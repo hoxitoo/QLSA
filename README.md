@@ -34,7 +34,7 @@ Layered Merkle-style aggregation over lattice signatures
 Threshold scheme: any t of n signers can produce valid aggregate
 
 Stack:
-<pre> ```text Python 3.11+
+<pre> ``` Python 3.11+
 ├── liboqs-python        # NIST PQC primitives
 ├── cryptography         # Key management
 ├── hashlib / hmac       # Merkle construction
@@ -50,7 +50,7 @@ qlsa/
 │   ├── coordinator.py   # t-of-n orchestration
 │   └── shares.py        # Secret sharing scheme
 ├── benchmarks/          # Performance profiling
-└── tests/               # Unit + integration tests ``` </pre>
+└── tests/               # Unit + integration ``` </pre>
 
 Roadmap
 Phase 0 — Research & Design
