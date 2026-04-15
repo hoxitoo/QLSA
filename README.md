@@ -1,92 +1,94 @@
-QLSA — Post-Quantum Rollup Infrastructure
+# QLSA — Post-Quantum Rollup Infrastructure
 
 Aggregate thousands of post-quantum signatures into a single constant-size proof.
-O(1) on-chain verification. No trusted setup. Quantum-safe by design.
+
+**O(1) on-chain verification. No trusted setup. Quantum-safe by design.**
 
 ---
 
-⚡ The Problem
+## ⚡ The Problem
 
 Post-quantum cryptography is inevitable — but it breaks blockchain scalability.
 
-Signature| Size| 3000 tx block
-ECDSA (current)| ~70 bytes| ~220 KB ✅
-ML-DSA-65 (FIPS 204)| ~2 420 bytes| ~7.2 MB ❌
+| Signature | Size | 3000 tx block |
+|----------|------:|--------------:|
+| ECDSA (current) | ~70 bytes | ~220 KB ✅ |
+| ML-DSA-65 (FIPS 204) | ~2,420 bytes | ~7.2 MB ❌ |
 
-A direct migration causes ×30–40 overhead per block, collapsing throughput.
+A direct migration causes **~30–40x overhead per block**, collapsing throughput.
 
-«The bottleneck is not cryptography — it is infrastructure.»
-
----
-
-💡 The Solution
-
-QLSA is not a new signature scheme.
-
-It is a post-quantum aggregation layer that makes PQ signatures usable at scale.
-
-Core idea:
-
-Aggregate "N" ML-DSA signatures
-Produce 1 STARK proof (constant size)
----
-
-✅ Properties
-
-O(1) on-chain verification
-No trusted setup (FRI-based STARK)
-Post-quantum secure (lattice + hash)
-Deployable as L2 (no hard fork required)
-Crypto-agile (algorithm versioning supported)
----
-
-🏗 Architecture
-
-Layer 1 — Signing
-
-ML-DSA-65 (FIPS 204)
-Address = "SHA3-256(pubkey)"
-Standard wallet UX
----
-
-Layer 2 — Aggregation (off-chain)
-
-Collect transactions
-Verify ML-DSA signatures
-Build Merkle tree ("SHA3-512")
-Generate STARK proof
----
-
-Layer 3 — Verification (on-chain)
-
-Verify STARK proof (constant cost)
-Store "merkle_root"
-Finalize batch
----
-
-🧠 Key Design Decisions
-
-Public inputs = Merkle roots only
-→ keeps verification truly O(1)
-
-Heavy computation is off-chain
-→ scalable by design
-
-Protocol not tied to specific prover
-→ crypto-agile architecture
+> The bottleneck is not cryptography — it is infrastructure.
 
 ---
 
-🚧 MVP Strategy
+## 💡 The Solution
 
-Full ML-DSA inside STARK is high-risk.
+QLSA is **not a new signature scheme**.
 
-QLSA follows a staged rollout:
+It is a **post-quantum aggregation layer** that makes PQ signatures usable at scale.
 
-Phase| STARK proves| ML-DSA inside STARK
-MVP-1| Core crypto only| ❌
-MVP-2| Merkle correctness| ❌
-MVP-3| ML-DSA verification| ✅ (research)
+### Core idea
+
+- Aggregate **N** ML-DSA signatures
+- Produce **1 STARK proof** of constant size
+
+---
+
+## ✅ Properties
+
+- O(1) on-chain verification
+- No trusted setup (FRI-based STARK)
+- Post-quantum secure (lattice + hash)
+- Deployable as L2 (no hard fork required)
+- Crypto-agile (algorithm versioning supported)
+
+---
+
+## 🏗 Architecture
+
+### Layer 1 — Signing
+
+- ML-DSA-65 (FIPS 204)
+- Address = `SHA3-256(pubkey)`
+- Standard wallet UX
+
+### Layer 2 — Aggregation (off-chain)
+
+- Collect transactions
+- Verify ML-DSA signatures
+- Build Merkle tree with `SHA3-512`
+- Generate STARK proof
+
+### Layer 3 — Verification (on-chain)
+
+- Verify STARK proof at constant cost
+- Store `merkle_root`
+- Finalize batch
+
+---
+
+## 🏗 Architecture
+
+### Layer 1 — Signing
+
+- ML-DSA-65 (FIPS 204)
+- Address = `SHA3-256(pubkey)`
+- Standard wallet UX
+
+### Layer 2 — Aggregation (off-chain)
+
+- Collect transactions
+- Verify ML-DSA signatures
+- Build Merkle tree with `SHA3-512`
+- Generate STARK proof
+
+### Layer 3 — Verification (on-chain)
+
+- Verify STARK proof at constant cost
+- Store `merkle_root`
+- Finalize batch
+
+---
 
 👉 Deliver working system fast, expand later.
 
@@ -94,117 +96,126 @@ MVP-3| ML-DSA verification| ✅ (research)
 
 🔬 Tech Stack (2026)
 
-Cryptographic Core
+### Cryptographic Core
 
-ML-DSA-65 — FIPS 204
-SHA3-512 — Merkle hashing
-SHA3-256 — address scheme
----
+- **ML-DSA-65** — FIPS 204
+- **SHA3-512** — Merkle hashing
+- **SHA3-256** — address scheme
 
-STARK Layer
+### STARK Layer
 
-Stage| Stack| Notes
-Prototype| Winterfell v0.13.1| ⚠️ Not perfect ZK
-Production| Stwo (Circle STARK)| High-performance, no trusted setup
+| Stage | Stack | Notes |
+|------|------|------|
+| Prototype | Winterfell v0.13.1 | Not perfect zero-knowledge |
+| Production | Stwo (Circle STARK) | High-performance, no trusted setup |
 
----
+### Infrastructure
 
-Infrastructure
-
-Python 3.10+
-liboqs-python ≥ 0.14.0
-Solidity + Hardhat
-Target: Polygon zkEVM / Starknet
----
-
-📊 Performance Targets
-
-Metric| Target
-Batch size| 3000 tx
-Proof size| 90–200 KB
-Verification| O(1)
-Prover time (MVP-2)| seconds–minutes
-Prover time (MVP-3)| TBD
+- Python 3.10+
+- `liboqs-python >= 0.14.0`
+- Solidity + Hardhat
+- Target L2: Polygon zkEVM / Starknet
 
 ---
 
-⚠️ Key Risks & Mitigations
+## 📊 Performance Targets
 
-ML-DSA inside STARK (main risk)
+| Metric | Target |
+|------|--------|
+| Batch size | 3,000 tx |
+| Proof size | 90–200 KB |
+| On-chain verification | O(1) |
+| Prover time (MVP-2) | seconds to minutes |
+| Prover time (MVP-3) | TBD |
 
-Expensive operations (NTT, modular arithmetic)
-Proof size may increase significantly
-Mitigation:
+> Benchmarks will be published in `/benchmarks/` as development progresses.
 
-Keep ML-DSA outside STARK in MVP
-Benchmark before integration
 ---
 
-Aggregator trust model
+## ⚠️ Key Risks & Mitigations
 
-Off-chain verification introduces trust
+### 1. ML-DSA inside STARK (main risk)
 
-Mitigation (planned):
+ML-DSA operations such as NTT and modular arithmetic are expensive in AIR.  
+Proof size may grow significantly.
 
-Fraud proofs
-Permissionless aggregators
+**Mitigation:**
+- Keep ML-DSA outside STARK in MVP
+- Benchmark feasibility before full integration
+
+### 2. Aggregator trust model
+
+Off-chain verification introduces trust in the aggregator.
+
+**Planned mitigation:**
+- Fraud proofs
+- Permissionless aggregators
+
+### 3. Adoption timeline
+
+PQ adoption is inevitable, but gradual.
+
+**Focus areas:**
+- CBDCs
+- Government systems
+- Long-term archival infrastructure
+
 ---
 
-Adoption timeline
+## 💰 Economics (Draft)
 
-PQ adoption is inevitable but gradual (3–7 years)
+- Users pay a fee for batch inclusion
+- Aggregators receive rewards
+- Incentives are based on gas saved versus naive verification
 
-Focus:
+### Future
 
-Early adopters (CBDCs, gov systems, long-term storage)
+- Fraud-proof penalties
+- Decentralized aggregator market
+
 ---
 
-💰 Economics (Draft)
+## 🧩 Future Extensions
 
-Users pay fee for batch inclusion
-Aggregators receive rewards
-Incentive = gas saved vs naive verification
-Future:
+- Threshold signatures (`t-of-n`)
+- Multi-party aggregation
+- Full zk aggregation (ML-DSA in AIR)
+- Native PQ rollup chain
 
-Fraud proof penalties
-Decentralized aggregator market
 ---
 
-🧩 Future Extensions
+## 🗺 Roadmap
 
-Threshold signatures (t-of-n)
-Multi-party aggregation
-Full zk aggregation (ML-DSA in AIR)
-Native PQ rollup chain
+### Phase 1 — Core
+- ML-DSA keys
+- Signing
+- Verification
+- Merkle tree
+
+### Phase 2 — STARK (prototype)
+- Merkle inside STARK
+- Benchmarks
+
+### Phase 3 — Smart Contracts
+- On-chain verifier
+- Batch registry
+
+### Phase 4 — Aggregator Node
+- Mempool
+- Batching logic
+
+### Phase 5 — SDK
+- Python SDK
+- JavaScript SDK
+
+### Phase 6 — Testnet
+- Polygon zkEVM / Starknet deployment
+
 ---
 
-🗺 Roadmap
+## 📂 Repository Structure
 
-Phase 1 — Core
-
-ML-DSA keys, signing, verification
-Merkle tree
-Phase 2 — STARK (prototype)
-
-Merkle inside STARK
-Benchmarks
-Phase 3 — Smart Contracts
-
-On-chain verifier
-Batch registry
-Phase 4 — Aggregator Node
-
-Mempool + batching
-Phase 5 — SDK
-
-Python + JS
-Phase 6 — Testnet
-
-Polygon zkEVM / Starknet
----
-
-📂 Repository Structure
-
+```text
 qlsa/
 ├── core/
 ├── aggregator/
