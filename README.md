@@ -1,112 +1,256 @@
-# QLSA
-Quantum-Layered Signature Aggregation — post-quantum signature aggregation protocol for next-generation blockchain infrastructure.
+QLSA — Post-Quantum Rollup Infrastructure
 
+Aggregate thousands of post-quantum signatures into a single constant-size proof.
+O(1) on-chain verification. No trusted setup. Quantum-safe by design.
 
-The Problem
-Current blockchain networks rely on ECDSA and Schnorr signatures — both vulnerable to quantum attacks via Shor's algorithm. As quantum computing scales, billions of dollars in on-chain assets face existential risk.
-Existing post-quantum proposals either:
+---
 
-Sacrifice signature aggregation (making multi-party protocols impractical)
-Introduce unacceptable latency for real-time consensus
-Lack native Layer-1 integration paths
+⚡ The Problem
 
-No production-ready solution exists today.
+Post-quantum cryptography is inevitable — but it breaks blockchain scalability.
 
-✅ What QLSA Does
+Signature| Size| 3000 tx block
+ECDSA (current)| ~70 bytes| ~220 KB ✅
+ML-DSA-65 (FIPS 204)| ~2 420 bytes| ~7.2 MB ❌
 
-QLSA is a novel signature protocol that combines lattice-based cryptography with layered threshold aggregation — enabling: 
+A direct migration causes ×30–40 overhead per block, collapsing throughput.
 
-| Feature | QLSA | ECDSA | Naive PQC |
-|---|---|---|---|
-| Quantum-resistant | ✅ | ❌ | ✅ |
-| Signature aggregation | ✅ | ✅ | ❌ |
-| Threshold (t-of-n) | ✅ | Partial | ❌ |
-| L1-compatible design | ✅ | ✅ | ❌ |
+«The bottleneck is not cryptography — it is infrastructure.»
 
+---
 
-The core innovation: layered aggregation trees that compress n lattice-based signatures into a single constant-size proof, preserving threshold semantics.
+💡 The Solution
 
-Technical Overview
-Cryptographic foundation:
+QLSA is not a new signature scheme.
 
-CRYSTALS-Dilithium (NIST PQC Round 3 winner) via liboqs
-Layered Merkle-style aggregation over lattice signatures
-Threshold scheme: any t of n signers can produce valid aggregate
+It is a post-quantum aggregation layer that makes PQ signatures usable at scale.
 
-Stack:
-<pre> ``` Python 3.11+
-├── liboqs-python        # NIST PQC primitives
-├── cryptography         # Key management
-├── hashlib / hmac       # Merkle construction
-└── pytest               # Test suite
-Architecture:
+Core idea:
+
+Aggregate "N" ML-DSA signatures
+Produce 1 STARK proof (constant size)
+---
+
+✅ Properties
+
+O(1) on-chain verification
+No trusted setup (FRI-based STARK)
+Post-quantum secure (lattice + hash)
+Deployable as L2 (no hard fork required)
+Crypto-agile (algorithm versioning supported)
+---
+
+🏗 Architecture
+
+Layer 1 — Signing
+
+ML-DSA-65 (FIPS 204)
+Address = "SHA3-256(pubkey)"
+Standard wallet UX
+---
+
+Layer 2 — Aggregation (off-chain)
+
+Collect transactions
+Verify ML-DSA signatures
+Build Merkle tree ("SHA3-512")
+Generate STARK proof
+---
+
+Layer 3 — Verification (on-chain)
+
+Verify STARK proof (constant cost)
+Store "merkle_root"
+Finalize batch
+---
+
+🧠 Key Design Decisions
+
+Public inputs = Merkle roots only
+→ keeps verification truly O(1)
+
+Heavy computation is off-chain
+→ scalable by design
+
+Protocol not tied to specific prover
+→ crypto-agile architecture
+
+---
+
+🚧 MVP Strategy
+
+Full ML-DSA inside STARK is high-risk.
+
+QLSA follows a staged rollout:
+
+Phase| STARK proves| ML-DSA inside STARK
+MVP-1| Core crypto only| ❌
+MVP-2| Merkle correctness| ❌
+MVP-3| ML-DSA verification| ✅ (research)
+
+👉 Deliver working system fast, expand later.
+
+---
+
+🔬 Tech Stack (2026)
+
+Cryptographic Core
+
+ML-DSA-65 — FIPS 204
+SHA3-512 — Merkle hashing
+SHA3-256 — address scheme
+---
+
+STARK Layer
+
+Stage| Stack| Notes
+Prototype| Winterfell v0.13.1| ⚠️ Not perfect ZK
+Production| Stwo (Circle STARK)| High-performance, no trusted setup
+
+---
+
+Infrastructure
+
+Python 3.10+
+liboqs-python ≥ 0.14.0
+Solidity + Hardhat
+Target: Polygon zkEVM / Starknet
+---
+
+📊 Performance Targets
+
+Metric| Target
+Batch size| 3000 tx
+Proof size| 90–200 KB
+Verification| O(1)
+Prover time (MVP-2)| seconds–minutes
+Prover time (MVP-3)| TBD
+
+---
+
+⚠️ Key Risks & Mitigations
+
+ML-DSA inside STARK (main risk)
+
+Expensive operations (NTT, modular arithmetic)
+Proof size may increase significantly
+Mitigation:
+
+Keep ML-DSA outside STARK in MVP
+Benchmark before integration
+---
+
+Aggregator trust model
+
+Off-chain verification introduces trust
+
+Mitigation (planned):
+
+Fraud proofs
+Permissionless aggregators
+---
+
+Adoption timeline
+
+PQ adoption is inevitable but gradual (3–7 years)
+
+Focus:
+
+Early adopters (CBDCs, gov systems, long-term storage)
+---
+
+💰 Economics (Draft)
+
+Users pay fee for batch inclusion
+Aggregators receive rewards
+Incentive = gas saved vs naive verification
+Future:
+
+Fraud proof penalties
+Decentralized aggregator market
+---
+
+🧩 Future Extensions
+
+Threshold signatures (t-of-n)
+Multi-party aggregation
+Full zk aggregation (ML-DSA in AIR)
+Native PQ rollup chain
+---
+
+🗺 Roadmap
+
+Phase 1 — Core
+
+ML-DSA keys, signing, verification
+Merkle tree
+Phase 2 — STARK (prototype)
+
+Merkle inside STARK
+Benchmarks
+Phase 3 — Smart Contracts
+
+On-chain verifier
+Batch registry
+Phase 4 — Aggregator Node
+
+Mempool + batching
+Phase 5 — SDK
+
+Python + JS
+Phase 6 — Testnet
+
+Polygon zkEVM / Starknet
+---
+
+📂 Repository Structure
+
 qlsa/
 ├── core/
-│   ├── keygen.py        # Dilithium keypair generation
-│   ├── sign.py          # Individual signing
-│   ├── aggregate.py     # Layered aggregation logic
-│   └── verify.py        # Aggregate proof verification
-├── threshold/
-│   ├── coordinator.py   # t-of-n orchestration
-│   └── shares.py        # Secret sharing scheme
-├── benchmarks/          # Performance profiling
-└── tests/               # Unit + integration ``` </pre>
+├── aggregator/
+├── stark/
+├── contracts/
+├── sdk/
+├── benchmarks/
+├── docs/
+├── tests/
+└── CONTEXT.md
 
-Roadmap
-Phase 0 — Research & Design
+---
 
- Literature review: NIST PQC finalists
- Protocol specification
- Architecture design
+📌 Current Status
 
-Phase 1 — Core Implementation (current)
+Phase: 1 — Core
+In progress: "core/keys.py"
+Next: "core/signing.py"
+---
 
- Environment setup (liboqs, Python bindings)
- Key generation module
- Basic sign/verify pipeline
- Layered aggregation prototype
+🧠 Why Now
 
-Phase 2 — Threshold Protocol
+NIST finalized PQC standards (FIPS 203–205)
+Quantum threat: “harvest now, decrypt later”
+STARK infrastructure matured (Stwo, 2025)
+PQ migration window is open — but narrowing
+---
 
- t-of-n coordinator
- Secret sharing integration
- Multi-party test vectors
+🤝 Contributing
 
-Phase 3 — Benchmarks & Whitepaper
+Early-stage deep-tech project.
 
- Performance vs ECDSA / Schnorr
- Formal security analysis
- Published whitepaper
+Looking for contributors in:
 
-Phase 4 — L1 Integration Prototype
+Cryptography
+ZK / STARKs
+Blockchain infrastructure
+---
 
- EVM-compatible verifier contract
- Testnet deployment
+📜 License
 
-Research Context
-  QLSA builds on:
+Apache 2.0
 
-  CRYSTALS-Dilithium — NIST FIPS 204 standard (2024)
-  Boneh & Shacham threshold signature constructions
-  STARK-based aggregation techniques adapted for lattice settings
+---
 
-This work is aligned with NIST's Post-Quantum Cryptography Standardization initiative and addresses the "harvest now, decrypt later" threat model increasingly relevant to long-lived blockchain assets.
+⚠️ Disclaimer
 
-Why We're Seeking AI Research Credits
-  We're using large language models as a force multiplier for:
-
-  Formal verification assistance — reasoning about security proofs
-  Code review — catching subtle cryptographic implementation bugs
-  Research synthesis — navigating NIST PQC literature efficiently
-  Documentation — generating rigorous technical specifications
-
-This is active, technical research — not a demo project.
-
-Author
-Independent researcher focused on post-quantum blockchain infrastructure.
-Open to collaboration, feedback and research partnerships.
-
-License
-MIT — open research, open future.
-
-QLSA is pre-production research software. Do not use in production systems.
+QLSA is experimental research software.
+Do not use in production systems.
