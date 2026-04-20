@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QLSA — Post-Quantum Rollup Infrastructure</title>
+  <meta name="description" content="QLSA is a research-stage post-quantum rollup infrastructure project that aggregates thousands of ML-DSA signatures into a single constant-size proof." />
+  <meta name="theme-color" content="#07111f" />
+  <meta property="og:title" content="QLSA — Post-Quantum Rollup Infrastructure" />
+  <meta property="og:description" content="Aggregate thousands of post-quantum signatures into a single constant-size proof." />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="og-card.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=b_T_PjA0c10GeExvPsGcStGl5tWSuQGQagSMhYPJRwslx_bQK0OCzLHAQWZz6FFDQBsTtTTvVL1PFCAjByqccu8Mje_qUC1hMqAP1epnyKBJpaFYfWkrNX2T3tTi8GfHDrkDGQCbjtC6L7v926lV5eHjwLhr7p5QJQtqst1xZtTC2OZDMvvjYQrARS76EE4gZURJ4PzcBi5vRiENUzQPoTP5_SKbWtgiUnMO34NhL7EioiEtdlyNI3sVZQED-dupv3ILx5g7nKJbEH_xgx5g5Q" charset="UTF-8"></script><link rel="stylesheet" crossorigin="anonymous" href="https://gc.kis.v2.scr.kaspersky-labs.com/E3E8934C-235A-4B0E-825A-35A08381A191/abn/main.css?attr=aHR0cHM6Ly9jaGF0Z3B0LmNvbS9iYWNrZW5kLWFwaS9lc3R1YXJ5L2NvbnRlbnQ_aWQ9ZmlsZV8wMDAwMDAwMGQyZDQ3MjBjYmFmNWU1ZDZhNzhiNDNiNyZ0cz00OTM1MjYmcD1mcyZjaWQ9MSZzaWc9MWIzMTIwZDQ0NDEyMGFlM2Y2MTg2NjQ5YTA5NzhhOWM3N2I1Nzk2Yzk3MzM0MzEyM2IxN2FhNzEyNDlhOGE2ZSZ2PTA"/><style>
+    :root{
+      --bg:#07111f;
+      --text:#eef4ff;
+      --muted:#a6b7d9;
+      --line:rgba(178,201,255,.14);
+      --accent:#76a9ff;
+      --accent2:#7ff0cb;
+      --shadow:0 24px 70px rgba(0,0,0,.34);
+      --max:1180px;
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{
+      margin:0;
+      color:var(--text);
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+      line-height:1.65;
+      background:
+        radial-gradient(circle at 10% 8%, rgba(118,169,255,.18), transparent 24%),
+        radial-gradient(circle at 84% 14%, rgba(127,240,203,.12), transparent 20%),
+        linear-gradient(180deg, #060d1a 0%, #081223 40%, #07111f 100%);
+    }
+    body::before{
+      content:"";
+      position:fixed;
+      inset:0;
+      pointer-events:none;
+      background-image:
+        linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+      background-size:32px 32px;
+      opacity:.25;
+      mask-image:linear-gradient(180deg, rgba(0,0,0,.35), rgba(0,0,0,.05));
+    }
+    a{color:inherit;text-decoration:none}
+    .container{width:min(var(--max), calc(100% - 32px));margin:0 auto}
+    .nav{
+      position:sticky;top:0;z-index:50;
+      backdrop-filter:blur(14px);
+      background:rgba(7,17,31,.68);
+      border-bottom:1px solid rgba(255,255,255,.06);
+    }
+    .nav-inner{
+      min-height:74px;display:flex;align-items:center;justify-content:space-between;gap:20px;
+    }
+    .brand{display:flex;align-items:center;gap:14px;font-weight:800}
+    .brand-mark{
+      width:42px;height:42px;border-radius:14px;display:grid;place-items:center;
+      border:1px solid rgba(255,255,255,.1);
+      background:linear-gradient(135deg, rgba(118,169,255,.28), rgba(127,240,203,.14));
+      color:#fff;font-size:14px;font-weight:900;
+    }
+    .brand small{display:block;color:var(--muted);font-size:.76rem;font-weight:600}
+    .nav-links{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
+    .nav-links a{color:var(--muted);font-size:.95rem}
+    .nav-links a:hover{color:var(--text)}
+    .hero{padding:90px 0 50px}
+    .hero-grid{display:grid;grid-template-columns:1.12fr .88fr;gap:28px;align-items:stretch}
+    .eyebrow{
+      display:inline-flex;align-items:center;gap:10px;padding:8px 12px;border-radius:999px;
+      color:#d2def8;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);font-size:.83rem;
+    }
+    .eyebrow::before{
+      content:"";width:8px;height:8px;border-radius:50%;background:var(--accent2);
+      box-shadow:0 0 0 4px rgba(127,240,203,.16);
+    }
+    h1{
+      margin:18px 0 14px;font-size:clamp(2.7rem, 6vw, 5.2rem);line-height:1.02;letter-spacing:-.05em;
+      max-width:920px;
+    }
+    .sub{margin:0;max-width:760px;font-size:clamp(1.06rem, 2vw, 1.23rem);color:#d8e4fb}
+    .hero-actions{margin-top:28px;display:flex;gap:14px;flex-wrap:wrap}
+    .hero-note{margin-top:16px;color:var(--muted);font-size:.96rem;max-width:760px}
+    .btn{
+      display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:48px;padding:0 18px;
+      border-radius:14px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);font-weight:700;
+      transition:transform .18s ease, border-color .18s ease, background .18s ease;
+    }
+    .btn:hover{transform:translateY(-1px);border-color:rgba(255,255,255,.2);background:rgba(255,255,255,.055)}
+    .btn-primary{
+      background:linear-gradient(135deg, rgba(118,169,255,.24), rgba(127,240,203,.16));
+      border-color:rgba(127,240,203,.22);
+    }
+    .panel{
+      border-radius:24px;border:1px solid var(--line);
+      background:linear-gradient(180deg, rgba(255,255,255,.038), rgba(255,255,255,.02));
+      box-shadow:var(--shadow);
+    }
+    .hero-card{padding:24px;display:flex;flex-direction:column;justify-content:space-between}
+    .hero-kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:18px}
+    .kpi{
+      padding:16px;border-radius:18px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);
+    }
+    .kpi strong{display:block;font-size:1.6rem;margin-bottom:6px;line-height:1}
+    .kpi span{color:var(--muted);font-size:.92rem}
+    .pill-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+    .pill{
+      padding:8px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.04);color:#dce6fb;font-size:.91rem;
+    }
+    .signal{margin-top:26px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+    .signal-card{
+      padding:16px;border-radius:18px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);
+    }
+    .signal-card small{display:block;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em;font-size:.72rem}
+    .signal-card strong{font-size:1.2rem;letter-spacing:-.02em}
+    .section{padding:36px 0}
+    .section-head{display:flex;align-items:end;justify-content:space-between;gap:18px;margin-bottom:18px}
+    .section-head h2{margin:0;font-size:clamp(1.5rem, 3vw, 2.15rem);letter-spacing:-.03em}
+    .section-head p{margin:0;max-width:740px;color:var(--muted)}
+    .grid{display:grid;gap:18px}
+    .grid-2{grid-template-columns:repeat(2,1fr)}
+    .grid-3{grid-template-columns:repeat(3,1fr)}
+    .grid-4{grid-template-columns:repeat(4,1fr)}
+    .card,.stack-block,.repo,.faq-item,.phase,.layer{
+      border-radius:22px;border:1px solid var(--line);background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.018));
+    }
+    .card,.stack-block,.repo,.faq-item,.phase{padding:22px}
+    .card h3,.stack-block h3,.faq-item h3,.phase h3{margin:0 0 10px;letter-spacing:-.02em}
+    .card p,.faq-item p{margin:0;color:#dbe5fa}
+    .metric-table{
+      width:100%;border-collapse:collapse;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:rgba(255,255,255,.02);
+    }
+    .metric-table th,.metric-table td{
+      padding:16px 18px;text-align:left;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top;
+    }
+    .metric-table th{
+      text-transform:uppercase;letter-spacing:.06em;font-size:.84rem;color:#d5e2ff;background:rgba(255,255,255,.03);
+    }
+    .metric-table tr:last-child td{border-bottom:none}
+    .good{color:#8ff0ab;font-weight:700}
+    .bad{color:#ff8d8d;font-weight:700}
+    .warn{color:#ffd57b;font-weight:700}
+    .stat-band{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:18px}
+    .stat-tile{
+      padding:18px;border-radius:18px;border:1px solid var(--line);background:rgba(255,255,255,.02);
+    }
+    .stat-tile strong{display:block;font-size:1.3rem;margin-bottom:6px;letter-spacing:-.02em}
+    .stat-tile span{color:var(--muted);font-size:.92rem}
+    .compare{display:grid;grid-template-columns:1.05fr .95fr;gap:18px}
+    .architecture{display:grid;gap:16px}
+    .layer{display:grid;grid-template-columns:120px 1fr;gap:18px;padding:20px}
+    .layer-badge{display:flex;justify-content:center;align-items:flex-start}
+    .layer-badge span{
+      display:inline-block;min-width:86px;text-align:center;padding:10px 12px;border-radius:14px;font-weight:800;
+      background:rgba(118,169,255,.14);border:1px solid rgba(118,169,255,.18);
+    }
+    ul{margin:12px 0 0;padding-left:18px}
+    li{margin:6px 0}
+    .repo{background:linear-gradient(180deg, rgba(8,13,28,.86), rgba(7,11,24,.94));overflow:auto}
+    pre{margin:0;color:#dde7ff;line-height:1.76;font-size:.96rem}
+    .phase-list{display:grid;gap:14px}
+    .phase-top{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:8px}
+    .phase-tag{
+      white-space:nowrap;padding:6px 10px;border-radius:999px;font-size:.8rem;color:#d9e7ff;
+      background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);
+    }
+    .faq{display:grid;gap:14px}
+    .cta{
+      margin:18px 0 58px;padding:30px;border-radius:28px;border:1px solid var(--line);
+      background:
+        radial-gradient(circle at left top, rgba(118,169,255,.18), transparent 30%),
+        radial-gradient(circle at right bottom, rgba(127,240,203,.12), transparent 24%),
+        linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.025));
+      box-shadow:var(--shadow);
+    }
+    .cta-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:20px;align-items:center}
+    .contact-box{display:grid;gap:10px}
+    .contact-line{display:flex;gap:10px;flex-wrap:wrap;align-items:center;color:#dfe8ff}
+    footer{padding:24px 0 46px;border-top:1px solid rgba(255,255,255,.06);color:var(--muted)}
+    .footer-row{display:flex;justify-content:space-between;flex-wrap:wrap;gap:18px;align-items:flex-start}
+    .small{font-size:.92rem;color:var(--muted)}
+    .footer-links{display:flex;gap:14px;flex-wrap:wrap}
+    @media (max-width: 1000px){
+      .hero-grid,.compare,.grid-4,.grid-3,.grid-2,.cta-grid,.stat-band,.signal{grid-template-columns:1fr}
+    }
+    @media (max-width: 740px){
+      .nav-links{display:none}
+      .hero{padding-top:56px}
+      .layer{grid-template-columns:1fr}
+      .nav-inner{padding:14px 0;align-items:flex-start}
+      .metric-table th,.metric-table td{padding:12px}
+      .section{padding:28px 0}
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a class="brand" href="#top" aria-label="QLSA home">
+        <div class="brand-mark">QLSA</div>
+        <div>QLSA<small>Quantum-Layered Signature Aggregation</small></div>
+      </a>
+      <div class="nav-links">
+        <a href="#problem">Problem</a>
+        <a href="#solution">Solution</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#stack">Stack</a>
+        <a href="#roadmap">Roadmap</a>
+        <a href="#faq">FAQ</a>
+        <a href="#contact">Contact</a>
+      </div>
+    </div>
+  </nav>
+
+  <main id="top">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <div class="eyebrow">Research-stage protocol for scalable post-quantum blockchain infrastructure</div>
+          <h1>Build the post-quantum migration layer before it becomes urgent</h1>
+          <p class="sub">
+            QLSA aggregates thousands of post-quantum signatures into a single constant-size proof,
+            targeting scalable blockchain verification without trusted setup and without forcing a hard fork.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://github.com/hoxitoo/QLSA" target="_blank" rel="noopener noreferrer">View GitHub</a>
+            <a class="btn" href="#roadmap">See Roadmap</a>
+          </div>
+          <p class="hero-note">
+            QLSA (Quantum-Layered Signature Aggregation) is an open deep-tech project exploring how ML-DSA,
+            Merkle commitments, and STARK proofs can make post-quantum blockchain systems operationally viable.
+          </p>
+
+          <div class="signal">
+            <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
+            <div class="signal-card"><small>Approach</small><strong>Benchmark-first MVP with staged proof integration</strong></div>
+            <div class="signal-card"><small>Status</small><strong>Phase 1 — Core implementation</strong></div>
+          </div>
+        </div>
+
+        <aside class="panel hero-card" aria-label="QLSA highlights">
+          <div>
+            <h3 style="margin:0 0 10px; font-size:1.22rem;">Why QLSA matters</h3>
+            <p style="margin:0;color:var(--muted);">
+              Post-quantum signatures solve the cryptographic problem, but they worsen the systems problem.
+              QLSA focuses on the missing infrastructure layer.
+            </p>
+            <div class="hero-kpis">
+              <div class="kpi"><strong>O(1)</strong><span>On-chain verification target</span></div>
+              <div class="kpi"><strong>3,000</strong><span>Default batch size target</span></div>
+              <div class="kpi"><strong>90–200 KB</strong><span>Proof size target</span></div>
+              <div class="kpi"><strong>0</strong><span>Trusted setup required</span></div>
+            </div>
+          </div>
+          <div class="pill-row">
+            <span class="pill">ML-DSA-65</span>
+            <span class="pill">SHA3-512</span>
+            <span class="pill">STARK / FRI</span>
+            <span class="pill">Stwo</span>
+            <span class="pill">Polygon zkEVM / Starknet</span>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="problem" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>The Problem</h2>
+            <p>
+              Direct migration from classical signatures to post-quantum signatures can severely inflate block payloads.
+              That turns protocol safety progress into an operational scaling problem.
+            </p>
+          </div>
+        </div>
+
+        <table class="metric-table" aria-label="Signature size comparison">
+          <thead>
+            <tr>
+              <th>Signature</th>
+              <th>Size</th>
+              <th>3000 tx block</th>
+              <th>Operational impact</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>ECDSA (current)</td><td>~70 bytes</td><td>~220 KB</td><td class="good">Fits today’s assumptions</td></tr>
+            <tr><td>ML-DSA-65 (FIPS 204)</td><td>~2,420 bytes</td><td>~7.2 MB</td><td class="bad">Severe throughput penalty</td></tr>
+          </tbody>
+        </table>
+
+        <div class="stat-band">
+          <div class="stat-tile"><strong>~30–40×</strong><span>Payload overhead from direct migration</span></div>
+          <div class="stat-tile"><strong>FIPS 204</strong><span>Standardized signature base</span></div>
+          <div class="stat-tile"><strong>Hash-first</strong><span>No trusted setup in the proving path</span></div>
+          <div class="stat-tile"><strong>L2-ready</strong><span>Deployment path without hard fork</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="solution" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>The Solution</h2>
+            <p>
+              QLSA is not a new signature scheme. It is a post-quantum aggregation layer that aims to make
+              large signature sets proof-friendly, compact, and verifiable at fixed on-chain cost.
+            </p>
+          </div>
+        </div>
+
+        <div class="compare">
+          <div class="card">
+            <h3>What QLSA does</h3>
+            <ul>
+              <li>Aggregates <code>N</code> ML-DSA signatures into one batch commitment</li>
+              <li>Uses Merkle commitments to structure batch data</li>
+              <li>Generates a STARK proof for batch correctness</li>
+              <li>Allows fixed-cost on-chain verification independent of batch size</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Why the architecture matters</h3>
+            <ul>
+              <li>Heavy proving remains off-chain</li>
+              <li>Public inputs can be kept minimal with commitment roots</li>
+              <li>MVP can ship before full ML-DSA-inside-AIR is solved</li>
+              <li>The system remains crypto-agile across future upgrades</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="architecture" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>Architecture</h2>
+            <p>
+              The system is split into three layers so that user flows stay familiar, proving stays off-chain,
+              and on-chain verification remains lean.
+            </p>
+          </div>
+        </div>
+
+        <div class="architecture">
+          <div class="layer">
+            <div class="layer-badge"><span>Layer 1</span></div>
+            <div>
+              <h3>Signing</h3>
+              <p style="margin:0;color:var(--muted)">Wallet-level signing using post-quantum keys.</p>
+              <ul>
+                <li>ML-DSA-65 for signatures</li>
+                <li>Address derived from <code>SHA3-256(pubkey)</code></li>
+                <li>Intended to preserve a familiar wallet-style UX</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="layer">
+            <div class="layer-badge"><span>Layer 2</span></div>
+            <div>
+              <h3>Aggregation</h3>
+              <p style="margin:0;color:var(--muted)">Batch formation and proving pipeline.</p>
+              <ul>
+                <li>Collect transactions off-chain</li>
+                <li>Verify ML-DSA signatures off-chain in the MVP</li>
+                <li>Build Merkle tree with <code>SHA3-512</code></li>
+                <li>Generate STARK proof for correctness claims</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="layer">
+            <div class="layer-badge"><span>Layer 3</span></div>
+            <div>
+              <h3>Verification</h3>
+              <p style="margin:0;color:var(--muted)">Constant-cost contract-side validation.</p>
+              <ul>
+                <li>Verify proof in Solidity verifier contract</li>
+                <li>Store <code>merkle_root</code> and finalize the batch</li>
+                <li>Favor commitment roots over raw pubkey arrays in public inputs</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container grid grid-2">
+        <div class="card">
+          <h3>MVP Strategy</h3>
+          <p style="margin:0;color:var(--muted)">
+            The project intentionally separates realistic implementation milestones from the hardest research component.
+          </p>
+          <table class="metric-table" style="margin-top:14px;">
+            <thead>
+              <tr><th>Stage</th><th>What STARK proves</th><th>ML-DSA in STARK</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>MVP-1</td><td>Core crypto only</td><td class="bad">No</td></tr>
+              <tr><td>MVP-2</td><td>Merkle correctness</td><td class="bad">No</td></tr>
+              <tr><td>MVP-3</td><td>ML-DSA verification</td><td class="warn">Research target</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h3>Key risks</h3>
+          <ul>
+            <li><strong>ML-DSA inside STARK:</strong> NTT and modular arithmetic can make AIR expensive.</li>
+            <li><strong>Aggregator trust model:</strong> the MVP relies on off-chain verification before challenge systems exist.</li>
+            <li><strong>Adoption timing:</strong> the need is real, but mainstream migration may still take years.</li>
+          </ul>
+          <div class="pill-row">
+            <span class="pill">Research-driven</span>
+            <span class="pill">Benchmark-first</span>
+            <span class="pill">Security-aware</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="stack" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>Tech Stack</h2>
+            <p>
+              The technical stack reflects a staged path: fast iteration now, stronger proving infrastructure later.
+            </p>
+          </div>
+        </div>
+
+        <div class="grid grid-3">
+          <div class="stack-block">
+            <h3>Cryptographic core</h3>
+            <ul>
+              <li>ML-DSA-65</li>
+              <li>SHA3-512 for Merkle hashing</li>
+              <li>SHA3-256 for address derivation</li>
+              <li>Python 3.10+</li>
+              <li><code>liboqs-python &gt;= 0.14.0</code></li>
+            </ul>
+          </div>
+          <div class="stack-block">
+            <h3>STARK layer</h3>
+            <ul>
+              <li>Winterfell for prototyping AIR</li>
+              <li>Stwo / Circle STARK for production path</li>
+              <li>FRI-based proofs</li>
+              <li>No trusted setup</li>
+            </ul>
+          </div>
+          <div class="stack-block">
+            <h3>Contracts & infra</h3>
+            <ul>
+              <li>Solidity + Hardhat</li>
+              <li>Target L2: Polygon zkEVM or Starknet</li>
+              <li>Aggregator node architecture planned</li>
+              <li>Benchmarks and docs published in-repo</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="grid grid-2" style="margin-top:18px;">
+          <div class="card">
+            <h3>Performance targets</h3>
+            <table class="metric-table" style="margin-top:10px;">
+              <tbody>
+                <tr><td>Batch size</td><td>3,000 tx</td></tr>
+                <tr><td>Proof size</td><td>90–200 KB</td></tr>
+                <tr><td>On-chain verification</td><td>O(1)</td></tr>
+                <tr><td>Current proving focus</td><td>Merkle-first MVP</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card">
+            <h3>Repository snapshot</h3>
+            <div class="repo">
+<pre>QLSA/
+├── core/
+├── aggregator/
+├── stark/
+├── contracts/
+├── sdk/
+├── benchmarks/
+├── docs/
+├── tests/
+└── CONTEXT.md</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="roadmap" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>Roadmap</h2>
+            <p>
+              The roadmap prioritizes a credible implementation path before expanding into the hardest proving research.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase-list">
+          <div class="phase"><div class="phase-top"><h3>Phase 1 — Core</h3><span class="phase-tag">In progress</span></div><p>ML-DSA keys, signing, verification, and Merkle tree implementation.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 2 — STARK Prototype</h3><span class="phase-tag">Planned</span></div><p>Merkle correctness inside STARK, plus benchmarks and feasibility measurements.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 3 — Smart Contracts</h3><span class="phase-tag">Planned</span></div><p>On-chain verifier and batch registry for fixed-cost verification flow.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag">Planned</span></div><p>Mempool integration, batching logic, and off-chain proof pipeline.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 5 — SDK</h3><span class="phase-tag">Planned</span></div><p>Developer-facing Python and JavaScript tooling for wallet and transaction integration.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag">Future</span></div><p>Public deployment, end-to-end demo, and benchmark-backed technical validation.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="faq" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>FAQ</h2>
+            <p>
+              Short answers to the questions most people will ask when they first encounter the project.
+            </p>
+          </div>
+        </div>
+
+        <div class="faq">
+          <div class="faq-item"><h3>Is QLSA a new signature algorithm?</h3><p>No. QLSA is an aggregation and verification architecture built around post-quantum signatures such as ML-DSA.</p></div>
+          <div class="faq-item"><h3>Why not just replace ECDSA directly?</h3><p>Because the size increase of post-quantum signatures can cause major throughput and cost problems if deployed naively.</p></div>
+          <div class="faq-item"><h3>Does the MVP already prove ML-DSA inside STARK?</h3><p>No. The MVP intentionally starts with a lower-risk path and treats full ML-DSA-inside-STARK as a later research milestone.</p></div>
+          <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is currently research-stage software and should not be used in production systems.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="contact" class="section">
+      <div class="container">
+        <div class="cta">
+          <div class="cta-grid">
+            <div>
+              <h2 style="margin:0 0 10px; letter-spacing:-.03em;">Interested in PQC, ZK proofs, or blockchain infrastructure?</h2>
+              <p style="margin:0;color:var(--muted);">
+                QLSA is an open research and engineering effort. Contributions, technical feedback, research discussion,
+                and collaboration are welcome.
+              </p>
+            </div>
+            <div class="contact-box">
+              <div class="contact-line"><strong>Email:</strong> <a href="mailto:research@qlsa-protocol.online">research@qlsa-protocol.online</a></div>
+              <div class="contact-line"><strong>GitHub:</strong> <a href="https://github.com/hoxitoo/QLSA" target="_blank" rel="noopener noreferrer">github.com/hoxitoo/QLSA</a></div>
+              <div class="hero-actions" style="margin-top:6px;">
+                <a class="btn btn-primary" href="mailto:research@qlsa-protocol.online">Contact</a>
+                <a class="btn" href="https://github.com/hoxitoo/QLSA" target="_blank" rel="noopener noreferrer">Open Repository</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-row">
+      <div><strong>QLSA</strong><div class="small">Quantum-Layered Signature Aggregation</div></div>
+      <div class="footer-links small">
+        <a href="https://github.com/hoxitoo/QLSA" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="mailto:research@qlsa-protocol.online">Email</a>
+      </div>
+      <div class="small">Apache 2.0 · Research-stage software · Do not use in production systems</div>
+    </div>
+  </footer>
+</body>
+</html>
