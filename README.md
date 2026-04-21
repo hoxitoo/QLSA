@@ -67,29 +67,6 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ---
 
-## 🏗 Architecture
-
-### Layer 1 — Signing
-
-- ML-DSA-65 (FIPS 204)
-- Address = `SHA3-256(pubkey)`
-- Standard wallet UX
-
-### Layer 2 — Aggregation (off-chain)
-
-- Collect transactions
-- Verify ML-DSA signatures
-- Build Merkle tree with `SHA3-512`
-- Generate STARK proof
-
-### Layer 3 — Verification (on-chain)
-
-- Verify STARK proof at constant cost
-- Store `merkle_root`
-- Finalize batch
-
----
-
 👉 Deliver working system fast, expand later.
 
 ---
@@ -226,7 +203,7 @@ qlsa/
 ├── docs/
 ├── tests/
 └── CONTEXT.md
-
+```
 ---
 
 📌 Current Status
