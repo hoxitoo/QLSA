@@ -10,6 +10,7 @@ Build it with:
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from dataclasses import dataclass
@@ -79,6 +80,5 @@ def _call_prover(leaves: list[int]) -> ProofResult:
         )
 
     out = json.loads(proc.stdout.decode())
-    import base64
     proof_bytes = base64.b64decode(out["proof"])
     return ProofResult(proof=proof_bytes, commitment=out["commitment"])

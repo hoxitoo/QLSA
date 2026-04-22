@@ -116,3 +116,33 @@ def test_batch_too_large_raises():
     with pytest.raises(BatchSizeError, match="maximum"):
         create_batch(txs)
     batch_mod.MAX_BATCH_SIZE = original
+
+
+def test_merkle_root_onchain_is_32_bytes():
+    txs, privs = _make_batch_txs(2)
+    batch = create_batch(txs)
+    _wipe_all(privs)
+    onchain = batch.merkle_root_onchain()
+    assert isinstance(onchain, bytes)
+    assert len(onchain) == 32
+    assert onchain == batch.merkle_root[:32]
+
+
+def test_stark_commitment_onchain_raises_when_not_set():
+    txs, privs = _make_batch_txs(2)
+    batch = create_batch(txs)
+    _wipe_all(privs)
+    assert batch.stark_commitment is None
+    with pytest.raises(ValueError, match="stark_commitment not set"):
+        batch.stark_commitment_onchain()
+
+
+def test_stark_commitment_onchain_decodes_hex():
+    txs, privs = _make_batch_txs(2)
+    batch = create_batch(txs)
+    _wipe_all(privs)
+    batch.stark_commitment = "aabbccdd11223344"  # 16 hex chars = 8 bytes
+    result = batch.stark_commitment_onchain()
+    assert isinstance(result, bytes)
+    assert len(result) == 8
+    assert result == bytes.fromhex("aabbccdd11223344")

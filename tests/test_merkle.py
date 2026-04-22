@@ -66,8 +66,7 @@ def test_proof_fails_for_wrong_leaf():
 def test_proof_fails_for_wrong_root():
     leaves = _leaves(8)
     tree = build_merkle_tree(leaves)
-    root = get_merkle_root(build_merkle_tree(_leaves(8)))
+    root = get_merkle_root(tree)
     proof = get_merkle_proof(tree, 0)
-    # Use a different root
     bad_root = bytes(b ^ 0xFF for b in root)
     assert not verify_merkle_proof(leaves[0], proof, bad_root)

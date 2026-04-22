@@ -16,11 +16,17 @@ class Transaction:
     # Set after calling signing.sign()
     signature: bytes | None = field(default=None, repr=False)
 
+    _UINT64_MAX = (1 << 64) - 1
+
     def __post_init__(self) -> None:
         if self.amount < 0:
             raise ValueError("amount must be non-negative")
+        if self.amount > self._UINT64_MAX:
+            raise ValueError("amount must fit in uint64")
         if self.nonce < 0:
             raise ValueError("nonce must be non-negative")
+        if self.nonce > self._UINT64_MAX:
+            raise ValueError("nonce must fit in uint64")
         if len(self.sender) != 64 or not _is_hex(self.sender):
             raise ValueError("sender must be a 64-char hex address")
         if len(self.recipient) != 64 or not _is_hex(self.recipient):

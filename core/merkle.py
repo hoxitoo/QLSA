@@ -1,9 +1,4 @@
 import hashlib
-import math
-
-
-def _hash_pair(left: bytes, right: bytes) -> bytes:
-    return hashlib.sha3_512(left + right).digest()
 
 
 def _hash_leaf(data: bytes) -> bytes:
@@ -50,7 +45,6 @@ def get_merkle_proof(tree: list[list[bytes]], index: int) -> list[tuple[bytes, s
     Each element is (sibling_hash, side) where side is 'left' or 'right'.
     """
     proof: list[tuple[bytes, str]] = []
-    n = len(tree[0])
 
     for level in tree[:-1]:
         # Pad level to even length (mirrors build_merkle_tree)

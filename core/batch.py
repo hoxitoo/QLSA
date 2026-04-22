@@ -29,6 +29,21 @@ class Batch:
     # Set after calling stark.prover.prove_batch()
     stark_commitment: str | None = field(default=None, repr=False)
 
+    def merkle_root_onchain(self) -> bytes:
+        """First 32 bytes of the SHA3-512 Merkle root — use as bytes32 in Solidity.
+        Python: batch.merkle_root_onchain()
+        Solidity: BatchRegistry.submitBatch(merkleRoot, ...)
+        """
+        return self.merkle_root[:32]
+
+    def stark_commitment_onchain(self) -> bytes:
+        """Decode the hex stark_commitment to 8 raw bytes for Solidity bytes8.
+        Raises ValueError if stark_commitment is not set.
+        """
+        if self.stark_commitment is None:
+            raise ValueError("stark_commitment not set — call prove_batch() first")
+        return bytes.fromhex(self.stark_commitment)
+
 
 def create_batch(
     transactions: list[Transaction],
