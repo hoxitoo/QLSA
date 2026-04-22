@@ -1,0 +1,20 @@
+{
+  "name": "qlsa-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QLSA on-chain batch registry and STARK verifier (Phase 3)",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test":    "hardhat test",
+    "deploy:local": "hardhat run scripts/deploy.js --network hardhat",
+    "deploy:mumbai": "hardhat run scripts/deploy.js --network mumbai"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.22.0",
+    "dotenv": "^16.4.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
