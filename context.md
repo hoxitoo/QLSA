@@ -1,20 +1,22 @@
 # QLSA — Project Context
 
 ## Статус
-- Фаза: **2 завершена** — STARK прототип
-- Готово: Phase 1 (криптоядро) + Phase 2 (STARK прототип)
-- Следующий шаг: Phase 3 — Smart Contracts (Solidity + Hardhat)
+- Фаза: **4 завершена** — Aggregator
+- Готово: Phase 1 (криптоядро) + Phase 2 (STARK прототип) + Phase 3 (Smart Contracts) + Phase 4 (Aggregator)
+- Следующий шаг: Phase 5 — SDK (Python + JS) или Phase 3+ (Stwo on-chain verifier)
 
 ### Что готово
 - `core/keys.py` — ML-DSA-44/65/87 keygen, derive_address (SHA3-256), wipe_key
 - `core/signing.py` — sign / verify через liboqs
 - `core/transaction.py` — Transaction dataclass, детерминированная сериализация, tx_hash
 - `core/merkle.py` — SHA3-512 Merkle tree, build / root / proof / verify
-- `core/batch.py` — create_batch: верификация подписей → Merkle root, поле stark_commitment
+- `core/batch.py` — create_batch, merkle_root_onchain(), stark_commitment_onchain()
 - `stark/` — STARK prover (Winterfell 0.13.1, Rust), Python subprocess обёртки
+- `contracts/src/` — BatchRegistry.sol, QLSAVerifier.sol (stub), IQLSAVerifier.sol (Hardhat + OZ v5)
+- `aggregator/` — Mempool (thread-safe), Batcher, AggregatorNode (Phase 4)
 - `benchmarks/bench_core.py` — benchmark suite
-- `tests/` — 68 тестов (57 core + 11 stark), все зелёные
-- CI: `.github/workflows/ci.yml` — python (3.10/3.12) + rust джобы
+- `tests/` — 96 тестов (57 core + 11 stark + 28 aggregator), все зелёные
+- CI: python (3.10/3.12) + rust + contracts (Hardhat) джобы
 
 ---
 
