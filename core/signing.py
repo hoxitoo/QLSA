@@ -9,7 +9,7 @@ def sign(message: bytes, private_key: bytearray, algorithm: str = DEFAULT_ALGORI
     if not message:
         raise ValueError("message must not be empty")
     with oqs.Signature(algorithm, bytes(private_key)) as sig:
-        return sig.sign(message)
+        return bytes(sig.sign(message))
 
 
 def verify(
@@ -23,4 +23,4 @@ def verify(
     if not message or not signature or not public_key:
         return False
     with oqs.Signature(algorithm) as sig:
-        return sig.verify(message, signature, public_key)
+        return bool(sig.verify(message, signature, public_key))
