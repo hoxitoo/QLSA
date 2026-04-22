@@ -23,16 +23,43 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
 
-      - name: Install liboqs system dependency
+      # liboqs-dev is not in Ubuntu APT — build from source
+      - name: Cache liboqs build
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: ~/liboqs-install
+          key: liboqs-0.14.0-${{ runner.os }}
+
+      - name: Build liboqs from source
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y liboqs-dev
+          sudo apt-get install -y cmake ninja-build libssl-dev
+          git clone --branch 0.14.0 --depth 1 \
+            https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs
+          cmake -S /tmp/liboqs -B /tmp/liboqs/build \
+            -DCMAKE_INSTALL_PREFIX="${HOME}/liboqs-install" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/liboqs/build --parallel $(nproc)
+          cmake --install /tmp/liboqs/build
 
-      - name: Install dependencies
+      # liboqs-python looks for the .so in ${HOME}/_oqs/lib/
+      - name: Make liboqs visible to liboqs-python
+        run: |
+          mkdir -p "${HOME}/_oqs"
+          cp -r "${HOME}/liboqs-install/." "${HOME}/_oqs/"
+
+      - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+
+      - name: Verify oqs import
+        run: python -c "import oqs; print('liboqs OK')"
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
