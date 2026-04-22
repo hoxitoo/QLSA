@@ -26,6 +26,8 @@ class Batch:
     transactions: list[Transaction]
     merkle_root: bytes
     batch_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Set after calling stark.prover.prove_batch()
+    stark_commitment: str | None = field(default=None, repr=False)
 
 
 def create_batch(
