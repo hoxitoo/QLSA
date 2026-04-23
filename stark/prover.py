@@ -1,11 +1,11 @@
 """
-Python wrapper around the qlsa-stark Rust binary — prove side.
+Python wrapper around the qlsa-stark-stwo Rust binary — prove side.
 
 The binary is expected at:
-  stark/target/release/qlsa-stark   (relative to repo root)
+  stark_stwo/target/release/qlsa-stark-stwo   (relative to repo root)
 
 Build it with:
-  cd stark && cargo build --release
+  cd stark_stwo && cargo +nightly-2025-07-01 build --release
 """
 
 from __future__ import annotations
@@ -19,13 +19,14 @@ from pathlib import Path
 from core.batch import Batch
 
 
-BINARY = Path(__file__).parent / "target" / "release" / "qlsa-stark"
+BINARY = Path(__file__).parent.parent / "stark_stwo" / "target" / "release" / "qlsa-stark-stwo"
 
 
 @dataclass
 class ProofResult:
-    proof: bytes       # raw proof bytes (serialised Winterfell StarkProof)
-    commitment: str    # hex-encoded field element (16 hex chars)
+    proof: bytes       # raw proof bytes (serialised Stwo StarkProof)
+    commitment: str    # 8-char little-endian hex (4 bytes, M31 field element)
+    log_size: int      # log₂(trace length) — required by the verifier
 
 
 def binary_available() -> bool:
@@ -44,13 +45,14 @@ def prove_batch(batch: Batch) -> ProofResult:
     if not binary_available():
         raise RuntimeError(
             f"STARK binary not found at {BINARY}. "
-            "Build it with: cd stark && cargo build --release"
+            "Build it with: cd stark_stwo && cargo +nightly-2025-07-01 build --release"
         )
 
     leaves = _txs_to_leaves(batch)
     result = _call_prover(leaves)
 
     batch.stark_commitment = result.commitment
+    batch.stark_log_size = result.log_size
     return result
 
 
@@ -75,10 +77,14 @@ def _call_prover(leaves: list[int]) -> ProofResult:
 
     if proc.returncode != 0:
         raise RuntimeError(
-            f"qlsa-stark prove failed (exit {proc.returncode}):\n"
+            f"qlsa-stark-stwo prove failed (exit {proc.returncode}):\n"
             f"{proc.stderr.decode()}"
         )
 
     out = json.loads(proc.stdout.decode())
     proof_bytes = base64.b64decode(out["proof"])
-    return ProofResult(proof=proof_bytes, commitment=out["commitment"])
+    return ProofResult(
+        proof=proof_bytes,
+        commitment=out["commitment"],
+        log_size=int(out["log_size"]),
+    )

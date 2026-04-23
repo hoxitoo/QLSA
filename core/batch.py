@@ -28,6 +28,7 @@ class Batch:
     batch_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     # Set after calling stark.prover.prove_batch()
     stark_commitment: str | None = field(default=None, repr=False)
+    stark_log_size: int | None = field(default=None, repr=False)
 
     def merkle_root_onchain(self) -> bytes:
         """First 32 bytes of the SHA3-512 Merkle root — use as bytes32 in Solidity.

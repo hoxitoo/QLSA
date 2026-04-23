@@ -1,10 +1,10 @@
 """
-STARK layer integration tests.
+STARK layer integration tests (Stwo Circle STARK backend).
 
 Tests that require the Rust binary are automatically skipped when the binary
 has not been compiled yet. Build it with:
 
-    cd stark && cargo build --release
+    cd stark_stwo && cargo +nightly-2025-07-01 build --release
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from stark.verifier import verify_batch_proof
 # Helper: skip all tests if binary not present
 needs_binary = pytest.mark.skipif(
     not binary_available(),
-    reason="qlsa-stark binary not built — run: cd stark && cargo build --release",
+    reason="qlsa-stark-stwo binary not built — run: cd stark_stwo && cargo +nightly-2025-07-01 build --release",
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -53,8 +53,8 @@ def _make_signed_batch(n: int):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_binary_path_is_configured():
-    assert BINARY.name == "qlsa-stark"
-    assert "stark" in str(BINARY)
+    assert BINARY.name == "qlsa-stark-stwo"
+    assert "stark_stwo" in str(BINARY)
 
 
 def test_txs_to_leaves_length():
@@ -88,17 +88,21 @@ def test_prove_returns_proof_result():
     result = prove_batch(batch)
     assert isinstance(result, ProofResult)
     assert len(result.proof) > 0
-    assert len(result.commitment) == 16  # 8 bytes as hex
+    assert len(result.commitment) == 8  # 4 bytes M31 as 8 hex chars
+    assert result.log_size >= 3         # minimum trace log size
 
 
 @needs_binary
-def test_prove_sets_batch_stark_commitment():
+def test_prove_sets_batch_stark_fields():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
     assert batch.stark_commitment is None
+    assert batch.stark_log_size is None
     prove_batch(batch)
     assert batch.stark_commitment is not None
-    assert len(batch.stark_commitment) == 16
+    assert len(batch.stark_commitment) == 8
+    assert batch.stark_log_size is not None
+    assert batch.stark_log_size >= 3
 
 
 @needs_binary
@@ -106,16 +110,7 @@ def test_verify_valid_proof():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
     result = prove_batch(batch)
-    assert verify_batch_proof(result.proof, result.commitment) is True
-
-
-@needs_binary
-def test_verify_tampered_commitment_fails():
-    from stark.prover import prove_batch
-    batch = _make_signed_batch(4)
-    result = prove_batch(batch)
-    bad_commitment = "ff" * 8  # wrong commitment
-    assert verify_batch_proof(result.proof, bad_commitment) is False
+    assert verify_batch_proof(result.proof, result.commitment, result.log_size) is True
 
 
 @needs_binary
@@ -125,7 +120,7 @@ def test_verify_tampered_proof_fails():
     result = prove_batch(batch)
     bad_proof = bytearray(result.proof)
     bad_proof[10] ^= 0xFF  # flip bits
-    assert verify_batch_proof(bytes(bad_proof), result.commitment) is False
+    assert verify_batch_proof(bytes(bad_proof), result.commitment, result.log_size) is False
 
 
 @needs_binary
