@@ -1,9 +1,9 @@
 # QLSA — Project Context
 
 ## Статус
-- Фаза: **Phase 4 завершена** — Aggregator Node
-- Готово: Phase 1 (криптоядро) + Phase 2 (STARK прототип, Stwo) + Phase 3 (Smart Contracts) + Phase 4 (Aggregator)
-- Следующий шаг: Phase 5 — SDK (Python + JS) → Phase 3+ (Stwo on-chain verifier / MVP-3)
+- Фаза: **Phase 5 завершена** — SDK (Python + JS)
+- Готово: Phase 1 (криптоядро) + Phase 2 (STARK прототип, Stwo) + Phase 3 (Smart Contracts) + Phase 4 (Aggregator) + Phase 5 (SDK)
+- Следующий шаг: Phase 3+ (Stwo on-chain verifier) → MVP-3 (ML-DSA в AIR)
 
 ### Что готово
 - `core/keys.py` — ML-DSA-44/65/87 keygen, derive_address (SHA3-256), wipe_key
@@ -16,7 +16,10 @@
 - `contracts/src/` — BatchRegistry.sol, QLSAVerifier.sol (**stub — всегда true**), IQLSAVerifier.sol (Hardhat + OZ v5)
 - `aggregator/` — Mempool (thread-safe), Batcher, AggregatorNode (Phase 4)
 - `benchmarks/bench_core.py` — benchmark suite
-- `tests/` — **107 тестов** (core + stark + aggregator), все зелёные
+- `sdk/python/qlsa/` — **Python SDK**: Wallet, TransactionBuilder, LocalClient, HttpClient (Phase 5)
+- `sdk/js/src/` — **JS SDK**: AggregatorClient (TypeScript, Phase 5)
+- `aggregator/api.py` — HTTP API (FastAPI), запуск: `uvicorn aggregator.api:app`
+- `tests/` — **124 теста** (core + stark + aggregator + sdk), все зелёные
 - CI: python (3.10/3.12) + rust (nightly-2025-07-01) + contracts (Hardhat) джобы
 
 ---
@@ -99,10 +102,11 @@
 - public_inputs содержит commitment + log_size (не массивы pubkeys)
 
 ### MVP план
-- **MVP-1** ✅ — ML-DSA + Merkle без STARK (Phase 1, завершено)
-- **MVP-2** ✅ — STARK hash chain prover (Phase 2, Stwo, завершено)
+- **MVP-1** ✅ — ML-DSA + Merkle без STARK (Phase 1)
+- **MVP-2** ✅ — STARK hash chain prover (Phase 2, Stwo)
   - Прим.: hash chain STARK (не Merkle-in-STARK) — SHA3-512 в AIR нецелесообразна
   - Переход на ZK-friendly hash (RPO256) запланирован при реализации MVP-3
+- **SDK** ✅ — Python SDK + JS SDK + HTTP API (Phase 5)
 - **MVP-3** — ML-DSA верификация внутри AIR (главная новизна, Phase 3+)
 - Fraud-proof модель — future feature (Phase 4+)
 - Batch economics — future feature (Phase 4+)

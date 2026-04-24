@@ -54,8 +54,8 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers | Done |
 | `contracts/` — BatchRegistry, QLSAVerifier | Done (stub verifier) |
 | `aggregator/` — Mempool, Batcher, AggregatorNode | Done |
-| `tests/` — 107 tests, all passing | Done |
-| `sdk/` — Python + JS SDK | Phase 5 |
+| `tests/` — 124 tests, all passing | Done |
+| `sdk/` — Python SDK + JS SDK + HTTP API | Done |
 
 > **Note:** `QLSAVerifier.sol` is a stub that always returns `true`. Do not deploy to any network until the on-chain STARK verifier is implemented.
 
@@ -199,7 +199,7 @@ PQ adoption is inevitable, but gradual.
 | Phase 2 | Stwo Circle STARK prover (hash chain AIR) | Done |
 | Phase 3 | Solidity contracts (BatchRegistry + stub verifier) | Done |
 | Phase 4 | Aggregator: Mempool, Batcher, Node | Done |
-| Phase 5 | SDK: Python + JavaScript | Next |
+| Phase 5 | SDK: Python + JavaScript + HTTP API | Done |
 | Phase 3+ | On-chain Stwo STARK verifier | Planned |
 | MVP-3 | ML-DSA verification inside AIR (main innovation) | Research |
 | Phase 6 | Testnet deployment (Polygon zkEVM / Starknet) | Future |
