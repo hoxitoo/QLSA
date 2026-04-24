@@ -141,8 +141,8 @@ def test_stark_commitment_onchain_decodes_hex():
     txs, privs = _make_batch_txs(2)
     batch = create_batch(txs)
     _wipe_all(privs)
-    batch.stark_commitment = "aabbccdd11223344"  # 16 hex chars = 8 bytes
+    batch.stark_commitment = "aabbccdd"  # 8 hex chars = 4 bytes (M31 field element)
     result = batch.stark_commitment_onchain()
     assert isinstance(result, bytes)
-    assert len(result) == 8
-    assert result == bytes.fromhex("aabbccdd11223344")
+    assert len(result) == 4
+    assert result == bytes.fromhex("aabbccdd")

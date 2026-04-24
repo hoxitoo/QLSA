@@ -48,6 +48,8 @@ class Mempool:
 
     def peek(self, n: int) -> list[Transaction]:
         """Return up to *n* transactions without removing them."""
+        if n < 1:
+            return []
         with self._lock:
             return list(self._txs)[:n]
 

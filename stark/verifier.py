@@ -38,18 +38,24 @@ def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
         "log_size":   log_size,
     })
 
-    proc = subprocess.run(
-        [str(BINARY), "verify"],
-        input=payload.encode(),
-        capture_output=True,
-        timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            [str(BINARY), "verify"],
+            input=payload.encode(),
+            capture_output=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("qlsa-stark-stwo verify timed out after 120 s")
 
     if proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace")
         raise RuntimeError(
-            f"qlsa-stark-stwo verify failed (exit {proc.returncode}):\n"
-            f"{proc.stderr.decode()}"
+            f"qlsa-stark-stwo verify failed (exit {proc.returncode}):\n{stderr}"
         )
 
-    out = json.loads(proc.stdout.decode())
-    return bool(out["valid"])
+    try:
+        out = json.loads(proc.stdout.decode(errors="replace"))
+        return bool(out["valid"])
+    except (json.JSONDecodeError, KeyError) as exc:
+        raise RuntimeError(f"qlsa-stark-stwo verify returned invalid JSON: {exc}") from exc

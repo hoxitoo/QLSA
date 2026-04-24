@@ -68,23 +68,38 @@ def _txs_to_leaves(batch: Batch) -> list[int]:
 def _call_prover(leaves: list[int]) -> ProofResult:
     payload = json.dumps({"leaves": leaves})
 
-    proc = subprocess.run(
-        [str(BINARY), "prove"],
-        input=payload.encode(),
-        capture_output=True,
-        timeout=300,
-    )
+    try:
+        proc = subprocess.run(
+            [str(BINARY), "prove"],
+            input=payload.encode(),
+            capture_output=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("qlsa-stark-stwo prove timed out after 300 s")
 
     if proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace")
         raise RuntimeError(
-            f"qlsa-stark-stwo prove failed (exit {proc.returncode}):\n"
-            f"{proc.stderr.decode()}"
+            f"qlsa-stark-stwo prove failed (exit {proc.returncode}):\n{stderr}"
         )
 
-    out = json.loads(proc.stdout.decode())
-    proof_bytes = base64.b64decode(out["proof"])
-    return ProofResult(
-        proof=proof_bytes,
-        commitment=out["commitment"],
-        log_size=int(out["log_size"]),
-    )
+    try:
+        out = json.loads(proc.stdout.decode(errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"qlsa-stark-stwo prove returned invalid JSON: {exc}") from exc
+
+    try:
+        proof_bytes = base64.b64decode(out["proof"])
+        commitment = str(out["commitment"])
+        log_size = int(out["log_size"])
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError(f"qlsa-stark-stwo prove output missing field: {exc}") from exc
+
+    if len(commitment) != 8:
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove returned unexpected commitment length "
+            f"({len(commitment)} chars, expected 8)"
+        )
+
+    return ProofResult(proof=proof_bytes, commitment=commitment, log_size=log_size)

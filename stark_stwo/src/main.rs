@@ -38,11 +38,20 @@ fn main() {
     }
 
     let mut input = String::new();
-    io::stdin().read_to_string(&mut input).expect("failed to read stdin");
+    if let Err(e) = io::stdin().read_to_string(&mut input) {
+        eprintln!("failed to read stdin: {e}");
+        std::process::exit(1);
+    }
 
     match args[1].as_str() {
         "prove" => {
-            let req: ProveInput = serde_json::from_str(&input).expect("invalid JSON input");
+            let req: ProveInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for prove: {e}");
+                    std::process::exit(1);
+                }
+            };
             match qlsa_stark_stwo::prove_hash_chain(&req.leaves) {
                 Ok((proof_bytes, commitment, log_size)) => {
                     let out = ProveOutput {
@@ -50,7 +59,10 @@ fn main() {
                         commitment,
                         log_size,
                     };
-                    println!("{}", serde_json::to_string(&out).unwrap());
+                    match serde_json::to_string(&out) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
                 }
                 Err(e) => {
                     eprintln!("prove error: {e}");
@@ -59,11 +71,26 @@ fn main() {
             }
         }
         "verify" => {
-            let req: VerifyInput = serde_json::from_str(&input).expect("invalid JSON input");
-            let proof_bytes = base64_decode(&req.proof).expect("invalid base64 proof");
+            let req: VerifyInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for verify: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let proof_bytes = match base64_decode(&req.proof) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("invalid base64 proof: {e}");
+                    std::process::exit(1);
+                }
+            };
             match qlsa_stark_stwo::verify_hash_chain(&proof_bytes, &req.commitment, req.log_size) {
                 Ok(valid) => {
-                    println!("{}", serde_json::to_string(&VerifyOutput { valid }).unwrap());
+                    match serde_json::to_string(&VerifyOutput { valid }) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
                 }
                 Err(e) => {
                     eprintln!("verify error: {e}");

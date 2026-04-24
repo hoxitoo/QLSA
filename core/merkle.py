@@ -44,6 +44,11 @@ def get_merkle_proof(tree: list[list[bytes]], index: int) -> list[tuple[bytes, s
     Return a proof for the leaf at `index`.
     Each element is (sibling_hash, side) where side is 'left' or 'right'.
     """
+    n_leaves = len(tree[0])
+    if index < 0 or index >= n_leaves:
+        raise IndexError(
+            f"leaf index {index} is out of range [0, {n_leaves})"
+        )
     proof: list[tuple[bytes, str]] = []
 
     for level in tree[:-1]:

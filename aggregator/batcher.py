@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from core.batch import Batch, create_batch
@@ -15,7 +16,7 @@ class BatchResult:
 
     # Populated when the Rust binary is available; None otherwise.
     proof: bytes | None = field(default=None, repr=False)
-    commitment: str | None = None       # 16 hex chars (8-byte field element)
+    commitment: str | None = None       # 8 hex chars (4-byte M31 field element)
 
     # Convenience properties for Solidity submission
     @property
@@ -95,6 +96,6 @@ class Batcher:
                     proof=pr.proof,
                     commitment=pr.commitment,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.warning("STARK proving skipped due to error: %s", exc)
         return BatchResult(batch=batch)
