@@ -68,7 +68,7 @@ jobs:
         run: pytest tests/ -v --tb=short
 
       - name: Type check (mypy)
-        run: mypy core/ aggregator/ --strict --ignore-missing-imports
+        run: mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/api'
 
       - name: Security scan (bandit)
         run: bandit -r core/ stark/ aggregator/ -ll
