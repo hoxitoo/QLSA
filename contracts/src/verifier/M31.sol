@@ -13,7 +13,7 @@ library M31 {
 
     function add(uint256 a, uint256 b) internal pure returns (uint256 r) {
         unchecked { r = a + b; }
-        if (r >= P) unchecked { r -= P; }
+        if (r >= P) r -= P;
     }
 
     function sub(uint256 a, uint256 b) internal pure returns (uint256) {
