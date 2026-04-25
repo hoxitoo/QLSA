@@ -127,8 +127,8 @@
 - Замена прototipного хэша `H(a,b) = a³ + b` на RPO256 при переходе к MVP-3
 - ~~FRI blowup=2~~ **FRI blowup=4** (log_blowup_factor=2, ~60-бит soundness); для production нужен blowup≥8
 - `wipe_key()` в Python ненадёжен: `bytes(private_key)` в `signing.py` создаёт иммутабельную копию, которую нельзя обнулить — для production нужна Rust-обёртка с `SecureZeroingMemory`
-- `QLSAVerifier.verify()` — заглушка, всегда возвращает `true`; деплой на testnet недопустим
-- `BatchRegistry.submitBatch()` — нет контроля доступа (любой адрес может финализировать root)
+- `QLSAVerifier.sol` — заглушка оставлена для совместимости; `QLSAVerifierV2` — структурный верификатор с M31 валидацией; полный FRI в Phase 3++
+- `BatchRegistry.submitBatch()` — ✅ контроль доступа реализован: `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
 - Усечение tx_hash до 8 байт при конвертации в M31: из 256 бит SHA3-256 используется 31 бит
 
 ### Инфраструктурные
@@ -178,12 +178,12 @@ Rust: `nightly-2025-07-01` (зафиксирован в `stark_stwo/rust-toolcha
 | Риск | Уровень | Статус |
 |------|---------|--------|
 | STARK не доказывает ML-DSA подписи | Критично | Open (MVP-3) |
-| QLSAVerifier — stub (всегда true) | Критично | Open (Phase 3+) |
+| QLSAVerifier — структурный (не полный FRI) | Критично | Partial (Phase 3++) |
 | Merkle-root не публичный вход STARK | Критично | Open (MVP-3) |
 | M31-коммитмент 32 бита — не binding | Высокий | Open |
 | bytes(private_key) — иммутабельная копия в Python | Высокий | Open (нужна Rust-обёртка) |
 | Нет replay-защиты on-chain | Высокий | Open |
-| FRI blowup=4 → ~60-бит soundness (улучшено с 2x) | Средний | Частично (нужен blowup≥8) |
-| BatchRegistry без access control | Средний | Open |
+| FRI blowup=4 → ~60-бит soundness (улучшено с 2x) | Средний | Partial (нужен blowup≥8) |
+| BatchRegistry access control | Средний | ✅ Done (Ownable + nonReentrant + replay guard) |
 | tx_hash усекается до 31 бита для M31 | Низкий | Open |
 | H(a,b) = a³+b — не крипто-стойкая | Низкий | Принято для прото |
