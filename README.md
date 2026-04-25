@@ -123,7 +123,7 @@ be resolved before any production or testnet deployment:
 | Merkle root is not a public input of the STARK proof | Critical | MVP-3 |
 | M31 commitment is 32 bits — not cryptographically binding | High | TBD |
 | No replay protection on-chain (nonce registry missing) | High | Phase 3+ |
-| FRI blowup factor = 2 → ~30-bit soundness (production needs 4–8) | Medium | MVP-3 |
+| FRI blowup factor = 4 → ~60-bit soundness (improved; production needs 8+) | Medium | Partial |
 | `BatchRegistry.submitBatch()` has no access control | Medium | Phase 3+ |
 | Private key zeroing in Python is best-effort, not guaranteed | Medium | Phase 5 |
 
@@ -200,7 +200,7 @@ PQ adoption is inevitable, but gradual.
 | Phase 3 | Solidity contracts (BatchRegistry + stub verifier) | Done |
 | Phase 4 | Aggregator: Mempool, Batcher, Node | Done |
 | Phase 5 | SDK: Python + JavaScript + HTTP API | Done |
-| Phase 3+ | On-chain Stwo STARK verifier | Planned |
+| Phase 3+ | M31 field library + QLSAVerifierV2 + FRI blowup 4x | In progress |
 | MVP-3 | ML-DSA verification inside AIR (main innovation) | Research |
 | Phase 6 | Testnet deployment (Polygon zkEVM / Starknet) | Future |
 

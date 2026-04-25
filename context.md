@@ -1,9 +1,9 @@
 # QLSA — Project Context
 
 ## Статус
-- Фаза: **Phase 5 завершена** — SDK (Python + JS)
-- Готово: Phase 1 (криптоядро) + Phase 2 (STARK прототип, Stwo) + Phase 3 (Smart Contracts) + Phase 4 (Aggregator) + Phase 5 (SDK)
-- Следующий шаг: Phase 3+ (Stwo on-chain verifier) → MVP-3 (ML-DSA в AIR)
+- Фаза: **Phase 3+ в процессе** — On-chain Verifier + FRI hardening
+- Готово: Phase 1 → Phase 5 + Phase 3+ (M31 library, QLSAVerifierV2, FRI blowup 4x)
+- Следующий шаг: Phase 3++ (полный FRI decommitment verifier) → MVP-3 (ML-DSA в AIR)
 
 ### Что готово
 - `core/keys.py` — ML-DSA-44/65/87 keygen, derive_address (SHA3-256), wipe_key
@@ -16,6 +16,8 @@
 - `contracts/src/` — BatchRegistry.sol, QLSAVerifier.sol (**stub — всегда true**), IQLSAVerifier.sol (Hardhat + OZ v5)
 - `aggregator/` — Mempool (thread-safe), Batcher, AggregatorNode (Phase 4)
 - `benchmarks/bench_core.py` — benchmark suite
+- `contracts/src/verifier/M31.sol` — **M31 field arithmetic library** (add/sub/mul/pow/inv/neg, LE encoding)
+- `contracts/src/QLSAVerifierV2.sol` — **Structural verifier** (M31 validation, replaces stub)
 - `sdk/python/qlsa/` — **Python SDK**: Wallet, TransactionBuilder, LocalClient, HttpClient (Phase 5)
 - `sdk/js/src/` — **JS SDK**: AggregatorClient (TypeScript, Phase 5)
 - `aggregator/api.py` — HTTP API (FastAPI), запуск: `uvicorn aggregator.api:app`
@@ -123,7 +125,7 @@
 
 ### Реализационные
 - Замена прototipного хэша `H(a,b) = a³ + b` на RPO256 при переходе к MVP-3
-- FRI blowup=2 (log_blowup_factor=1) → ~30-бит soundness; для production нужен blowup=4–8
+- ~~FRI blowup=2~~ **FRI blowup=4** (log_blowup_factor=2, ~60-бит soundness); для production нужен blowup≥8
 - `wipe_key()` в Python ненадёжен: `bytes(private_key)` в `signing.py` создаёт иммутабельную копию, которую нельзя обнулить — для production нужна Rust-обёртка с `SecureZeroingMemory`
 - `QLSAVerifier.verify()` — заглушка, всегда возвращает `true`; деплой на testnet недопустим
 - `BatchRegistry.submitBatch()` — нет контроля доступа (любой адрес может финализировать root)
@@ -181,7 +183,7 @@ Rust: `nightly-2025-07-01` (зафиксирован в `stark_stwo/rust-toolcha
 | M31-коммитмент 32 бита — не binding | Высокий | Open |
 | bytes(private_key) — иммутабельная копия в Python | Высокий | Open (нужна Rust-обёртка) |
 | Нет replay-защиты on-chain | Высокий | Open |
-| FRI blowup=2 → ~30-бит soundness | Средний | Open |
+| FRI blowup=4 → ~60-бит soundness (улучшено с 2x) | Средний | Частично (нужен blowup≥8) |
 | BatchRegistry без access control | Средний | Open |
 | tx_hash усекается до 31 бита для M31 | Низкий | Open |
 | H(a,b) = a³+b — не крипто-стойкая | Низкий | Принято для прото |

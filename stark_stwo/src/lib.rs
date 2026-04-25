@@ -15,6 +15,19 @@ use stwo_constraint_framework::TraceLocationAllocator;
 
 use air::{HashChainComponent, HashChainEval};
 
+/// log2 of the FRI blowup factor. 2 → blowup 4× (security margin ~60-bit at 30 FRI rounds).
+/// Was 1 (2×, ~30-bit). Increase to 3+ for production.
+const LOG_BLOWUP: u32 = 2;
+
+fn make_config(log_size: u32) -> PcsConfig {
+    let mut c = PcsConfig::default();
+    c.fri_config.log_blowup_factor = LOG_BLOWUP;
+    PcsConfig {
+        lifting_log_size: Some(log_size + LOG_BLOWUP),
+        ..c
+    }
+}
+
 /// Prove a hash-chain over `leaves`.
 ///
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
@@ -25,16 +38,11 @@ pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String
     let (columns, commitment) = trace::build_trace(leaves);
     let log_size = trace::compute_log_size(leaves.len());
 
-    // lifting_log_size = log_size + blowup so that max_log_degree_bound = log_size.
+    // lifting_log_size = log_size + LOG_BLOWUP so that max_log_degree_bound = log_size.
     // This keeps the OODS mask step (CanonicCoset::new(log_size).step()) and the vanishing
     // denominator consistent between the domain evaluator and the OODS point evaluator.
-    let default_cfg = PcsConfig::default();
-    let blowup = default_cfg.fri_config.log_blowup_factor;
-    let lifting = log_size + blowup;
-    let config = PcsConfig {
-        lifting_log_size: Some(lifting),
-        ..default_cfg
-    };
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
     let twiddles = CpuBackend::precompute_twiddles(
         CanonicCoset::new(lifting + 1).circle_domain().half_coset,
     );
@@ -98,7 +106,8 @@ pub fn verify_hash_chain(
         bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
             .map_err(|e| format!("deserialization error: {e:?}"))?;
 
-    let config = PcsConfig::default();
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
 
     let component = HashChainComponent::new(
         &mut TraceLocationAllocator::default(),
