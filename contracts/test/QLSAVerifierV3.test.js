@@ -28,6 +28,15 @@ describe("QLSAVerifierV3", function () {
     expect(await verifier.MIN_PROOF_LENGTH()).to.equal(700n);
   });
 
+  it("MAX_PROOF_LENGTH == 1048576 (1 MiB)", async function () {
+    expect(await verifier.MAX_PROOF_LENGTH()).to.equal(1_048_576n);
+  });
+
+  it("rejects proof larger than 1 MiB (gas-griefing guard)", async function () {
+    const tooBig = "0x" + "ab".repeat(1_048_577);
+    expect(await verifier.verify(tooBig, VALID_COMMITMENT)).to.be.false;
+  });
+
   // ── Acceptance ────────────────────────────────────────────────────────────
 
   it("accepts valid proof and valid M31 commitment", async function () {

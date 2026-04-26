@@ -20,6 +20,11 @@ contract QLSAVerifierV3 is IQLSAVerifier {
     /// Smallest observed Stwo proof at log_size=3 is 752 bytes; 700 is the floor.
     uint256 public constant MIN_PROOF_LENGTH = 700;
 
+    /// @notice Maximum proof length (bytes).
+    /// Stwo proofs for practical batch sizes (≤3000 tx) fit well under 1 MB.
+    /// Prevents gas-griefing via oversized calldata on the keccak256 call.
+    uint256 public constant MAX_PROOF_LENGTH = 1_048_576; // 1 MiB
+
     // ── IQLSAVerifier ─────────────────────────────────────────────────────────
 
     /// @inheritdoc IQLSAVerifier
@@ -28,8 +33,9 @@ contract QLSAVerifierV3 is IQLSAVerifier {
         bytes8 commitment
     ) external pure override returns (bool) {
 
-        // 1. Proof length floor.
+        // 1. Proof length bounds (floor: structural minimum; ceiling: gas-griefing guard).
         if (proof.length < MIN_PROOF_LENGTH) return false;
+        if (proof.length > MAX_PROOF_LENGTH) return false;
 
         // 2. Non-zero commitment.
         if (commitment == bytes8(0)) return false;
