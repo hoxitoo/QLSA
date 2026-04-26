@@ -3,17 +3,11 @@ pragma solidity ^0.8.24;
 
 /// @title Blake2s — RFC 7693 Blake2s-256 (keyless, 32-byte output)
 ///
-/// Pure Solidity implementation intended for on-chain FRI commitment
-/// verification in the QLSA Phase 3++ verifier.  Stwo (Circle STARK)
-/// uses Blake2s for all Merkle tree hashing in its commitment scheme.
+/// Pure Solidity implementation for on-chain FRI commitment verification.
+/// Stwo (Circle STARK) uses Blake2s for all Merkle tree hashing.
 ///
-/// Gas note: each call to `hash()` costs roughly 50k–200k gas depending
-/// on input length.  Suitable for prototype / low-frequency verification;
-/// production should use a precompile or Yul-optimised version.
-///
-/// Test vectors (RFC 7693 / Python hashlib):
-///   hash("")    = 0x69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9
-///   hash("abc") = 0x508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982
+/// Gas: ~50k–200k per call depending on input length.
+/// Production: replace with a precompile or Yul-optimised version.
 library Blake2s {
 
     // ── Initialisation vector (same as SHA-256) ───────────────────────────────
@@ -26,8 +20,7 @@ library Blake2s {
     uint32 private constant IV6 = 0x1F83D9AB;
     uint32 private constant IV7 = 0x5BE0CD19;
 
-    // Parameter block XOR for keyless Blake2s-256:
-    //   digest_len=0x20, key_len=0, fanout=1, max_depth=1  → LE32 = 0x01010020
+    // Keyless Blake2s-256 parameter block XOR: digest_len=32, key_len=0, fanout=1, max_depth=1
     uint32 private constant PARAM_XOR = 0x01010020;
 
     // ── Public interface ──────────────────────────────────────────────────────
@@ -43,19 +36,19 @@ library Blake2s {
         uint256 len = data.length;
         if (len == 0) {
             uint32[16] memory empty;
-            _compress(h, empty, 0, 0, true);
+            _compress(h, empty, 0, true);
         } else {
             uint256 offset = 0;
-            // Process all complete blocks except the last
             while (len - offset > 64) {
-                _compress(h, _block(data, offset), uint32(offset + 64), 0, false);
+                _compress(h, _block(data, offset), uint32(offset + 64), false);
                 offset += 64;
             }
-            // Final block (1–64 bytes, zero-padded)
-            _compress(h, _lastBlock(data, offset, len - offset), uint32(len), 0, true);
+            _compress(h, _lastBlock(data, offset, len - offset), uint32(len), true);
         }
 
-        // Output: state words serialised as little-endian bytes
+        // Serialise state as little-endian bytes (Blake2s output convention).
+        // Each state word is stored LE, but Solidity bytes32 is big-endian memory,
+        // so _rev32 reverses each word's byte order before packing.
         return bytes32(
             (uint256(_rev32(h[0])) << 224) | (uint256(_rev32(h[1])) << 192) |
             (uint256(_rev32(h[2])) << 160) | (uint256(_rev32(h[3])) << 128) |
@@ -66,11 +59,13 @@ library Blake2s {
 
     // ── Compression function ──────────────────────────────────────────────────
 
-    /// @dev Blake2s compression F.  Modifies h[] in place.
+    /// @dev Blake2s compression F (RFC 7693 §3.2). Modifies h[] in place.
+    ///      t0 is the byte counter (lower 32 bits); t1 is always 0 for inputs
+    ///      that fit in 32 bits, which is all practical Ethereum calldata.
     function _compress(
         uint32[8]  memory h,
         uint32[16] memory m,
-        uint32 t0, uint32 t1,
+        uint32 t0,
         bool last
     ) private pure {
         uint32[16] memory v;
@@ -78,72 +73,61 @@ library Blake2s {
         v[4] = h[4]; v[5] = h[5]; v[6] = h[6]; v[7]  = h[7];
         v[8]  = IV0; v[9]  = IV1; v[10] = IV2; v[11] = IV3;
         v[12] = IV4 ^ t0;
-        v[13] = IV5 ^ t1;
+        v[13] = IV5;
         v[14] = last ? IV6 ^ 0xFFFFFFFF : IV6;
         v[15] = IV7;
 
-        // 10 rounds — unrolled with inlined sigma schedule (RFC 7693)
-        // Round 0: sigma = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+        // 10 rounds with inlined sigma permutation schedule (RFC 7693 §2.7)
         _G(v,0,4, 8,12,m[ 0],m[ 1]); _G(v,1,5, 9,13,m[ 2],m[ 3]);
         _G(v,2,6,10,14,m[ 4],m[ 5]); _G(v,3,7,11,15,m[ 6],m[ 7]);
         _G(v,0,5,10,15,m[ 8],m[ 9]); _G(v,1,6,11,12,m[10],m[11]);
         _G(v,2,7, 8,13,m[12],m[13]); _G(v,3,4, 9,14,m[14],m[15]);
 
-        // Round 1: sigma = [14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3]
         _G(v,0,4, 8,12,m[14],m[10]); _G(v,1,5, 9,13,m[ 4],m[ 8]);
         _G(v,2,6,10,14,m[ 9],m[15]); _G(v,3,7,11,15,m[13],m[ 6]);
         _G(v,0,5,10,15,m[ 1],m[12]); _G(v,1,6,11,12,m[ 0],m[ 2]);
         _G(v,2,7, 8,13,m[11],m[ 7]); _G(v,3,4, 9,14,m[ 5],m[ 3]);
 
-        // Round 2: sigma = [11,8,12,0,5,2,15,13,10,14,3,6,7,1,9,4]
         _G(v,0,4, 8,12,m[11],m[ 8]); _G(v,1,5, 9,13,m[12],m[ 0]);
         _G(v,2,6,10,14,m[ 5],m[ 2]); _G(v,3,7,11,15,m[15],m[13]);
         _G(v,0,5,10,15,m[10],m[14]); _G(v,1,6,11,12,m[ 3],m[ 6]);
         _G(v,2,7, 8,13,m[ 7],m[ 1]); _G(v,3,4, 9,14,m[ 9],m[ 4]);
 
-        // Round 3: sigma = [7,9,3,1,13,12,11,14,2,6,5,10,4,0,15,8]
         _G(v,0,4, 8,12,m[ 7],m[ 9]); _G(v,1,5, 9,13,m[ 3],m[ 1]);
         _G(v,2,6,10,14,m[13],m[12]); _G(v,3,7,11,15,m[11],m[14]);
         _G(v,0,5,10,15,m[ 2],m[ 6]); _G(v,1,6,11,12,m[ 5],m[10]);
         _G(v,2,7, 8,13,m[ 4],m[ 0]); _G(v,3,4, 9,14,m[15],m[ 8]);
 
-        // Round 4: sigma = [9,0,5,7,2,4,10,15,14,1,11,12,6,8,3,13]
         _G(v,0,4, 8,12,m[ 9],m[ 0]); _G(v,1,5, 9,13,m[ 5],m[ 7]);
         _G(v,2,6,10,14,m[ 2],m[ 4]); _G(v,3,7,11,15,m[10],m[15]);
         _G(v,0,5,10,15,m[14],m[ 1]); _G(v,1,6,11,12,m[11],m[12]);
         _G(v,2,7, 8,13,m[ 6],m[ 8]); _G(v,3,4, 9,14,m[ 3],m[13]);
 
-        // Round 5: sigma = [2,12,6,10,0,11,8,3,4,13,7,5,15,14,1,9]
         _G(v,0,4, 8,12,m[ 2],m[12]); _G(v,1,5, 9,13,m[ 6],m[10]);
         _G(v,2,6,10,14,m[ 0],m[11]); _G(v,3,7,11,15,m[ 8],m[ 3]);
         _G(v,0,5,10,15,m[ 4],m[13]); _G(v,1,6,11,12,m[ 7],m[ 5]);
         _G(v,2,7, 8,13,m[15],m[14]); _G(v,3,4, 9,14,m[ 1],m[ 9]);
 
-        // Round 6: sigma = [12,5,1,15,14,13,4,10,0,7,6,3,9,2,8,11]
         _G(v,0,4, 8,12,m[12],m[ 5]); _G(v,1,5, 9,13,m[ 1],m[15]);
         _G(v,2,6,10,14,m[14],m[13]); _G(v,3,7,11,15,m[ 4],m[10]);
         _G(v,0,5,10,15,m[ 0],m[ 7]); _G(v,1,6,11,12,m[ 6],m[ 3]);
         _G(v,2,7, 8,13,m[ 9],m[ 2]); _G(v,3,4, 9,14,m[ 8],m[11]);
 
-        // Round 7: sigma = [13,11,7,14,12,1,3,9,5,0,15,4,8,6,2,10]
         _G(v,0,4, 8,12,m[13],m[11]); _G(v,1,5, 9,13,m[ 7],m[14]);
         _G(v,2,6,10,14,m[12],m[ 1]); _G(v,3,7,11,15,m[ 3],m[ 9]);
         _G(v,0,5,10,15,m[ 5],m[ 0]); _G(v,1,6,11,12,m[15],m[ 4]);
         _G(v,2,7, 8,13,m[ 8],m[ 6]); _G(v,3,4, 9,14,m[ 2],m[10]);
 
-        // Round 8: sigma = [6,15,14,9,11,3,0,8,12,2,13,7,1,4,10,5]
         _G(v,0,4, 8,12,m[ 6],m[15]); _G(v,1,5, 9,13,m[14],m[ 9]);
         _G(v,2,6,10,14,m[11],m[ 3]); _G(v,3,7,11,15,m[ 0],m[ 8]);
         _G(v,0,5,10,15,m[12],m[ 2]); _G(v,1,6,11,12,m[13],m[ 7]);
         _G(v,2,7, 8,13,m[ 1],m[ 4]); _G(v,3,4, 9,14,m[10],m[ 5]);
 
-        // Round 9: sigma = [10,2,8,4,7,6,1,5,15,11,9,14,3,12,13,0]
         _G(v,0,4, 8,12,m[10],m[ 2]); _G(v,1,5, 9,13,m[ 8],m[ 4]);
         _G(v,2,6,10,14,m[ 7],m[ 6]); _G(v,3,7,11,15,m[ 1],m[ 5]);
         _G(v,0,5,10,15,m[15],m[11]); _G(v,1,6,11,12,m[ 9],m[14]);
         _G(v,2,7, 8,13,m[ 3],m[12]); _G(v,3,4, 9,14,m[13],m[ 0]);
 
-        // Finalise
         h[0] ^= v[0] ^ v[8];  h[1] ^= v[1] ^ v[9];
         h[2] ^= v[2] ^ v[10]; h[3] ^= v[3] ^ v[11];
         h[4] ^= v[4] ^ v[12]; h[5] ^= v[5] ^ v[13];
@@ -170,24 +154,30 @@ library Blake2s {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// @dev Right-rotate a 32-bit word by n bits.
     function _rotr(uint32 w, uint8 n) private pure returns (uint32) {
-        return (w >> n) | (w << (32 - n));
+        unchecked { return uint32((w >> n) | (w << (32 - n))); }
+    }
+
+    /// @dev Load a single LE uint32 word from `data` starting at byte `p`,
+    ///      reading only bytes strictly before `end` (zero-padding the rest).
+    function _loadWord(bytes memory data, uint256 p, uint256 end) private pure returns (uint32 w) {
+        unchecked {
+            if (p     < end) w  = uint32(uint8(data[p]));
+            if (p + 1 < end) w |= uint32(uint8(data[p + 1])) << 8;
+            if (p + 2 < end) w |= uint32(uint8(data[p + 2])) << 16;
+            if (p + 3 < end) w |= uint32(uint8(data[p + 3])) << 24;
+        }
     }
 
     /// @dev Load a full 64-byte block as 16 little-endian uint32 words.
     function _block(bytes memory data, uint256 off) private pure returns (uint32[16] memory m) {
+        uint256 end = off + 64;
         for (uint8 i = 0; i < 16; i++) {
-            uint256 p = off + uint256(i) * 4;
-            m[i] = uint32(uint8(data[p]))
-                 | (uint32(uint8(data[p + 1])) << 8)
-                 | (uint32(uint8(data[p + 2])) << 16)
-                 | (uint32(uint8(data[p + 3])) << 24);
+            m[i] = _loadWord(data, off + uint256(i) * 4, end);
         }
     }
 
     /// @dev Load the final (possibly partial) block, zero-padding to 64 bytes.
-    ///      `blockLen` is 1–64.
     function _lastBlock(
         bytes memory data,
         uint256 off,
@@ -195,21 +185,17 @@ library Blake2s {
     ) private pure returns (uint32[16] memory m) {
         uint256 end = off + blockLen;
         for (uint8 i = 0; i < 16; i++) {
-            uint256 p = off + uint256(i) * 4;
-            uint32 w = 0;
-            if (p     < end) w  = uint32(uint8(data[p]));
-            if (p + 1 < end) w |= uint32(uint8(data[p + 1])) << 8;
-            if (p + 2 < end) w |= uint32(uint8(data[p + 2])) << 16;
-            if (p + 3 < end) w |= uint32(uint8(data[p + 3])) << 24;
-            m[i] = w;
+            m[i] = _loadWord(data, off + uint256(i) * 4, end);
         }
     }
 
     /// @dev Reverse the byte order of a 32-bit word (for LE output encoding).
     function _rev32(uint32 w) private pure returns (uint32) {
-        return ((w & 0x000000FF) << 24)
-             | ((w & 0x0000FF00) << 8)
-             | ((w & 0x00FF0000) >> 8)
-             |  (w >> 24);
+        unchecked {
+            return ((w & 0x000000FF) << 24)
+                 | ((w & 0x0000FF00) << 8)
+                 | ((w & 0x00FF0000) >> 8)
+                 |  (w >> 24);
+        }
     }
 }

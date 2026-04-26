@@ -1,23 +1,6 @@
 const { expect } = require("chai");
 const { ethers }  = require("hardhat");
-
-// M31.P = 2^31 − 1
-const P = 2_147_483_647n;
-
-// ── Helpers (same encoding as V2 tests) ───────────────────────────────────────
-
-function makeCommitment(m31Val) {
-  const v = BigInt(m31Val);
-  const b0 = (v >>  0n) & 0xFFn;
-  const b1 = (v >>  8n) & 0xFFn;
-  const b2 = (v >> 16n) & 0xFFn;
-  const b3 = (v >> 24n) & 0xFFn;
-  return (b0 << 56n) | (b1 << 48n) | (b2 << 40n) | (b3 << 32n);
-}
-
-function toBytes8Hex(bigint) {
-  return "0x" + bigint.toString(16).padStart(16, "0");
-}
+const { P, makeCommitment, toBytes8Hex } = require("./helpers");
 
 const VALID_M31        = 0x12345678n;
 const VALID_COMMITMENT = toBytes8Hex(makeCommitment(VALID_M31)); // 0x7856341200000000
@@ -33,7 +16,8 @@ const ALL_ZERO_PROOF   = "0x" + "00".repeat(700);
 describe("QLSAVerifierV3", function () {
   let verifier;
 
-  beforeEach(async function () {
+  // QLSAVerifierV3.verify() is pure — one deployment covers all tests.
+  before(async function () {
     const Factory = await ethers.getContractFactory("QLSAVerifierV3");
     verifier = await Factory.deploy();
   });

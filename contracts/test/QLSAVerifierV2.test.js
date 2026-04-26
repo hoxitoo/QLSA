@@ -1,27 +1,6 @@
 const { expect } = require("chai");
 const { ethers }  = require("hardhat");
-
-// M31.P = 2^31 - 1 = 0x7FFFFFFF
-const P = 2_147_483_647n;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-// Produce a commitment bytes8 where the first 4 bytes encode `m31Val` in
-// little-endian (as the Stwo prover would), and the trailing 4 bytes are zero.
-function makeCommitment(m31Val) {
-  const v = BigInt(m31Val);
-  // LE bytes of v as uint32
-  const b0 = (v >> 0n) & 0xFFn;
-  const b1 = (v >> 8n) & 0xFFn;
-  const b2 = (v >> 16n) & 0xFFn;
-  const b3 = (v >> 24n) & 0xFFn;
-  // Pack into bytes8 (big-endian memory, trailing 4 bytes = 0)
-  return (b0 << 56n) | (b1 << 48n) | (b2 << 40n) | (b3 << 32n);
-}
-
-function toBytes8Hex(bigint) {
-  return "0x" + bigint.toString(16).padStart(16, "0");
-}
+const { P, makeCommitment, toBytes8Hex } = require("./helpers");
 
 const VALID_PROOF      = "0x" + "ab".repeat(256);   // 256 bytes
 const SHORT_PROOF      = "0x" + "ab".repeat(128);   // 128 bytes < 256
