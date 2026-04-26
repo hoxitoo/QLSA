@@ -15,7 +15,7 @@ module.exports = {
   },
 
   solidity: {
-    version: "0.8.24",
+    version: "0.8.26",
     settings: {
       optimizer: { enabled: true, runs: 200 },
       viaIR: false,
@@ -23,7 +23,10 @@ module.exports = {
   },
 
   networks: {
-    hardhat: {},
+    // Allow large calldata for MAX_PROOF_LENGTH guard tests (1 MiB proof)
+    hardhat: {
+      blockGasLimit: 100_000_000,
+    },
 
     // Polygon zkEVM testnet
     cardona: {
@@ -43,5 +46,9 @@ module.exports = {
   gasReporter: {
     enabled: process.env.REPORT_GAS === "true",
     currency: "USD",
+  },
+
+  mocha: {
+    timeout: 60_000,
   },
 };
