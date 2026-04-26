@@ -33,7 +33,10 @@ describe("QLSAVerifierV3", function () {
   });
 
   it("rejects proof larger than 1 MiB (gas-griefing guard)", async function () {
-    const tooBig = "0x" + "ab".repeat(1_048_577);
+    // Use zero bytes so calldata gas stays within the Hardhat/Fusaka per-tx gas cap
+    // (16,777,216 gas).  Content is irrelevant: verify() returns false at the
+    // proof.length > MAX_PROOF_LENGTH check before reading any proof bytes.
+    const tooBig = "0x" + "00".repeat(1_048_577);
     expect(await verifier.verify(tooBig, VALID_COMMITMENT)).to.be.false;
   });
 
