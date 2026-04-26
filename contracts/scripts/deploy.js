@@ -5,14 +5,14 @@ async function main() {
   console.log("Deploying with account:", deployer.address);
   console.log("Network:", hre.network.name);
 
-  // 1. Deploy QLSAVerifierV2 (Phase 3+ structural verifier)
-  const QLSAVerifierV2 = await hre.ethers.getContractFactory("QLSAVerifierV2");
-  const verifier = await QLSAVerifierV2.deploy();
+  // 1. Deploy QLSAVerifierV3 (Phase 3++ structural verifier)
+  const QLSAVerifierV3 = await hre.ethers.getContractFactory("QLSAVerifierV3");
+  const verifier = await QLSAVerifierV3.deploy();
   await verifier.waitForDeployment();
   const verifierAddr = await verifier.getAddress();
-  console.log("QLSAVerifierV2 deployed to:", verifierAddr);
+  console.log("QLSAVerifierV3 deployed to:", verifierAddr);
 
-  // 2. Deploy BatchRegistry pointing at QLSAVerifierV2
+  // 2. Deploy BatchRegistry pointing at QLSAVerifierV3
   const BatchRegistry = await hre.ethers.getContractFactory("BatchRegistry");
   const registry = await BatchRegistry.deploy(deployer.address, verifierAddr);
   await registry.waitForDeployment();
@@ -20,12 +20,13 @@ async function main() {
   console.log("BatchRegistry deployed to:", registryAddr);
 
   console.log("\nDeployment summary:");
-  console.log("  QLSAVerifierV2:", verifierAddr);
+  console.log("  QLSAVerifierV3:", verifierAddr);
   console.log("  BatchRegistry: ", registryAddr);
   console.log("  Owner:         ", deployer.address);
-  console.log("\nNOTE: QLSAVerifierV2 is a structural verifier (Phase 3+).");
-  console.log("It validates M31 commitment range but does NOT perform full FRI verification.");
-  console.log("Replace with the full Circle STARK on-chain verifier before mainnet use.");
+  console.log("\nNOTE: QLSAVerifierV3 is a structural verifier (Phase 3++).");
+  console.log("It validates M31 commitment range, proof length >= 700 bytes, and trivial-proof guard,");
+  console.log("but does NOT perform full FRI decommitment. Replace with the full Circle STARK verifier");
+  console.log("before mainnet use.");
   console.log("\nUpgrade path: registry.setVerifier(<full-verifier-address>)");
 }
 

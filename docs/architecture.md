@@ -44,8 +44,8 @@ N signed transactions  →  1 STARK proof (~90–200 KB)  →  O(1) on-chain ver
  │       │                                                                  │
  │       │ IQLSAVerifier.verify(proof, commitment)                          │
  │       ▼                                                                  │
- │  QLSAVerifierV2  →  M31 range check + structural validation             │
- │  (Phase 3++ → full FRI decommitment + OODS + constraint check)          │
+ │  QLSAVerifierV3  →  M31 range check + MIN_PROOF_LENGTH=700 + Blake2s    │
+ │  (QLSAVerifierFull → full FRI decommitment + OODS + constraint check)   │
  │       │                                                                  │
  │       │ finalizedBatches[merkleRoot] = true                             │
  │       └──  emit BatchFinalized(merkleRoot, commitment, timestamp)        │
@@ -70,6 +70,8 @@ N signed transactions  →  1 STARK proof (~90–200 KB)  →  O(1) on-chain ver
 | HTTP API | FastAPI server | `aggregator/api.py` | Done |
 | Contracts | BatchRegistry + Verifier | `contracts/src/` | Done (structural) |
 | M31 Library | On-chain field arithmetic | `contracts/src/verifier/M31.sol` | Done |
+| Blake2s Library | On-chain Blake2s-256 (RFC 7693) | `contracts/src/verifier/Blake2s.sol` | Done (Phase 3++) |
+| QLSAVerifierV3 | Structural verifier (MIN_PROOF_LENGTH=700) | `contracts/src/QLSAVerifierV3.sol` | Done (Phase 3++) |
 | Python SDK | Wallet, Builder, Client | `sdk/python/qlsa/` | Done |
 | JS SDK | AggregatorClient (TS) | `sdk/js/src/` | Done |
 
@@ -115,8 +117,9 @@ AIR constraints:
 |---------|---------------|--------|
 | `QLSAVerifier` (stub) | proof.length ≥ 64, commitment ≠ 0 | Done |
 | `QLSAVerifierV2` | + M31 range, + trailing zero bytes | Done (Phase 3+) |
-| `QLSAVerifierV3` | + FRI decommitment, OODS, Blake2s Merkle paths | Phase 3++ |
-| `QLSAVerifierFull` | + ML-DSA constraint satisfaction | MVP-3 |
+| `QLSAVerifierV3` | + MIN_PROOF_LENGTH=700, trivial-proof guard, keccak binding, Blake2s imported | Done (Phase 3++) |
+| `QLSAVerifierFull` (planned) | + full FRI decommitment, OODS, Blake2s Merkle paths | Future |
+| `QLSAVerifierFinalFull` | + ML-DSA constraint satisfaction | MVP-3 |
 
 ---
 

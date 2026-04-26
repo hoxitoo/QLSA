@@ -1,9 +1,9 @@
 # QLSA — Project Context
 
 ## Статус
-- Фаза: **Phase 3+ в процессе** — On-chain Verifier + FRI hardening
-- Готово: Phase 1 → Phase 5 + Phase 3+ (M31 library, QLSAVerifierV2, FRI blowup 4x)
-- Следующий шаг: Phase 3++ (полный FRI decommitment verifier) → MVP-3 (ML-DSA в AIR)
+- Фаза: **Phase 3++ в процессе** — Blake2s on-chain library + QLSAVerifierV3
+- Готово: Phase 1 → Phase 5 + Phase 3+ (M31 library, QLSAVerifierV2, FRI blowup 4x) + Phase 3++ (Blake2s-256, QLSAVerifierV3, тесты Blake2s + V3)
+- Следующий шаг: QLSAVerifierFull (полный FRI decommitment + OODS) → MVP-3 (ML-DSA в AIR)
 
 ### Что готово
 - `core/keys.py` — ML-DSA-44/65/87 keygen, derive_address (SHA3-256), wipe_key
@@ -17,7 +17,9 @@
 - `aggregator/` — Mempool (thread-safe), Batcher, AggregatorNode (Phase 4)
 - `benchmarks/bench_core.py` — benchmark suite
 - `contracts/src/verifier/M31.sol` — **M31 field arithmetic library** (add/sub/mul/pow/inv/neg, LE encoding)
+- `contracts/src/verifier/Blake2s.sol` — **Blake2s-256 library** (RFC 7693, pure Solidity, 10-round compression)
 - `contracts/src/QLSAVerifierV2.sol` — **Structural verifier** (M31 validation, replaces stub)
+- `contracts/src/QLSAVerifierV3.sol` — **Phase 3++ verifier** (MIN_PROOF_LENGTH=700, trivial-proof guard, keccak256 binding groundwork, Blake2s imported)
 - `sdk/python/qlsa/` — **Python SDK**: Wallet, TransactionBuilder, LocalClient, HttpClient (Phase 5)
 - `sdk/js/src/` — **JS SDK**: AggregatorClient (TypeScript, Phase 5)
 - `aggregator/api.py` — HTTP API (FastAPI), запуск: `uvicorn aggregator.api:app`
@@ -51,6 +53,7 @@
 ### Фаза 3 (смарт-контракты)
 - Solidity + Hardhat
 - `QLSAVerifier.sol` — **заглушка** (не деплоить без реальной верификации)
+- `QLSAVerifierV3.sol` — **Phase 3++ структурный верификатор** (MIN_PROOF_LENGTH=700, Blake2s imported)
 - Stwo on-chain verifier (без trusted setup) — следующий этап
 - Деплой: Polygon zkEVM или Starknet L2
 
@@ -127,7 +130,7 @@
 - Замена прototipного хэша `H(a,b) = a³ + b` на RPO256 при переходе к MVP-3
 - ~~FRI blowup=2~~ **FRI blowup=4** (log_blowup_factor=2, ~60-бит soundness); для production нужен blowup≥8
 - `wipe_key()` в Python ненадёжен: `bytes(private_key)` в `signing.py` создаёт иммутабельную копию, которую нельзя обнулить — для production нужна Rust-обёртка с `SecureZeroingMemory`
-- `QLSAVerifier.sol` — заглушка оставлена для совместимости; `QLSAVerifierV2` — структурный верификатор с M31 валидацией; полный FRI в Phase 3++
+- `QLSAVerifier.sol` — заглушка оставлена для совместимости; `QLSAVerifierV2` — структурный верификатор с M31 валидацией; `QLSAVerifierV3` — Phase 3++ (Blake2s + тайтенный минимум 700 байт); полный FRI в QLSAVerifierFull
 - `BatchRegistry.submitBatch()` — ✅ контроль доступа реализован: `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
 - Усечение tx_hash до 8 байт при конвертации в M31: из 256 бит SHA3-256 используется 31 бит
 
@@ -178,7 +181,7 @@ Rust: `nightly-2025-07-01` (зафиксирован в `stark_stwo/rust-toolcha
 | Риск | Уровень | Статус |
 |------|---------|--------|
 | STARK не доказывает ML-DSA подписи | Критично | Open (MVP-3) |
-| QLSAVerifier — структурный (не полный FRI) | Критично | Partial (Phase 3++) |
+| QLSAVerifierV3 — структурный (не полный FRI) | Критично | Partial (Phase 3++, deployed) |
 | Merkle-root не публичный вход STARK | Критично | Open (MVP-3) |
 | M31-коммитмент 32 бита — не binding | Высокий | Open |
 | bytes(private_key) — иммутабельная копия в Python | Высокий | Open (нужна Rust-обёртка) |

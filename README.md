@@ -52,12 +52,12 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `core/` — ML-DSA keys, signing, Merkle tree, batch | Done |
 | `stark_stwo/` — Stwo Circle STARK prover (Rust) | Done |
 | `stark/` — Python prover/verifier wrappers | Done |
-| `contracts/` — BatchRegistry, QLSAVerifier | Done (stub verifier) |
+| `contracts/` — BatchRegistry, QLSAVerifier, QLSAVerifierV2, QLSAVerifierV3 | Done (structural verifier) |
 | `aggregator/` — Mempool, Batcher, AggregatorNode | Done |
 | `tests/` — 124 tests, all passing | Done |
 | `sdk/` — Python SDK + JS SDK + HTTP API | Done |
 
-> **Note:** `QLSAVerifier.sol` is a stub that always returns `true`. Do not deploy to any network until the on-chain STARK verifier is implemented.
+> **Note:** `QLSAVerifier.sol` is a stub that always returns `true`. `QLSAVerifierV3` is a structural verifier (MIN_PROOF_LENGTH=700, M31 range, Blake2s imported) — not full FRI. Do not deploy to mainnet until the full on-chain STARK verifier is implemented.
 
 ---
 
@@ -119,7 +119,7 @@ be resolved before any production or testnet deployment:
 | Issue | Severity | Phase |
 |-------|----------|-------|
 | STARK does not prove ML-DSA signatures — proves hash chain only | Critical | MVP-3 |
-| `QLSAVerifier.sol` is a stub (always returns true) | Critical | Phase 3+ |
+| `QLSAVerifierV3` is structural only (no full FRI) | Critical | Phase 3++ partial |
 | Merkle root is not a public input of the STARK proof | Critical | MVP-3 |
 | M31 commitment is 32 bits — not cryptographically binding | High | TBD |
 | No replay protection on-chain (nonce registry missing) | High | Phase 3+ |
@@ -200,7 +200,8 @@ PQ adoption is inevitable, but gradual.
 | Phase 3 | Solidity contracts (BatchRegistry + stub verifier) | Done |
 | Phase 4 | Aggregator: Mempool, Batcher, Node | Done |
 | Phase 5 | SDK: Python + JavaScript + HTTP API | Done |
-| Phase 3+ | M31 field library + QLSAVerifierV2 + FRI blowup 4x | In progress |
+| Phase 3+ | M31 field library + QLSAVerifierV2 + FRI blowup 4x | Done |
+| Phase 3++ | Blake2s-256 library + QLSAVerifierV3 (MIN_PROOF_LENGTH=700) | In progress |
 | MVP-3 | ML-DSA verification inside AIR (main innovation) | Research |
 | Phase 6 | Testnet deployment (Polygon zkEVM / Starknet) | Future |
 
