@@ -31,6 +31,17 @@ class TxPayload(BaseModel):
     public_key: str   # hex
     signature: str    # hex
 
+    @field_validator("sender", "recipient")
+    @classmethod
+    def must_be_address(cls, v: str) -> str:
+        if len(v) != 64:
+            raise ValueError("must be a 64-character hex string (SHA3-256 address)")
+        try:
+            bytes.fromhex(v)
+        except ValueError as exc:
+            raise ValueError("must be a valid hex string") from exc
+        return v.lower()
+
     @field_validator("public_key", "signature")
     @classmethod
     def must_be_hex(cls, v: str) -> str:

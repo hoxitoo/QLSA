@@ -26,10 +26,15 @@ class BatchResult:
 
     @property
     def stark_commitment_onchain(self) -> bytes | None:
-        """Raw 8 bytes of the STARK commitment — use as bytes8 in Solidity."""
+        """Raw bytes of the STARK commitment — use as bytes8 in Solidity."""
         if self.commitment is None:
             return None
-        return bytes.fromhex(self.commitment)
+        raw = bytes.fromhex(self.commitment)
+        if len(raw) not in (4, 8):
+            raise ValueError(
+                f"commitment must be 4 or 8 bytes, got {len(raw)}"
+            )
+        return raw
 
     @property
     def is_proven(self) -> bool:
@@ -76,10 +81,11 @@ class Batcher:
 
         Returns None if the mempool is empty.
         """
-        if self.mempool.size() == 0:
-            return None
-
         txs = self.mempool.drain(self.max_batch_size)
+        # Guard against TOCTOU: another thread may have drained the mempool
+        # between a size() check and this drain call.
+        if not txs:
+            return None
         batch = create_batch(txs, algorithm=self.algorithm)
         return self._try_prove(batch)
 
@@ -96,6 +102,10 @@ class Batcher:
                     proof=pr.proof,
                     commitment=pr.commitment,
                 )
+        except RuntimeError as exc:
+            # Expected: binary not built, prover timeout, or serialization failure.
+            logging.warning("STARK proving skipped: %s", exc)
         except Exception as exc:
-            logging.warning("STARK proving skipped due to error: %s", exc)
+            # Unexpected: log at error level so it's not silently swallowed.
+            logging.error("Unexpected error during STARK proving: %s", exc, exc_info=True)
         return BatchResult(batch=batch)

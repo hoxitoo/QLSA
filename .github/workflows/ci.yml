@@ -36,6 +36,7 @@ jobs:
 
       - name: Build liboqs from source
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        timeout-minutes: 20
         run: |
           sudo apt-get update -q
           sudo apt-get install -y cmake ninja-build libssl-dev
@@ -65,6 +66,7 @@ jobs:
         run: python -c "import oqs; print('liboqs OK')"
 
       - name: Run tests
+        timeout-minutes: 15
         run: pytest tests/ -v --tb=short
 
       - name: Type check (mypy)
@@ -126,7 +128,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust nightly-2025-07-01
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2025-07-01
 
@@ -140,12 +142,20 @@ jobs:
           key: cargo-stwo-${{ runner.os }}-${{ hashFiles('stark_stwo/Cargo.lock') }}
           restore-keys: cargo-stwo-${{ runner.os }}-
 
+      - name: Dependency vulnerability audit
+        working-directory: stark_stwo
+        run: |
+          cargo install cargo-audit --quiet 2>/dev/null || true
+          cargo audit
+
       - name: Run unit tests
         working-directory: stark_stwo
+        timeout-minutes: 10
         run: cargo +nightly-2025-07-01 test
 
       - name: Build release binary
         working-directory: stark_stwo
+        timeout-minutes: 15
         run: cargo +nightly-2025-07-01 build --release
 
       - name: Smoke test — prove + verify

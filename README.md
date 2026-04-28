@@ -155,7 +155,7 @@ QLSA/
 ├── aggregator/         # Mempool, Batcher, AggregatorNode
 ├── contracts/          # Solidity contracts (Hardhat + OpenZeppelin v5)
 ├── benchmarks/         # Performance benchmarks
-├── tests/              # 107 tests (pytest)
+├── tests/              # 124 tests (pytest)
 ├── docs/               # Architecture docs
 ├── context.md          # Technical context and decisions log
 └── README.md

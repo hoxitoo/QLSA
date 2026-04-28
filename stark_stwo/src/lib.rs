@@ -33,7 +33,9 @@ fn make_config(log_size: u32) -> PcsConfig {
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
 /// `commitment_hex` is the 8-char little-endian hex of `h[last_row]` (4 bytes, M31).
 pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String> {
-    assert!(!leaves.is_empty(), "leaves must not be empty");
+    if leaves.is_empty() {
+        return Err("leaves must not be empty".into());
+    }
 
     let (columns, commitment) = trace::build_trace(leaves);
     let log_size = trace::compute_log_size(leaves.len());
@@ -119,8 +121,16 @@ pub fn verify_hash_chain(
     let commitment_scheme =
         &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
-    // Feed tree commitments in the same order as proving
+    // Feed tree commitments in the same order as proving.
+    // A well-formed Stwo StarkProof has exactly 2 commitment trees
+    // (preprocessed + main trace); validate before indexing.
     let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!(
+            "malformed proof: expected 2 commitments, got {}",
+            proof.commitments.len()
+        ));
+    }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 

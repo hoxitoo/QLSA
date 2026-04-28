@@ -36,7 +36,7 @@ class Wallet:
 
     def sign_transaction(self, tx: Transaction) -> Transaction:
         """Sign *tx* in-place and return it."""
-        tx.signature = sign(tx.to_bytes(), self._private_key)
+        tx.signature = sign(tx.to_bytes(), self._private_key, self.algorithm)
         return tx
 
     def wipe(self) -> None:

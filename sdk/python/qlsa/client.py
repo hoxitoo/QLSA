@@ -116,13 +116,18 @@ class HttpClient:
         data = resp.json()
         if data.get("status") == "no_batch":
             return None
-        return BatchStatus(
-            batch_id=data["batch_id"],
-            tx_count=data["tx_count"],
-            merkle_root=data["merkle_root"],
-            is_proven=data["is_proven"],
-            stark_commitment=data.get("stark_commitment"),
-        )
+        try:
+            return BatchStatus(
+                batch_id=data["batch_id"],
+                tx_count=data["tx_count"],
+                merkle_root=data["merkle_root"],
+                is_proven=data["is_proven"],
+                stark_commitment=data.get("stark_commitment"),
+            )
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Aggregator /batch/run response missing field: {exc}. Got: {list(data)}"
+            ) from exc
 
     def flush(self) -> BatchStatus | None:
         httpx = self._httpx()
@@ -131,13 +136,18 @@ class HttpClient:
         data = resp.json()
         if data.get("status") == "empty":
             return None
-        return BatchStatus(
-            batch_id=data["batch_id"],
-            tx_count=data["tx_count"],
-            merkle_root=data["merkle_root"],
-            is_proven=data["is_proven"],
-            stark_commitment=data.get("stark_commitment"),
-        )
+        try:
+            return BatchStatus(
+                batch_id=data["batch_id"],
+                tx_count=data["tx_count"],
+                merkle_root=data["merkle_root"],
+                is_proven=data["is_proven"],
+                stark_commitment=data.get("stark_commitment"),
+            )
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Aggregator /batch/flush response missing field: {exc}. Got: {list(data)}"
+            ) from exc
 
     def stats(self) -> NodeStats:
         httpx = self._httpx()
@@ -157,5 +167,6 @@ class HttpClient:
         try:
             resp = httpx.get(f"{self._base_url}/health", timeout=self._timeout)
             return resp.is_success
-        except Exception:
+        except (httpx.TransportError, httpx.TimeoutException):
+            # Expected: server is down, unreachable, or timed out.
             return False

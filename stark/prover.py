@@ -106,6 +106,12 @@ def _call_prover(leaves: list[int]) -> ProofResult:
             f"({len(commitment)} chars, expected 8)"
         )
 
+    if len(proof_bytes) < 32:
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove returned proof shorter than 32 bytes "
+            f"({len(proof_bytes)} bytes) — cannot compute on-chain commitment"
+        )
+
     # Compute on-chain commitment for QLSAVerifierFull:
     # first 8 bytes of Blake2s(proof[0:32]) encoded as 16-char hex.
     onchain_commitment = hashlib.blake2s(proof_bytes[:32]).digest()[:8].hex()
