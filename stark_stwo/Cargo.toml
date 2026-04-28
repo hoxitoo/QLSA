@@ -1,0 +1,29 @@
+[package]
+name    = "qlsa-stark-stwo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "qlsa-stark-stwo"
+path = "src/main.rs"
+
+[lib]
+name = "qlsa_stark_stwo"
+path = "src/lib.rs"
+
+[features]
+default = ["prover"]
+prover  = ["stwo/prover", "stwo-constraint-framework/prover"]
+
+[dependencies]
+stwo                      = { version = "2.2.0", features = ["prover"] }
+stwo-constraint-framework = { version = "2.2.0", features = ["prover"] }
+serde                     = { version = "1", features = ["derive"] }
+serde_json                = "1"
+hex                       = "0.4"
+bincode                   = { version = "2", features = ["serde"] }
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
