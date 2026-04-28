@@ -1,9 +1,9 @@
 # QLSA — Project Context
 
 ## Статус
-- Фаза: **Phase 3++ в процессе** — Blake2s on-chain library + QLSAVerifierV3
-- Готово: Phase 1 → Phase 5 + Phase 3+ (M31 library, QLSAVerifierV2, FRI blowup 4x) + Phase 3++ (Blake2s-256, QLSAVerifierV3, тесты Blake2s + V3)
-- Следующий шаг: QLSAVerifierFull (полный FRI decommitment + OODS) → MVP-3 (ML-DSA в AIR)
+- Фаза: **MVP-3 (ML-DSA в AIR) — следующий этап**
+- Готово: Phase 1 → Phase 5 + Phase 3+ + Phase 3++ + QLSAVerifierFull (Blake2s binding, тесты, CI зелёный)
+- Следующий шаг: MVP-3 — ML-DSA верификация внутри AIR + Phase 6 (Testnet: Polygon zkEVM / Starknet)
 
 ### Что готово
 - `core/keys.py` — ML-DSA-44/65/87 keygen, derive_address (SHA3-256), wipe_key
@@ -20,6 +20,7 @@
 - `contracts/src/verifier/Blake2s.sol` — **Blake2s-256 library** (RFC 7693, pure Solidity, 10-round compression)
 - `contracts/src/QLSAVerifierV2.sol` — **Structural verifier** (M31 validation, replaces stub)
 - `contracts/src/QLSAVerifierV3.sol` — **Phase 3++ verifier** (MIN_PROOF_LENGTH=700, trivial-proof guard, keccak256 binding groundwork, Blake2s imported)
+- `contracts/src/QLSAVerifierFull.sol` — **QLSAVerifierFull** (Blake2s FRI root binding: commitment = Blake2s(proof[0:32])[:8])
 - `sdk/python/qlsa/` — **Python SDK**: Wallet, TransactionBuilder, LocalClient, HttpClient (Phase 5)
 - `sdk/js/src/` — **JS SDK**: AggregatorClient (TypeScript, Phase 5)
 - `aggregator/api.py` — HTTP API (FastAPI), запуск: `uvicorn aggregator.api:app`
@@ -54,7 +55,8 @@
 - Solidity + Hardhat
 - `QLSAVerifier.sol` — **заглушка** (не деплоить без реальной верификации)
 - `QLSAVerifierV3.sol` — **Phase 3++ структурный верификатор** (MIN_PROOF_LENGTH=700, Blake2s imported)
-- Stwo on-chain verifier (без trusted setup) — следующий этап
+- `QLSAVerifierFull.sol` — **Blake2s FRI root binding** (commitment = Blake2s(proof[0:32])[:8], deployed)
+- Полный on-chain Stwo STARK verifier (FRI queries + OODS + ML-DSA in AIR) — следующий этап (MVP-3+)
 - Деплой: Polygon zkEVM или Starknet L2
 
 ---
@@ -181,7 +183,7 @@ Rust: `nightly-2025-07-01` (зафиксирован в `stark_stwo/rust-toolcha
 | Риск | Уровень | Статус |
 |------|---------|--------|
 | STARK не доказывает ML-DSA подписи | Критично | Open (MVP-3) |
-| QLSAVerifierV3 — структурный (не полный FRI) | Критично | Partial (Phase 3++, deployed) |
+| QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (QLSAVerifierFull, deployed) |
 | Merkle-root не публичный вход STARK | Критично | Open (MVP-3) |
 | M31-коммитмент 32 бита — не binding | Высокий | Open |
 | bytes(private_key) — иммутабельная копия в Python | Высокий | Open (нужна Rust-обёртка) |

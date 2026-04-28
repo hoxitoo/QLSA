@@ -52,12 +52,12 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `core/` — ML-DSA keys, signing, Merkle tree, batch | Done |
 | `stark_stwo/` — Stwo Circle STARK prover (Rust) | Done |
 | `stark/` — Python prover/verifier wrappers | Done |
-| `contracts/` — BatchRegistry, QLSAVerifier, QLSAVerifierV2, QLSAVerifierV3 | Done (structural verifier) |
+| `contracts/` — BatchRegistry, QLSAVerifier, QLSAVerifierV2, QLSAVerifierV3, QLSAVerifierFull | Done (Blake2s binding verifier) |
 | `aggregator/` — Mempool, Batcher, AggregatorNode | Done |
 | `tests/` — 124 tests, all passing | Done |
 | `sdk/` — Python SDK + JS SDK + HTTP API | Done |
 
-> **Note:** `QLSAVerifier.sol` is a stub that always returns `true`. `QLSAVerifierV3` is a structural verifier (MIN_PROOF_LENGTH=700, M31 range, Blake2s imported) — not full FRI. Do not deploy to mainnet until the full on-chain STARK verifier is implemented.
+> **Note:** `QLSAVerifier.sol` is a stub that always returns `true`. `QLSAVerifierFull` binds proof to commitment via Blake2s (commitment = Blake2s(proof[0:32])[:8]) but is not a full FRI verifier. Do not deploy to mainnet until the full on-chain STARK verifier (MVP-3+) is implemented.
 
 ---
 
@@ -201,7 +201,8 @@ PQ adoption is inevitable, but gradual.
 | Phase 4 | Aggregator: Mempool, Batcher, Node | Done |
 | Phase 5 | SDK: Python + JavaScript + HTTP API | Done |
 | Phase 3+ | M31 field library + QLSAVerifierV2 + FRI blowup 4x | Done |
-| Phase 3++ | Blake2s-256 library + QLSAVerifierV3 (MIN_PROOF_LENGTH=700) | In progress |
+| Phase 3++ | Blake2s-256 library + QLSAVerifierV3 (MIN_PROOF_LENGTH=700) | Done |
+| QLSAVerifierFull | Blake2s FRI root binding: proof[:32] → commitment | Done |
 | MVP-3 | ML-DSA verification inside AIR (main innovation) | Research |
 | Phase 6 | Testnet deployment (Polygon zkEVM / Starknet) | Future |
 

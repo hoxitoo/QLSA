@@ -8,9 +8,10 @@ pragma solidity ^0.8.24;
 interface IQLSAVerifier {
     /// @notice Verify a STARK proof against a batch commitment.
     /// @param proof      Raw STARK proof bytes (Stwo serialization).
-    /// @param commitment 8-byte Stwo Circle STARK commitment:
-    ///                   bytes 0–3: M31 field element (little-endian uint32, value < 2^31−1)
-    ///                   bytes 4–7: zero padding (ABI convention)
+    /// @param commitment 8-byte batch commitment (encoding is verifier-version-specific):
+    ///                   V2/V3: bytes 0–3 = M31 field element (LE uint32, value < 2^31−1),
+    ///                          bytes 4–7 = zero padding
+    ///                   Full:  bytes 0–7 = Blake2s(proof[0:32])[0:8]
     /// @return valid     True if the proof is accepted.
     function verify(
         bytes calldata proof,

@@ -11,9 +11,10 @@ Build it with:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.batch import Batch
@@ -24,9 +25,12 @@ BINARY = Path(__file__).parent.parent / "stark_stwo" / "target" / "release" / "q
 
 @dataclass
 class ProofResult:
-    proof: bytes       # raw proof bytes (serialised Stwo StarkProof)
-    commitment: str    # 8-char little-endian hex (4 bytes, M31 field element)
-    log_size: int      # log₂(trace length) — required by the verifier
+    proof: bytes             # raw proof bytes (serialised Stwo StarkProof)
+    commitment: str          # 8-char little-endian hex (4 bytes, M31) — for Rust verifier
+    log_size: int            # log₂(trace length) — required by the Rust verifier
+    onchain_commitment: str = field(default="")
+    # onchain_commitment: 16-char hex (8 bytes) = Blake2s(proof[0:32])[0:8]
+    # Use this as the commitment when submitting to QLSAVerifierFull on-chain.
 
 
 def binary_available() -> bool:
@@ -102,4 +106,13 @@ def _call_prover(leaves: list[int]) -> ProofResult:
             f"({len(commitment)} chars, expected 8)"
         )
 
-    return ProofResult(proof=proof_bytes, commitment=commitment, log_size=log_size)
+    # Compute on-chain commitment for QLSAVerifierFull:
+    # first 8 bytes of Blake2s(proof[0:32]) encoded as 16-char hex.
+    onchain_commitment = hashlib.blake2s(proof_bytes[:32]).digest()[:8].hex()
+
+    return ProofResult(
+        proof=proof_bytes,
+        commitment=commitment,
+        log_size=log_size,
+        onchain_commitment=onchain_commitment,
+    )
