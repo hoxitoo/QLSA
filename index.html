@@ -12,7 +12,7 @@
   <meta property="og:image" content="og-card.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-  <script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=b_T_PjA0c10GeExvPsGcStGl5tWSuQGQagSMhYPJRwslx_bQK0OCzLHAQWZz6FFDQBsTtTTvVL1PFCAjByqccu8Mje_qUC1hMqAP1epnyKBJpaFYfWkrNX2T3tTi8GfHDrkDGQCbjtC6L7v926lV5eHjwLhr7p5QJQtqst1xZtTC2OZDMvvjYQrARS76EE4gZURJ4PzcBi5vRiENUzQPoTP5_SKbWtgiUnMO34NhL7EioiEtdlyNI3sVZQED-dupv3ILx5g7nKJbEH_xgx5g5Q" charset="UTF-8"></script><link rel="stylesheet" crossorigin="anonymous" href="https://gc.kis.v2.scr.kaspersky-labs.com/E3E8934C-235A-4B0E-825A-35A08381A191/abn/main.css?attr=aHR0cHM6Ly9jaGF0Z3B0LmNvbS9iYWNrZW5kLWFwaS9lc3R1YXJ5L2NvbnRlbnQ_aWQ9ZmlsZV8wMDAwMDAwMGQyZDQ3MjBjYmFmNWU1ZDZhNzhiNDNiNyZ0cz00OTM1MjYmcD1mcyZjaWQ9MSZzaWc9MWIzMTIwZDQ0NDEyMGFlM2Y2MTg2NjQ5YTA5NzhhOWM3N2I1Nzk2Yzk3MzM0MzEyM2IxN2FhNzEyNDlhOGE2ZSZ2PTA"/><style>
+  <style>
     :root{
       --bg:#07111f;
       --text:#eef4ff;
@@ -186,6 +186,14 @@
     .footer-row{display:flex;justify-content:space-between;flex-wrap:wrap;gap:18px;align-items:flex-start}
     .small{font-size:.92rem;color:var(--muted)}
     .footer-links{display:flex;gap:14px;flex-wrap:wrap}
+    .phase-tag.complete{background:rgba(127,240,203,.12);border-color:rgba(127,240,203,.28);color:#7ff0cb}
+    .phase-tag.active{background:rgba(118,169,255,.14);border-color:rgba(118,169,255,.28);color:#a8c8ff}
+    .progress-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px}
+    .progress-item{padding:16px 20px;border-radius:18px;border:1px solid rgba(127,240,203,.2);background:rgba(127,240,203,.04);display:flex;align-items:flex-start;gap:12px}
+    .progress-check{flex-shrink:0;width:22px;height:22px;border-radius:50%;background:rgba(127,240,203,.18);border:1px solid rgba(127,240,203,.3);display:grid;place-items:center;font-size:.82rem;color:#7ff0cb;margin-top:1px}
+    .progress-item strong{display:block;margin-bottom:4px;font-size:.98rem}
+    .progress-item span{color:var(--muted);font-size:.88rem}
+    @media (max-width:1000px){.progress-grid{grid-template-columns:1fr}}
     @media (max-width: 1000px){
       .hero-grid,.compare,.grid-4,.grid-3,.grid-2,.cta-grid,.stat-band,.signal{grid-template-columns:1fr}
     }
@@ -207,6 +215,7 @@
         <div>QLSA<small>Quantum-Layered Signature Aggregation</small></div>
       </a>
       <div class="nav-links">
+        <a href="#progress">Progress</a>
         <a href="#problem">Problem</a>
         <a href="#solution">Solution</a>
         <a href="#architecture">Architecture</a>
@@ -222,7 +231,7 @@
     <section class="hero">
       <div class="container hero-grid">
         <div>
-          <div class="eyebrow">Research-stage protocol for scalable post-quantum blockchain infrastructure</div>
+          <div class="eyebrow">Post-quantum rollup infrastructure — phases 1–5 implemented, testnet next</div>
           <h1>Build the post-quantum migration layer before it becomes urgent</h1>
           <p class="sub">
             QLSA aggregates thousands of post-quantum signatures into a single constant-size proof,
@@ -239,8 +248,8 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>Approach</small><strong>Benchmark-first MVP with staged proof integration</strong></div>
-            <div class="signal-card"><small>Status</small><strong>Phase 1 — Core implementation</strong></div>
+            <div class="signal-card"><small>Tests</small><strong>131 passing — zero known failures</strong></div>
+            <div class="signal-card"><small>Status</small><strong>Phase 3 active — contracts &amp; verifier</strong></div>
           </div>
         </div>
 
@@ -266,6 +275,25 @@
             <span class="pill">Polygon zkEVM / Starknet</span>
           </div>
         </aside>
+      </div>
+    </section>
+
+    <section id="progress" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>What's been built</h2>
+            <p>Security audit completed April 2026. All critical and high findings resolved. 131 tests green.</p>
+          </div>
+        </div>
+        <div class="progress-grid">
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Cryptographic core</strong><span>ML-DSA-65/44/87, SHA3-512 Merkle, address derivation, batch aggregation</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>STARK prover (Stwo)</strong><span>Circle STARK, hash-chain AIR circuit, FRI blowup ×4, prove + verify pipeline</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts</strong><span>QLSAVerifierFull (Blake2s FRI binding), BatchRegistry, upgradeable proxy</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Aggregator node</strong><span>Mempool, auto-batcher, FastAPI REST endpoint, STARK pipeline integration</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>SDK (Python + JS)</strong><span>Wallet, transaction builder, aggregator client — both language SDKs complete</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Security audit</strong><span>TOCTOU fix, algorithm propagation bug, bounds checks, JS input validation hardened</span></div></div>
+        </div>
       </div>
     </section>
 
@@ -405,12 +433,12 @@
           </p>
           <table class="metric-table" style="margin-top:14px;">
             <thead>
-              <tr><th>Stage</th><th>What STARK proves</th><th>ML-DSA in STARK</th></tr>
+              <tr><th>Stage</th><th>What STARK proves</th><th>ML-DSA in STARK</th><th>Status</th></tr>
             </thead>
             <tbody>
-              <tr><td>MVP-1</td><td>Core crypto only</td><td class="bad">No</td></tr>
-              <tr><td>MVP-2</td><td>Merkle correctness</td><td class="bad">No</td></tr>
-              <tr><td>MVP-3</td><td>ML-DSA verification</td><td class="warn">Research target</td></tr>
+              <tr><td>MVP-1</td><td>Core crypto &amp; Merkle</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
+              <tr><td>MVP-2</td><td>Hash-chain circuit (Stwo)</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
+              <tr><td>MVP-3</td><td>ML-DSA verification in AIR</td><td class="warn">Research target</td><td class="warn">Active</td></tr>
             </tbody>
           </table>
         </div>
@@ -456,19 +484,21 @@
           <div class="stack-block">
             <h3>STARK layer</h3>
             <ul>
-              <li>Winterfell for prototyping AIR</li>
-              <li>Stwo / Circle STARK for production path</li>
-              <li>FRI-based proofs</li>
-              <li>No trusted setup</li>
+              <li>Stwo 2.2.0 — Circle STARK (deployed)</li>
+              <li>Hash-chain AIR circuit over M31 field</li>
+              <li>FRI blowup ×4 — ~60-bit security margin</li>
+              <li>Blake2s FRI root binding for on-chain commitment</li>
+              <li>nightly-2025-07-01 Rust toolchain</li>
             </ul>
           </div>
           <div class="stack-block">
             <h3>Contracts & infra</h3>
             <ul>
-              <li>Solidity + Hardhat</li>
+              <li>Solidity + Hardhat 2.28</li>
+              <li>QLSAVerifierFull — Blake2s commitment binding</li>
+              <li>BatchRegistry — upgradeable proxy</li>
+              <li>FastAPI aggregator REST endpoint</li>
               <li>Target L2: Polygon zkEVM or Starknet</li>
-              <li>Aggregator node architecture planned</li>
-              <li>Benchmarks and docs published in-repo</li>
             </ul>
           </div>
         </div>
@@ -481,7 +511,8 @@
                 <tr><td>Batch size</td><td>3,000 tx</td></tr>
                 <tr><td>Proof size</td><td>90–200 KB</td></tr>
                 <tr><td>On-chain verification</td><td>O(1)</td></tr>
-                <tr><td>Current proving focus</td><td>Merkle-first MVP</td></tr>
+                <tr><td>Test suite</td><td class="good">131 passing</td></tr>
+                <tr><td>Security audit</td><td class="good">All findings resolved</td></tr>
               </tbody>
             </table>
           </div>
@@ -517,12 +548,12 @@
         </div>
 
         <div class="phase-list">
-          <div class="phase"><div class="phase-top"><h3>Phase 1 — Core</h3><span class="phase-tag">In progress</span></div><p>ML-DSA keys, signing, verification, and Merkle tree implementation.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 2 — STARK Prototype</h3><span class="phase-tag">Planned</span></div><p>Merkle correctness inside STARK, plus benchmarks and feasibility measurements.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 3 — Smart Contracts</h3><span class="phase-tag">Planned</span></div><p>On-chain verifier and batch registry for fixed-cost verification flow.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag">Planned</span></div><p>Mempool integration, batching logic, and off-chain proof pipeline.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 5 — SDK</h3><span class="phase-tag">Planned</span></div><p>Developer-facing Python and JavaScript tooling for wallet and transaction integration.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag">Future</span></div><p>Public deployment, end-to-end demo, and benchmark-backed technical validation.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 1 — Core</h3><span class="phase-tag complete">✓ Complete</span></div><p>ML-DSA-65/44/87 keys, signing, transaction model, SHA3-512 Merkle tree, batch aggregation. 131 tests green. Security audit passed.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 2 — STARK Prototype</h3><span class="phase-tag complete">✓ Complete</span></div><p>Stwo Circle STARK — hash-chain AIR circuit, FRI blowup ×4, Python prover/verifier wrappers. Blake2s FRI root binding for on-chain commitment anchoring.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 3 — Smart Contracts</h3><span class="phase-tag active">In progress</span></div><p>QLSAVerifierFull and BatchRegistry deployed (Hardhat). Upgradeable proxy. Next milestone: ML-DSA verification inside STARK AIR.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag complete">✓ Complete</span></div><p>In-memory mempool, auto-batcher, FastAPI REST endpoint. Full STARK prove→submit pipeline wired end-to-end.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 5 — SDK</h3><span class="phase-tag complete">✓ Complete</span></div><p>Python SDK (wallet + async client) and TypeScript/JavaScript SDK with full input validation and typed API.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag">Planned</span></div><p>Public deployment on Polygon zkEVM or Starknet, end-to-end demo, and benchmark-backed technical validation.</p></div>
         </div>
       </div>
     </section>
@@ -541,8 +572,9 @@
         <div class="faq">
           <div class="faq-item"><h3>Is QLSA a new signature algorithm?</h3><p>No. QLSA is an aggregation and verification architecture built around post-quantum signatures such as ML-DSA.</p></div>
           <div class="faq-item"><h3>Why not just replace ECDSA directly?</h3><p>Because the size increase of post-quantum signatures can cause major throughput and cost problems if deployed naively.</p></div>
-          <div class="faq-item"><h3>Does the MVP already prove ML-DSA inside STARK?</h3><p>No. The MVP intentionally starts with a lower-risk path and treats full ML-DSA-inside-STARK as a later research milestone.</p></div>
-          <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is currently research-stage software and should not be used in production systems.</p></div>
+          <div class="faq-item"><h3>Does QLSA already prove ML-DSA inside STARK?</h3><p>Not yet. The current STARK circuit (Stwo hash-chain AIR) proves hash-chain correctness. Full ML-DSA-inside-AIR is the active research milestone for MVP-3.</p></div>
+          <div class="faq-item"><h3>What smart contracts exist?</h3><p><code>QLSAVerifierFull</code> verifies a STARK proof by cryptographically binding the FRI root to a Blake2s commitment. <code>BatchRegistry</code> stores finalized Merkle roots after proof verification.</p></div>
+          <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is research-stage software. Phases 1–5 are implemented and audited, but the system should not be used in production systems until testnet validation is complete.</p></div>
         </div>
       </div>
     </section>
