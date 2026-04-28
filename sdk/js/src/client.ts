@@ -5,6 +5,23 @@ import type {
   TransactionPayload,
 } from "./types.js";
 
+const HEX_RE = /^[0-9a-fA-F]+$/;
+
+function _validateTransaction(tx: TransactionPayload): void {
+  if (!tx.sender || tx.sender.length !== 64 || !HEX_RE.test(tx.sender))
+    throw new TypeError("sender must be a 64-character hex string");
+  if (!tx.recipient || tx.recipient.length !== 64 || !HEX_RE.test(tx.recipient))
+    throw new TypeError("recipient must be a 64-character hex string");
+  if (!Number.isInteger(tx.amount) || tx.amount < 0)
+    throw new RangeError("amount must be a non-negative integer");
+  if (!Number.isInteger(tx.nonce) || tx.nonce < 0)
+    throw new RangeError("nonce must be a non-negative integer");
+  if (!tx.publicKey || !HEX_RE.test(tx.publicKey))
+    throw new TypeError("publicKey must be a non-empty hex string");
+  if (!tx.signature || !HEX_RE.test(tx.signature))
+    throw new TypeError("signature must be a non-empty hex string");
+}
+
 export class AggregatorClient {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -20,6 +37,7 @@ export class AggregatorClient {
 
   /** Submit a signed transaction to the aggregator mempool. */
   async submit(tx: TransactionPayload): Promise<SubmitResult> {
+    _validateTransaction(tx);
     const body = {
       sender: tx.sender,
       recipient: tx.recipient,
@@ -129,6 +147,8 @@ export class AggregatorClient {
   }
 
   private async _request<T>(path: string, init: RequestInit): Promise<T> {
+    if (this.timeoutMs <= 0) throw new RangeError("timeoutMs must be positive");
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {

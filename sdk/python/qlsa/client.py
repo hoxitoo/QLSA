@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from core.transaction import Transaction
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
 from .models import BatchStatus, NodeStats, SubmitResult
 
+if TYPE_CHECKING:
+    from aggregator.batcher import BatchResult
 
-def _batch_status(result) -> BatchStatus:
+
+def _batch_status(result: BatchResult) -> BatchStatus:
     return BatchStatus(
         batch_id=result.batch.batch_id,
         tx_count=len(result.batch.transactions),

@@ -62,3 +62,25 @@ def test_sign_unsupported_algorithm():
     with pytest.raises(ValueError, match="Unsupported algorithm"):
         sign(b"msg", priv, algorithm="ECDSA")
     wipe_key(priv)
+
+
+def test_verify_unsupported_algorithm():
+    pub, priv = _make_keypair()
+    sig = sign(b"msg", priv)
+    with pytest.raises(ValueError, match="Unsupported algorithm"):
+        verify(b"msg", sig, pub, algorithm="ECDSA")
+    wipe_key(priv)
+
+
+def test_cross_algorithm_verify_fails():
+    """Signature produced with ML-DSA-44 must not verify under ML-DSA-65."""
+    from core.keys import generate_keypair as gkp
+    pub44, priv44 = gkp(algorithm="ML-DSA-44")
+    pub65, priv65 = gkp(algorithm="ML-DSA-65")
+    msg = b"cross-algorithm test"
+    sig44 = sign(msg, priv44, algorithm="ML-DSA-44")
+    # Verify with the wrong algorithm — should return False, not raise.
+    result = verify(msg, sig44, pub44, algorithm="ML-DSA-65")
+    assert result is False
+    wipe_key(priv44)
+    wipe_key(priv65)

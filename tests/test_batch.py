@@ -105,17 +105,15 @@ def test_empty_batch_raises():
         create_batch([])
 
 
-def test_batch_too_large_raises():
-    # Build just enough to trigger the limit without actually generating MAX_BATCH_SIZE keys
+def test_batch_too_large_raises(monkeypatch):
+    # Build just enough to trigger the limit without generating MAX_BATCH_SIZE keys.
+    # Use monkeypatch for proper teardown even if the assertion fails.
     txs, privs = _make_batch_txs(2)
     _wipe_all(privs)
-    # Manually override the list length check by patching
     import core.batch as batch_mod
-    original = batch_mod.MAX_BATCH_SIZE
-    batch_mod.MAX_BATCH_SIZE = 1
+    monkeypatch.setattr(batch_mod, "MAX_BATCH_SIZE", 1)
     with pytest.raises(BatchSizeError, match="maximum"):
         create_batch(txs)
-    batch_mod.MAX_BATCH_SIZE = original
 
 
 def test_merkle_root_onchain_is_32_bytes():

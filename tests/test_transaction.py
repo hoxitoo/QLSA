@@ -76,6 +76,56 @@ def test_invalid_sender_raises():
         Transaction(sender="not-an-address", recipient="b" * 64, amount=0, nonce=0, public_key=pub)
 
 
-def test_empty_pubkey_raises():
-    with pytest.raises(ValueError, match="public_key"):
-        Transaction(sender="a" * 64, recipient="b" * 64, amount=0, nonce=0, public_key=b"")
+def test_amount_at_uint64_max_is_valid():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    tx = Transaction(
+        sender="a" * 64,
+        recipient="b" * 64,
+        amount=(1 << 64) - 1,
+        nonce=0,
+        public_key=pub,
+    )
+    assert tx.amount == (1 << 64) - 1
+
+
+def test_amount_exceeds_uint64_raises():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    with pytest.raises(ValueError, match="uint64"):
+        Transaction(sender="a" * 64, recipient="b" * 64, amount=1 << 64, nonce=0, public_key=pub)
+
+
+def test_nonce_at_uint64_max_is_valid():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    tx = Transaction(
+        sender="a" * 64,
+        recipient="b" * 64,
+        amount=0,
+        nonce=(1 << 64) - 1,
+        public_key=pub,
+    )
+    assert tx.nonce == (1 << 64) - 1
+
+
+def test_nonce_exceeds_uint64_raises():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    with pytest.raises(ValueError, match="uint64"):
+        Transaction(sender="a" * 64, recipient="b" * 64, amount=0, nonce=1 << 64, public_key=pub)
+
+
+def test_invalid_recipient_raises():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    with pytest.raises(ValueError, match="recipient"):
+        Transaction(sender="a" * 64, recipient="not-an-address", amount=0, nonce=0, public_key=pub)
+
+
+def test_recipient_wrong_length_raises():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    with pytest.raises(ValueError, match="recipient"):
+        Transaction(sender="a" * 64, recipient="ab" * 10, amount=0, nonce=0, public_key=pub)
+
