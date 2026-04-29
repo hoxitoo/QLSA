@@ -61,12 +61,11 @@ def prove_batch(batch: Batch) -> ProofResult:
 
 
 def _txs_to_leaves(batch: Batch) -> list[int]:
-    leaves = []
-    for tx in batch.transactions:
-        h = tx.tx_hash()           # 32-byte SHA3-256
-        leaf = int.from_bytes(h[:8], "little")
-        leaves.append(leaf)
-    return leaves
+    # Feed the 64-byte SHA3-512 Merkle root as 8 × u64 leaves (little-endian).
+    # This binds the STARK proof directly to the Merkle root stored on-chain:
+    # the proof's commitment = hash_chain(root_chunk_0, ..., root_chunk_7).
+    root: bytes = batch.merkle_root  # 64 bytes
+    return [int.from_bytes(root[i : i + 8], "little") for i in range(0, 64, 8)]
 
 
 def _call_prover(leaves: list[int]) -> ProofResult:

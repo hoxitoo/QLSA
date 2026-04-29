@@ -57,24 +57,31 @@ def test_binary_path_is_configured():
     assert "stark_stwo" in str(BINARY)
 
 
-def test_txs_to_leaves_length():
-    batch = _make_signed_batch(4)
-    leaves = _txs_to_leaves(batch)
-    assert len(leaves) == 4
+def test_txs_to_leaves_always_8():
+    # Merkle root is always 64 bytes → 8 × u64 chunks regardless of batch size.
+    for n in (1, 4, 16):
+        leaves = _txs_to_leaves(_make_signed_batch(n))
+        assert len(leaves) == 8
 
 
 def test_txs_to_leaves_are_u64():
-    batch = _make_signed_batch(3)
-    leaves = _txs_to_leaves(batch)
+    leaves = _txs_to_leaves(_make_signed_batch(3))
     for leaf in leaves:
         assert 0 <= leaf < 2**64
 
 
 def test_txs_to_leaves_are_deterministic():
     batch = _make_signed_batch(2)
-    l1 = _txs_to_leaves(batch)
-    l2 = _txs_to_leaves(batch)
-    assert l1 == l2
+    assert _txs_to_leaves(batch) == _txs_to_leaves(batch)
+
+
+def test_txs_to_leaves_encodes_merkle_root():
+    # Reconstruct leaves manually and verify they match the Merkle root bytes.
+    batch = _make_signed_batch(4)
+    leaves = _txs_to_leaves(batch)
+    root = batch.merkle_root  # 64 bytes
+    expected = [int.from_bytes(root[i : i + 8], "little") for i in range(0, 64, 8)]
+    assert leaves == expected
 
 
 # ──────────────────────────────────────────────────────────────────────────────

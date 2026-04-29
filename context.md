@@ -24,7 +24,7 @@
 - `sdk/python/qlsa/` — **Python SDK**: Wallet, TransactionBuilder, LocalClient, HttpClient (Phase 5)
 - `sdk/js/src/` — **JS SDK**: AggregatorClient (TypeScript, Phase 5)
 - `aggregator/api.py` — HTTP API (FastAPI), запуск: `uvicorn aggregator.api:app`
-- `tests/` — **124 теста** (core + stark + aggregator + sdk), все зелёные
+- `tests/` — **132 теста** (core + stark + aggregator + sdk), все зелёные
 - CI: python (3.10/3.12) + rust (nightly-2025-07-01) + contracts (Hardhat) джобы
 
 ---
