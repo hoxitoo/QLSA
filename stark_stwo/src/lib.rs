@@ -1,4 +1,5 @@
 pub mod air;
+pub mod mldsa;
 pub mod trace;
 
 use stwo::core::air::Component;
