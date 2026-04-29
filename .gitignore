@@ -1,0 +1,31 @@
+# Source directories — present in working tree from dev branch, not part of the site
+aggregator/
+contracts/
+core/
+sdk/
+stark/
+stark_stwo/
+tests/
+benchmarks/
+docs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+.venv/
+venv/
+
+# Node / Hardhat
+node_modules/
+artifacts/
+cache/
+
+# Rust
+target/
+
+# Env / secrets
+.env
+*.local
