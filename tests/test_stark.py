@@ -147,3 +147,50 @@ def test_different_batches_have_different_commitments():
     r1 = prove_batch(b1)
     r2 = prove_batch(b2)
     assert r1.commitment != r2.commitment
+
+
+# ─── ML-DSA batch via Rust verifier ──────────────────────────────────────────
+
+def _mldsa_entries(n: int) -> list[tuple[bytes, bytes, bytes]]:
+    """Generate n real ML-DSA-65 (pk, msg, sig) triples via liboqs."""
+    import oqs
+    entries = []
+    for i in range(n):
+        alg = oqs.Signature("ML-DSA-65")
+        pk = alg.generate_keypair()
+        msg = f"transaction payload {i}".encode()
+        sig = alg.sign(msg)
+        entries.append((pk, msg, sig))
+    return entries
+
+
+@needs_binary
+def test_prove_mldsa_batch_returns_result():
+    from stark.prover import prove_mldsa_batch, MldsaBatchResult
+    entries = _mldsa_entries(2)
+    result = prove_mldsa_batch(entries)
+    assert isinstance(result, MldsaBatchResult)
+    assert result.verified == 2
+    assert result.rejected == 0
+    assert len(result.proof) > 0
+
+
+@needs_binary
+def test_prove_mldsa_batch_rejects_invalid_sig():
+    from stark.prover import prove_mldsa_batch
+    entries = _mldsa_entries(2)
+    # Corrupt the second signature
+    bad_sig = bytearray(entries[1][2])
+    bad_sig[10] ^= 0xFF
+    entries[1] = (entries[1][0], entries[1][1], bytes(bad_sig))
+    result = prove_mldsa_batch(entries)
+    assert result.verified == 1
+    assert result.rejected == 1
+
+
+@needs_binary
+def test_prove_mldsa_batch_verify_proof():
+    from stark.prover import prove_mldsa_batch
+    entries = _mldsa_entries(2)
+    result = prove_mldsa_batch(entries)
+    assert verify_batch_proof(result.proof, result.commitment, result.log_size) is True

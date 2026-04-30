@@ -121,3 +121,73 @@ def _call_prover(leaves: list[int]) -> ProofResult:
         log_size=log_size,
         onchain_commitment=onchain_commitment,
     )
+
+
+# ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
+
+@dataclass
+class MldsaBatchResult(ProofResult):
+    verified: int = 0  # number of valid signatures included in proof
+    rejected: int = 0  # number of invalid signatures skipped
+
+
+def prove_mldsa_batch(
+    entries: list[tuple[bytes, bytes, bytes]],
+) -> MldsaBatchResult:
+    """
+    Verify N ML-DSA-65 signatures in Rust and generate a STARK proof.
+
+    Each entry is (pk_bytes, msg_bytes, sig_bytes).
+    Invalid signatures are silently skipped; at least one must be valid.
+
+    Returns a MldsaBatchResult with the STARK proof and verification counts.
+    """
+    if not binary_available():
+        raise RuntimeError(
+            f"STARK binary not found at {BINARY}. "
+            "Build it with: cd stark_stwo && cargo +nightly-2025-07-01 build --release"
+        )
+
+    payload = json.dumps({
+        "entries": [
+            {
+                "pk":  base64.b64encode(pk).decode(),
+                "msg": base64.b64encode(msg).decode(),
+                "sig": base64.b64encode(sig).decode(),
+            }
+            for pk, msg, sig in entries
+        ]
+    })
+
+    try:
+        proc = subprocess.run(
+            [str(BINARY), "mldsa_batch"],
+            input=payload.encode(),
+            capture_output=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("qlsa-stark-stwo mldsa_batch timed out after 300 s")
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace")
+        raise RuntimeError(
+            f"qlsa-stark-stwo mldsa_batch failed (exit {proc.returncode}):\n{stderr}"
+        )
+
+    try:
+        out = json.loads(proc.stdout.decode(errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"qlsa-stark-stwo mldsa_batch returned invalid JSON: {exc}") from exc
+
+    proof_bytes = base64.b64decode(out["proof"])
+    onchain_commitment = hashlib.blake2s(proof_bytes[:32]).digest()[:8].hex()
+
+    return MldsaBatchResult(
+        proof=proof_bytes,
+        commitment=str(out["commitment"]),
+        log_size=int(out["log_size"]),
+        onchain_commitment=onchain_commitment,
+        verified=int(out["verified"]),
+        rejected=int(out["rejected"]),
+    )

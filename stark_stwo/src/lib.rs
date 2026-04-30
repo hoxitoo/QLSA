@@ -145,6 +145,46 @@ pub fn verify_hash_chain(
     Ok(result.is_ok())
 }
 
+// ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
+
+/// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
+///
+/// Each entry is `(pk, msg, sig)` as raw byte slices.
+/// Returns `(proof_bytes, commitment_hex, log_size, verified_count, rejected_count)`.
+///
+/// Only valid signatures contribute to the proof. At least one must be valid.
+pub fn prove_mldsa_batch(
+    entries: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+) -> Result<(Vec<u8>, String, u32, usize, usize), String> {
+    use sha3::{Sha3_256, Digest};
+    use mldsa::verify::ml_dsa_verify;
+
+    let mut leaves: Vec<u64> = Vec::new();
+    let mut rejected = 0usize;
+
+    for (pk, msg, sig) in entries {
+        if ml_dsa_verify(pk, msg, sig) {
+            // Leaf = first 8 bytes of SHA3-256(pk ∥ msg) as little-endian u64.
+            let mut h = Sha3_256::new();
+            h.update(pk);
+            h.update(msg);
+            let digest = h.finalize();
+            let leaf = u64::from_le_bytes(digest[..8].try_into().unwrap());
+            leaves.push(leaf);
+        } else {
+            rejected += 1;
+        }
+    }
+
+    let verified = leaves.len();
+    if leaves.is_empty() {
+        return Err("no valid ML-DSA-65 signatures in batch".into());
+    }
+
+    let (proof_bytes, commitment, log_size) = prove_hash_chain(&leaves)?;
+    Ok((proof_bytes, commitment, log_size, verified, rejected))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
