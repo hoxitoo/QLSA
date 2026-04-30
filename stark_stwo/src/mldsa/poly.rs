@@ -6,7 +6,7 @@
 ///
 /// Multiplication via NTT: poly_mul(a, b) = INTT(NTT(a) ⊙ NTT(b)).
 
-use super::{Q, N, field};
+use super::{N, field};
 use super::ntt::{ntt, ntt_inv, pointwise_mul};
 
 // ─── Poly ────────────────────────────────────────────────────────────────────
@@ -145,6 +145,7 @@ pub fn poly_mul(a: &Poly, b: &Poly) -> Poly {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::Q;
 
     fn rng(seed: u64) -> impl FnMut() -> i64 {
         let mut state = seed;

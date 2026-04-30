@@ -1,17 +1,22 @@
-/// ML-DSA (FIPS 204) mathematical primitives.
-///
-/// This module implements the arithmetic foundation required for ML-DSA
-/// signature verification inside a STARK circuit (MVP-3 target).
+/// ML-DSA (FIPS 204) mathematical primitives and verification.
 ///
 /// Components:
-///   field  — Z_q arithmetic (q = 8 380 417)
-///   ntt    — NTT / INTT per FIPS 204 Algorithms 41 & 42
-///   poly   — Poly and NTTPoly types; polynomial multiplication via NTT
-///
-/// All values are in the range [0, Q) unless otherwise noted.
+///   params   — ML-DSA-65 parameter constants (k, l, η, γ₁, γ₂, …)
+///   field    — Z_q arithmetic (q = 8 380 417)
+///   ntt      — NTT / INTT per FIPS 204 Algorithms 41 & 42
+///   poly     — Poly and NTTPoly types; polynomial multiplication via NTT
+///   polyvec  — PolyVec / NTTPolyVec / NTTMatrix; Decompose / UseHint helpers
+///   encoding — bit-packing: pkDecode, sigDecode, w1Encode (Algorithms 16–22)
+///   xof      — SHAKE-128/256: ExpandA, SampleInBall, hash helpers
+///   verify   — ML-DSA.Verify (FIPS 204 Algorithm 3)
+pub mod params;
 pub mod field;
 pub mod ntt;
 pub mod poly;
+pub mod polyvec;
+pub mod encoding;
+pub mod xof;
+pub mod verify;
 
 /// ML-DSA modulus: q = 2^23 − 2^13 + 1 (prime)
 pub const Q: i64 = 8_380_417;
