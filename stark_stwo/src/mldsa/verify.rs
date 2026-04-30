@@ -80,7 +80,11 @@ pub fn ml_dsa_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 
     // ── Step 6: Recompute μ and c̃' ───────────────────────────────────────────
     let tr = hash_pk(pk);
-    let mu = hash_mu(&tr, msg);
+    // FIPS 204 §3.3 external API: M' = 0x00 ∥ IntToBytes(|ctx|,1) ∥ ctx ∥ M
+    // With empty context: M' = [0x00, 0x00] ∥ msg.
+    let mut m_prime = vec![0u8, 0u8];
+    m_prime.extend_from_slice(msg);
+    let mu = hash_mu(&tr, &m_prime);
     let w1_enc = w1_encode(&w1_prime);
     let c_tilde_prime = hash_commit(&mu, &w1_enc, LAMBDA_BYTES);
 
