@@ -146,7 +146,7 @@ def prove_batch_poseidon2(batch: Batch) -> Poseidon2ProofResult:
 
     Uses the same 8 × u64 leaf encoding as prove_batch, but the hash chain
     inside the STARK uses a cryptographically secure Poseidon2 permutation
-    (6 full rounds, α=5, MDS [[3,1],[1,3]] over M31) instead of the
+    (8 full rounds, α=5, MDS [[3,1],[1,3]] over M31) instead of the
     prototype H(a,b) = a³+b.
 
     The `onchain_commitment` binding formula is unchanged:
