@@ -97,6 +97,33 @@ def test_prove_returns_proof_result():
     assert len(result.proof) > 0
     assert len(result.commitment) == 8  # 4 bytes M31 as 8 hex chars
     assert result.log_size >= 3         # minimum trace log size
+    assert len(result.onchain_commitment) == 16  # 8 bytes as 16 hex chars
+
+
+@needs_binary
+def test_onchain_commitment_bound_to_merkle_root():
+    """onchain_commitment = Blake2s(proof[:32] || merkle_root[:32])[:8]
+    matches QLSAVerifierBound / BatchRegistryV2 commitment scheme."""
+    import hashlib
+    from stark.prover import prove_batch
+    batch = _make_signed_batch(4)
+    result = prove_batch(batch)
+
+    expected = hashlib.blake2s(
+        result.proof[:32] + batch.merkle_root[:32]
+    ).digest()[:8].hex()
+    assert result.onchain_commitment == expected
+
+
+@needs_binary
+def test_onchain_commitment_differs_for_different_batches():
+    """Each batch has a unique onchain_commitment — no replay possible."""
+    from stark.prover import prove_batch
+    b1 = _make_signed_batch(4)
+    b2 = _make_signed_batch(4)
+    r1 = prove_batch(b1)
+    r2 = prove_batch(b2)
+    assert r1.onchain_commitment != r2.onchain_commitment
 
 
 @needs_binary

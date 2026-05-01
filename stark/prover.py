@@ -29,8 +29,9 @@ class ProofResult:
     commitment: str          # 8-char little-endian hex (4 bytes, M31) — for Rust verifier
     log_size: int            # log₂(trace length) — required by the Rust verifier
     onchain_commitment: str = field(default="")
-    # onchain_commitment: 16-char hex (8 bytes) = Blake2s(proof[0:32])[0:8]
-    # Use this as the commitment when submitting to QLSAVerifierFull on-chain.
+    # onchain_commitment: 16-char hex (8 bytes) = Blake2s(proof[0:32] ∥ merkle_root[:32])[:8]
+    # Use this as the commitment when submitting to QLSAVerifierBound / BatchRegistryV2.
+    # The Merkle root binding ensures the proof cannot be replayed against a different batch.
 
 
 def binary_available() -> bool:
@@ -41,8 +42,12 @@ def prove_batch(batch: Batch) -> ProofResult:
     """
     Generate a STARK proof for the batch.
 
-    Converts each transaction's SHA3-256 tx_hash to a 64-bit leaf value
-    (first 8 bytes, little-endian), then runs the Rust prover.
+    Converts the SHA3-512 Merkle root to 8 × u64 leaves (little-endian),
+    then runs the Rust prover.
+
+    The `onchain_commitment` is bound to the Merkle root:
+      Blake2s(proof[0:32] ∥ merkle_root[:32])[:8]
+    This matches QLSAVerifierBound / BatchRegistryV2 on-chain.
 
     Raises RuntimeError if the binary is not built or the prover fails.
     """
@@ -53,7 +58,7 @@ def prove_batch(batch: Batch) -> ProofResult:
         )
 
     leaves = _txs_to_leaves(batch)
-    result = _call_prover(leaves)
+    result = _call_prover(leaves, merkle_root=batch.merkle_root)
 
     batch.stark_commitment = result.commitment
     batch.stark_log_size = result.log_size
@@ -68,7 +73,7 @@ def _txs_to_leaves(batch: Batch) -> list[int]:
     return [int.from_bytes(root[i : i + 8], "little") for i in range(0, 64, 8)]
 
 
-def _call_prover(leaves: list[int]) -> ProofResult:
+def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofResult:
     payload = json.dumps({"leaves": leaves})
 
     try:
@@ -111,9 +116,14 @@ def _call_prover(leaves: list[int]) -> ProofResult:
             f"({len(proof_bytes)} bytes) — cannot compute on-chain commitment"
         )
 
-    # Compute on-chain commitment for QLSAVerifierFull:
-    # first 8 bytes of Blake2s(proof[0:32]) encoded as 16-char hex.
-    onchain_commitment = hashlib.blake2s(proof_bytes[:32]).digest()[:8].hex()
+    # Compute on-chain commitment for QLSAVerifierBound / BatchRegistryV2:
+    # Blake2s(proof[0:32] ∥ merkle_root[:32])[:8] — binds proof to Merkle root.
+    # Falls back to Blake2s(proof[0:32])[:8] when merkle_root is not provided
+    # (legacy path for QLSAVerifierFull compatibility).
+    binding_input = proof_bytes[:32]
+    if merkle_root is not None:
+        binding_input = binding_input + merkle_root[:32]
+    onchain_commitment = hashlib.blake2s(binding_input).digest()[:8].hex()
 
     return ProofResult(
         proof=proof_bytes,
