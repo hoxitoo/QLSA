@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from core.batch import Batch, InvalidSignatureError, BatchSizeError, create_batch
 from core.keys import DEFAULT_ALGORITHM
+from core.transaction import Transaction
 from aggregator.mempool import Mempool
 
 
@@ -100,7 +101,7 @@ class Batcher:
 
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _create_and_prove(self, txs: list) -> BatchResult | None:
+    def _create_and_prove(self, txs: list[Transaction]) -> BatchResult | None:
         """Filter invalid-signature transactions, build a valid batch, and prove.
 
         Invalid transactions are logged and discarded.  Valid transactions that
