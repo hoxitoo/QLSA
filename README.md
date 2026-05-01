@@ -45,16 +45,17 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**Phase 4 complete** (April 2026).
+**MVP-3 complete** (May 2026).
 
 | Component | Status |
 |-----------|--------|
 | `core/` — ML-DSA keys, signing, Merkle tree, batch | Done |
-| `stark_stwo/` — Stwo Circle STARK prover (Rust) | Done |
-| `stark/` — Python prover/verifier wrappers | Done |
+| `stark_stwo/src/mldsa/` — Pure Rust ML-DSA-65 verifier (FIPS 204, 61 Rust tests) | Done |
+| `stark_stwo/` — Stwo Circle STARK prover (Rust) + ML-DSA batch bridge | Done |
+| `stark/` — Python prover/verifier wrappers (`prove_mldsa_batch`) | Done |
 | `contracts/` — BatchRegistry, QLSAVerifier, QLSAVerifierV2, QLSAVerifierV3, QLSAVerifierFull | Done (Blake2s binding verifier) |
 | `aggregator/` — Mempool, Batcher, AggregatorNode | Done |
-| `tests/` — 124 tests, all passing | Done |
+| `tests/` — 135 Python tests + 61 Rust tests, all passing | Done |
 | `sdk/` — Python SDK + JS SDK + HTTP API | Done |
 
 > **Note:** `QLSAVerifier.sol` is a stub that always returns `true`. `QLSAVerifierFull` binds proof to commitment via Blake2s (commitment = Blake2s(proof[0:32])[:8]) but is not a full FRI verifier. Do not deploy to mainnet until the full on-chain STARK verifier (MVP-3+) is implemented.
@@ -71,7 +72,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 ### Layer 2 — Aggregation (off-chain)
 
 - Collect transactions
-- Verify ML-DSA signatures (Python)
+- Verify ML-DSA-65 signatures (pure Rust FIPS 204 verifier — no liboqs)
 - Build Merkle tree with SHA3-512 → `merkle_root`
 - Generate Stwo Circle STARK proof → `stark_proof` + `stark_commitment`
 
@@ -116,16 +117,15 @@ and prove ML-DSA signature correctness directly inside the STARK (MVP-3).
 QLSA is experimental research software. Several known limitations exist that must
 be resolved before any production or testnet deployment:
 
-| Issue | Severity | Phase |
-|-------|----------|-------|
-| STARK does not prove ML-DSA signatures — proves hash chain only | Critical | MVP-3 |
-| `QLSAVerifierV3` is structural only (no full FRI) | Critical | Phase 3++ partial |
-| Merkle root is not a public input of the STARK proof | Critical | MVP-3 |
-| M31 commitment is 32 bits — not cryptographically binding | High | TBD |
-| No replay protection on-chain (nonce registry missing) | High | Phase 3+ |
-| FRI blowup factor = 4 → ~60-bit soundness (improved; production needs 8+) | Medium | Partial |
-| `BatchRegistry.submitBatch()` has no access control | Medium | Phase 3+ |
-| Private key zeroing in Python is best-effort, not guaranteed | Medium | Phase 5 |
+| Issue | Severity | Status |
+|-------|----------|--------|
+| ML-DSA verification happens outside the AIR circuit | Critical | Partial ✅ (Rust FIPS 204, prove_mldsa_batch) |
+| `QLSAVerifierFull` is not a full FRI on-chain verifier | Critical | Partial (Blake2s binding only) |
+| Merkle root is not a public input of the STARK proof | Critical | Open (MVP-3+) |
+| M31 commitment is 32 bits — not cryptographically binding | High | Open |
+| No replay protection on-chain (nonce registry missing) | High | Open |
+| FRI blowup factor = 4 → ~60-bit soundness (needs 8+) | Medium | Partial |
+| Private key zeroing in Python is best-effort, not guaranteed | Medium | Open |
 
 For the full cryptography and security analysis, see `context.md`.
 
@@ -138,8 +138,9 @@ For the full cryptography and security analysis, see `context.md`.
 | Batch size | 3,000 tx |
 | Proof size | 90–200 KB |
 | On-chain verification | O(1) |
-| Prover time (current prototype) | seconds to minutes |
-| Prover time (MVP-3, ML-DSA in AIR) | TBD |
+| Prover time (current prototype, hash chain) | seconds to minutes |
+| ML-DSA batch verify time (Rust FIPS 204, 4 sigs) | ~seconds |
+| Prover time (MVP-3+, ML-DSA in AIR) | TBD |
 
 Benchmarks are published in `/benchmarks/` as development progresses.
 
@@ -155,7 +156,7 @@ QLSA/
 ├── aggregator/         # Mempool, Batcher, AggregatorNode
 ├── contracts/          # Solidity contracts (Hardhat + OpenZeppelin v5)
 ├── benchmarks/         # Performance benchmarks
-├── tests/              # 124 tests (pytest)
+├── tests/              # 135 tests (pytest) + 61 Rust tests
 ├── docs/               # Architecture docs
 ├── context.md          # Technical context and decisions log
 └── README.md
@@ -203,8 +204,9 @@ PQ adoption is inevitable, but gradual.
 | Phase 3+ | M31 field library + QLSAVerifierV2 + FRI blowup 4x | Done |
 | Phase 3++ | Blake2s-256 library + QLSAVerifierV3 (MIN_PROOF_LENGTH=700) | Done |
 | QLSAVerifierFull | Blake2s FRI root binding: proof[:32] → commitment | Done |
-| MVP-3 | ML-DSA verification inside AIR (main innovation) | Research |
-| Phase 6 | Testnet deployment (Polygon zkEVM / Starknet) | Future |
+| MVP-3 | ML-DSA batch verifier (Rust FIPS 204) + STARK bridge | Done |
+| MVP-3+ | ML-DSA verification natively inside AIR circuit | Research |
+| Phase 6 | Testnet deployment (Polygon zkEVM / Starknet) | Next |
 
 ---
 
