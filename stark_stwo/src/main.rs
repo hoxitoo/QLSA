@@ -59,7 +59,7 @@ struct VerifyOutput {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: qlsa-stark-stwo <prove|verify|mldsa_batch>");
+        eprintln!("Usage: qlsa-stark-stwo <prove|verify|mldsa_batch|prove_p2|verify_p2>");
         std::process::exit(1);
     }
 
@@ -170,6 +170,60 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("mldsa_batch error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "prove_p2" => {
+            let req: ProveInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for prove_p2: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match qlsa_stark_stwo::prove_hash_chain_poseidon2(&req.leaves) {
+                Ok((proof_bytes, commitment, log_size)) => {
+                    let out = ProveOutput {
+                        proof: base64_encode(&proof_bytes),
+                        commitment,
+                        log_size,
+                    };
+                    match serde_json::to_string(&out) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("prove_p2 error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "verify_p2" => {
+            let req: VerifyInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for verify_p2: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let proof_bytes = match base64_decode(&req.proof) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("invalid base64 proof: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match qlsa_stark_stwo::verify_hash_chain_poseidon2(&proof_bytes, &req.commitment, req.log_size) {
+                Ok(valid) => {
+                    match serde_json::to_string(&VerifyOutput { valid }) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("verify_p2 error: {e}");
                     std::process::exit(1);
                 }
             }

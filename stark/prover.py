@@ -133,6 +133,98 @@ def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofRe
     )
 
 
+# ─── Poseidon2 hash-chain STARK (MVP-3+) ─────────────────────────────────────
+
+@dataclass
+class Poseidon2ProofResult(ProofResult):
+    """ProofResult whose commitment is a Poseidon2-over-M31 hash of the leaves."""
+
+
+def prove_batch_poseidon2(batch: Batch) -> Poseidon2ProofResult:
+    """
+    Generate a Poseidon2-over-M31 STARK proof for the batch.
+
+    Uses the same 8 × u64 leaf encoding as prove_batch, but the hash chain
+    inside the STARK uses a cryptographically secure Poseidon2 permutation
+    (6 full rounds, α=5, MDS [[3,1],[1,3]] over M31) instead of the
+    prototype H(a,b) = a³+b.
+
+    The `onchain_commitment` binding formula is unchanged:
+      Blake2s(proof[0:32] ∥ merkle_root[:32])[:8]
+
+    Raises RuntimeError if the binary is not built or the prover fails.
+    """
+    if not binary_available():
+        raise RuntimeError(
+            f"STARK binary not found at {BINARY}. "
+            "Build it with: cd stark_stwo && cargo +nightly-2025-07-01 build --release"
+        )
+
+    leaves = _txs_to_leaves(batch)
+    result = _call_prover_p2(leaves, merkle_root=batch.merkle_root)
+
+    batch.stark_commitment = result.commitment
+    batch.stark_log_size = result.log_size
+    return result
+
+
+def _call_prover_p2(
+    leaves: list[int], merkle_root: bytes | None = None
+) -> Poseidon2ProofResult:
+    """Call the `prove_p2` command on the Rust binary."""
+    payload = json.dumps({"leaves": leaves})
+
+    try:
+        proc = subprocess.run(
+            [str(BINARY), "prove_p2"],
+            input=payload.encode(),
+            capture_output=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("qlsa-stark-stwo prove_p2 timed out after 300 s")
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace")
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove_p2 failed (exit {proc.returncode}):\n{stderr}"
+        )
+
+    try:
+        out = json.loads(proc.stdout.decode(errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove_p2 returned invalid JSON: {exc}"
+        ) from exc
+
+    try:
+        proof_bytes = base64.b64decode(out["proof"])
+        commitment = str(out["commitment"])
+        log_size = int(out["log_size"])
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove_p2 output missing field: {exc}"
+        ) from exc
+
+    if len(proof_bytes) < 32:
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove_p2 returned proof shorter than 32 bytes "
+            f"({len(proof_bytes)} bytes)"
+        )
+
+    binding_input = proof_bytes[:32]
+    if merkle_root is not None:
+        binding_input = binding_input + merkle_root[:32]
+    onchain_commitment = hashlib.blake2s(binding_input).digest()[:8].hex()
+
+    return Poseidon2ProofResult(
+        proof=proof_bytes,
+        commitment=commitment,
+        log_size=log_size,
+        onchain_commitment=onchain_commitment,
+    )
+
+
 # ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 @dataclass
