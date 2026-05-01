@@ -5,13 +5,14 @@
 /// Each Poseidon2 permutation takes N_ROUNDS = 8 rows (one per round).
 /// Row `b*N_ROUNDS + r` belongs to block `b` (leaf `b`), round `r`.
 ///
-/// Main trace (6 columns, in order):
+/// Main trace (7 columns, in order):
 ///   0  s0    : state element 0 after this round
 ///   1  s1    : state element 1 after this round
 ///   2  t0    : (inp0 + rc0)^2  — SBox helper for s0
-///   3  t1    : (s1[-1] + rc1)^2 — SBox helper for s1
+///   3  t1    : (inp1 + rc1)^2  — SBox helper for s1
 ///   4  inp0  : input to round for s0  =  (1-init_row)*s0[-1] + is_init*leaf
 ///   5  leaf  : leaf value (non-zero only on is_init rows, i.e. r == 0)
+///   6  inp1  : input to round for s1  =  (1-init_row)*s1[-1]
 ///
 /// Preprocessed trace (4 columns, in order):
 ///   0  rc0      : RC[r % N_ROUNDS][0]
@@ -19,20 +20,26 @@
 ///   2  is_init  : 1 if r % N_ROUNDS == 0, else 0
 ///   3  init_row : 1 if row index == 0, else 0
 ///
-/// # Constraints (×5, all degree ≤ 3)
+/// # Constraints (×6, all degree ≤ 3)
 ///
-///   C1  inp0  − (1−init_row)·s0[−1] − is_init·leaf = 0
-///   C2  t0    − (inp0 + rc0)²                       = 0
-///   C3  t1    − (s1[−1] + rc1)²                     = 0
-///   C4  s0    − (3·t0²·(inp0+rc0)  +  t1²·(s1[−1]+rc1))  = 0
-///   C5  s1    − (  t0²·(inp0+rc0)  + 3·t1²·(s1[−1]+rc1)) = 0
+///   C1     inp0  − (1−init_row)·s0[−1] − is_init·leaf = 0       (degree 2)
+///   C_inp1 inp1  − (1−init_row)·s1[−1]                = 0       (degree 2)
+///   C2     t0    − (inp0 + rc0)²                       = 0       (degree 2)
+///   C3     t1    − (inp1 + rc1)²                       = 0       (degree 2)
+///   C4     s0    − (3·t0²·(inp0+rc0)  +  t1²·(inp1+rc1)) = 0    (degree 3)
+///   C5     s1    − (  t0²·(inp0+rc0)  + 3·t1²·(inp1+rc1)) = 0   (degree 3)
 ///
 /// # Wrap-around
 ///
 /// Circle STARK evaluates constraints on all rows, including the wrap-around
 /// row n−1 → 0.  At row 0:
-///   init_row[0] = 1  →  (1−init_row)·s0[n−1] = 0
+///   init_row[0] = 1  →  (1−init_row)·s0[n−1] = 0,  (1−init_row)·s1[n−1] = 0
 ///   inp0[0] = is_init[0]·leaf[0] = leaf[0]   (initial state forced to 0)
+///   inp1[0] = 0                               (initial s1=0)
+///
+/// Using inp1 as an explicit trace column (degree 1) keeps x1 = inp1 + rc1 at
+/// degree 1, so all constraint degrees stay ≤ 3, satisfying the bound
+/// max_constraint_log_degree_bound = log_n_rows + 1.
 ///
 /// Padding rows (n_real..n−1) continue absorbing zero leaves — their constraints
 /// hold by construction when the trace builder propagates the permutation.
@@ -105,35 +112,38 @@ impl FrameworkEval for Poseidon2Eval {
         let init_row = eval.get_preprocessed_column(pc_init_row());
 
         // ── Main trace columns ─────────────────────────────────────────────
-        // s0: current (offset 0) and previous (offset -1)
         let [s0_curr, s0_prev] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize, -1_isize]);
-        // s1: previous (offset -1) only (current is read below)
         let [s1_curr, s1_prev] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize, -1_isize]);
         let [t0]   = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
         let [t1]   = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
         let [inp0] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
         let [leaf] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
+        // inp1 is an explicit trace column so that x1 = inp1 + rc1 is degree 1,
+        // keeping all constraint degrees ≤ 3.
+        let [inp1] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
 
         // ── Helpers ────────────────────────────────────────────────────────
         let one = E::F::from(BaseField::from_u32_unchecked(1));
 
-        // (1 − init_row) · s0_prev
+        // (1 − init_row) gates the Circle-STARK wrap-around at row 0.
         let not_init_row = one - init_row.clone();
-        let s0_prev_gated = not_init_row * s0_prev;
+        let s0_prev_gated = not_init_row.clone() * s0_prev;
+        let s1_prev_gated = not_init_row * s1_prev;
 
         // inp0_expected = (1−init_row)·s0[−1] + is_init·leaf
         let inp0_expected = s0_prev_gated + is_init.clone() * leaf;
 
-        // x0 = inp0 + rc0,  x1 = s1_prev + rc1
+        // x0 = inp0 + rc0  (degree 1)
+        // x1 = inp1 + rc1  (degree 1, via explicit inp1 column)
         let x0 = inp0.clone() + rc0;
-        let x1 = s1_prev + rc1;
+        let x1 = inp1.clone() + rc1;
 
-        // SBox witnesses: t0 = x0^2,  t1 = x1^2
-        // x0^5 = t0^2 · x0 (via helper column t0)
-        let sbox0 = t0.clone() * t0.clone() * x0.clone();
-        let sbox1 = t1.clone() * t1.clone() * x1.clone();
+        // SBox witnesses: t0 = x0^2,  t1 = x1^2  (degree 2 each)
+        // x^5 = t^2 · x
+        let sbox0 = t0.clone() * t0.clone() * x0.clone();  // degree 3
+        let sbox1 = t1.clone() * t1.clone() * x1.clone();  // degree 3
 
         // MDS [[3,1],[1,3]]:
         //   s0_new = 3·sbox0 + sbox1
@@ -143,17 +153,17 @@ impl FrameworkEval for Poseidon2Eval {
         let s1_expected = sbox0 + sbox1 * three;
 
         // ── Constraints ───────────────────────────────────────────────────
-        // C1: inp0 definition
+        // C1: inp0 = (1−init_row)·s0[−1] + is_init·leaf          (degree 2)
         eval.add_constraint(inp0.clone() - inp0_expected);
-        // C2: t0 = (inp0+rc0)² — we re-derive from x0 already computed
-        //     Use t0 - x0² where x0 = inp0 + rc0 (both already consumed above):
-        //     Since EvalAtRow columns are read once, use x0 (still in scope).
+        // C_inp1: inp1 = (1−init_row)·s1[−1]                      (degree 2)
+        eval.add_constraint(inp1 - s1_prev_gated);
+        // C2: t0 = (inp0+rc0)²                                     (degree 2)
         eval.add_constraint(t0 - x0.clone() * x0);
-        // C3: t1 = (s1[−1]+rc1)²
+        // C3: t1 = (inp1+rc1)²                                     (degree 2)
         eval.add_constraint(t1 - x1.clone() * x1);
-        // C4: s0 update
+        // C4: s0 update                                             (degree 3)
         eval.add_constraint(s0_curr - s0_expected);
-        // C5: s1 update
+        // C5: s1 update                                             (degree 3)
         eval.add_constraint(s1_curr - s1_expected);
 
         eval
@@ -175,7 +185,7 @@ pub fn new_component(log_n_rows: u32) -> Poseidon2Component {
 /// Build the execution trace for `n_leaves` Poseidon2 absorptions.
 ///
 /// Returns `(main_columns, preprocessed_columns, commitment)` where:
-///   - `main_columns`: 6 columns in circle-domain bit-reversed order
+///   - `main_columns`: 7 columns in circle-domain bit-reversed order
 ///   - `preprocessed_columns`: 4 columns in the same order
 ///   - `commitment`: s0 value at the last REAL row (row n_leaves·N_ROUNDS − 1)
 pub fn build_trace(
@@ -194,13 +204,14 @@ pub fn build_trace(
     let bf_zero = BaseField::from_u32_unchecked(0);
 
     // ── Allocate columns ─────────────────────────────────────────────────
-    // Main
+    // Main (7 columns)
     let mut s0_col   = vec![bf_zero; n];
     let mut s1_col   = vec![bf_zero; n];
     let mut t0_col   = vec![bf_zero; n];
     let mut t1_col   = vec![bf_zero; n];
     let mut inp0_col = vec![bf_zero; n];
     let mut leaf_col = vec![bf_zero; n];
+    let mut inp1_col = vec![bf_zero; n];
 
     // Preprocessed
     let mut rc0_col      = vec![bf_zero; n];
@@ -222,12 +233,10 @@ pub fn build_trace(
     // and is updated after every round.  Padding rows (i ≥ n_real) absorb
     // zero leaves, keeping the computation consistent with the constraints.
     //
-    // For row 0 the wrap-around would feed s0[n−1] into inp0, but the
-    // `init_row` preprocessed column zeroes that term (see AIR constraint C1).
-    // We therefore set inp0[0] = leaf[0] (correct initial absorption).
+    // inp1_col[row] = state[1] before the round = s1[row-1], except at row 0
+    // where it is 0 (initial state).  This matches constraint C_inp1.
     let mut state = [0u64; 2];
 
-    // We need n full rounds; some are real (with leaves) and the rest absorb 0.
     let leaf_at = |block: usize| -> u64 {
         if block < n_leaves { leaves[block] % M31_P } else { 0 }
     };
@@ -238,15 +247,14 @@ pub fn build_trace(
         for r in 0..N_ROUNDS {
             let row = block * N_ROUNDS + r;
 
-            // inp0: on round 0 of each block absorb the leaf; for row 0
-            //       the init_row constraint overrides the previous state, so
-            //       we use leaf directly (state starts at 0).
+            // inp0: on round 0 of each block absorb the leaf.
             let inp0_val = if r == 0 {
                 m31_add(state[0], lf)
             } else {
                 state[0]
             };
-            let inp1_val = state[1]; // s1_prev for t1
+            // inp1: state[1] before this round (= s1[row-1], or 0 at row 0).
+            let inp1_val = state[1];
 
             let rc = [RC[r][0] as u64, RC[r][1] as u64];
             let x0 = m31_add(inp0_val, rc[0]);
@@ -272,6 +280,7 @@ pub fn build_trace(
 
             // Write main trace
             inp0_col[row] = to_m31(inp0_val);
+            inp1_col[row] = to_m31(inp1_val);
             leaf_col[row] = if r == 0 { to_m31(lf) } else { bf_zero };
             t0_col[row]   = to_m31(t0_val);
             t1_col[row]   = to_m31(t1_val);
@@ -289,7 +298,7 @@ pub fn build_trace(
     // ── Bit-reverse all columns to circle-domain storage order ────────────
     for col in [
         &mut s0_col, &mut s1_col, &mut t0_col, &mut t1_col,
-        &mut inp0_col, &mut leaf_col,
+        &mut inp0_col, &mut leaf_col, &mut inp1_col,
         &mut rc0_col, &mut rc1_col, &mut is_init_col, &mut init_row_col,
     ] {
         bit_reverse_coset_to_circle_domain_order(col);
@@ -302,6 +311,7 @@ pub fn build_trace(
         CircleEvaluation::new(domain, t1_col),
         CircleEvaluation::new(domain, inp0_col),
         CircleEvaluation::new(domain, leaf_col),
+        CircleEvaluation::new(domain, inp1_col),
     ];
     let preproc_cols = vec![
         CircleEvaluation::new(domain, rc0_col),
@@ -325,9 +335,9 @@ mod tests {
 
     #[test]
     fn test_compute_log_size() {
-        assert_eq!(compute_log_size(1), 3); // 6 rows → need 2^3 = 8
-        assert_eq!(compute_log_size(4), 5); // 24 rows → need 2^5 = 32
-        assert_eq!(compute_log_size(8), 6); // 48 rows → need 2^6 = 64
+        assert_eq!(compute_log_size(1), 3); // 8 rows → need 2^3 = 8
+        assert_eq!(compute_log_size(4), 5); // 32 rows → need 2^5 = 32
+        assert_eq!(compute_log_size(8), 6); // 64 rows → need 2^6 = 64
     }
 
     #[test]
@@ -351,13 +361,13 @@ mod tests {
         let (main_cols, preproc_cols, _) = build_trace(&leaves);
         let log_size = compute_log_size(leaves.len());
 
-        // Extract raw value vectors for assert_constraints_on_trace.
         let s0_v:    Vec<M31> = main_cols[0].values.clone();
         let s1_v:    Vec<M31> = main_cols[1].values.clone();
         let t0_v:    Vec<M31> = main_cols[2].values.clone();
         let t1_v:    Vec<M31> = main_cols[3].values.clone();
         let inp0_v:  Vec<M31> = main_cols[4].values.clone();
         let leaf_v:  Vec<M31> = main_cols[5].values.clone();
+        let inp1_v:  Vec<M31> = main_cols[6].values.clone();
 
         let rc0_v:      Vec<M31> = preproc_cols[0].values.clone();
         let rc1_v:      Vec<M31> = preproc_cols[1].values.clone();
@@ -367,7 +377,7 @@ mod tests {
         // TreeVec order: [preprocessed, main]
         let evals: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![
             vec![&rc0_v, &rc1_v, &is_init_v, &init_row_v],
-            vec![&s0_v, &s1_v, &t0_v, &t1_v, &inp0_v, &leaf_v],
+            vec![&s0_v, &s1_v, &t0_v, &t1_v, &inp0_v, &leaf_v, &inp1_v],
         ]);
 
         let eval_obj = Poseidon2Eval { log_n_rows: log_size };
