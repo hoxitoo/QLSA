@@ -1,12 +1,14 @@
 """
-QLSA STARK layer — Phase 2 prototype.
+QLSA STARK layer — Stwo Circle STARK backend (Phase 2+).
 
 The STARK proves:
-  "I know N leaf values such that their hash-chain commitment equals C"
-using a prototype algebraic hash H(a, b) = a^3 + b over a 64-bit prime field.
+  "The SHA3-512 Merkle root of this batch, split into 8 × u64 chunks,
+   produces hash-chain commitment C under H(a,b) = a³+b over M31."
 
-NOTE: The prototype hash is NOT cryptographically secure.
-Production will replace it with Rescue Prime (RPO256) via Stwo.
+This cryptographically binds the on-chain Merkle root to the STARK commitment.
+
+NOTE: H(a,b) = a³+b is a prototype algebraic hash — not cryptographically
+secure in isolation. Production upgrade: replace with Poseidon2 over M31.
 
 Usage:
     from stark.prover import prove_batch

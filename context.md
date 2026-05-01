@@ -1,9 +1,9 @@
 # QLSA — Project Context
 
 ## Статус
-- Фаза: **MVP-3 (ML-DSA в AIR) — следующий этап**
-- Готово: Phase 1 → Phase 5 + Phase 3+ + Phase 3++ + QLSAVerifierFull (Blake2s binding, тесты, CI зелёный)
-- Следующий шаг: MVP-3 — ML-DSA верификация внутри AIR + Phase 6 (Testnet: Polygon zkEVM / Starknet)
+- Фаза: **MVP-3 завершён** → следующий этап: Phase 6 (Testnet) + MVP-3+ (ML-DSA native in AIR)
+- Готово: Phase 1 → Phase 5 + Phase 3++ + QLSAVerifierFull + **ML-DSA batch verifier (Rust) + STARK bridge**
+- Следующий шаг: Phase 6 — Testnet (Polygon zkEVM / Starknet) и/или MVP-3+ AIR circuit для ML-DSA
 
 ### Что готово
 - `core/keys.py` — ML-DSA-44/65/87 keygen, derive_address (SHA3-256), wipe_key
@@ -13,9 +13,20 @@
 - `core/batch.py` — create_batch, merkle_root_onchain(), stark_commitment_onchain()
 - `stark/` — Winterfell prover (Python subprocess обёртки, устаревает)
 - `stark_stwo/` — **Stwo Circle STARK prover** (Rust, nightly-2025-07-01), Python обёртки в `stark/prover.py` / `stark/verifier.py`
+- `stark_stwo/src/mldsa/` — **чистый Rust ML-DSA-65 верификатор** (FIPS 204 Algorithm 3, без liboqs):
+  - `params.rs` — все константы ML-DSA-65 (k=6, l=5, η=4, τ=49, β=196, γ₁=2¹⁹, d=13, λ=192, ω=55)
+  - `field.rs` / `ntt.rs` / `poly.rs` — арифметика над Zq, NTT/INTT, полиномы
+  - `polyvec.rs` — PolyVec, NTTPolyVec, NTTMatrix, UseHint, Decompose
+  - `encoding.rs` — pkDecode, sigDecode, HintBitUnpack, w1Encode, bit_pack/unpack
+  - `xof.rs` — ExpandA (SHAKE-128), SampleInBall, hash_pk/hash_mu/hash_commit (SHAKE-256)
+  - `verify.rs` — `ml_dsa_verify()` FIPS 204 внешний API (M' = 0x00‖0x00‖msg)
+- `stark_stwo/src/lib.rs` — `prove_mldsa_batch()`: N ML-DSA-65 верификаций → STARK hash-chain proof
+- `stark_stwo/src/main.rs` — CLI команда `mldsa_batch` (JSON/base64 I/O)
+- `stark/prover.py` — `MldsaBatchResult`, `prove_mldsa_batch()` (Python обёртка)
 - `contracts/src/` — BatchRegistry.sol, QLSAVerifier.sol (**stub — всегда true**), IQLSAVerifier.sol (Hardhat + OZ v5)
 - `aggregator/` — Mempool (thread-safe), Batcher, AggregatorNode (Phase 4)
-- `benchmarks/bench_core.py` — benchmark suite
+- `benchmarks/bench_core.py` — benchmark suite (ML-DSA sign/verify + Merkle)
+- `benchmarks/bench_stark.py` — **hash-chain + ML-DSA batch STARK benchmarks**
 - `contracts/src/verifier/M31.sol` — **M31 field arithmetic library** (add/sub/mul/pow/inv/neg, LE encoding)
 - `contracts/src/verifier/Blake2s.sol` — **Blake2s-256 library** (RFC 7693, pure Solidity, 10-round compression)
 - `contracts/src/QLSAVerifierV2.sol` — **Structural verifier** (M31 validation, replaces stub)
@@ -24,7 +35,7 @@
 - `sdk/python/qlsa/` — **Python SDK**: Wallet, TransactionBuilder, LocalClient, HttpClient (Phase 5)
 - `sdk/js/src/` — **JS SDK**: AggregatorClient (TypeScript, Phase 5)
 - `aggregator/api.py` — HTTP API (FastAPI), запуск: `uvicorn aggregator.api:app`
-- `tests/` — **124 теста** (core + stark + aggregator + sdk), все зелёные
+- `tests/` — **135 тестов** (core + stark + aggregator + sdk), все зелёные; Rust — 61 тест
 - CI: python (3.10/3.12) + rust (nightly-2025-07-01) + contracts (Hardhat) джобы
 
 ---
@@ -84,12 +95,13 @@
 - ML-DSA-65 (FIPS 204)
 - Адрес = SHA3-256(pubkey)
 
-### Слой 2 — Агрегация (реализован MVP)
+### Слой 2 — Агрегация (реализован MVP-3)
 - Collect transactions
-- Verify ML-DSA signatures (Python, **вне STARK** — архитектурный gap до MVP-3)
+- Verify ML-DSA-65 signatures (Rust FIPS 204 верификатор, внутри `prove_mldsa_batch`)
 - Build SHA3-512 Merkle tree → `merkle_root`
 - Hash chain STARK commitment → `stark_commitment` (M31 field element, 4 bytes)
-- Generate STARK proof (Stwo, hash chain AIR)
+- Generate STARK proof (Stwo, hash chain AIR over SHA3-256 leaf hashes of valid sigs)
+- **Примечание:** ML-DSA верификация происходит в Rust вне AIR circuit; AIR доказывает hash chain над результатами. Полная ML-DSA-in-AIR — MVP-3+.
 
 ### Слой 3 — Верификация (следующий этап)
 - On-chain STARK verifier (Solidity) — **stub, не готов**
@@ -112,9 +124,15 @@
 - **MVP-1** ✅ — ML-DSA + Merkle без STARK (Phase 1)
 - **MVP-2** ✅ — STARK hash chain prover (Phase 2, Stwo)
   - Прим.: hash chain STARK (не Merkle-in-STARK) — SHA3-512 в AIR нецелесообразна
-  - Переход на ZK-friendly hash (RPO256) запланирован при реализации MVP-3
+  - Переход на ZK-friendly hash (RPO256) запланирован при реализации MVP-3+
 - **SDK** ✅ — Python SDK + JS SDK + HTTP API (Phase 5)
-- **MVP-3** — ML-DSA верификация внутри AIR (главная новизна, Phase 3+)
+- **MVP-3** ✅ — ML-DSA batch verifier + STARK bridge (май 2026)
+  - Чистый Rust FIPS 204 верификатор (`stark_stwo/src/mldsa/`), 61 тест
+  - `prove_mldsa_batch()`: N ML-DSA-65 sig → STARK proof (Python + Rust CLI)
+  - Test fixtures: реальные liboqs векторы (binary, не hex) через `include_bytes!`
+  - FIPS 204 внешний API (M' = 0x00‖0x00‖msg) верифицирован end-to-end
+- **Phase 6** — Testnet deployment (Polygon zkEVM / Starknet) — следующий этап
+- **MVP-3+** — ML-DSA верификация native в AIR (NTT + решётчатая арифметика в constraints)
 - Fraud-proof модель — future feature (Phase 4+)
 - Batch economics — future feature (Phase 4+)
 
@@ -123,10 +141,11 @@
 ## Открытые вопросы
 
 ### Архитектурные (критично)
-- **STARK не доказывает ML-DSA подписи** — главный архитектурный gap. AIR circuit доказывает лишь правильность цепочки H(a,b). Merkle-root не является публичным входом STARK — связь между proof и merkle_root отсутствует.
+- **ML-DSA верификация вне AIR** — `prove_mldsa_batch` верифицирует подписи в Rust (вне STARK circuit). AIR доказывает hash chain над SHA3-256(pk‖msg) листьями валидных подписей. Нативная ML-DSA-in-AIR — MVP-3+.
+- **Merkle-root не публичный вход STARK** — связь между on-chain `merkle_root` и STARK proof требует явного включения root chunks в public inputs AIR. Открыто для MVP-3+.
 - **Replay-защита отсутствует** — одна транзакция (sender, nonce) может войти в несколько батчей; on-chain реестр использованных nonce не реализован.
 - **M31-коммитмент — 32 бита** — пространство перебора ~2·10⁹, не является криптографически связывающим. При production-использовании заменить на хэш всего witness (SHA3-256 или BLAKE3).
-- **AIR-схема для ML-DSA в Stwo** — главная сложность MVP-3 (NTT и решётчатая арифметика в constraints).
+- **AIR-схема для ML-DSA в Stwo** — главная сложность MVP-3+ (NTT и решётчатая арифметика в constraints).
 
 ### Реализационные
 - Замена прototipного хэша `H(a,b) = a³ + b` на RPO256 при переходе к MVP-3
@@ -182,9 +201,9 @@ Rust: `nightly-2025-07-01` (зафиксирован в `stark_stwo/rust-toolcha
 ### Известные ограничения (требуют решения до production)
 | Риск | Уровень | Статус |
 |------|---------|--------|
-| STARK не доказывает ML-DSA подписи | Критично | Open (MVP-3) |
+| ML-DSA верификация вне AIR circuit | Критично | Partial ✅ (Rust FIPS 204, prove_mldsa_batch) |
 | QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (QLSAVerifierFull, deployed) |
-| Merkle-root не публичный вход STARK | Критично | Open (MVP-3) |
+| Merkle-root не публичный вход STARK | Критично | Open (MVP-3+) |
 | M31-коммитмент 32 бита — не binding | Высокий | Open |
 | bytes(private_key) — иммутабельная копия в Python | Высокий | Open (нужна Rust-обёртка) |
 | Нет replay-защиты on-chain | Высокий | Open |

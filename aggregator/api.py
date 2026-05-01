@@ -9,6 +9,7 @@ from pydantic import BaseModel, field_validator
 
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
+from core.signing import verify as sig_verify
 from core.transaction import Transaction
 
 
@@ -89,14 +90,24 @@ def stats(request: Request) -> dict[str, Any]:
 def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
     node: AggregatorNode = request.app.state.node
     try:
+        pub_key = bytes.fromhex(payload.public_key)
+        sig_bytes = bytes.fromhex(payload.signature)
         tx = Transaction(
             sender=payload.sender,
             recipient=payload.recipient,
             amount=payload.amount,
             nonce=payload.nonce,
-            public_key=bytes.fromhex(payload.public_key),
+            public_key=pub_key,
         )
-        tx.signature = bytes.fromhex(payload.signature)
+        # Verify signature at ingestion time — prevents mempool flooding with
+        # invalid transactions that would cause batch creation to fail later.
+        if not sig_verify(tx.to_bytes(), sig_bytes, pub_key):
+            return SubmitResponse(
+                accepted=False,
+                mempool_size=node.pending_count(),
+                error="invalid signature",
+            )
+        tx.signature = sig_bytes
         node.submit(tx)
         return SubmitResponse(accepted=True, mempool_size=node.pending_count())
     except (ValueError, MempoolFullError) as exc:

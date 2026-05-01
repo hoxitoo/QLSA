@@ -32,7 +32,7 @@ N signed transactions  →  1 STARK proof (~90–200 KB)  →  O(1) on-chain ver
  │       ▼                                                                  │
  │  1. Verify all ML-DSA signatures (Python / liboqs)                       │
  │  2. Build SHA3-512 Merkle tree  →  merkle_root (64 bytes)               │
- │  3. Derive M31 leaves from tx_hash[:8]                                   │
+ │  3. Split merkle_root (64 bytes) into 8 × u64 M31 leaves                 │
  │  4. Run Stwo Circle STARK prover  →  stark_proof + stark_commitment      │
  └────────────────────────────┬────────────────────────────────────────────┘
                               │ BatchResult
@@ -77,10 +77,11 @@ N signed transactions  →  1 STARK proof (~90–200 KB)  →  O(1) on-chain ver
 
 ---
 
-## STARK Circuit (Current — Prototype)
+## STARK Circuit (Current — Phase 2+)
 
 ```
-Leaves (M31):  tx_hash[:8] % (2^31 - 1)  for each tx
+Leaves (M31):  merkle_root split into 8 × u64, each reduced mod (2^31 - 1)
+               — binds the STARK proof directly to the on-chain Merkle root
 
 AIR constraint:  h[i+1] = h[i]³ + leaf[i+1]   (H(a,b) = a³+b over M31)
 
@@ -88,10 +89,9 @@ Commitment:  h[n-2]  (last non-padding row, 4 bytes, M31 field element)
 ```
 
 **Limitations (MVP-3 targets):**
-- Does NOT prove ML-DSA signature correctness
-- `merkle_root` is NOT a public input of the STARK
-- H(a,b) = a³+b is not cryptographically secure (prototype only)
-- tx_hash truncated to 31 bits for M31 field
+- Does NOT prove ML-DSA signature correctness inside the circuit
+- H(a,b) = a³+b is a prototype hash — not cryptographically secure in isolation
+- Production upgrade: replace with Poseidon2 over M31
 
 ---
 
@@ -118,7 +118,7 @@ AIR constraints:
 | `QLSAVerifier` (stub) | proof.length ≥ 64, commitment ≠ 0 | Done |
 | `QLSAVerifierV2` | + M31 range, + trailing zero bytes | Done (Phase 3+) |
 | `QLSAVerifierV3` | + MIN_PROOF_LENGTH=700, trivial-proof guard, keccak binding, Blake2s imported | Done (Phase 3++) |
-| `QLSAVerifierFull` (planned) | + full FRI decommitment, OODS, Blake2s Merkle paths | Future |
+| `QLSAVerifierFull` | + Blake2s FRI root binding (commitment = Blake2s(proof[0:32])[:8]) | Done |
 | `QLSAVerifierFinalFull` | + ML-DSA constraint satisfaction | MVP-3 |
 
 ---
@@ -128,7 +128,7 @@ AIR constraints:
 | Property | Current State | Target |
 |----------|--------------|--------|
 | ML-DSA signature validity | Verified off-chain (Python) | In STARK (MVP-3) |
-| Merkle tree integrity | SHA3-512, verified off-chain | Public input of STARK (MVP-3) |
+| Merkle tree integrity | SHA3-512, Merkle root fed as STARK leaves | Full Merkle-in-STARK (MVP-3) |
 | STARK soundness (FRI blowup) | 4× (~60-bit) | ≥8× (~90-bit) for production |
 | On-chain binding | Structural (M31 range) | Full FRI (Phase 3++) |
 | Replay protection | `BatchAlreadyFinalized` on-chain | Done |

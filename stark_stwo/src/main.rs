@@ -8,6 +8,32 @@ struct ProveInput {
     leaves: Vec<u64>,
 }
 
+// ── mldsa_batch ──────────────────────────────────────────────────────────────
+
+/// One entry in a ML-DSA batch (all fields base64-encoded).
+#[derive(Deserialize)]
+struct MldsaEntry {
+    pk:  String,
+    msg: String,
+    sig: String,
+}
+
+/// Input JSON for the `mldsa_batch` command.
+#[derive(Deserialize)]
+struct MldsaBatchInput {
+    entries: Vec<MldsaEntry>,
+}
+
+/// Output JSON for the `mldsa_batch` command.
+#[derive(Serialize)]
+struct MldsaBatchOutput {
+    proof:      String, // base64-encoded STARK proof
+    commitment: String, // 8-char little-endian hex
+    log_size:   u32,
+    verified:   usize,  // number of valid signatures included in proof
+    rejected:   usize,  // number of invalid signatures skipped
+}
+
 /// Output JSON for the `prove` command.
 #[derive(Serialize)]
 struct ProveOutput {
@@ -33,7 +59,7 @@ struct VerifyOutput {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: qlsa-stark-stwo <prove|verify>");
+        eprintln!("Usage: qlsa-stark-stwo <prove|verify|mldsa_batch|prove_p2|verify_p2>");
         std::process::exit(1);
     }
 
@@ -94,6 +120,110 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("verify error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "mldsa_batch" => {
+            let req: MldsaBatchInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for mldsa_batch: {e}");
+                    std::process::exit(1);
+                }
+            };
+            // Decode base64 fields.
+            let entries: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = req
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let pk  = base64_decode(&e.pk).unwrap_or_else(|err| {
+                        eprintln!("entry[{i}]: invalid pk base64: {err}");
+                        std::process::exit(1);
+                    });
+                    let msg = base64_decode(&e.msg).unwrap_or_else(|err| {
+                        eprintln!("entry[{i}]: invalid msg base64: {err}");
+                        std::process::exit(1);
+                    });
+                    let sig = base64_decode(&e.sig).unwrap_or_else(|err| {
+                        eprintln!("entry[{i}]: invalid sig base64: {err}");
+                        std::process::exit(1);
+                    });
+                    (pk, msg, sig)
+                })
+                .collect();
+
+            match qlsa_stark_stwo::prove_mldsa_batch(&entries) {
+                Ok((proof_bytes, commitment, log_size, verified, rejected)) => {
+                    let out = MldsaBatchOutput {
+                        proof: base64_encode(&proof_bytes),
+                        commitment,
+                        log_size,
+                        verified,
+                        rejected,
+                    };
+                    match serde_json::to_string(&out) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("mldsa_batch error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "prove_p2" => {
+            let req: ProveInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for prove_p2: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match qlsa_stark_stwo::prove_hash_chain_poseidon2(&req.leaves) {
+                Ok((proof_bytes, commitment, log_size)) => {
+                    let out = ProveOutput {
+                        proof: base64_encode(&proof_bytes),
+                        commitment,
+                        log_size,
+                    };
+                    match serde_json::to_string(&out) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("prove_p2 error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "verify_p2" => {
+            let req: VerifyInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for verify_p2: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let proof_bytes = match base64_decode(&req.proof) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("invalid base64 proof: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match qlsa_stark_stwo::verify_hash_chain_poseidon2(&proof_bytes, &req.commitment, req.log_size) {
+                Ok(valid) => {
+                    match serde_json::to_string(&VerifyOutput { valid }) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("verify_p2 error: {e}");
                     std::process::exit(1);
                 }
             }
