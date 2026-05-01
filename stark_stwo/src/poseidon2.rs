@@ -3,9 +3,9 @@
 /// Parameters:
 ///   - state width  t = 2
 ///   - S-Box        x^5  (gcd(5, p-1) = 1 since p-1 = 2*(2^30-1), so valid)
-///   - rounds       N_ROUNDS = 6 full rounds
-///   - MDS matrix   [[3,1],[1,3]] over M31
-///   - round consts first 12 SHA-256 IV / round-constant bytes reduced mod M31_P
+///   - rounds       N_ROUNDS = 8 full rounds (min for 128-bit security at t=2)
+///   - MDS matrix   [[3,1],[1,3]] over M31 (det=8≠0, invertible → MDS for t=2)
+///   - round consts first 16 SHA-256 IV / round-constant bytes reduced mod M31_P
 ///
 /// Used for:
 ///   - Witness generation in the Poseidon2 AIR (poseidon2_air.rs)

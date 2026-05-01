@@ -2,7 +2,7 @@
 ///
 /// # Trace layout
 ///
-/// Each Poseidon2 permutation takes N_ROUNDS = 6 rows (one per round).
+/// Each Poseidon2 permutation takes N_ROUNDS = 8 rows (one per round).
 /// Row `b*N_ROUNDS + r` belongs to block `b` (leaf `b`), round `r`.
 ///
 /// Main trace (6 columns, in order):

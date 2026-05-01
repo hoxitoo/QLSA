@@ -88,6 +88,10 @@ pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String
     Ok((proof_bytes, commitment_hex, log_size))
 }
 
+/// Maximum log2 trace size accepted by the verifier (2^28 rows ≈ 268 M rows).
+/// Prevents an untrusted `log_size` field from triggering OOM inside Stwo.
+const MAX_LOG_SIZE: u32 = 28;
+
 /// Verify a proof previously produced by `prove_hash_chain`.
 pub fn verify_hash_chain(
     proof_bytes: &[u8],
@@ -95,6 +99,13 @@ pub fn verify_hash_chain(
     log_size: u32,
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
+
+    if log_size < trace::MIN_LOG_SIZE || log_size > MAX_LOG_SIZE {
+        return Err(format!(
+            "log_size {log_size} out of valid range [{}, {MAX_LOG_SIZE}]",
+            trace::MIN_LOG_SIZE
+        ));
+    }
 
     let commitment_bytes = hex::decode(commitment_hex)
         .map_err(|e| format!("invalid commitment hex: {e}"))?;
@@ -214,6 +225,13 @@ pub fn verify_hash_chain_poseidon2(
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
     use poseidon2_air::preprocessed_column_ids;
+
+    if log_size < poseidon2_air::MIN_LOG_SIZE || log_size > MAX_LOG_SIZE {
+        return Err(format!(
+            "log_size {log_size} out of valid range [{}, {MAX_LOG_SIZE}]",
+            poseidon2_air::MIN_LOG_SIZE
+        ));
+    }
 
     let commitment_bytes = hex::decode(commitment_hex)
         .map_err(|e| format!("invalid commitment hex: {e}"))?;
