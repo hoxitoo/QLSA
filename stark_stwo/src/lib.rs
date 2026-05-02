@@ -2,6 +2,7 @@ pub mod air;
 pub mod mldsa;
 pub mod poseidon2;
 pub mod poseidon2_air;
+pub mod poseidon2_merkle_air;
 pub mod trace;
 
 use stwo::core::air::Component;
@@ -322,6 +323,117 @@ pub fn prove_mldsa_batch(
     Ok((proof_bytes, commitment, log_size, verified, rejected))
 }
 
+// ─── Poseidon2 Merkle-tree STARK ─────────────────────────────────────────────
+
+/// Prove that `leaves` hash to a Merkle root via Poseidon2 compression.
+///
+/// Returns `(proof_bytes, commitment_hex, log_size)`.
+/// `commitment_hex` is the 8-char little-endian hex of the Merkle root (M31).
+pub fn prove_merkle_root(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String> {
+    use poseidon2_merkle_air::{build_trace, compute_log_size};
+
+    if leaves.is_empty() {
+        return Err("leaves must not be empty".into());
+    }
+
+    let (main_cols, preproc_cols, commitment) = build_trace(leaves);
+    let log_size = compute_log_size(leaves.len());
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: preprocessed columns (rc0, rc1, is_init)
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preproc_cols);
+    tree_builder.commit(channel);
+
+    // Tree 1: main trace (s0, s1, t0, t1, inp0, left, inp1, right)
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(main_cols);
+    tree_builder.commit(channel);
+
+    let component = poseidon2_merkle_air::new_component(log_size);
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&component],
+        channel,
+        commitment_scheme,
+    )
+    .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    let commitment_hex = hex::encode(commitment.0.to_le_bytes());
+    Ok((proof_bytes, commitment_hex, log_size))
+}
+
+/// Verify a proof previously produced by `prove_merkle_root`.
+pub fn verify_merkle_root(
+    proof_bytes: &[u8],
+    commitment_hex: &str,
+    log_size: u32,
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+
+    if log_size < poseidon2_merkle_air::MIN_LOG_SIZE || log_size > MAX_LOG_SIZE {
+        return Err(format!(
+            "log_size {log_size} out of valid range [{}, {MAX_LOG_SIZE}]",
+            poseidon2_merkle_air::MIN_LOG_SIZE
+        ));
+    }
+
+    let commitment_bytes = hex::decode(commitment_hex)
+        .map_err(|e| format!("invalid commitment hex: {e}"))?;
+    if commitment_bytes.len() != 4 {
+        return Err(format!(
+            "commitment must be 4 bytes, got {}",
+            commitment_bytes.len()
+        ));
+    }
+    let _commitment_val = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
+            .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = poseidon2_merkle_air::new_component(log_size);
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme =
+        &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!(
+            "malformed proof: expected 2 commitments, got {}",
+            proof.commitments.len()
+        ));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    let result = verify::<Blake2sM31MerkleChannel>(
+        &[&component],
+        verifier_channel,
+        commitment_scheme,
+        proof,
+    );
+
+    Ok(result.is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +505,41 @@ mod tests {
         let mut bad_proof = proof_bytes.clone();
         bad_proof[20] ^= 0xFF;
         let result = verify_hash_chain_poseidon2(&bad_proof, &commitment_hex, log_size)
+            .unwrap_or(false);
+        assert!(!result);
+    }
+
+    // ── Poseidon2 Merkle tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_merkle_prove_and_verify() {
+        let leaves = vec![1u64, 2, 3, 4];
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_merkle_root(&leaves).expect("merkle proving failed");
+        let valid = verify_merkle_root(&proof_bytes, &commitment_hex, log_size)
+            .expect("merkle verification failed");
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_merkle_commitment_matches_root() {
+        let leaves = vec![10u64, 20, 30, 40];
+        let (_, commitment_hex, _) =
+            prove_merkle_root(&leaves).expect("merkle proving failed");
+        let expected = poseidon2_merkle_air::merkle_root(&leaves);
+        let expected_hex =
+            hex::encode(BaseField::from_u32_unchecked(expected as u32).0.to_le_bytes());
+        assert_eq!(commitment_hex, expected_hex);
+    }
+
+    #[test]
+    fn test_merkle_tampered_proof_fails() {
+        let leaves = vec![1u64, 2, 3, 4];
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_merkle_root(&leaves).expect("merkle proving failed");
+        let mut bad_proof = proof_bytes.clone();
+        bad_proof[20] ^= 0xFF;
+        let result = verify_merkle_root(&bad_proof, &commitment_hex, log_size)
             .unwrap_or(false);
         assert!(!result);
     }

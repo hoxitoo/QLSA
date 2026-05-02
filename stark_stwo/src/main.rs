@@ -59,7 +59,7 @@ struct VerifyOutput {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: qlsa-stark-stwo <prove|verify|mldsa_batch|prove_p2|verify_p2>");
+        eprintln!("Usage: qlsa-stark-stwo <prove|verify|mldsa_batch|prove_p2|verify_p2|merkle_prove|merkle_verify>");
         std::process::exit(1);
     }
 
@@ -224,6 +224,60 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("verify_p2 error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "merkle_prove" => {
+            let req: ProveInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for merkle_prove: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match qlsa_stark_stwo::prove_merkle_root(&req.leaves) {
+                Ok((proof_bytes, commitment, log_size)) => {
+                    let out = ProveOutput {
+                        proof: base64_encode(&proof_bytes),
+                        commitment,
+                        log_size,
+                    };
+                    match serde_json::to_string(&out) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("merkle_prove error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "merkle_verify" => {
+            let req: VerifyInput = match serde_json::from_str(&input) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("invalid JSON input for merkle_verify: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let proof_bytes = match base64_decode(&req.proof) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("invalid base64 proof: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match qlsa_stark_stwo::verify_merkle_root(&proof_bytes, &req.commitment, req.log_size) {
+                Ok(valid) => {
+                    match serde_json::to_string(&VerifyOutput { valid }) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => { eprintln!("serialization error: {e}"); std::process::exit(1); }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("merkle_verify error: {e}");
                     std::process::exit(1);
                 }
             }
