@@ -208,3 +208,6 @@ __marimo__/
 
 # Rust build artifacts
 stark/target/
+
+# Private audit and internal notes (owner-only, never published)
+.private/
