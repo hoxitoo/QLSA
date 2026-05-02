@@ -40,9 +40,12 @@ pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String
     if leaves.is_empty() {
         return Err("leaves must not be empty".into());
     }
+    let log_size = trace::compute_log_size(leaves.len());
+    if log_size > MAX_LOG_SIZE {
+        return Err(format!("input too large: log_size {log_size} exceeds MAX_LOG_SIZE {MAX_LOG_SIZE}"));
+    }
 
     let (columns, commitment) = trace::build_trace(leaves);
-    let log_size = trace::compute_log_size(leaves.len());
 
     // lifting_log_size = log_size + LOG_BLOWUP so that max_log_degree_bound = log_size.
     // This keeps the OODS mask step (CanonicCoset::new(log_size).step()) and the vanishing
@@ -172,9 +175,12 @@ pub fn prove_hash_chain_poseidon2(leaves: &[u64]) -> Result<(Vec<u8>, String, u3
     if leaves.is_empty() {
         return Err("leaves must not be empty".into());
     }
+    let log_size = compute_log_size(leaves.len());
+    if log_size > MAX_LOG_SIZE {
+        return Err(format!("input too large: log_size {log_size} exceeds MAX_LOG_SIZE {MAX_LOG_SIZE}"));
+    }
 
     let (main_cols, preproc_cols, commitment) = build_trace(leaves);
-    let log_size = compute_log_size(leaves.len());
 
     let config = make_config(log_size);
     let lifting = log_size + LOG_BLOWUP;
@@ -335,9 +341,12 @@ pub fn prove_merkle_root(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), Strin
     if leaves.is_empty() {
         return Err("leaves must not be empty".into());
     }
+    let log_size = compute_log_size(leaves.len());
+    if log_size > MAX_LOG_SIZE {
+        return Err(format!("input too large: log_size {log_size} exceeds MAX_LOG_SIZE {MAX_LOG_SIZE}"));
+    }
 
     let (main_cols, preproc_cols, commitment) = build_trace(leaves);
-    let log_size = compute_log_size(leaves.len());
 
     let config = make_config(log_size);
     let lifting = log_size + LOG_BLOWUP;
