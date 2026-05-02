@@ -13,7 +13,9 @@
 
 pub const M31_P: u64 = (1u64 << 31) - 1;
 /// Number of full rounds per Poseidon2 permutation.
-/// 8 rounds: a power of 2, so n_leaves×8 always divides 2^k for the trace (no partial blocks).
+/// 8 full rounds: Poseidon2 paper (§5.2) requires R_F ≥ 8 for t=2, α=5, p≥2^30
+/// to achieve 128-bit security. Do NOT reduce — the power-of-2 property is convenient
+/// but secondary. N_ROUNDS=8 is a cryptographic lower bound, not a performance choice.
 pub const N_ROUNDS: usize = 8;
 
 /// Round constants: RC[round][state_element]

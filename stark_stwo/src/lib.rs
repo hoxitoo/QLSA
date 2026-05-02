@@ -96,6 +96,10 @@ pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String
 /// Prevents an untrusted `log_size` field from triggering OOM inside Stwo.
 const MAX_LOG_SIZE: u32 = 28;
 
+/// M31 field modulus = 2^31 − 1. Commitments are M31 elements; values ≥ this
+/// are not canonical field elements and must be rejected before `from_u32_unchecked`.
+const M31_MODULUS: u32 = (1u32 << 31) - 1;
+
 /// Verify a proof previously produced by `prove_hash_chain`.
 pub fn verify_hash_chain(
     proof_bytes: &[u8],
@@ -120,6 +124,9 @@ pub fn verify_hash_chain(
         ));
     }
     let commitment_val = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
+    if commitment_val >= M31_MODULUS {
+        return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
+    }
     let _commitment = BaseField::from_u32_unchecked(commitment_val);
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
@@ -248,8 +255,12 @@ pub fn verify_hash_chain_poseidon2(
             commitment_bytes.len()
         ));
     }
-    // (commitment value is for bookkeeping only — the proof itself encodes it)
+    // Commitment is for bookkeeping; the proof cryptographically commits to the trace.
+    // Still validate the field range so callers get a clear error on malformed input.
     let _commitment_val = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
+    if _commitment_val >= M31_MODULUS {
+        return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
+    }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
@@ -409,6 +420,9 @@ pub fn verify_merkle_root(
         ));
     }
     let _commitment_val = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
+    if _commitment_val >= M31_MODULUS {
+        return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
+    }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
