@@ -125,3 +125,139 @@ def test_different_leaves_give_different_commitments():
     out_a = _prove([1, 2, 3, 4])
     out_b = _prove([5, 6, 7, 8])
     assert out_a["commitment"] != out_b["commitment"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# prove_p2 / verify_p2 CLI tests (Poseidon2 sponge hash chain)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _prove_p2(leaves: list[int]) -> dict:
+    proc = subprocess.run(
+        [str(BINARY), "prove_p2"],
+        input=json.dumps({"leaves": leaves}).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    return json.loads(proc.stdout)
+
+
+def _verify_p2(proof: str, commitment: str, log_size: int) -> bool:
+    proc = subprocess.run(
+        [str(BINARY), "verify_p2"],
+        input=json.dumps({"proof": proof, "commitment": commitment, "log_size": log_size}).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    return json.loads(proc.stdout)["valid"]
+
+
+@needs_binary
+def test_prove_p2_output_schema():
+    out = _prove_p2([1, 2, 3, 4])
+    assert "proof" in out
+    assert "commitment" in out
+    assert "log_size" in out
+    assert len(out["commitment"]) == 8
+    base64.b64decode(out["proof"])
+
+
+@needs_binary
+def test_prove_p2_verify_p2_roundtrip():
+    out = _prove_p2([1, 2, 3, 4, 5, 6, 7, 8])
+    assert _verify_p2(out["proof"], out["commitment"], out["log_size"])
+
+
+@needs_binary
+def test_prove_p2_tampered_proof_fails():
+    out = _prove_p2([1, 2, 3, 4])
+    raw = bytearray(base64.b64decode(out["proof"]))
+    raw[20] ^= 0xFF
+    bad_proof = base64.b64encode(bytes(raw)).decode()
+    assert not _verify_p2(bad_proof, out["commitment"], out["log_size"])
+
+
+@needs_binary
+def test_prove_p2_different_leaves_different_commitments():
+    out_a = _prove_p2([1, 2, 3, 4])
+    out_b = _prove_p2([5, 6, 7, 8])
+    assert out_a["commitment"] != out_b["commitment"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# merkle_prove / merkle_verify CLI tests (Poseidon2 Merkle tree)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _merkle_prove(leaves: list[int]) -> dict:
+    proc = subprocess.run(
+        [str(BINARY), "merkle_prove"],
+        input=json.dumps({"leaves": leaves}).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    return json.loads(proc.stdout)
+
+
+def _merkle_verify(proof: str, commitment: str, log_size: int) -> bool:
+    proc = subprocess.run(
+        [str(BINARY), "merkle_verify"],
+        input=json.dumps({"proof": proof, "commitment": commitment, "log_size": log_size}).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    return json.loads(proc.stdout)["valid"]
+
+
+@needs_binary
+def test_merkle_prove_output_schema():
+    out = _merkle_prove([1, 2, 3, 4])
+    assert "proof" in out
+    assert "commitment" in out
+    assert "log_size" in out
+    assert len(out["commitment"]) == 8
+    int(out["commitment"], 16)  # must be valid hex
+    base64.b64decode(out["proof"])  # must be valid base64
+
+
+@needs_binary
+def test_merkle_prove_verify_roundtrip_two_leaves():
+    out = _merkle_prove([10, 20])
+    assert _merkle_verify(out["proof"], out["commitment"], out["log_size"])
+
+
+@needs_binary
+def test_merkle_prove_verify_roundtrip_four_leaves():
+    out = _merkle_prove([1, 2, 3, 4])
+    assert _merkle_verify(out["proof"], out["commitment"], out["log_size"])
+
+
+@needs_binary
+def test_merkle_prove_verify_roundtrip_eight_leaves():
+    out = _merkle_prove([1, 2, 3, 4, 5, 6, 7, 8])
+    assert _merkle_verify(out["proof"], out["commitment"], out["log_size"])
+
+
+@needs_binary
+def test_merkle_tampered_proof_fails():
+    out = _merkle_prove([1, 2, 3, 4])
+    raw = bytearray(base64.b64decode(out["proof"]))
+    raw[20] ^= 0xFF
+    bad_proof = base64.b64encode(bytes(raw)).decode()
+    assert not _merkle_verify(bad_proof, out["commitment"], out["log_size"])
+
+
+@needs_binary
+def test_merkle_different_leaves_different_commitments():
+    out_a = _merkle_prove([1, 2, 3, 4])
+    out_b = _merkle_prove([1, 2, 3, 5])
+    assert out_a["commitment"] != out_b["commitment"]
+
+
+@needs_binary
+def test_merkle_log_size_grows_with_leaves():
+    out_small = _merkle_prove([1, 2])
+    out_large = _merkle_prove([1, 2, 3, 4, 5, 6, 7, 8])
+    assert out_large["log_size"] >= out_small["log_size"]

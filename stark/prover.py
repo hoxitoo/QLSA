@@ -293,3 +293,94 @@ def prove_mldsa_batch(
         verified=int(out["verified"]),
         rejected=int(out["rejected"]),
     )
+
+
+# ─── Poseidon2 Merkle-tree STARK ─────────────────────────────────────────────
+
+@dataclass
+class MerkleProofResult(ProofResult):
+    """ProofResult whose commitment is a Poseidon2 Merkle root (M31 hex)."""
+
+
+def prove_batch_merkle(batch: Batch) -> MerkleProofResult:
+    """
+    Generate a Poseidon2 Merkle-tree STARK proof for the batch.
+
+    Uses the same 8 × u64 leaf encoding as prove_batch, but proves a binary
+    Merkle tree built with Poseidon2 2-to-1 compression instead of a hash chain.
+    The commitment is the Merkle root (M31 field element, 8-char hex).
+
+    The `onchain_commitment` binding formula is unchanged:
+      Blake2s(proof[0:32] ∥ merkle_root[:32])[:8]
+
+    Raises RuntimeError if the binary is not built or the prover fails.
+    """
+    if not binary_available():
+        raise RuntimeError(
+            f"STARK binary not found at {BINARY}. "
+            "Build it with: cd stark_stwo && cargo +nightly-2025-07-01 build --release"
+        )
+
+    leaves = _txs_to_leaves(batch)
+    result = _call_prover_merkle(leaves, merkle_root=batch.merkle_root)
+
+    batch.stark_commitment = result.commitment
+    batch.stark_log_size = result.log_size
+    return result
+
+
+def _call_prover_merkle(
+    leaves: list[int], merkle_root: bytes | None = None
+) -> MerkleProofResult:
+    """Call the `merkle_prove` command on the Rust binary."""
+    payload = json.dumps({"leaves": leaves})
+
+    try:
+        proc = subprocess.run(
+            [str(BINARY), "merkle_prove"],
+            input=payload.encode(),
+            capture_output=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("qlsa-stark-stwo merkle_prove timed out after 300 s")
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode(errors="replace")
+        raise RuntimeError(
+            f"qlsa-stark-stwo merkle_prove failed (exit {proc.returncode}):\n{stderr}"
+        )
+
+    try:
+        out = json.loads(proc.stdout.decode(errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"qlsa-stark-stwo merkle_prove returned invalid JSON: {exc}"
+        ) from exc
+
+    try:
+        proof_bytes = base64.b64decode(out["proof"])
+        commitment = str(out["commitment"])
+        log_size = int(out["log_size"])
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError(
+            f"qlsa-stark-stwo merkle_prove output missing field: {exc}"
+        ) from exc
+
+    if len(proof_bytes) < 32:
+        raise RuntimeError(
+            f"qlsa-stark-stwo merkle_prove returned proof shorter than 32 bytes "
+            f"({len(proof_bytes)} bytes)"
+        )
+
+    binding_input = proof_bytes[:32]
+    if merkle_root is not None:
+        binding_input = binding_input + merkle_root[:32]
+    onchain_commitment = hashlib.blake2s(binding_input).digest()[:8].hex()
+
+    return MerkleProofResult(
+        proof=proof_bytes,
+        commitment=commitment,
+        log_size=log_size,
+        onchain_commitment=onchain_commitment,
+    )
