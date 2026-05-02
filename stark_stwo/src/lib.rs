@@ -103,6 +103,11 @@ const MAX_LOG_SIZE: u32 = 28;
 /// are not canonical field elements and must be rejected before `from_u32_unchecked`.
 const M31_MODULUS: u32 = (1u32 << 31) - 1;
 
+/// Maximum proof size accepted by the verifiers (32 MB).
+/// Prevents crafted length-prefix fields in bincode from triggering unbounded heap
+/// allocation before any actual deserialization work begins (audit H-3).
+const MAX_PROOF_BYTES: usize = 32 * 1024 * 1024;
+
 /// Verify a proof previously produced by `prove_hash_chain`.
 pub fn verify_hash_chain(
     proof_bytes: &[u8],
@@ -133,7 +138,7 @@ pub fn verify_hash_chain(
     let _commitment = BaseField::from_u32_unchecked(commitment_val); // validated above
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
-        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
+        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>())
             .map_err(|e| format!("deserialization error: {e:?}"))?;
 
     let mut config = PcsConfig::default();
@@ -271,7 +276,7 @@ pub fn verify_hash_chain_poseidon2(
     }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
-        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
+        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>())
             .map_err(|e| format!("deserialization error: {e:?}"))?;
 
     let mut config = PcsConfig::default();
@@ -439,7 +444,7 @@ pub fn verify_merkle_root(
     }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
-        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
+        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>())
             .map_err(|e| format!("deserialization error: {e:?}"))?;
 
     let mut config = PcsConfig::default();

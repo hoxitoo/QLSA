@@ -138,16 +138,16 @@ fn main() {
                 .iter()
                 .enumerate()
                 .map(|(i, e)| {
-                    let pk  = base64_decode(&e.pk).unwrap_or_else(|err| {
-                        eprintln!("entry[{i}]: invalid pk base64: {err}");
+                    let pk  = base64_decode(&e.pk).unwrap_or_else(|_| {
+                        eprintln!("entry[{i}]: invalid pk base64");
                         std::process::exit(1);
                     });
-                    let msg = base64_decode(&e.msg).unwrap_or_else(|err| {
-                        eprintln!("entry[{i}]: invalid msg base64: {err}");
+                    let msg = base64_decode(&e.msg).unwrap_or_else(|_| {
+                        eprintln!("entry[{i}]: invalid msg base64");
                         std::process::exit(1);
                     });
-                    let sig = base64_decode(&e.sig).unwrap_or_else(|err| {
-                        eprintln!("entry[{i}]: invalid sig base64: {err}");
+                    let sig = base64_decode(&e.sig).unwrap_or_else(|_| {
+                        eprintln!("entry[{i}]: invalid sig base64");
                         std::process::exit(1);
                     });
                     (pk, msg, sig)
