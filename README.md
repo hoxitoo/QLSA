@@ -6,6 +6,19 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 
 ---
 
+> **⚠ NOT PRODUCTION READY — Research Prototype**
+>
+> This codebase is a **research prototype / testnet-ready demonstrator**.
+> It has **not** undergone an external cryptographic audit.
+> Known architectural limitations include:
+> - ML-DSA signature verification happens off-chain, not inside the STARK circuit
+> - The Merkle AIR lacks inter-node continuity constraints (lookup arguments not yet implemented)
+> - LOG_BLOWUP = 4 targets ~120-bit FRI security; production parameters require formal review
+>
+> **Do not deploy to mainnet or use with real funds without a full external audit.**
+
+---
+
 ## The Problem
 
 Post-quantum cryptography is inevitable — but it breaks blockchain scalability.

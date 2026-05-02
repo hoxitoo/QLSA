@@ -6,7 +6,7 @@ pub mod poseidon2_merkle_air;
 pub mod trace;
 
 use stwo::core::air::Component;
-use stwo::core::channel::Blake2sM31Channel;
+use stwo::core::channel::{Blake2sM31Channel, Channel};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
@@ -19,9 +19,9 @@ use stwo_constraint_framework::TraceLocationAllocator;
 
 use air::{HashChainComponent, HashChainEval};
 
-/// log2 of the FRI blowup factor. 2 → blowup 4× (security margin ~60-bit at 30 FRI rounds).
-/// Was 1 (2×, ~30-bit). Increase to 3+ for production.
-const LOG_BLOWUP: u32 = 2;
+/// log2 of the FRI blowup factor. 4 → blowup 16× (security margin ~120-bit at 30 FRI rounds).
+/// Do NOT reduce below 4 for any network-facing deployment.
+const LOG_BLOWUP: u32 = 4;
 
 fn make_config(log_size: u32) -> PcsConfig {
     let mut c = PcsConfig::default();
@@ -70,6 +70,9 @@ pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(columns);
     tree_builder.commit(channel);
+
+    // Bind commitment to Fiat-Shamir transcript (C-2 fix).
+    channel.mix_u32s(&[commitment.0]);
 
     let component = HashChainComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -127,7 +130,7 @@ pub fn verify_hash_chain(
     if commitment_val >= M31_MODULUS {
         return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
     }
-    let _commitment = BaseField::from_u32_unchecked(commitment_val);
+    let _commitment = BaseField::from_u32_unchecked(commitment_val); // validated above
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard())
@@ -158,6 +161,9 @@ pub fn verify_hash_chain(
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Mirror the prover's channel.mix_u32s so the Fiat-Shamir transcript matches (C-2 fix).
+    verifier_channel.mix_u32s(&[commitment_val]);
 
     let result = verify::<Blake2sM31MerkleChannel>(
         &[&component],
@@ -210,6 +216,9 @@ pub fn prove_hash_chain_poseidon2(leaves: &[u64]) -> Result<(Vec<u8>, String, u3
     tree_builder.extend_evals(main_cols);
     tree_builder.commit(channel);
 
+    // Bind commitment to Fiat-Shamir transcript (C-2 fix).
+    channel.mix_u32s(&[commitment.0]);
+
     let ids = preprocessed_column_ids();
     let component = poseidon2_air::Poseidon2Component::new(
         &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids),
@@ -255,10 +264,9 @@ pub fn verify_hash_chain_poseidon2(
             commitment_bytes.len()
         ));
     }
-    // Commitment is for bookkeeping; the proof cryptographically commits to the trace.
-    // Still validate the field range so callers get a clear error on malformed input.
-    let _commitment_val = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
-    if _commitment_val >= M31_MODULUS {
+    // Validate range; commitment is mixed into Fiat-Shamir transcript below (C-2 fix).
+    let commitment_val_p2 = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
+    if commitment_val_p2 >= M31_MODULUS {
         return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
     }
 
@@ -289,6 +297,9 @@ pub fn verify_hash_chain_poseidon2(
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Mirror the prover's channel.mix_u32s so the Fiat-Shamir transcript matches (C-2 fix).
+    verifier_channel.mix_u32s(&[commitment_val_p2]);
 
     let result = verify::<Blake2sM31MerkleChannel>(
         &[&component],
@@ -380,6 +391,9 @@ pub fn prove_merkle_root(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), Strin
     tree_builder.extend_evals(main_cols);
     tree_builder.commit(channel);
 
+    // Bind commitment to Fiat-Shamir transcript (C-2 fix).
+    channel.mix_u32s(&[commitment.0]);
+
     let component = poseidon2_merkle_air::new_component(log_size);
 
     let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
@@ -419,8 +433,8 @@ pub fn verify_merkle_root(
             commitment_bytes.len()
         ));
     }
-    let _commitment_val = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
-    if _commitment_val >= M31_MODULUS {
+    let commitment_val_merkle = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
+    if commitment_val_merkle >= M31_MODULUS {
         return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
     }
 
@@ -446,6 +460,9 @@ pub fn verify_merkle_root(
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Mirror the prover's channel.mix_u32s so the Fiat-Shamir transcript matches (C-2 fix).
+    verifier_channel.mix_u32s(&[commitment_val_merkle]);
 
     let result = verify::<Blake2sM31MerkleChannel>(
         &[&component],
@@ -530,6 +547,59 @@ mod tests {
         let result = verify_hash_chain_poseidon2(&bad_proof, &commitment_hex, log_size)
             .unwrap_or(false);
         assert!(!result);
+    }
+
+    #[test]
+    fn test_wrong_commitment_fails_hash_chain() {
+        let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_hash_chain(&leaves).expect("proving failed");
+        // Flip one bit in the commitment hex to produce a different (valid-range) commitment.
+        let bad_commitment = {
+            let mut val = u32::from_le_bytes(
+                hex::decode(&commitment_hex).unwrap().try_into().unwrap(),
+            );
+            val = val.wrapping_add(1) % M31_MODULUS;
+            hex::encode(val.to_le_bytes())
+        };
+        // A wrong commitment changes the Fiat-Shamir transcript; verification must fail.
+        let result = verify_hash_chain(&proof_bytes, &bad_commitment, log_size)
+            .unwrap_or(false);
+        assert!(!result, "wrong commitment should cause verification failure");
+    }
+
+    #[test]
+    fn test_wrong_commitment_fails_poseidon2() {
+        let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_hash_chain_poseidon2(&leaves).expect("poseidon2 proving failed");
+        let bad_commitment = {
+            let mut val = u32::from_le_bytes(
+                hex::decode(&commitment_hex).unwrap().try_into().unwrap(),
+            );
+            val = val.wrapping_add(1) % M31_MODULUS;
+            hex::encode(val.to_le_bytes())
+        };
+        let result = verify_hash_chain_poseidon2(&proof_bytes, &bad_commitment, log_size)
+            .unwrap_or(false);
+        assert!(!result, "wrong commitment should cause poseidon2 verification failure");
+    }
+
+    #[test]
+    fn test_wrong_commitment_fails_merkle() {
+        let leaves = vec![1u64, 2, 3, 4];
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_merkle_root(&leaves).expect("merkle proving failed");
+        let bad_commitment = {
+            let mut val = u32::from_le_bytes(
+                hex::decode(&commitment_hex).unwrap().try_into().unwrap(),
+            );
+            val = val.wrapping_add(1) % M31_MODULUS;
+            hex::encode(val.to_le_bytes())
+        };
+        let result = verify_merkle_root(&proof_bytes, &bad_commitment, log_size)
+            .unwrap_or(false);
+        assert!(!result, "wrong commitment should cause merkle verification failure");
     }
 
     // ── Poseidon2 Merkle tests ────────────────────────────────────────────────
