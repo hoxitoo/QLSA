@@ -261,3 +261,70 @@ def test_merkle_log_size_grows_with_leaves():
     out_small = _merkle_prove([1, 2])
     out_large = _merkle_prove([1, 2, 3, 4, 5, 6, 7, 8])
     assert out_large["log_size"] >= out_small["log_size"]
+
+
+# ── Negative security tests ───────────────────────────────────────────────────
+
+@needs_binary
+def test_merkle_empty_leaves_rejected():
+    proc = subprocess.run(
+        [str(BINARY), "merkle_prove"],
+        input=json.dumps({"leaves": []}).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    assert proc.returncode != 0, "empty leaves should be rejected"
+
+
+@needs_binary
+def test_merkle_out_of_bounds_log_size_rejected():
+    out = _merkle_prove([1, 2, 3, 4])
+    proc = subprocess.run(
+        [str(BINARY), "merkle_verify"],
+        input=json.dumps({
+            "proof": out["proof"],
+            "commitment": out["commitment"],
+            "log_size": 100,  # absurdly large — should error
+        }).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    # Must error (non-zero exit) OR return valid=False
+    if proc.returncode == 0:
+        assert not json.loads(proc.stdout)["valid"]
+
+
+@needs_binary
+def test_merkle_zero_log_size_rejected():
+    out = _merkle_prove([1, 2])
+    proc = subprocess.run(
+        [str(BINARY), "merkle_verify"],
+        input=json.dumps({
+            "proof": out["proof"],
+            "commitment": out["commitment"],
+            "log_size": 0,
+        }).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    # Must error (non-zero exit) OR return valid=False
+    if proc.returncode == 0:
+        assert not json.loads(proc.stdout)["valid"]
+
+
+@needs_binary
+def test_merkle_wrong_log_size_fails():
+    out = _merkle_prove([1, 2, 3, 4])
+    wrong_log = out["log_size"] + 1
+    proc = subprocess.run(
+        [str(BINARY), "merkle_verify"],
+        input=json.dumps({
+            "proof": out["proof"],
+            "commitment": out["commitment"],
+            "log_size": wrong_log,
+        }).encode(),
+        capture_output=True,
+        timeout=60,
+    )
+    if proc.returncode == 0:
+        assert not json.loads(proc.stdout)["valid"]

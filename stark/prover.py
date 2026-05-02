@@ -367,12 +367,28 @@ def _call_prover_merkle(
             f"qlsa-stark-stwo merkle_prove output missing field: {exc}"
         ) from exc
 
+    if len(commitment) != 8:
+        raise RuntimeError(
+            f"qlsa-stark-stwo merkle_prove returned unexpected commitment length "
+            f"({len(commitment)} chars, expected 8)"
+        )
+
     if len(proof_bytes) < 32:
         raise RuntimeError(
             f"qlsa-stark-stwo merkle_prove returned proof shorter than 32 bytes "
             f"({len(proof_bytes)} bytes)"
         )
 
+    # merkle_root binds the on-chain commitment to the batch's SHA3-512 Merkle root,
+    # preventing proof replay against a different batch. Callers should always provide
+    # it; the None fallback produces an unbound commitment (legacy/testing path only).
+    if merkle_root is None:
+        import warnings
+        warnings.warn(
+            "_call_prover_merkle called without merkle_root: on-chain commitment "
+            "will not be bound to any batch Merkle root.",
+            stacklevel=3,
+        )
     binding_input = proof_bytes[:32]
     if merkle_root is not None:
         binding_input = binding_input + merkle_root[:32]

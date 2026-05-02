@@ -336,6 +336,8 @@ pub fn build_trace(leaves: &[u64]) -> (TraceColumns, TraceColumns, BaseField) {
     }
 
     // Root commitment = s0 at the last round of the last REAL node.
+    // IMPORTANT: this read MUST happen before bit_reverse_coset_to_circle_domain_order;
+    // after bit-reversal s0_col[n_real-1] no longer corresponds to the final round output.
     let root_commitment = s0_col[n_real - 1];
 
     // ── Bit-reverse all columns ───────────────────────────────────────────────
