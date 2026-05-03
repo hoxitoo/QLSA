@@ -231,7 +231,7 @@
     <section class="hero">
       <div class="container hero-grid">
         <div>
-          <div class="eyebrow">Post-quantum rollup infrastructure — Poseidon2 AIR + ML-DSA batch verifier live, testnet next</div>
+          <div class="eyebrow">Post-quantum rollup infrastructure — PyO3 native prover, 128-bit commitment, testnet infrastructure live</div>
           <h1>Build the post-quantum migration layer before it becomes urgent</h1>
           <p class="sub">
             QLSA aggregates thousands of post-quantum signatures into a single constant-size proof,
@@ -248,8 +248,8 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>CI</small><strong>5/5 jobs green — 77 Rust tests passing</strong></div>
-            <div class="signal-card"><small>Status</small><strong>Phase 3 complete — ML-DSA batch verifier live</strong></div>
+            <div class="signal-card"><small>CI</small><strong>5/5 jobs green — 93 Rust tests passing</strong></div>
+            <div class="signal-card"><small>Status</small><strong>Phase 6 infra ready — testnet deployment next</strong></div>
           </div>
         </div>
 
@@ -283,7 +283,7 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Security audit completed May 2026. All critical and high findings resolved. 77 Rust tests + full Python CI — all 5 CI jobs green.</p>
+            <p>Security audit completed May 2026. All findings resolved. PyO3 native extension replaces subprocess (zero-overhead FFI). 93 Rust tests + full Python CI — all 5 CI jobs green.</p>
           </div>
         </div>
         <div class="progress-grid">
@@ -553,11 +553,11 @@
 
         <div class="phase-list">
           <div class="phase"><div class="phase-top"><h3>Phase 1 — Core</h3><span class="phase-tag complete">✓ Complete</span></div><p>ML-DSA-65/44/87 keys, signing, transaction model, SHA3-512 Merkle tree, batch aggregation. Security audit passed (May 2026).</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 2 — STARK Prototype</h3><span class="phase-tag complete">✓ Complete</span></div><p>Stwo 2.2.0 Circle STARK — hash-chain AIR + Poseidon2-over-M31 AIR (7 columns, 6 constraints), ML-DSA-65 batch verifier in Rust (FIPS 204), FRI blowup ×4. 77 Rust tests green.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 3 — Smart Contracts</h3><span class="phase-tag complete">✓ Complete</span></div><p>QLSAVerifierFull, QLSAVerifierBound (Merkle-root-bound Blake2s), BatchRegistry, BatchRegistryV2 — all deployed (Hardhat). Next: testnet deployment.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag complete">✓ Complete</span></div><p>In-memory mempool, auto-batcher, FastAPI REST endpoint. Full STARK prove→submit pipeline wired end-to-end.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 2 — STARK Prototype</h3><span class="phase-tag complete">✓ Complete</span></div><p>Stwo 2.2.0 Circle STARK — hash-chain AIR + Poseidon2-over-M31 AIR (7 columns, 6 constraints), ML-DSA-65 batch verifier in Rust (FIPS 204), FRI blowup ×4. 128-bit Fiat-Shamir bound commitment. 93 Rust tests green.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 3 — Smart Contracts</h3><span class="phase-tag complete">✓ Complete</span></div><p>QLSAVerifierFull, QLSAVerifierBound (Merkle-root-bound Blake2s, bytes16 128-bit commitment), BatchRegistry, BatchRegistryV2 — all deployed (Hardhat). 29/29 contract tests green.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag complete">✓ Complete</span></div><p>In-memory mempool, auto-batcher, FastAPI REST endpoint. Full STARK prove→submit pipeline via PyO3 native FFI (zero subprocess overhead).</p></div>
           <div class="phase"><div class="phase-top"><h3>Phase 5 — SDK</h3><span class="phase-tag complete">✓ Complete</span></div><p>Python SDK (wallet + async client) and TypeScript/JavaScript SDK with full input validation and typed API.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag">Planned</span></div><p>Public deployment on Polygon zkEVM or Starknet, end-to-end demo, and benchmark-backed technical validation.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag active">⚡ In Progress</span></div><p>Infrastructure complete: Docker, E2E demo script, BatchFinalized event monitor, deployment scripts. Awaiting public deployment on Polygon zkEVM Cardona.</p></div>
         </div>
       </div>
     </section>
@@ -578,7 +578,7 @@
           <div class="faq-item"><h3>Why not just replace ECDSA directly?</h3><p>Because the size increase of post-quantum signatures can cause major throughput and cost problems if deployed naively.</p></div>
           <div class="faq-item"><h3>Does QLSA already prove ML-DSA inside STARK?</h3><p>Partially. ML-DSA-65 signatures are verified off-chain in Rust (FIPS 204); valid signatures are committed via Poseidon2 sponge and proven with Circle STARK. The STARK circuit does not yet execute ML-DSA arithmetic internally — that remains the MVP-3 research target.</p></div>
           <div class="faq-item"><h3>What smart contracts exist?</h3><p><code>QLSAVerifierFull</code> binds a STARK proof to a Blake2s commitment. <code>QLSAVerifierBound</code> additionally anchors the proof to the batch Merkle root via <code>Blake2s(proof[:32] ∥ merkle_root[:32])</code>, preventing replay. <code>BatchRegistry</code> and <code>BatchRegistryV2</code> store finalized roots on-chain.</p></div>
-          <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is research-stage software. Phases 1–5 are implemented and audited, but the system should not be used in production systems until testnet validation is complete.</p></div>
+          <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is research-stage software. Phases 1–6 infrastructure is implemented and audited (May 2026), but the system should not be used in production until testnet validation is complete.</p></div>
         </div>
       </div>
     </section>
