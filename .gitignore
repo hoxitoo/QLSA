@@ -211,3 +211,6 @@ stark/target/
 
 # Private audit and internal notes (owner-only, never published)
 .private/
+
+# Auto-generated testnet deployment output (contract addresses, keep locally)
+.env.deployed

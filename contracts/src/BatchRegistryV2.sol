@@ -41,7 +41,7 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     mapping(bytes32 => uint256) public batchTimestamps;
 
     /// @notice The commitment used to finalize each batch (for auditability).
-    mapping(bytes32 => bytes8) public batchCommitments;
+    mapping(bytes32 => bytes16) public batchCommitments;
 
     // ──────────────────────────────────────────────────────────────────────────
     // Events
@@ -53,7 +53,7 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     /// @param timestamp   Block timestamp of finalization.
     event BatchFinalized(
         bytes32 indexed merkleRoot,
-        bytes8  indexed commitment,
+        bytes16  indexed commitment,
         uint256         timestamp
     );
 
@@ -92,7 +92,7 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     /// @param starkProof  Full serialized STARK proof bytes.
     function submitBatch(
         bytes32        merkleRoot,
-        bytes8         commitment,
+        bytes16         commitment,
         bytes calldata starkProof
     ) external nonReentrant {
         if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
@@ -113,7 +113,7 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     }
 
     /// @notice Retrieve the commitment stored for a finalized batch.
-    function getCommitment(bytes32 merkleRoot) external view returns (bytes8) {
+    function getCommitment(bytes32 merkleRoot) external view returns (bytes16) {
         return batchCommitments[merkleRoot];
     }
 

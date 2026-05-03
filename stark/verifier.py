@@ -1,14 +1,18 @@
 """
-Python wrapper around the qlsa-stark-stwo Rust binary — verify side.
+Python interface to the qlsa_stark_stwo native extension — verify side.
+
+Install the extension once before use:
+    cd stark_stwo && maturin develop --features python --release
 """
 
 from __future__ import annotations
 
-import base64
-import json
-import subprocess
-
-from stark.prover import BINARY, binary_available
+try:
+    import qlsa_stark_stwo as _ext
+    _HAVE_EXT = True
+except ImportError:
+    _ext = None
+    _HAVE_EXT = False
 
 
 def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
@@ -17,45 +21,15 @@ def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
 
     Args:
         proof:      Raw proof bytes (from ProofResult.proof).
-        commitment: Hex commitment string (from ProofResult.commitment).
+        commitment: 32-char hex commitment string (from ProofResult.commitment).
         log_size:   log₂(trace length) (from ProofResult.log_size).
 
     Returns:
         True if the proof is valid, False otherwise.
-
-    Raises:
-        RuntimeError if the binary is not built or crashes unexpectedly.
     """
-    if not binary_available():
+    if not _HAVE_EXT:
         raise RuntimeError(
-            f"STARK binary not found at {BINARY}. "
-            "Build it with: cd stark_stwo && cargo +nightly-2025-07-01 build --release"
+            "qlsa_stark_stwo extension required for verify. "
+            "Install with: cd stark_stwo && maturin develop --features python --release"
         )
-
-    payload = json.dumps({
-        "proof":      base64.b64encode(proof).decode("ascii"),
-        "commitment": commitment,
-        "log_size":   log_size,
-    })
-
-    try:
-        proc = subprocess.run(
-            [str(BINARY), "verify"],
-            input=payload.encode(),
-            capture_output=True,
-            timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("qlsa-stark-stwo verify timed out after 120 s")
-
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode(errors="replace")
-        raise RuntimeError(
-            f"qlsa-stark-stwo verify failed (exit {proc.returncode}):\n{stderr}"
-        )
-
-    try:
-        out = json.loads(proc.stdout.decode(errors="replace"))
-        return bool(out["valid"])
-    except (json.JSONDecodeError, KeyError) as exc:
-        raise RuntimeError(f"qlsa-stark-stwo verify returned invalid JSON: {exc}") from exc
+    return _ext.verify(proof, commitment, log_size)

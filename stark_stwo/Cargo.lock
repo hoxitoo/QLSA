@@ -564,6 +564,7 @@ name = "qlsa-stark-stwo"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "blake2",
  "hex",
  "serde",
  "serde_json",

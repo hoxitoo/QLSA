@@ -82,7 +82,12 @@ pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
 
 /// Total trace rows = smallest 2^k ≥ n_leaves·N_ROUNDS, with k ≥ MIN_LOG_SIZE.
 pub fn compute_log_size(n_leaves: usize) -> u32 {
-    let n_real = n_leaves * N_ROUNDS;
+    // checked_mul prevents overflow for n_leaves > ~2^61; callers reject u32::MAX
+    // because it exceeds MAX_LOG_SIZE (28).
+    let n_real = match n_leaves.checked_mul(N_ROUNDS) {
+        Some(v) => v,
+        None => return u32::MAX,
+    };
     let needed = n_real.max(1 << MIN_LOG_SIZE);
     let p2 = needed.next_power_of_two();
     p2.trailing_zeros().max(MIN_LOG_SIZE)

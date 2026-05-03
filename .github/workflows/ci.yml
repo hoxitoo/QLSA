@@ -56,6 +56,21 @@ jobs:
           mkdir -p "${HOME}/_oqs"
           cp -r "${HOME}/liboqs-install/." "${HOME}/_oqs/"
 
+      - name: Install Rust nightly for PyO3 extension
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-07-01
+
+      - name: Cache Cargo registry + build (PyO3 extension)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            stark_stwo/target
+          key: cargo-stwo-pyo3-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('stark_stwo/Cargo.lock') }}
+          restore-keys: cargo-stwo-pyo3-${{ runner.os }}-
+
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
@@ -64,6 +79,14 @@ jobs:
 
       - name: Verify oqs import
         run: python -c "import oqs; print('liboqs OK')"
+
+      - name: Build and install PyO3 extension
+        working-directory: stark_stwo
+        timeout-minutes: 20
+        run: maturin develop --features python --release
+
+      - name: Verify PyO3 extension
+        run: python -c "import qlsa_stark_stwo; proof, c, n = qlsa_stark_stwo.prove([1,2,3,4]); print('qlsa_stark_stwo OK — commitment', c)"
 
       - name: Run tests
         timeout-minutes: 15
@@ -167,7 +190,7 @@ jobs:
           import sys, json
           d = json.load(sys.stdin)
           assert len(d['proof']) > 0
-          assert len(d['commitment']) == 8, f'commitment len={len(d[\"commitment\"])}'
+          assert len(d['commitment']) == 32, f'commitment len={len(d["commitment"])}'
           assert d['log_size'] >= 3
           print('prove OK — log_size', d['log_size'], 'commitment', d['commitment'])
           "

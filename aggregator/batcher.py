@@ -131,18 +131,17 @@ class Batcher:
         return self._try_prove(batch)
 
     def _try_prove(self, batch: Batch) -> BatchResult:
-        """Run the STARK prover if the binary is available; skip gracefully."""
+        """Run the STARK prover if the PyO3 extension is available; skip gracefully."""
         try:
-            from stark.prover import binary_available, prove_batch
-            if binary_available():
-                pr = prove_batch(batch)
-                return BatchResult(
-                    batch=batch,
-                    proof=pr.proof,
-                    commitment=pr.commitment,
-                )
+            from stark.prover import prove_batch
+            pr = prove_batch(batch)
+            return BatchResult(
+                batch=batch,
+                proof=pr.proof,
+                commitment=pr.commitment,
+            )
         except RuntimeError as exc:
-            # Expected: binary not built, prover timeout, or serialization failure.
+            # Expected: extension not installed, prover timeout, or serialization failure.
             logging.warning("STARK proving skipped: %s", exc)
         except Exception as exc:
             # Unexpected: log at error level so it's not silently swallowed.

@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  aggregator:
+    build: .
+    image: qlsa-aggregator:latest
+    container_name: qlsa-aggregator
+    ports:
+      - "${AGGREGATOR_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      - AGGREGATOR_HOST=0.0.0.0
+      - AGGREGATOR_PORT=8080
+    volumes:
+      # Mount the pre-built Stwo binary so the aggregator can call the prover.
+      # Build it with: cd stark_stwo && cargo +nightly-2025-07-01 build --release
+      - ./stark_stwo/target/release/qlsa-stark-stwo:/app/stark_stwo/target/release/qlsa-stark-stwo:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

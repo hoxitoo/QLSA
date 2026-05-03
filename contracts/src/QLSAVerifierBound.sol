@@ -4,25 +4,23 @@ pragma solidity ^0.8.24;
 import "./IQLSAVerifierV2.sol";
 import "./verifier/Blake2s.sol";
 
-/// @title QLSAVerifierBound — Merkle-root-bound FRI commitment verifier
+/// @title QLSAVerifierBound — Merkle-root-bound FRI commitment verifier (128-bit)
 ///
 /// Implements IQLSAVerifierV2: binds the STARK proof to a specific batch
-/// Merkle root, closing the replay/substitution attack vector present in
-/// QLSAVerifierFull (which only binds proof to commitment, not to Merkle root).
+/// Merkle root and uses a 128-bit (bytes16) commitment for collision resistance.
 ///
 /// Commitment scheme (matches stark/prover.py):
-///   onchain_commitment = Blake2s(proof[0:32] ∥ merkleRoot)[0:8]
+///   onchain_commitment = Blake2s(proof[0:32] ∥ merkleRoot)[0:16]
 ///
 /// Security properties:
-///   + Proof cannot be replayed against a different Merkle root:
-///     changing merkleRoot invalidates the commitment check.
-///   + Commitment cannot be forged without inverting Blake2s (128-bit security).
-///   + Proof and Merkle root are both required to produce a valid commitment.
+///   + 128-bit commitment — birthday-bound collisions require ~2^64 batches.
+///   + Proof cannot be replayed against a different Merkle root.
+///   + Commitment cannot be forged without inverting Blake2s.
 ///   - Still not a full FRI verifier: polynomial queries and OODS are not checked.
 ///     Replace with the full Circle STARK verifier before mainnet deployment.
 ///
 /// Off-chain counterpart:
-///   Python: hashlib.blake2s(proof[:32] + merkle_root[:32]).digest()[:8].hex()
+///   Python: hashlib.blake2s(proof[:32] + merkle_root[:32]).digest()[:16].hex()
 contract QLSAVerifierBound is IQLSAVerifierV2 {
 
     // ── Constants ─────────────────────────────────────────────────────────────
@@ -38,7 +36,7 @@ contract QLSAVerifierBound is IQLSAVerifierV2 {
     /// @inheritdoc IQLSAVerifierV2
     function verify(
         bytes calldata proof,
-        bytes8         commitment,
+        bytes16        commitment,
         bytes32        merkleRoot
     ) external pure override returns (bool) {
 
@@ -47,12 +45,12 @@ contract QLSAVerifierBound is IQLSAVerifierV2 {
         if (proof.length > MAX_PROOF_LENGTH) return false;
 
         // 2. Non-trivial inputs.
-        if (commitment == bytes8(0)) return false;
+        if (commitment == bytes16(0)) return false;
         if (merkleRoot == bytes32(0)) return false;
 
         // 3. Merkle-root-bound commitment check.
         //    Hash the first 32 bytes of the proof concatenated with the Merkle root.
-        //    commitment must equal the first 8 bytes of that Blake2s hash.
+        //    commitment must equal the first 16 bytes of that Blake2s hash (128-bit).
         //    proof.length >= 700 so proof[0:32] is always in bounds.
         bytes memory input = new bytes(64);
         assembly {
@@ -62,7 +60,7 @@ contract QLSAVerifierBound is IQLSAVerifierV2 {
             mstore(add(input, 64), merkleRoot)
         }
         bytes32 h = Blake2s.hash(input);
-        if (bytes8(h) != commitment) return false;
+        if (bytes16(h) != commitment) return false;
 
         return true;
     }
