@@ -26,10 +26,10 @@ BINARY = Path(__file__).parent.parent / "stark_stwo" / "target" / "release" / "q
 @dataclass
 class ProofResult:
     proof: bytes             # raw proof bytes (serialised Stwo StarkProof)
-    commitment: str          # 8-char little-endian hex (4 bytes, M31) — for Rust verifier
+    commitment: str          # 32-char hex (16 bytes, 128-bit) — for Rust verifier
     log_size: int            # log₂(trace length) — required by the Rust verifier
     onchain_commitment: str = field(default="")
-    # onchain_commitment: 16-char hex (8 bytes) = Blake2s(proof[0:32] ∥ merkle_root[:32])[:8]
+    # onchain_commitment: 32-char hex (16 bytes, 128-bit) = Blake2s(proof[0:32] ∥ merkle_root[:32])[:16]
     # Use this as the commitment when submitting to QLSAVerifierBound / BatchRegistryV2.
     # The Merkle root binding ensures the proof cannot be replayed against a different batch.
 
@@ -104,10 +104,10 @@ def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofRe
     except (KeyError, ValueError) as exc:
         raise RuntimeError(f"qlsa-stark-stwo prove output missing field: {exc}") from exc
 
-    if len(commitment) != 8:
+    if len(commitment) != 32:
         raise RuntimeError(
             f"qlsa-stark-stwo prove returned unexpected commitment length "
-            f"({len(commitment)} chars, expected 8)"
+            f"({len(commitment)} chars, expected 32)"
         )
 
     if len(proof_bytes) < 32:
@@ -123,7 +123,7 @@ def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofRe
     binding_input = proof_bytes[:32]
     if merkle_root is not None:
         binding_input = binding_input + merkle_root[:32]
-    onchain_commitment = hashlib.blake2s(binding_input).digest()[:8].hex()
+    onchain_commitment = hashlib.blake2s(binding_input).digest()[:16].hex()
 
     return ProofResult(
         proof=proof_bytes,
@@ -215,7 +215,7 @@ def _call_prover_p2(
     binding_input = proof_bytes[:32]
     if merkle_root is not None:
         binding_input = binding_input + merkle_root[:32]
-    onchain_commitment = hashlib.blake2s(binding_input).digest()[:8].hex()
+    onchain_commitment = hashlib.blake2s(binding_input).digest()[:16].hex()
 
     return Poseidon2ProofResult(
         proof=proof_bytes,
@@ -392,7 +392,7 @@ def _call_prover_merkle(
     binding_input = proof_bytes[:32]
     if merkle_root is not None:
         binding_input = binding_input + merkle_root[:32]
-    onchain_commitment = hashlib.blake2s(binding_input).digest()[:8].hex()
+    onchain_commitment = hashlib.blake2s(binding_input).digest()[:16].hex()
 
     return MerkleProofResult(
         proof=proof_bytes,

@@ -9,7 +9,7 @@ const PROOF_LEN  = 700;
 const PROOF_FILL = "ab";
 
 const makeProof = (len, fill = PROOF_FILL) => "0x" + fill.repeat(len);
-const toBytes8  = (hash32hex) => "0x" + hash32hex.slice(2, 18);
+const toBytes16 = (hash32hex) => "0x" + hash32hex.slice(2, 34);
 
 describe("BatchRegistryV2", function () {
   let registry;
@@ -42,7 +42,7 @@ describe("BatchRegistryV2", function () {
     const proofHead = "0x" + PROOF_FILL.repeat(32);
     const input64   = proofHead + "cd".repeat(32);
     const rootHash  = await b2s.hash(input64);
-    VALID_COMMITMENT = toBytes8(rootHash);
+    VALID_COMMITMENT = toBytes16(rootHash);
   });
 
   // ── Deployment ────────────────────────────────────────────────────────────

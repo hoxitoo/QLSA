@@ -53,7 +53,7 @@ def test_prove_output_schema():
     assert "proof" in out
     assert "commitment" in out
     assert "log_size" in out
-    assert len(out["commitment"]) == 8
+    assert len(out["commitment"]) == 32
     assert out["log_size"] >= 3
     base64.b64decode(out["proof"])  # must be valid base64
 
@@ -78,9 +78,9 @@ def test_prove_verify_roundtrip_large_values():
 
 
 @needs_binary
-def test_commitment_is_8_hex_chars():
+def test_commitment_is_128bit_hex():
     out = _prove([10, 20, 30])
-    assert len(out["commitment"]) == 8
+    assert len(out["commitment"]) == 32
     int(out["commitment"], 16)  # must be valid hex
 
 
@@ -159,7 +159,7 @@ def test_prove_p2_output_schema():
     assert "proof" in out
     assert "commitment" in out
     assert "log_size" in out
-    assert len(out["commitment"]) == 8
+    assert len(out["commitment"]) == 32
     base64.b64decode(out["proof"])
 
 
@@ -217,7 +217,7 @@ def test_merkle_prove_output_schema():
     assert "proof" in out
     assert "commitment" in out
     assert "log_size" in out
-    assert len(out["commitment"]) == 8
+    assert len(out["commitment"]) == 32
     int(out["commitment"], 16)  # must be valid hex
     base64.b64decode(out["proof"])  # must be valid base64
 

@@ -30,8 +30,8 @@ _REGISTRY_ABI = json.loads("""
   {"inputs":[],"name":"ZeroAddressVerifier","type":"error"},
   {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":true,"internalType":"bytes8","name":"commitment","type":"bytes8"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BatchFinalized","type":"event"},
   {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"isBatchFinalized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes8","name":"commitment","type":"bytes8"},{"internalType":"bytes","name":"starkProof","type":"bytes"}],"name":"submitBatch","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"getCommitment","outputs":[{"internalType":"bytes8","name":"","type":"bytes8"}],"stateMutability":"view","type":"function"}
+  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes16","name":"commitment","type":"bytes16"},{"internalType":"bytes","name":"starkProof","type":"bytes"}],"name":"submitBatch","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"getCommitment","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"}
 ]
 """)
 
@@ -89,14 +89,14 @@ class OnchainSubmitter:
             Transaction hash as a hex string (0x-prefixed).
         """
         root_bytes32: bytes = merkle_root[:32]
-        commitment_bytes8: bytes = bytes.fromhex(onchain_commitment)[:8]
+        commitment_bytes16: bytes = bytes.fromhex(onchain_commitment)[:16]
 
         nonce = self.w3.eth.get_transaction_count(self.account.address)
         gas_price = self.w3.eth.gas_price
 
         tx = self.registry.functions.submitBatch(
             root_bytes32,
-            commitment_bytes8,
+            commitment_bytes16,
             proof_bytes,
         ).build_transaction({
             "from": self.account.address,

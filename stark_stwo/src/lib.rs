@@ -5,9 +5,10 @@ pub mod poseidon2_air;
 pub mod poseidon2_merkle_air;
 pub mod trace;
 
+use blake2::{Blake2s256, Digest};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sM31Channel, Channel};
-use stwo::core::fields::m31::BaseField;
+use stwo::core::fields::m31::BaseField; // used in tests
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::verifier::verify;
@@ -18,6 +19,55 @@ use stwo::prover::{prove, CommitmentSchemeProver};
 use stwo_constraint_framework::TraceLocationAllocator;
 
 use air::{HashChainComponent, HashChainEval};
+
+// ─── 128-bit commitment helpers ───────────────────────────────────────────────
+//
+// Layout (16 bytes = 32 hex chars):
+//   bytes [0:4]  — M31 field element (le-u32), extracted by verifier for Fiat-Shamir
+//   bytes [4:16] — Blake2s(m31_le ∥ proof[0:32])[0:12], 96-bit proof-binding suffix
+//
+// The M31 component stays 32-bit for Fiat-Shamir mixing (must be known before proving).
+// The suffix provides 128-bit total binding for on-chain batch identification and
+// prevents birthday collisions that would be feasible with a 32-bit commitment alone.
+
+/// Build a 128-bit commitment (32 hex chars) from the circuit output and proof bytes.
+fn build_commitment_128(m31_val: u32, proof_bytes: &[u8]) -> String {
+    let m31_le = m31_val.to_le_bytes();
+    let mut h = Blake2s256::new();
+    h.update(m31_le);
+    h.update(&proof_bytes[..proof_bytes.len().min(32)]);
+    let hash = h.finalize();
+    let mut buf = [0u8; 16];
+    buf[0..4].copy_from_slice(&m31_le);
+    buf[4..16].copy_from_slice(&hash[0..12]);
+    hex::encode(buf)
+}
+
+/// Parse and validate a 128-bit commitment. Returns the M31 value for Fiat-Shamir mixing.
+/// Returns Err if the hex is malformed, the M31 is out of range, or the suffix is wrong.
+fn parse_commitment_128(commitment_hex: &str, proof_bytes: &[u8]) -> Result<u32, String> {
+    let bytes = hex::decode(commitment_hex)
+        .map_err(|e| format!("invalid commitment hex: {e}"))?;
+    if bytes.len() != 16 {
+        return Err(format!(
+            "commitment must be 16 bytes (32 hex chars), got {} bytes",
+            bytes.len()
+        ));
+    }
+    let m31_bytes: [u8; 4] = bytes[0..4].try_into().unwrap();
+    let m31_val = u32::from_le_bytes(m31_bytes);
+    if m31_val >= M31_MODULUS {
+        return Err("commitment M31 component out of M31 field range [0, 2^31 − 2]".into());
+    }
+    let mut h = Blake2s256::new();
+    h.update(m31_bytes);
+    h.update(&proof_bytes[..proof_bytes.len().min(32)]);
+    let expected = h.finalize();
+    if bytes[4..16] != expected[0..12] {
+        return Err("commitment integrity check failed (suffix mismatch)".into());
+    }
+    Ok(m31_val)
+}
 
 /// log2 of the FRI blowup factor. 4 → blowup 16× (security margin ~120-bit at 30 FRI rounds).
 /// Do NOT reduce below 4 for any network-facing deployment.
@@ -90,7 +140,7 @@ pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String
     let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("serialization error: {e:?}"))?;
 
-    let commitment_hex = hex::encode(commitment.0.to_le_bytes());
+    let commitment_hex = build_commitment_128(commitment.0, &proof_bytes);
 
     Ok((proof_bytes, commitment_hex, log_size))
 }
@@ -123,19 +173,8 @@ pub fn verify_hash_chain(
         ));
     }
 
-    let commitment_bytes = hex::decode(commitment_hex)
-        .map_err(|e| format!("invalid commitment hex: {e}"))?;
-    if commitment_bytes.len() != 4 {
-        return Err(format!(
-            "commitment must be 4 bytes, got {}",
-            commitment_bytes.len()
-        ));
-    }
-    let commitment_val = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
-    if commitment_val >= M31_MODULUS {
-        return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
-    }
-    let _commitment = BaseField::from_u32_unchecked(commitment_val); // validated above
+    // Parse and validate 128-bit commitment; extracts M31 for Fiat-Shamir.
+    let commitment_val = parse_commitment_128(commitment_hex, proof_bytes)?;
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>())
@@ -154,9 +193,6 @@ pub fn verify_hash_chain(
     let commitment_scheme =
         &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
-    // Feed tree commitments in the same order as proving.
-    // A well-formed Stwo StarkProof has exactly 2 commitment trees
-    // (preprocessed + main trace); validate before indexing.
     let sizes = component.trace_log_degree_bounds();
     if proof.commitments.len() < 2 {
         return Err(format!(
@@ -167,7 +203,7 @@ pub fn verify_hash_chain(
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
-    // Mirror the prover's channel.mix_u32s so the Fiat-Shamir transcript matches (C-2 fix).
+    // Mirror the prover's channel.mix_u32s (Fiat-Shamir binding, C-2 fix).
     verifier_channel.mix_u32s(&[commitment_val]);
 
     let result = verify::<Blake2sM31MerkleChannel>(
@@ -241,7 +277,7 @@ pub fn prove_hash_chain_poseidon2(leaves: &[u64]) -> Result<(Vec<u8>, String, u3
     let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("serialization error: {e:?}"))?;
 
-    let commitment_hex = hex::encode(commitment.0.to_le_bytes());
+    let commitment_hex = build_commitment_128(commitment.0, &proof_bytes);
     Ok((proof_bytes, commitment_hex, log_size))
 }
 
@@ -261,19 +297,8 @@ pub fn verify_hash_chain_poseidon2(
         ));
     }
 
-    let commitment_bytes = hex::decode(commitment_hex)
-        .map_err(|e| format!("invalid commitment hex: {e}"))?;
-    if commitment_bytes.len() != 4 {
-        return Err(format!(
-            "commitment must be 4 bytes, got {}",
-            commitment_bytes.len()
-        ));
-    }
-    // Validate range; commitment is mixed into Fiat-Shamir transcript below (C-2 fix).
-    let commitment_val_p2 = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
-    if commitment_val_p2 >= M31_MODULUS {
-        return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
-    }
+    // Parse 128-bit commitment, validate suffix, extract M31 for Fiat-Shamir.
+    let commitment_val_p2 = parse_commitment_128(commitment_hex, proof_bytes)?;
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>())
@@ -411,7 +436,7 @@ pub fn prove_merkle_root(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), Strin
     let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("serialization error: {e:?}"))?;
 
-    let commitment_hex = hex::encode(commitment.0.to_le_bytes());
+    let commitment_hex = build_commitment_128(commitment.0, &proof_bytes);
     Ok((proof_bytes, commitment_hex, log_size))
 }
 
@@ -430,18 +455,8 @@ pub fn verify_merkle_root(
         ));
     }
 
-    let commitment_bytes = hex::decode(commitment_hex)
-        .map_err(|e| format!("invalid commitment hex: {e}"))?;
-    if commitment_bytes.len() != 4 {
-        return Err(format!(
-            "commitment must be 4 bytes, got {}",
-            commitment_bytes.len()
-        ));
-    }
-    let commitment_val_merkle = u32::from_le_bytes(commitment_bytes.try_into().unwrap());
-    if commitment_val_merkle >= M31_MODULUS {
-        return Err("commitment value out of M31 field range [0, 2^31 − 2]".into());
-    }
+    // Parse 128-bit commitment, validate suffix, extract M31 for Fiat-Shamir.
+    let commitment_val_merkle = parse_commitment_128(commitment_hex, proof_bytes)?;
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>())
@@ -538,8 +553,9 @@ mod tests {
         let (_, commitment_hex, _) =
             prove_hash_chain_poseidon2(&leaves).expect("poseidon2 proving failed");
         let (expected_s0, _) = poseidon2_chain(&leaves);
-        let expected_hex = hex::encode(BaseField::from_u32_unchecked(expected_s0 as u32).0.to_le_bytes());
-        assert_eq!(commitment_hex, expected_hex);
+        let expected_m31_hex = hex::encode(BaseField::from_u32_unchecked(expected_s0 as u32).0.to_le_bytes());
+        // Commitment is now 128-bit; the first 8 chars (4 bytes) encode the M31 value.
+        assert_eq!(&commitment_hex[..8], expected_m31_hex);
     }
 
     #[test]
@@ -559,15 +575,15 @@ mod tests {
         let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
         let (proof_bytes, commitment_hex, log_size) =
             prove_hash_chain(&leaves).expect("proving failed");
-        // Flip one bit in the commitment hex to produce a different (valid-range) commitment.
+        // Mutate the M31 component (bytes [0:4]) — the suffix check will catch it.
         let bad_commitment = {
-            let mut val = u32::from_le_bytes(
-                hex::decode(&commitment_hex).unwrap().try_into().unwrap(),
-            );
+            let mut bytes = hex::decode(&commitment_hex).unwrap();
+            let mut val = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
             val = val.wrapping_add(1) % M31_MODULUS;
-            hex::encode(val.to_le_bytes())
+            bytes[0..4].copy_from_slice(&val.to_le_bytes());
+            hex::encode(&bytes)
         };
-        // A wrong commitment changes the Fiat-Shamir transcript; verification must fail.
+        // Wrong commitment → suffix mismatch; parse_commitment_128 returns Err → false.
         let result = verify_hash_chain(&proof_bytes, &bad_commitment, log_size)
             .unwrap_or(false);
         assert!(!result, "wrong commitment should cause verification failure");
@@ -579,11 +595,11 @@ mod tests {
         let (proof_bytes, commitment_hex, log_size) =
             prove_hash_chain_poseidon2(&leaves).expect("poseidon2 proving failed");
         let bad_commitment = {
-            let mut val = u32::from_le_bytes(
-                hex::decode(&commitment_hex).unwrap().try_into().unwrap(),
-            );
+            let mut bytes = hex::decode(&commitment_hex).unwrap();
+            let mut val = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
             val = val.wrapping_add(1) % M31_MODULUS;
-            hex::encode(val.to_le_bytes())
+            bytes[0..4].copy_from_slice(&val.to_le_bytes());
+            hex::encode(&bytes)
         };
         let result = verify_hash_chain_poseidon2(&proof_bytes, &bad_commitment, log_size)
             .unwrap_or(false);
@@ -596,11 +612,11 @@ mod tests {
         let (proof_bytes, commitment_hex, log_size) =
             prove_merkle_root(&leaves).expect("merkle proving failed");
         let bad_commitment = {
-            let mut val = u32::from_le_bytes(
-                hex::decode(&commitment_hex).unwrap().try_into().unwrap(),
-            );
+            let mut bytes = hex::decode(&commitment_hex).unwrap();
+            let mut val = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
             val = val.wrapping_add(1) % M31_MODULUS;
-            hex::encode(val.to_le_bytes())
+            bytes[0..4].copy_from_slice(&val.to_le_bytes());
+            hex::encode(&bytes)
         };
         let result = verify_merkle_root(&proof_bytes, &bad_commitment, log_size)
             .unwrap_or(false);
@@ -625,9 +641,10 @@ mod tests {
         let (_, commitment_hex, _) =
             prove_merkle_root(&leaves).expect("merkle proving failed");
         let expected = poseidon2_merkle_air::merkle_root(&leaves);
-        let expected_hex =
+        let expected_m31_hex =
             hex::encode(BaseField::from_u32_unchecked(expected as u32).0.to_le_bytes());
-        assert_eq!(commitment_hex, expected_hex);
+        // Commitment is now 128-bit; the first 8 chars (4 bytes) encode the Merkle root M31.
+        assert_eq!(&commitment_hex[..8], expected_m31_hex);
     }
 
     #[test]
