@@ -83,7 +83,9 @@ jobs:
       - name: Build and install PyO3 extension
         working-directory: stark_stwo
         timeout-minutes: 20
-        run: maturin develop --features python --release
+        run: |
+          maturin build --features python --release
+          pip install --force-reinstall target/wheels/*.whl
 
       - name: Verify PyO3 extension
         run: python -c "import qlsa_stark_stwo; proof, c, n = qlsa_stark_stwo.prove([1,2,3,4]); print('qlsa_stark_stwo OK — commitment', c)"
