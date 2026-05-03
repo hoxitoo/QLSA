@@ -494,6 +494,86 @@ pub fn verify_merkle_root(
     Ok(result.is_ok())
 }
 
+// ─── PyO3 Python extension module ────────────────────────────────────────────
+//
+// Compiled only with `--features python` (e.g. `maturin develop --features python`).
+// Exports the six prove/verify functions plus `prove_mldsa` as a Python native
+// extension module named `qlsa_stark_stwo`.
+//
+//   cd stark_stwo && maturin develop --features python --release
+//   python -c "import qlsa_stark_stwo; proof, c, n = qlsa_stark_stwo.prove([1,2,3,4])"
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+/// prove(leaves) -> (proof: bytes, commitment: str, log_size: int)
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
+    prove_hash_chain(&leaves).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// verify(proof, commitment, log_size) -> bool
+/// Returns False on any verification failure; never raises.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
+    verify_hash_chain(&proof, &commitment, log_size).unwrap_or(false)
+}
+
+/// prove_p2(leaves) -> (proof: bytes, commitment: str, log_size: int)
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_p2(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
+    prove_hash_chain_poseidon2(&leaves).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// verify_p2(proof, commitment, log_size) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_p2(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
+    verify_hash_chain_poseidon2(&proof, &commitment, log_size).unwrap_or(false)
+}
+
+/// prove_merkle(leaves) -> (proof: bytes, commitment: str, log_size: int)
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_merkle(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
+    prove_merkle_root(&leaves).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// verify_merkle(proof, commitment, log_size) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_merkle(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
+    verify_merkle_root(&proof, &commitment, log_size).unwrap_or(false)
+}
+
+/// prove_mldsa(entries) -> (proof: bytes, commitment: str, log_size: int, verified: int, rejected: int)
+///
+/// `entries` is a list of ``(pk, msg, sig)`` tuples (all ``bytes``).
+/// At least one signature must be valid; raises RuntimeError otherwise.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_mldsa(
+    entries: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+) -> PyResult<(Vec<u8>, String, u32, usize, usize)> {
+    prove_mldsa_batch(&entries).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+#[cfg(feature = "python")]
+#[pymodule]
+fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(prove, m)?)?;
+    m.add_function(wrap_pyfunction!(verify, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_p2, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_p2, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_merkle, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_merkle, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa, m)?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,10 +10,12 @@ path = "src/main.rs"
 [lib]
 name = "qlsa_stark_stwo"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["prover"]
 prover  = ["stwo/prover", "stwo-constraint-framework/prover"]
+python  = ["pyo3/extension-module"]
 
 [dependencies]
 stwo                      = { version = "2.2.0", features = ["prover"] }
@@ -24,6 +26,7 @@ hex                       = "0.4"
 blake2                    = "0.10"
 bincode                   = { version = "2", features = ["serde"] }
 sha3                      = "0.10"
+pyo3                      = { version = "0.23", optional = true }
 
 [profile.release]
 opt-level     = 3
