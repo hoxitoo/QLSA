@@ -509,7 +509,8 @@ use pyo3::prelude::*;
 /// prove(leaves) -> (proof: bytes, commitment: str, log_size: int)
 #[cfg(feature = "python")]
 #[pyfunction]
-fn prove(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
+#[pyo3(name = "prove")]
+fn py_prove(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
     prove_hash_chain(&leaves).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
@@ -517,7 +518,8 @@ fn prove(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
 /// Returns False on any verification failure; never raises.
 #[cfg(feature = "python")]
 #[pyfunction]
-fn verify(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
+#[pyo3(name = "verify")]
+fn py_verify(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
     verify_hash_chain(&proof, &commitment, log_size).unwrap_or(false)
 }
 
@@ -564,8 +566,8 @@ fn prove_mldsa(
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(prove, m)?)?;
-    m.add_function(wrap_pyfunction!(verify, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prove, m)?)?;
+    m.add_function(wrap_pyfunction!(py_verify, m)?)?;
     m.add_function(wrap_pyfunction!(prove_p2, m)?)?;
     m.add_function(wrap_pyfunction!(verify_p2, m)?)?;
     m.add_function(wrap_pyfunction!(prove_merkle, m)?)?;
