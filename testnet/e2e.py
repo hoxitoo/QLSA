@@ -42,7 +42,7 @@ from core.batch import create_batch
 from core.keys import generate_keypair, derive_address
 from core.signing import sign
 from core.transaction import Transaction
-from stark.prover import binary_available, prove_batch
+from stark.prover import prove_batch
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,14 +80,16 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
     logger.info("=== QLSA Phase 6 — E2E Testnet Demo ===")
     logger.info("Transactions: %d | Dry-run: %s", n_txs, dry_run)
 
-    # ── Step 1: Check STARK binary ────────────────────────────────────────────
-    if not binary_available():
+    # ── Step 1: Check PyO3 extension ─────────────────────────────────────────
+    try:
+        import qlsa_stark_stwo  # noqa: F401
+    except ImportError:
         logger.error(
-            "STARK binary not found. Build it with:\n"
-            "  cd stark_stwo && cargo +nightly-2025-07-01 build --release"
+            "PyO3 extension not installed. Build it with:\n"
+            "  cd stark_stwo && maturin develop --features python --release"
         )
         return 1
-    logger.info("STARK binary: OK")
+    logger.info("STARK extension: OK")
 
     # ── Step 2: Generate keypairs + signed transactions ───────────────────────
     logger.info("Generating %d keypairs and signed transactions…", n_txs)

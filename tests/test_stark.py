@@ -1,23 +1,28 @@
 """
 STARK layer integration tests (Stwo Circle STARK backend).
 
-Tests that require the Rust binary are automatically skipped when the binary
-has not been compiled yet. Build it with:
+Tests that require the PyO3 extension are automatically skipped when the module
+is not installed. Install it with:
 
-    cd stark_stwo && cargo +nightly-2025-07-01 build --release
+    cd stark_stwo && maturin develop --features python --release
 """
 
 from __future__ import annotations
 
 import pytest
 
-from stark.prover import BINARY, ProofResult, binary_available, _txs_to_leaves
+from stark.prover import ProofResult, _txs_to_leaves
 from stark.verifier import verify_batch_proof
 
-# Helper: skip all tests if binary not present
-needs_binary = pytest.mark.skipif(
-    not binary_available(),
-    reason="qlsa-stark-stwo binary not built — run: cd stark_stwo && cargo +nightly-2025-07-01 build --release",
+try:
+    import qlsa_stark_stwo as _ext
+    _HAVE_EXT = True
+except ImportError:
+    _HAVE_EXT = False
+
+needs_ext = pytest.mark.skipif(
+    not _HAVE_EXT,
+    reason="qlsa_stark_stwo not installed — run: cd stark_stwo && maturin develop --features python",
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -49,13 +54,8 @@ def _make_signed_batch(n: int):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tests that do NOT require the binary
+# Tests that do NOT require the extension
 # ──────────────────────────────────────────────────────────────────────────────
-
-def test_binary_path_is_configured():
-    assert BINARY.name == "qlsa-stark-stwo"
-    assert "stark_stwo" in str(BINARY)
-
 
 def test_txs_to_leaves_always_8():
     # Merkle root is always 64 bytes → 8 × u64 chunks regardless of batch size.
@@ -76,7 +76,6 @@ def test_txs_to_leaves_are_deterministic():
 
 
 def test_txs_to_leaves_encodes_merkle_root():
-    # Reconstruct leaves manually and verify they match the Merkle root bytes.
     batch = _make_signed_batch(4)
     leaves = _txs_to_leaves(batch)
     root = batch.merkle_root  # 64 bytes
@@ -85,24 +84,24 @@ def test_txs_to_leaves_encodes_merkle_root():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tests that require the compiled Rust binary
+# Tests that require the compiled PyO3 extension
 # ──────────────────────────────────────────────────────────────────────────────
 
-@needs_binary
+@needs_ext
 def test_prove_returns_proof_result():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
     result = prove_batch(batch)
     assert isinstance(result, ProofResult)
     assert len(result.proof) > 0
-    assert len(result.commitment) == 8  # 4 bytes M31 as 8 hex chars
-    assert result.log_size >= 3         # minimum trace log size
-    assert len(result.onchain_commitment) == 16  # 8 bytes as 16 hex chars
+    assert len(result.commitment) == 32        # 128-bit = 32 hex chars
+    assert result.log_size >= 3
+    assert len(result.onchain_commitment) == 32  # Blake2s 16 bytes = 32 hex chars
 
 
-@needs_binary
+@needs_ext
 def test_onchain_commitment_bound_to_merkle_root():
-    """onchain_commitment = Blake2s(proof[:32] || merkle_root[:32])[:8]
+    """onchain_commitment = Blake2s(proof[:32] || merkle_root[:32])[:16]
     matches QLSAVerifierBound / BatchRegistryV2 commitment scheme."""
     import hashlib
     from stark.prover import prove_batch
@@ -111,11 +110,11 @@ def test_onchain_commitment_bound_to_merkle_root():
 
     expected = hashlib.blake2s(
         result.proof[:32] + batch.merkle_root[:32]
-    ).digest()[:8].hex()
+    ).digest()[:16].hex()
     assert result.onchain_commitment == expected
 
 
-@needs_binary
+@needs_ext
 def test_onchain_commitment_differs_for_different_batches():
     """Each batch has a unique onchain_commitment — no replay possible."""
     from stark.prover import prove_batch
@@ -126,7 +125,7 @@ def test_onchain_commitment_differs_for_different_batches():
     assert r1.onchain_commitment != r2.onchain_commitment
 
 
-@needs_binary
+@needs_ext
 def test_prove_sets_batch_stark_fields():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -134,12 +133,12 @@ def test_prove_sets_batch_stark_fields():
     assert batch.stark_log_size is None
     prove_batch(batch)
     assert batch.stark_commitment is not None
-    assert len(batch.stark_commitment) == 8
+    assert len(batch.stark_commitment) == 32  # 128-bit commitment
     assert batch.stark_log_size is not None
     assert batch.stark_log_size >= 3
 
 
-@needs_binary
+@needs_ext
 def test_verify_valid_proof():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -147,17 +146,17 @@ def test_verify_valid_proof():
     assert verify_batch_proof(result.proof, result.commitment, result.log_size) is True
 
 
-@needs_binary
+@needs_ext
 def test_verify_tampered_proof_fails():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
     result = prove_batch(batch)
     bad_proof = bytearray(result.proof)
-    bad_proof[10] ^= 0xFF  # flip bits
+    bad_proof[10] ^= 0xFF
     assert verify_batch_proof(bytes(bad_proof), result.commitment, result.log_size) is False
 
 
-@needs_binary
+@needs_ext
 def test_commitment_is_deterministic():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -166,7 +165,7 @@ def test_commitment_is_deterministic():
     assert r1.commitment == r2.commitment
 
 
-@needs_binary
+@needs_ext
 def test_different_batches_have_different_commitments():
     from stark.prover import prove_batch
     b1 = _make_signed_batch(4)
@@ -191,7 +190,7 @@ def _mldsa_entries(n: int) -> list[tuple[bytes, bytes, bytes]]:
     return entries
 
 
-@needs_binary
+@needs_ext
 def test_prove_mldsa_batch_returns_result():
     from stark.prover import prove_mldsa_batch, MldsaBatchResult
     entries = _mldsa_entries(2)
@@ -202,11 +201,10 @@ def test_prove_mldsa_batch_returns_result():
     assert len(result.proof) > 0
 
 
-@needs_binary
+@needs_ext
 def test_prove_mldsa_batch_rejects_invalid_sig():
     from stark.prover import prove_mldsa_batch
     entries = _mldsa_entries(2)
-    # Corrupt the second signature
     bad_sig = bytearray(entries[1][2])
     bad_sig[10] ^= 0xFF
     entries[1] = (entries[1][0], entries[1][1], bytes(bad_sig))
@@ -215,7 +213,7 @@ def test_prove_mldsa_batch_rejects_invalid_sig():
     assert result.rejected == 1
 
 
-@needs_binary
+@needs_ext
 def test_prove_mldsa_batch_verify_proof():
     from stark.prover import prove_mldsa_batch
     entries = _mldsa_entries(2)

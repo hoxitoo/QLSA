@@ -7,7 +7,12 @@ Install the extension once before use:
 
 from __future__ import annotations
 
-import qlsa_stark_stwo as _ext
+try:
+    import qlsa_stark_stwo as _ext
+    _HAVE_EXT = True
+except ImportError:
+    _ext = None
+    _HAVE_EXT = False
 
 
 def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
@@ -22,4 +27,9 @@ def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
     Returns:
         True if the proof is valid, False otherwise.
     """
+    if not _HAVE_EXT:
+        raise RuntimeError(
+            "qlsa_stark_stwo extension required for verify. "
+            "Install with: cd stark_stwo && maturin develop --features python --release"
+        )
     return _ext.verify(proof, commitment, log_size)

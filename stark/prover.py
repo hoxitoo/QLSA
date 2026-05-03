@@ -17,9 +17,22 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 
-import qlsa_stark_stwo as _ext
+try:
+    import qlsa_stark_stwo as _ext
+    _HAVE_EXT = True
+except ImportError:
+    _ext = None
+    _HAVE_EXT = False
 
 from core.batch import Batch
+
+
+def _require_ext(fn_name: str) -> None:
+    if not _HAVE_EXT:
+        raise RuntimeError(
+            f"qlsa_stark_stwo extension required for {fn_name}. "
+            "Install with: cd stark_stwo && maturin develop --features python --release"
+        )
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +71,7 @@ def _txs_to_leaves(batch: Batch) -> list[int]:
 
 
 def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofResult:
+    _require_ext("prove")
     try:
         proof_bytes, commitment, log_size = _ext.prove(leaves)
     except Exception as exc:
@@ -113,6 +127,7 @@ def prove_batch_poseidon2(batch: Batch) -> Poseidon2ProofResult:
 def _call_prover_p2(
     leaves: list[int], merkle_root: bytes | None = None
 ) -> Poseidon2ProofResult:
+    _require_ext("prove_p2")
     try:
         proof_bytes, commitment, log_size = _ext.prove_p2(leaves)
     except Exception as exc:
@@ -156,6 +171,7 @@ def prove_mldsa_batch(
 
     Returns a MldsaBatchResult with the STARK proof and verification counts.
     """
+    _require_ext("prove_mldsa")
     try:
         proof_bytes, commitment, log_size, verified, rejected = _ext.prove_mldsa(entries)
     except Exception as exc:
@@ -199,6 +215,7 @@ def prove_batch_merkle(batch: Batch) -> MerkleProofResult:
 def _call_prover_merkle(
     leaves: list[int], merkle_root: bytes | None = None
 ) -> MerkleProofResult:
+    _require_ext("prove_merkle")
     if merkle_root is None:
         import warnings
         warnings.warn(
