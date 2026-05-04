@@ -248,8 +248,8 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>CI</small><strong>5/5 jobs green — 93 Rust tests passing</strong></div>
-            <div class="signal-card"><small>Status</small><strong>Phase 6 infra ready — testnet deployment next</strong></div>
+            <div class="signal-card"><small>CI</small><strong>151 Python + 93 Rust tests — all green</strong></div>
+            <div class="signal-card"><small>Status</small><strong>Phase 6 — testnet deployment pending credentials</strong></div>
           </div>
         </div>
 
@@ -283,7 +283,7 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Security audit completed May 2026. All findings resolved. PyO3 native extension replaces subprocess (zero-overhead FFI). 93 Rust tests + full Python CI — all 5 CI jobs green.</p>
+            <p>Security audit completed May 2026. All findings resolved. PyO3 native extension (pyo3 0.24, RUSTSEC-2025-0020 patched) replaces subprocess — zero-overhead FFI. 151 Python + 93 Rust tests — all 5 CI jobs green.</p>
           </div>
         </div>
         <div class="progress-grid">
@@ -515,7 +515,11 @@
                 <tr><td>Batch size</td><td>3,000 tx</td></tr>
                 <tr><td>Proof size</td><td>90–200 KB</td></tr>
                 <tr><td>On-chain verification</td><td>O(1)</td></tr>
-                <tr><td>Rust test suite</td><td class="good">77 passing</td></tr>
+                <tr><td>ML-DSA-65 sign (avg)</td><td class="good">0.12 ms / tx</td></tr>
+                <tr><td>Merkle build N=3000</td><td class="good">7.1 ms</td></tr>
+                <tr><td>Full pipeline N=3000</td><td class="good">354 ms</td></tr>
+                <tr><td>Rust test suite</td><td class="good">93 passing</td></tr>
+                <tr><td>Python test suite</td><td class="good">151 passing</td></tr>
                 <tr><td>CI pipeline</td><td class="good">5 / 5 jobs green</td></tr>
                 <tr><td>Security audit</td><td class="good">May 2026 — all resolved</td></tr>
               </tbody>
