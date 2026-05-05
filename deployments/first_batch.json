@@ -1,0 +1,14 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "date": "2026-05-05",
+  "txs": 4,
+  "tx_hash": "0x5a9215d2aeb42f09697a958485298687d678de15a53d86825eccdcc936b2bd82",
+  "merkle_root": "51ecef6177873179",
+  "commitment": "8f6a3719f0ab8c8eb2d58c076087c734",
+  "proof_size_bytes": 3234,
+  "log_size": 4,
+  "finalized": true,
+  "finalized_in_s": 9.16,
+  "registry": "0xF44A51CF1d7620e070ecaf611685418DE4679879"
+}
