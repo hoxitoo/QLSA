@@ -1,0 +1,61 @@
+name: Deploy contracts
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: "Target network"
+        required: true
+        default: "sepolia"
+        type: choice
+        options: [sepolia, cardona]
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.network }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: contracts/package-lock.json
+
+      - name: Install dependencies
+        working-directory: contracts
+        run: npm install
+
+      - name: Compile contracts
+        working-directory: contracts
+        run: npx hardhat compile
+
+      - name: Deploy to ${{ github.event.inputs.network }}
+        working-directory: contracts
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          RPC_URL: ${{ github.event.inputs.network == 'sepolia' && 'https://ethereum-sepolia-rpc.publicnode.com' || 'https://rpc.cardona.zkevm-rpc.com' }}
+        run: |
+          npx hardhat run scripts/deploy.js --network ${{ github.event.inputs.network }} --no-compile \
+            | tee /tmp/deploy_output.txt
+          echo "## Deployment output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/deploy_output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Extract contract addresses
+        run: |
+          VERIFIER=$(grep "QLSAVerifierBound deployed to:" /tmp/deploy_output.txt | awk '{print $NF}')
+          REGISTRY=$(grep "BatchRegistryV2 deployed to:"  /tmp/deploy_output.txt | awk '{print $NF}')
+          echo "### Contract addresses" >> $GITHUB_STEP_SUMMARY
+          echo "| Contract | Address |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| QLSAVerifierBound | \`$VERIFIER\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| BatchRegistryV2   | \`$REGISTRY\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Network: ${{ github.event.inputs.network }}"
+          echo "VERIFIER_ADDRESS=$VERIFIER"
+          echo "REGISTRY_ADDRESS=$REGISTRY"

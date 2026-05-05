@@ -35,6 +35,13 @@ module.exports = {
       chainId:  2442,
     },
 
+    // Ethereum Sepolia testnet
+    sepolia: {
+      url:      "https://ethereum-sepolia-rpc.publicnode.com",
+      accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
+      chainId:  11155111,
+    },
+
     // Polygon zkEVM mainnet
     polygonZkEvm: {
       url:      POLYGON_ZKEVM,
