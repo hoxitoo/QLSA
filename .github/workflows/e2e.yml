@@ -1,0 +1,99 @@
+name: E2E testnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      txs:
+        description: "Number of transactions in batch"
+        required: true
+        default: "4"
+      dry_run:
+        description: "Dry-run (skip on-chain submission)"
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  e2e:
+    name: E2E — Sepolia (${{ github.event.inputs.txs }} txs)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Cache liboqs build
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: ~/liboqs-install
+          key: liboqs-0.14.0-${{ runner.os }}
+
+      - name: Build liboqs from source
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake ninja-build libssl-dev
+          git clone --branch 0.14.0 --depth 1 \
+            https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs
+          cmake -S /tmp/liboqs -B /tmp/liboqs/build \
+            -DCMAKE_INSTALL_PREFIX="${HOME}/liboqs-install" \
+            -DBUILD_SHARED_LIBS=ON -DOQS_BUILD_ONLY_LIB=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/liboqs/build --parallel $(nproc)
+          cmake --install /tmp/liboqs/build
+
+      - name: Make liboqs visible to liboqs-python
+        run: |
+          mkdir -p "${HOME}/_oqs"
+          cp -r "${HOME}/liboqs-install/." "${HOME}/_oqs/"
+
+      - name: Install Rust nightly for PyO3 extension
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-07-01
+
+      - name: Cache Cargo (PyO3 extension)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            stark_stwo/target
+          key: cargo-stwo-pyo3-${{ runner.os }}-3.12-${{ hashFiles('stark_stwo/Cargo.lock') }}
+          restore-keys: cargo-stwo-pyo3-${{ runner.os }}-
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install web3
+
+      - name: Build and install PyO3 extension
+        working-directory: stark_stwo
+        timeout-minutes: 20
+        run: |
+          maturin build --features python --release
+          pip install --force-reinstall target/wheels/*.whl
+
+      - name: Run E2E
+        env:
+          RPC_URL: https://ethereum-sepolia-rpc.publicnode.com
+          DEPLOYER_PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          REGISTRY_ADDRESS: "0xF44A51CF1d7620e070ecaf611685418DE4679879"
+          VERIFIER_ADDRESS: "0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd"
+        run: |
+          DRY=${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+          python -m testnet.e2e --txs ${{ github.event.inputs.txs }} $DRY \
+            | tee /tmp/e2e_output.txt
+          echo "## E2E output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/e2e_output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
