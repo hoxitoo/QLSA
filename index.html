@@ -249,7 +249,7 @@
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
             <div class="signal-card"><small>CI</small><strong>151 Python + 93 Rust tests — all green</strong></div>
-            <div class="signal-card"><small>Status</small><strong>Phase 6 live — Sepolia testnet deployed 2026-05-05</strong></div>
+            <div class="signal-card"><small>Status</small><strong>First batch finalized on Sepolia — 2026-05-05</strong></div>
           </div>
         </div>
 
@@ -561,7 +561,7 @@
           <div class="phase"><div class="phase-top"><h3>Phase 3 — Smart Contracts</h3><span class="phase-tag complete">✓ Complete</span></div><p>QLSAVerifierFull, QLSAVerifierBound (Merkle-root-bound Blake2s, bytes16 128-bit commitment), BatchRegistry, BatchRegistryV2 — all deployed (Hardhat). 29/29 contract tests green.</p></div>
           <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag complete">✓ Complete</span></div><p>In-memory mempool, auto-batcher, FastAPI REST endpoint. Full STARK prove→submit pipeline via PyO3 native FFI (zero subprocess overhead).</p></div>
           <div class="phase"><div class="phase-top"><h3>Phase 5 — SDK</h3><span class="phase-tag complete">✓ Complete</span></div><p>Python SDK (wallet + async client) and TypeScript/JavaScript SDK with full input validation and typed API.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag complete">✓ Complete</span></div><p>Live on Ethereum Sepolia (2026-05-05). QLSAVerifierBound: <code>0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd</code> · BatchRegistryV2: <code>0xF44A51CF1d7620e070ecaf611685418DE4679879</code>. Blake2s commitment scheme active. E2E pipeline: ML-DSA sign → STARK prove → on-chain submit.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag complete">✓ Complete</span></div><p>Live on Ethereum Sepolia (2026-05-05). QLSAVerifierBound: <code>0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd</code> · BatchRegistryV2: <code>0xF44A51CF1d7620e070ecaf611685418DE4679879</code>. First batch live: tx <code>0x5a9215d2aeb4…bd82</code>, proof 3234 bytes, finalized in 9.16s. Full pipeline: ML-DSA-65 × 4 → STARK → BatchRegistryV2.</p></div>
         </div>
       </div>
     </section>
