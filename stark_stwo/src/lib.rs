@@ -1,5 +1,6 @@
 pub mod air;
 pub mod mldsa;
+pub mod mldsa_ntt_air;
 pub mod poseidon2;
 pub mod poseidon2_air;
 pub mod poseidon2_merkle_air;
