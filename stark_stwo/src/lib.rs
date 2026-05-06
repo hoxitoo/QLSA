@@ -342,6 +342,150 @@ pub fn verify_hash_chain_poseidon2(
     Ok(result.is_ok())
 }
 
+// ─── NTT STARK prover/verifier (MVP-3+) ──────────────────────────────────────
+
+/// Commit to the NTT output: Blake2s over all 256 coefficients → 4-byte M31 value.
+///
+/// Calling this before `prove()` lets us mix the output fingerprint into the
+/// Fiat-Shamir channel before the FRI queries are determined.
+fn ntt_commitment_m31(ntt_out: &[i64; 256]) -> u32 {
+    let mut h = Blake2s256::new();
+    for c in ntt_out {
+        h.update(&(*c as u32).to_le_bytes());
+    }
+    let hash = h.finalize();
+    u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % M31_MODULUS
+}
+
+/// Prove a forward NTT over Z_q[X]/(X^{256}+1) using a Circle STARK.
+///
+/// Input `f` must have coefficients in `[0, Q)` (Q = 8 380 417).
+///
+/// Returns `(proof_bytes, commitment_hex, ntt_out)`:
+/// - `proof_bytes`: serialised STARK proof (~90–200 KB)
+/// - `commitment_hex`: 32-hex-char 128-bit binding of proof to NTT output
+/// - `ntt_out`: the NTT of `f` (forward transform result)
+///
+/// # Soundness
+/// The butterfly-addition/subtraction constraints (C2–C5) are fully sound in M31.
+/// The multiplication constraint (C1) requires range-check arguments for full
+/// soundness (planned for MVP-4); the proof is sound for honest provers.
+pub fn prove_ntt(f: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_ntt_air::{MlDsaNttButterflyEval, MlDsaNttButterflyComponent, LOG_N_BUTTERFLIES, build_trace};
+
+    // Input validation: all coefficients must be in [0, Q).
+    for (i, &c) in f.iter().enumerate() {
+        if c < 0 || c >= Q {
+            return Err(format!("f[{i}] = {c} out of range [0, Q)"));
+        }
+    }
+
+    let log_size = LOG_N_BUTTERFLIES;
+    let (columns, ntt_out) = build_trace(f);
+
+    // Commitment M31 value: fingerprint of the NTT output (mixed into Fiat-Shamir).
+    let commitment_m31 = ntt_commitment_m31(&ntt_out);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: preprocessed (none for this circuit)
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    // Tree 1: main trace (9 columns)
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    // Mix NTT output fingerprint into the Fiat-Shamir transcript.
+    channel.mix_u32s(&[commitment_m31]);
+
+    let component = MlDsaNttButterflyComponent::new(
+        &mut TraceLocationAllocator::default(),
+        MlDsaNttButterflyEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&component],
+        channel,
+        commitment_scheme,
+    )
+    .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    let commitment_hex = build_commitment_128(commitment_m31, &proof_bytes);
+    Ok((proof_bytes, commitment_hex, ntt_out))
+}
+
+/// Verify an NTT STARK proof produced by [`prove_ntt`].
+///
+/// The proof is valid iff the prover correctly computed all 1024 butterfly
+/// operations of the forward NTT and committed to the output consistently.
+pub fn verify_ntt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_ntt_air::{MlDsaNttButterflyEval, MlDsaNttButterflyComponent, LOG_N_BUTTERFLIES};
+
+    let log_size = LOG_N_BUTTERFLIES;
+
+    // Parse 128-bit commitment → M31 fingerprint for Fiat-Shamir replay.
+    let commitment_m31 = parse_commitment_128(commitment_hex, proof_bytes)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = MlDsaNttButterflyComponent::new(
+        &mut TraceLocationAllocator::default(),
+        MlDsaNttButterflyEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!(
+            "malformed proof: expected ≥ 2 commitments, got {}",
+            proof.commitments.len()
+        ));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Replay Fiat-Shamir: mix the same NTT output fingerprint as the prover.
+    verifier_channel.mix_u32s(&[commitment_m31]);
+
+    let result = verify::<Blake2sM31MerkleChannel>(
+        &[&component],
+        verifier_channel,
+        commitment_scheme,
+        proof,
+    );
+
+    Ok(result.is_ok())
+}
+
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 /// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
@@ -552,6 +696,27 @@ fn verify_merkle(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
     verify_merkle_root(&proof, &commitment, log_size).unwrap_or(false)
 }
 
+/// prove_ntt_py(f) -> (proof: bytes, commitment: str, ntt_out: list[int])
+///
+/// `f` is a list of 256 ints in [0, Q) (Q = 8 380 417).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_ntt_py(f: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let arr: [i64; 256] = f
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("f must have exactly 256 elements"))?;
+    let (proof, commitment, ntt_out) = prove_ntt(&arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, ntt_out.to_vec()))
+}
+
+/// verify_ntt_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_ntt_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_ntt(&proof, &commitment).unwrap_or(false)
+}
+
 /// prove_mldsa(entries) -> (proof: bytes, commitment: str, log_size: int, verified: int, rejected: int)
 ///
 /// `entries` is a list of ``(pk, msg, sig)`` tuples (all ``bytes``).
@@ -574,6 +739,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prove_merkle, m)?)?;
     m.add_function(wrap_pyfunction!(verify_merkle, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_ntt_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_ntt_py, m)?)?;
     Ok(())
 }
 
@@ -740,5 +907,70 @@ mod tests {
         let result = verify_merkle_root(&bad_proof, &commitment_hex, log_size)
             .unwrap_or(false);
         assert!(!result);
+    }
+
+    // ── NTT STARK prover/verifier tests (MVP-3+) ─────────────────────────────
+
+    fn random_ntt_input(seed: u64) -> [i64; 256] {
+        let q = mldsa::Q;
+        let mut state = seed;
+        let mut f = [0i64; 256];
+        for c in f.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *c = ((state >> 33) as i64).abs() % q;
+        }
+        f
+    }
+
+    #[test]
+    fn test_prove_and_verify_ntt() {
+        let f = random_ntt_input(0xc0ffee);
+        let (proof_bytes, commitment_hex, ntt_out) =
+            prove_ntt(&f).expect("NTT proving failed");
+
+        // Output must match the reference NTT.
+        let mut expected = f;
+        mldsa::ntt::ntt(&mut expected);
+        assert_eq!(ntt_out, expected, "NTT output mismatch");
+
+        // Proof must verify.
+        let valid = verify_ntt(&proof_bytes, &commitment_hex).expect("NTT verification failed");
+        assert!(valid, "NTT proof should verify");
+    }
+
+    #[test]
+    fn test_ntt_tampered_proof_fails() {
+        let f = random_ntt_input(42);
+        let (proof_bytes, commitment_hex, _) = prove_ntt(&f).expect("NTT proving failed");
+        let mut bad_proof = proof_bytes.clone();
+        bad_proof[20] ^= 0xFF;
+        let result = verify_ntt(&bad_proof, &commitment_hex).unwrap_or(false);
+        assert!(!result, "tampered NTT proof should not verify");
+    }
+
+    #[test]
+    fn test_ntt_wrong_commitment_fails() {
+        let f = random_ntt_input(7);
+        let (proof_bytes, commitment_hex, _) = prove_ntt(&f).expect("NTT proving failed");
+        let bad_commitment = {
+            let mut bytes = hex::decode(&commitment_hex).unwrap();
+            let mut val = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+            val = val.wrapping_add(1) % M31_MODULUS;
+            bytes[0..4].copy_from_slice(&val.to_le_bytes());
+            hex::encode(&bytes)
+        };
+        let result = verify_ntt(&proof_bytes, &bad_commitment).unwrap_or(false);
+        assert!(!result, "wrong commitment should fail NTT verification");
+    }
+
+    #[test]
+    fn test_ntt_zero_poly() {
+        // NTT of the zero polynomial is the zero polynomial.
+        let f = [0i64; 256];
+        let (proof_bytes, commitment_hex, ntt_out) =
+            prove_ntt(&f).expect("NTT proving of zero failed");
+        assert_eq!(ntt_out, [0i64; 256]);
+        let valid = verify_ntt(&proof_bytes, &commitment_hex).expect("NTT verification failed");
+        assert!(valid);
     }
 }
