@@ -4,3 +4,6 @@ mypy==1.13.0
 black==24.10.0
 pip-audit==2.7.3
 maturin==1.13.1
+# API testing (FastAPI TestClient)
+fastapi==0.115.6
+httpx==0.28.1
