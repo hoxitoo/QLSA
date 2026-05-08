@@ -3,6 +3,7 @@ pub mod mldsa;
 pub mod mldsa_intt_air;
 pub mod mldsa_norm_check_air;
 pub mod mldsa_ntt_air;
+pub mod mldsa_use_hint_air;
 pub mod mldsa_poly_add_air;
 pub mod mldsa_poly_mul_air;
 pub mod mldsa_verify_stark;
@@ -767,6 +768,101 @@ pub fn prove_poly_sub(
 /// Verification is identical to [`verify_poly_add`] because the same AIR is used.
 pub fn verify_poly_sub(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
     verify_poly_add(proof_bytes, commitment_hex)
+}
+
+// ─── UseHint STARK (MVP-3+) ───────────────────────────────────────────────────
+
+/// Prove `UseHint(h[i], r[i]) = w₁'[i]` for all 256 coefficients of one polynomial.
+///
+/// Includes inline `Decompose(r)` proof.  `r` must be in `[0, Q)`.
+///
+/// Returns `(proof_bytes, commitment_hex, w1_poly)`.
+pub fn prove_use_hint(r: &[i64; 256], h_bits: &[bool; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_use_hint_air::{UseHintEval, UseHintComponent, LOG_N_ROWS, build_trace};
+
+    for (i, &c) in r.iter().enumerate() {
+        if c < 0 || c >= Q { return Err(format!("r[{i}] = {c} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, w1_out) = build_trace(r, h_bits);
+
+    let fp = output_fingerprint(&w1_out);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&fp);
+
+    let component = UseHintComponent::new(
+        &mut TraceLocationAllocator::default(),
+        UseHintEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("use_hint proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, w1_out))
+}
+
+/// Verify a UseHint proof produced by [`prove_use_hint`].
+pub fn verify_use_hint(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_use_hint_air::{UseHintEval, UseHintComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = UseHintComponent::new(
+        &mut TraceLocationAllocator::default(),
+        UseHintEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
 // ─── Coefficient norm check STARK (MVP-3+) ───────────────────────────────────
@@ -1619,5 +1715,53 @@ mod tests {
         let mut bad = proof_bytes.clone();
         bad[20] ^= 0xFF;
         assert!(!verify_norm_check(&bad, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── UseHint STARK tests (MVP-3+) ─────────────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_use_hint_no_hints() {
+        let r   = random_q_poly(1200);
+        let h   = [false; 256];
+        let (proof_bytes, commitment_hex, w1) =
+            prove_use_hint(&r, &h).expect("use_hint proving failed");
+        // No hints: w1[i] = HighBits(r[i]).
+        for i in 0..256 {
+            let (r1, _) = mldsa_use_hint_air::decompose_val_signed(r[i]);
+            assert_eq!(w1[i], r1, "no-hint w1[{i}]");
+        }
+        let valid = verify_use_hint(&proof_bytes, &commitment_hex)
+            .expect("use_hint verification failed");
+        assert!(valid, "use_hint (no hints) proof should verify");
+    }
+
+    #[test]
+    fn test_prove_and_verify_use_hint_random() {
+        use mldsa::polyvec::use_hint_val;
+        let r = random_q_poly(1300);
+        let mut state = 1301u64;
+        let h: [bool; 256] = std::array::from_fn(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 63) != 0
+        });
+        let (proof_bytes, commitment_hex, w1) =
+            prove_use_hint(&r, &h).expect("use_hint proving failed");
+        for i in 0..256 {
+            assert_eq!(w1[i], use_hint_val(h[i], r[i]), "w1[{i}]");
+        }
+        let valid = verify_use_hint(&proof_bytes, &commitment_hex)
+            .expect("use_hint verification failed");
+        assert!(valid, "use_hint proof should verify");
+    }
+
+    #[test]
+    fn test_use_hint_tampered_proof_fails() {
+        let r = random_q_poly(1400);
+        let h = [true; 256];
+        let (proof_bytes, commitment_hex, _) =
+            prove_use_hint(&r, &h).expect("use_hint proving failed");
+        let mut bad = proof_bytes.clone();
+        bad[20] ^= 0xFF;
+        assert!(!verify_use_hint(&bad, &commitment_hex).unwrap_or(false));
     }
 }
