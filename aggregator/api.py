@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from pydantic import BaseModel, field_validator
 
 from aggregator.mempool import MempoolFullError
@@ -117,9 +117,12 @@ def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
 
 
 @app.post("/batch/run")
-def batch_run(request: Request) -> dict[str, Any]:
+def batch_run(
+    request: Request,
+    prove_witnesses: bool = Query(default=False),
+) -> dict[str, Any]:
     node: AggregatorNode = request.app.state.node
-    result = node.run_cycle()
+    result = node.run_cycle(prove_witnesses=prove_witnesses)
     if result is None:
         return {"status": "no_batch", "reason": "insufficient transactions in mempool"}
     return {
@@ -129,13 +132,18 @@ def batch_run(request: Request) -> dict[str, Any]:
         "merkle_root": result.batch.merkle_root.hex(),
         "is_proven": result.is_proven,
         "stark_commitment": result.commitment,
+        "has_witness": result.has_witness,
+        "witness_commitment": result.witness_commitment,
     }
 
 
 @app.post("/batch/flush")
-def batch_flush(request: Request) -> dict[str, Any]:
+def batch_flush(
+    request: Request,
+    prove_witnesses: bool = Query(default=False),
+) -> dict[str, Any]:
     node: AggregatorNode = request.app.state.node
-    result = node.force_cycle()
+    result = node.force_cycle(prove_witnesses=prove_witnesses)
     if result is None:
         return {"status": "empty"}
     return {
@@ -145,4 +153,6 @@ def batch_flush(request: Request) -> dict[str, Any]:
         "merkle_root": result.batch.merkle_root.hex(),
         "is_proven": result.is_proven,
         "stark_commitment": result.commitment,
+        "has_witness": result.has_witness,
+        "witness_commitment": result.witness_commitment,
     }

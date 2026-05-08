@@ -9,6 +9,7 @@ from sdk.python.qlsa import (
     SubmitResult,
     TransactionBuilder,
     Wallet,
+    WitnessStatus,
 )
 
 
@@ -198,3 +199,75 @@ def test_local_client_stats_initial_state():
     assert stats.transactions_received == 0
     assert stats.batches_created == 0
     assert stats.pending == 0
+
+
+# ── BatchStatus witness fields ────────────────────────────────────────────────
+
+def test_batch_status_has_witness_false_by_default():
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=5, nonce=0)
+        client = LocalClient()
+        client.submit(tx)
+        status = client.flush()
+    assert status is not None
+    assert status.has_witness is False
+    assert status.witness_commitment is None
+
+
+def test_batch_status_prove_witnesses_param_accepted():
+    """flush(prove_witnesses=True) completes without error regardless of PyO3 ext."""
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=5, nonce=0)
+        client = LocalClient()
+        client.submit(tx)
+        status = client.flush(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+
+
+def test_run_cycle_prove_witnesses_param_accepted():
+    from aggregator.node import AggregatorNode
+
+    node = AggregatorNode(min_batch_size=1)
+    client = LocalClient(node=node)
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1, nonce=0)
+        client.submit(tx)
+    status = client.run_cycle(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+
+
+# ── LocalClient.prove_witness ─────────────────────────────────────────────────
+
+def test_prove_witness_unsigned_tx_returns_no_witness():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    tx = Transaction(
+        sender=derive_address(pub),
+        recipient="f" * 64,
+        amount=1,
+        nonce=0,
+        public_key=pub,
+    )
+    client = LocalClient()
+    ws = client.prove_witness(tx)
+    assert isinstance(ws, WitnessStatus)
+    assert ws.has_witness is False
+
+
+def test_prove_witness_signed_tx_returns_witness_status():
+    """Returns WitnessStatus; has_witness may be False if PyO3 ext is not installed."""
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=1, nonce=0)
+        client = LocalClient()
+        ws = client.prove_witness(tx)
+    assert isinstance(ws, WitnessStatus)
+    assert isinstance(ws.has_witness, bool)
+    assert isinstance(ws.max_norms, list)
+    if ws.has_witness:
+        assert ws.onchain_commitment is not None
+        assert len(ws.onchain_commitment) == 32
+        int(ws.onchain_commitment, 16)  # valid hex
+        assert ws.c_tilde_hex is not None
+        assert len(ws.c_tilde_hex) == 96
