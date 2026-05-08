@@ -36,6 +36,9 @@ def _require_ext(fn_name: str) -> None:
 
 logger = logging.getLogger(__name__)
 
+# ML-DSA-65: γ₁ − β = 524 288 − 196
+NORM_BOUND: int = 524_092
+
 
 @dataclass
 class ProofResult:
