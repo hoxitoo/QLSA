@@ -208,7 +208,7 @@ def prove_poly_sub_stark(
 def verify_poly_sub_stark(result: PolyProofResult) -> bool:
     """Verify a polynomial-subtraction proof."""
     _require_ext("verify_poly_sub_py")
-    return _ext.verify_poly_sub_py(result.proof, result.commitment)
+    return bool(_ext.verify_poly_sub_py(result.proof, result.commitment))
 
 
 def prove_norm_check_stark(z: list[int]) -> NormCheckResult:
@@ -231,7 +231,7 @@ def prove_norm_check_stark(z: list[int]) -> NormCheckResult:
 def verify_norm_check_stark(result: NormCheckResult) -> bool:
     """Verify a norm-check proof."""
     _require_ext("verify_norm_check_py")
-    return _ext.verify_norm_check_py(result.proof, result.commitment)
+    return bool(_ext.verify_norm_check_py(result.proof, result.commitment))
 
 
 def prove_use_hint_stark(r: list[int], h_bits: list[bool]) -> UseHintResult:
@@ -252,7 +252,7 @@ def prove_use_hint_stark(r: list[int], h_bits: list[bool]) -> UseHintResult:
 def verify_use_hint_stark(result: UseHintResult) -> bool:
     """Verify a UseHint proof."""
     _require_ext("verify_use_hint_py")
-    return _ext.verify_use_hint_py(result.proof, result.commitment)
+    return bool(_ext.verify_use_hint_py(result.proof, result.commitment))
 
 
 # ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
