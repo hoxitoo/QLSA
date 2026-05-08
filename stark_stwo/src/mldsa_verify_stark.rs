@@ -120,7 +120,6 @@ pub fn prove_intt(f: &[i64; N]) -> Result<(Vec<u8>, String, [i64; N]), String> {
         MlDsaInttButterflyEval, MlDsaInttButterflyComponent, LOG_N_BUTTERFLIES,
         build_trace as intt_build_trace,
     };
-    use blake2::{Blake2s256, Digest};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
     use stwo::core::pcs::PcsConfig;
     use stwo::core::poly::circle::CanonicCoset;
@@ -137,13 +136,9 @@ pub fn prove_intt(f: &[i64; N]) -> Result<(Vec<u8>, String, [i64; N]), String> {
     let log_size = LOG_N_BUTTERFLIES;
     let (columns, intt_out) = intt_build_trace(f);
 
-    let commitment_m31 = {
-        let mut h = Blake2s256::new();
-        for c in &intt_out { h.update(&(*c as u32).to_le_bytes()); }
-        let hash = h.finalize();
-        u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]])
-            % ((1u32 << 31) - 1)
-    };
+    // Scheme-B: 128-bit output fingerprint mixed into Fiat-Shamir.
+    let fp = crate::output_fingerprint(&intt_out);
+    let commitment_hex = crate::build_poly_commitment(&fp);
 
     let log_blowup = crate::LOG_BLOWUP;
     let mut config = PcsConfig::default();
@@ -171,7 +166,8 @@ pub fn prove_intt(f: &[i64; N]) -> Result<(Vec<u8>, String, [i64; N]), String> {
     tb.extend_evals(columns);
     tb.commit(channel);
 
-    channel.mix_u32s(&[commitment_m31]);
+    // Mix 4-word fingerprint (128-bit FS binding).
+    channel.mix_u32s(&fp);
 
     let component = MlDsaInttButterflyComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -186,16 +182,6 @@ pub fn prove_intt(f: &[i64; N]) -> Result<(Vec<u8>, String, [i64; N]), String> {
 
     let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("serialization error: {e:?}"))?;
-
-    let m31_le = commitment_m31.to_le_bytes();
-    let mut h2 = Blake2s256::new();
-    h2.update(m31_le);
-    h2.update(&proof_bytes[..proof_bytes.len().min(32)]);
-    let suffix = h2.finalize();
-    let mut buf = [0u8; 16];
-    buf[0..4].copy_from_slice(&m31_le);
-    buf[4..16].copy_from_slice(&suffix[0..12]);
-    let commitment_hex = hex::encode(buf);
 
     Ok((proof_bytes, commitment_hex, intt_out))
 }
@@ -215,17 +201,13 @@ pub fn verify_intt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Str
 
     let log_size = LOG_N_BUTTERFLIES;
 
-    let bytes = hex::decode(commitment_hex)
-        .map_err(|e| format!("invalid commitment hex: {e}"))?;
-    if bytes.len() != 16 {
-        return Err("commitment must be 16 bytes".into());
-    }
-    let commitment_m31 = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    // Scheme-B: decode 4-word fingerprint for Fiat-Shamir replay.
+    let fp = crate::parse_poly_commitment(commitment_hex)?;
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
             proof_bytes,
-            bincode::config::standard().with_limit::<{ 32 * 1024 * 1024 }>(),
+            bincode::config::standard().with_limit::<{ 8 * 1024 * 1024 }>(),
         )
         .map_err(|e| format!("deserialization error: {e:?}"))?;
 
@@ -249,7 +231,7 @@ pub fn verify_intt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Str
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
-    verifier_channel.mix_u32s(&[commitment_m31]);
+    verifier_channel.mix_u32s(&fp);
 
     Ok(verify::<Blake2sM31MerkleChannel>(
         &[&component], verifier_channel, commitment_scheme, proof,

@@ -25,15 +25,25 @@ use stwo_constraint_framework::TraceLocationAllocator;
 
 use air::{HashChainComponent, HashChainEval};
 
-// ─── 128-bit commitment helpers ───────────────────────────────────────────────
+// ─── Commitment helpers ────────────────────────────────────────────────────────
 //
-// Layout (16 bytes = 32 hex chars):
-//   bytes [0:4]  — M31 field element (le-u32), extracted by verifier for Fiat-Shamir
-//   bytes [4:16] — Blake2s(m31_le ∥ proof[0:32])[0:12], 96-bit proof-binding suffix
+// Two distinct commitment schemes coexist:
 //
-// The M31 component stays 32-bit for Fiat-Shamir mixing (must be known before proving).
-// The suffix provides 128-bit total binding for on-chain batch identification and
-// prevents birthday collisions that would be feasible with a 32-bit commitment alone.
+// A) Hash-chain / Poseidon2 / Merkle circuits (128-bit with proof-binding suffix):
+//    bytes [0:4]  — M31 field element (circuit output, le-u32)
+//    bytes [4:16] — Blake2s(m31_le ∥ proof[0:32])[0:12]  96-bit proof-binding suffix
+//    Used by prove/verify_hash_chain, prove/verify_hash_chain_poseidon2, prove/verify_merkle_root.
+//
+// B) Polynomial circuits — NTT / INTT / PolyMul / PolyAdd (128-bit output fingerprint):
+//    bytes [0:3]  — fp[0] = Blake2s256(output_coeffs)[0:4]  % M31_MODULUS
+//    bytes [4:7]  — fp[1] = Blake2s256(output_coeffs)[4:8]  % M31_MODULUS
+//    bytes [8:11] — fp[2] = Blake2s256(output_coeffs)[8:12] % M31_MODULUS
+//    bytes [12:15]— fp[3] = Blake2s256(output_coeffs)[12:16]% M31_MODULUS
+//    ALL 4 words are mixed into the Fiat-Shamir channel → 128-bit FS binding.
+//    Used by prove/verify_ntt, prove/verify_poly_mul, prove/verify_poly_add (INTT).
+//    Birthday bound: ~2^{-64} for collision in 4 independent M31 words.
+
+// ── Scheme A helpers ─────────────────────────────────────────────────────────
 
 /// Build a 128-bit commitment (32 hex chars) from the circuit output and proof bytes.
 fn build_commitment_128(m31_val: u32, proof_bytes: &[u8]) -> String {
@@ -48,7 +58,7 @@ fn build_commitment_128(m31_val: u32, proof_bytes: &[u8]) -> String {
     hex::encode(buf)
 }
 
-/// Parse and validate a 128-bit commitment. Returns the M31 value for Fiat-Shamir mixing.
+/// Parse and validate a Scheme-A commitment. Returns the M31 value for Fiat-Shamir mixing.
 /// Returns Err if the hex is malformed, the M31 is out of range, or the suffix is wrong.
 fn parse_commitment_128(commitment_hex: &str, proof_bytes: &[u8]) -> Result<u32, String> {
     let bytes = hex::decode(commitment_hex)
@@ -72,6 +82,54 @@ fn parse_commitment_128(commitment_hex: &str, proof_bytes: &[u8]) -> Result<u32,
         return Err("commitment integrity check failed (suffix mismatch)".into());
     }
     Ok(m31_val)
+}
+
+// ── Scheme B helpers ─────────────────────────────────────────────────────────
+
+/// Compute a 128-bit output fingerprint for polynomial circuits (NTT, INTT, PolyMul, PolyAdd).
+///
+/// Returns 4 M31-reduced u32 words derived from Blake2s256(output_coefficients).
+/// All 4 words must be mixed into the Fiat-Shamir channel via `channel.mix_u32s(&fp)`.
+/// This gives 128-bit binding of the FRI query challenges to the circuit output,
+/// replacing the previous 32-bit binding that was vulnerable to birthday attacks (~2^16).
+pub fn output_fingerprint(coeffs: &[i64]) -> [u32; 4] {
+    let mut h = Blake2s256::new();
+    for &c in coeffs { h.update(&(c as u32).to_le_bytes()); }
+    let hash = h.finalize();
+    std::array::from_fn(|i| {
+        u32::from_le_bytes(hash[i*4..(i+1)*4].try_into().unwrap()) % M31_MODULUS
+    })
+}
+
+/// Encode a Scheme-B polynomial commitment as a 32-hex-char string.
+pub(crate) fn build_poly_commitment(fp: &[u32; 4]) -> String {
+    let mut buf = [0u8; 16];
+    for (i, &w) in fp.iter().enumerate() {
+        buf[i*4..(i+1)*4].copy_from_slice(&w.to_le_bytes());
+    }
+    hex::encode(buf)
+}
+
+/// Decode and validate a Scheme-B polynomial commitment.
+/// Returns Err if hex is malformed or any word exceeds M31_MODULUS.
+pub(crate) fn parse_poly_commitment(commitment_hex: &str) -> Result<[u32; 4], String> {
+    let bytes = hex::decode(commitment_hex)
+        .map_err(|e| format!("invalid commitment hex: {e}"))?;
+    if bytes.len() != 16 {
+        return Err(format!(
+            "commitment must be 16 bytes (32 hex chars), got {} bytes",
+            bytes.len()
+        ));
+    }
+    let words: [u32; 4] = std::array::from_fn(|i| {
+        u32::from_le_bytes(bytes[i*4..(i+1)*4].try_into().unwrap())
+    });
+    for (i, &w) in words.iter().enumerate() {
+        if w >= M31_MODULUS {
+            return Err(format!("commitment word {i} = {w} out of M31 range [0, 2^31-2]"));
+        }
+    }
+    Ok(words)
 }
 
 /// log2 of the FRI blowup factor. 4 → blowup 16× (security margin ~120-bit at 30 FRI rounds).
@@ -158,10 +216,10 @@ const MAX_LOG_SIZE: u32 = 28;
 /// are not canonical field elements and must be rejected before `from_u32_unchecked`.
 const M31_MODULUS: u32 = (1u32 << 31) - 1;
 
-/// Maximum proof size accepted by the verifiers (32 MB).
-/// Prevents crafted length-prefix fields in bincode from triggering unbounded heap
-/// allocation before any actual deserialization work begins (audit H-3).
-const MAX_PROOF_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum proof size accepted by the verifiers (8 MB).
+/// Realistic Stwo proofs are 90–200 KB; 8 MB gives generous headroom while preventing
+/// crafted oversized proofs from triggering multi-second heap allocations (DoS risk).
+const MAX_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Verify a proof previously produced by `prove_hash_chain`.
 pub fn verify_hash_chain(
@@ -348,32 +406,20 @@ pub fn verify_hash_chain_poseidon2(
 
 // ─── NTT STARK prover/verifier (MVP-3+) ──────────────────────────────────────
 
-/// Commit to the NTT output: Blake2s over all 256 coefficients → 4-byte M31 value.
-///
-/// Calling this before `prove()` lets us mix the output fingerprint into the
-/// Fiat-Shamir channel before the FRI queries are determined.
-fn ntt_commitment_m31(ntt_out: &[i64; 256]) -> u32 {
-    let mut h = Blake2s256::new();
-    for c in ntt_out {
-        h.update(&(*c as u32).to_le_bytes());
-    }
-    let hash = h.finalize();
-    u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % M31_MODULUS
-}
-
 /// Prove a forward NTT over Z_q[X]/(X^{256}+1) using a Circle STARK.
 ///
 /// Input `f` must have coefficients in `[0, Q)` (Q = 8 380 417).
 ///
 /// Returns `(proof_bytes, commitment_hex, ntt_out)`:
 /// - `proof_bytes`: serialised STARK proof (~90–200 KB)
-/// - `commitment_hex`: 32-hex-char 128-bit binding of proof to NTT output
+/// - `commitment_hex`: 32-hex-char 128-bit Scheme-B commitment (4 M31 words)
 /// - `ntt_out`: the NTT of `f` (forward transform result)
 ///
 /// # Soundness
 /// The butterfly-addition/subtraction constraints (C2–C5) are fully sound in M31.
 /// The multiplication constraint (C1) requires range-check arguments for full
 /// soundness (planned for MVP-4); the proof is sound for honest provers.
+/// Fiat-Shamir binding: 128-bit (4 M31 words mixed into channel).
 pub fn prove_ntt(f: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String> {
     use mldsa::Q;
     use mldsa_ntt_air::{MlDsaNttButterflyEval, MlDsaNttButterflyComponent, LOG_N_BUTTERFLIES, build_trace};
@@ -388,8 +434,9 @@ pub fn prove_ntt(f: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String
     let log_size = LOG_N_BUTTERFLIES;
     let (columns, ntt_out) = build_trace(f);
 
-    // Commitment M31 value: fingerprint of the NTT output (mixed into Fiat-Shamir).
-    let commitment_m31 = ntt_commitment_m31(&ntt_out);
+    // 128-bit fingerprint of the NTT output mixed into Fiat-Shamir (Scheme B).
+    let fp = output_fingerprint(&ntt_out);
+    let commitment_hex = build_poly_commitment(&fp);
 
     let config = make_config(log_size);
     let lifting = log_size + LOG_BLOWUP;
@@ -412,8 +459,8 @@ pub fn prove_ntt(f: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String
     tree_builder.extend_evals(columns);
     tree_builder.commit(channel);
 
-    // Mix NTT output fingerprint into the Fiat-Shamir transcript.
-    channel.mix_u32s(&[commitment_m31]);
+    // Mix all 4 fingerprint words (128-bit FS binding).
+    channel.mix_u32s(&fp);
 
     let component = MlDsaNttButterflyComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -431,7 +478,6 @@ pub fn prove_ntt(f: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String
     let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("serialization error: {e:?}"))?;
 
-    let commitment_hex = build_commitment_128(commitment_m31, &proof_bytes);
     Ok((proof_bytes, commitment_hex, ntt_out))
 }
 
@@ -445,8 +491,8 @@ pub fn verify_ntt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Stri
 
     let log_size = LOG_N_BUTTERFLIES;
 
-    // Parse 128-bit commitment → M31 fingerprint for Fiat-Shamir replay.
-    let commitment_m31 = parse_commitment_128(commitment_hex, proof_bytes)?;
+    // Parse Scheme-B commitment → 4 M31 words for Fiat-Shamir replay.
+    let fp = parse_poly_commitment(commitment_hex)?;
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
@@ -477,8 +523,8 @@ pub fn verify_ntt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Stri
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
-    // Replay Fiat-Shamir: mix the same NTT output fingerprint as the prover.
-    verifier_channel.mix_u32s(&[commitment_m31]);
+    // Replay Fiat-Shamir: mix the same 4-word fingerprint as the prover.
+    verifier_channel.mix_u32s(&fp);
 
     let result = verify::<Blake2sM31MerkleChannel>(
         &[&component],
@@ -511,13 +557,8 @@ pub fn prove_poly_mul(
     let log_size = LOG_N_ROWS;
     let (columns, product) = build_trace(a, b);
 
-    // Commitment: Blake2s fingerprint of product coefficients.
-    let commitment_m31 = {
-        let mut h = Blake2s256::new();
-        for c in &product { h.update(&(*c as u32).to_le_bytes()); }
-        let hash = h.finalize();
-        u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % M31_MODULUS
-    };
+    let fp = output_fingerprint(&product);
+    let commitment_hex = build_poly_commitment(&fp);
 
     let config = make_config(log_size);
     let lifting = log_size + LOG_BLOWUP;
@@ -538,7 +579,7 @@ pub fn prove_poly_mul(
     tree_builder.extend_evals(columns);
     tree_builder.commit(channel);
 
-    channel.mix_u32s(&[commitment_m31]);
+    channel.mix_u32s(&fp);
 
     let component = PolyMulComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -552,7 +593,6 @@ pub fn prove_poly_mul(
     let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("serialization error: {e:?}"))?;
 
-    let commitment_hex = build_commitment_128(commitment_m31, &proof_bytes);
     Ok((proof_bytes, commitment_hex, product))
 }
 
@@ -562,7 +602,7 @@ pub fn verify_poly_mul(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
     use mldsa_poly_mul_air::{PolyMulEval, PolyMulComponent, LOG_N_ROWS};
 
     let log_size = LOG_N_ROWS;
-    let commitment_m31 = parse_commitment_128(commitment_hex, proof_bytes)?;
+    let fp = parse_poly_commitment(commitment_hex)?;
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
@@ -589,7 +629,7 @@ pub fn verify_poly_mul(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
-    verifier_channel.mix_u32s(&[commitment_m31]);
+    verifier_channel.mix_u32s(&fp);
 
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
@@ -619,12 +659,8 @@ pub fn prove_poly_add(
     let log_size = LOG_N_ROWS;
     let (columns, sum) = build_trace(a, b);
 
-    let commitment_m31 = {
-        let mut h = Blake2s256::new();
-        for c in &sum { h.update(&(*c as u32).to_le_bytes()); }
-        let hash = h.finalize();
-        u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % M31_MODULUS
-    };
+    let fp = output_fingerprint(&sum);
+    let commitment_hex = build_poly_commitment(&fp);
 
     let config = make_config(log_size);
     let lifting = log_size + LOG_BLOWUP;
@@ -645,7 +681,7 @@ pub fn prove_poly_add(
     tree_builder.extend_evals(columns);
     tree_builder.commit(channel);
 
-    channel.mix_u32s(&[commitment_m31]);
+    channel.mix_u32s(&fp);
 
     let component = PolyAddComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -659,7 +695,6 @@ pub fn prove_poly_add(
     let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("serialization error: {e:?}"))?;
 
-    let commitment_hex = build_commitment_128(commitment_m31, &proof_bytes);
     Ok((proof_bytes, commitment_hex, sum))
 }
 
@@ -669,7 +704,7 @@ pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
     use mldsa_poly_add_air::{PolyAddEval, PolyAddComponent, LOG_N_ROWS};
 
     let log_size = LOG_N_ROWS;
-    let commitment_m31 = parse_commitment_128(commitment_hex, proof_bytes)?;
+    let fp = parse_poly_commitment(commitment_hex)?;
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
@@ -696,7 +731,7 @@ pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
-    verifier_channel.mix_u32s(&[commitment_m31]);
+    verifier_channel.mix_u32s(&fp);
 
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
