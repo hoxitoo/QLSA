@@ -2,6 +2,7 @@ pub mod air;
 pub mod mldsa;
 pub mod mldsa_intt_air;
 pub mod mldsa_ntt_air;
+pub mod mldsa_poly_add_air;
 pub mod mldsa_poly_mul_air;
 pub mod mldsa_verify_stark;
 pub mod poseidon2;
@@ -593,6 +594,113 @@ pub fn verify_poly_mul(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Polynomial addition STARK (MVP-3+) ──────────────────────────────────────
+
+/// Prove that `c[i] = (a[i] + b[i]) mod Q` for i = 0..255.
+///
+/// Returns `(proof_bytes, commitment_hex, sum)`.
+/// The commitment fingerprints the 256 output coefficients via Blake2s.
+///
+/// # Soundness
+/// The addition/boolean constraints are **fully sound** in M31: all operands are
+/// < Q < 2²³, so sums stay below M31 and there is no wrap-around ambiguity.
+pub fn prove_poly_add(
+    a: &[i64; 256],
+    b: &[i64; 256],
+) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_poly_add_air::{PolyAddEval, PolyAddComponent, LOG_N_ROWS, build_trace};
+
+    for (i, (&av, &bv)) in a.iter().zip(b.iter()).enumerate() {
+        if av < 0 || av >= Q { return Err(format!("a[{i}] = {av} out of [0, Q)")); }
+        if bv < 0 || bv >= Q { return Err(format!("b[{i}] = {bv} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, sum) = build_trace(a, b);
+
+    let commitment_m31 = {
+        let mut h = Blake2s256::new();
+        for c in &sum { h.update(&(*c as u32).to_le_bytes()); }
+        let hash = h.finalize();
+        u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % M31_MODULUS
+    };
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&[commitment_m31]);
+
+    let component = PolyAddComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PolyAddEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    let commitment_hex = build_commitment_128(commitment_m31, &proof_bytes);
+    Ok((proof_bytes, commitment_hex, sum))
+}
+
+/// Verify a polynomial-addition proof produced by [`prove_poly_add`].
+pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_poly_add_air::{PolyAddEval, PolyAddComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let commitment_m31 = parse_commitment_128(commitment_hex, proof_bytes)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = PolyAddComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PolyAddEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&[commitment_m31]);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 /// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
@@ -850,6 +958,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_ntt_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_poly_mul_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_poly_mul_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_poly_add_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_poly_add_py, m)?)?;
     Ok(())
 }
 
@@ -871,6 +981,26 @@ fn prove_poly_mul_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec
 #[pyfunction]
 fn verify_poly_mul_py(proof: Vec<u8>, commitment: String) -> bool {
     verify_poly_mul(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_poly_add_py(a, b) -> (proof: bytes, commitment: str, sum: list[int])
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_poly_add_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let a_arr: [i64; 256] = a.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("a must have exactly 256 elements"))?;
+    let b_arr: [i64; 256] = b.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("b must have exactly 256 elements"))?;
+    let (proof, commitment, sum) = prove_poly_add(&a_arr, &b_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, sum.to_vec()))
+}
+
+/// verify_poly_add_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_poly_add_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_poly_add(&proof, &commitment).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1151,5 +1281,46 @@ mod tests {
             prove_poly_mul(&a, &b).expect("poly_mul proving failed");
         assert_eq!(product, [0i64; 256]);
         assert!(verify_poly_mul(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── Polynomial addition tests (MVP-3+) ───────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_poly_add() {
+        let a = random_q_poly(300);
+        let b = random_q_poly(400);
+        let (proof_bytes, commitment_hex, sum) =
+            prove_poly_add(&a, &b).expect("poly_add proving failed");
+
+        // Sum must be correct mod Q.
+        let q = mldsa::Q;
+        for i in 0..256 {
+            assert_eq!(sum[i], (a[i] + b[i]).rem_euclid(q), "sum[{i}]");
+        }
+
+        let valid = verify_poly_add(&proof_bytes, &commitment_hex)
+            .expect("poly_add verification failed");
+        assert!(valid, "poly_add proof should verify");
+    }
+
+    #[test]
+    fn test_poly_add_zero_is_identity() {
+        let a = random_q_poly(500);
+        let z = [0i64; 256];
+        let (proof_bytes, commitment_hex, sum) =
+            prove_poly_add(&a, &z).expect("poly_add proving failed");
+        assert_eq!(sum, a);
+        assert!(verify_poly_add(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_poly_add_tampered_proof_fails() {
+        let a = random_q_poly(10);
+        let b = random_q_poly(20);
+        let (proof_bytes, commitment_hex, _) =
+            prove_poly_add(&a, &b).expect("poly_add proving failed");
+        let mut bad = proof_bytes.clone();
+        bad[20] ^= 0xFF;
+        assert!(!verify_poly_add(&bad, &commitment_hex).unwrap_or(false));
     }
 }
