@@ -1233,6 +1233,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
     Ok(())
 }
 
@@ -1418,6 +1419,96 @@ fn verify_mldsa_witness_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_proofs(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_sig_witness_py(pk: bytes, msg: bytes, sig: bytes)
+///   -> (proof_bundle: bytes, max_norms: list[int], w1_prime: list[list[int]])
+///
+/// End-to-end function: decodes an ML-DSA-65 signature, verifies it, then
+/// proves the full arithmetic witness pipeline:
+///   Az  →  c·t₁·2^d  →  poly_sub  →  norm_check  →  UseHint
+///
+/// Raises PyRuntimeError if the signature is invalid or any sub-proof fails.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_mldsa_sig_witness_py(
+    pk:  Vec<u8>,
+    msg: Vec<u8>,
+    sig: Vec<u8>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>)> {
+    use mldsa::encoding::{pk_decode, sig_decode};
+    use mldsa::xof::{expand_a, sample_in_ball};
+    use mldsa::field;
+    use mldsa::params::{K, L, D};
+    use mldsa::N;
+
+    // Verify first — reject invalid signatures immediately.
+    if !mldsa::verify::ml_dsa_verify(&pk, &msg, &sig) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ML-DSA-65 signature verification failed — cannot prove invalid witness"
+        ));
+    }
+
+    // Decode public key: rho + t1 (K polynomials in [0, 2^T1_BITS)).
+    let (rho, t1) = pk_decode(&pk)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+            format!("pk_decode failed: {e}")
+        ))?;
+
+    // Decode signature: c_tilde + z (L polys, signed) + hints (K × N bools).
+    let (c_tilde, z, hints) = sig_decode(&sig)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+            format!("sig_decode failed: {e}")
+        ))?;
+
+    // a_hat = ExpandA(rho) — K×L NTT-domain matrix (already in [0, Q)).
+    let a_hat_matrix = expand_a(&rho);
+    let mut a_hat_flat: Vec<[i64; N]> = Vec::with_capacity(K * L);
+    for row in &a_hat_matrix.rows {
+        for poly in &row.0 {
+            a_hat_flat.push(poly.coeffs);
+        }
+    }
+
+    // c = SampleInBall(c_tilde) — challenge polynomial.
+    let c_poly = sample_in_ball(&c_tilde);
+    // Reduce challenge to [0, Q) (SampleInBall produces coeffs ∈ {-1, 0, 1}).
+    let mut c_arr = [0i64; N];
+    for (i, &v) in c_poly.coeffs.iter().enumerate() {
+        c_arr[i] = field::reduce(v);
+    }
+
+    // z_reduced: signature z polynomials reduced from signed to [0, Q).
+    let mut z_arr: Vec<[i64; N]> = Vec::with_capacity(L);
+    for poly in &z.0 {
+        let mut coeffs = [0i64; N];
+        for (i, &v) in poly.coeffs.iter().enumerate() {
+            coeffs[i] = field::reduce(v);
+        }
+        z_arr.push(coeffs);
+    }
+
+    // t1_scaled = t1 * 2^D mod Q — the FIPS 204 scaling of public key components.
+    let t1_scaled = t1.scale_power2(D);
+    let mut t1_arr: Vec<[i64; N]> = Vec::with_capacity(K);
+    for poly in &t1_scaled.0 {
+        t1_arr.push(poly.coeffs);
+    }
+
+    // Run the full STARK witness pipeline.
+    let proof = mldsa_verify_stark::prove_verify_mldsa_witness(
+        &a_hat_flat, &z_arr, &c_arr, &t1_arr, &hints, K, L,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+
+    Ok((bundle, max_norms, w1_prime))
 }
 
 #[cfg(test)]

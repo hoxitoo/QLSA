@@ -304,3 +304,62 @@ def test_mldsa_witness_wrong_input_size_raises():
             [[1, 2, 3]],  # wrong size — not 256
             [[0] * N], [0] * N, [[0] * N], [[False] * N], 1, 1,
         )
+
+
+# ─── prove_mldsa_sig_witness — end-to-end with real oqs signature ─────────────
+
+try:
+    import oqs as _oqs
+    _HAVE_OQS = True
+except ImportError:
+    _HAVE_OQS = False
+
+needs_oqs = pytest.mark.skipif(
+    not (_HAVE_EXT and _HAVE_OQS),
+    reason="requires qlsa_stark_stwo + oqs",
+)
+
+
+@needs_oqs
+def test_prove_mldsa_sig_witness_roundtrip():
+    """Prove a real liboqs ML-DSA-65 signature through the full STARK pipeline."""
+    from stark.prover import prove_mldsa_sig_witness_stark, verify_mldsa_witness_stark, NORM_BOUND
+
+    alg = _oqs.Signature("ML-DSA-65")
+    pk = alg.generate_keypair()
+    msg = b"qlsa test message for witness proof"
+    sig = alg.sign(msg)
+
+    result = prove_mldsa_sig_witness_stark(pk, msg, sig)
+
+    assert isinstance(result.proof_bundle, bytes)
+    assert len(result.proof_bundle) > 0
+    # L = 5 norm values (||z[j]||_∞); must be within ML-DSA bound.
+    assert len(result.max_norms) == 5
+    for mn in result.max_norms:
+        assert 0 <= mn < NORM_BOUND, f"||z||_inf = {mn} >= NORM_BOUND {NORM_BOUND}"
+    # K = 6 rows of UseHint output.
+    assert len(result.w1_prime) == 6
+    for row in result.w1_prime:
+        assert len(row) == 256
+        assert all(0 <= v < 16 for v in row), "w1 values must be in [0, m=16)"
+
+    assert verify_mldsa_witness_stark(result), "Witness proof did not verify"
+
+
+@needs_oqs
+def test_prove_mldsa_sig_witness_rejects_invalid_sig():
+    """Invalid signature must raise RuntimeError before attempting any proof."""
+    from stark.prover import prove_mldsa_sig_witness_stark
+
+    alg = _oqs.Signature("ML-DSA-65")
+    pk = alg.generate_keypair()
+    msg = b"original message"
+    sig = alg.sign(msg)
+
+    # Flip a byte to invalidate the signature.
+    bad_sig = bytearray(sig)
+    bad_sig[10] ^= 0xFF
+
+    with pytest.raises(RuntimeError, match="failed"):
+        prove_mldsa_sig_witness_stark(pk, msg, bytes(bad_sig))

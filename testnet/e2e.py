@@ -42,7 +42,7 @@ from core.batch import create_batch
 from core.keys import generate_keypair, derive_address
 from core.signing import sign
 from core.transaction import Transaction
-from stark.prover import prove_batch
+from stark.prover import prove_batch, prove_mldsa_sig_witness_stark, verify_mldsa_witness_stark, NORM_BOUND
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,7 +109,7 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
         time.monotonic() - t0,
     )
 
-    # ── Step 4: Generate STARK proof ─────────────────────────────────────────
+    # ── Step 4: Generate batch STARK proof ───────────────────────────────────
     logger.info("Generating Circle STARK proof (Stwo, LOG_BLOWUP=4)…")
     t0 = time.monotonic()
     proof_result = prove_batch(batch)
@@ -123,11 +123,42 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
         elapsed,
     )
 
+    # ── Step 4.5: ML-DSA arithmetic witness proof (MVP-3+) ────────────────────
+    # Prove the full Az → c·t₁ → sub → norm_check → UseHint pipeline for the
+    # first transaction's signature. This demonstrates that the signer's
+    # ML-DSA-65 verification logic is correct and committed to the batch.
+    logger.info("Proving ML-DSA-65 arithmetic witness for tx[0]…")
+    tx0 = txs[0]
+    t0 = time.monotonic()
+    try:
+        witness_result = prove_mldsa_sig_witness_stark(
+            pk=tx0.public_key,
+            msg=tx0.to_bytes(),
+            sig=tx0.signature,
+        )
+        elapsed_w = time.monotonic() - t0
+        norm_ok = all(mn < NORM_BOUND for mn in witness_result.max_norms)
+        valid_w = verify_mldsa_witness_stark(witness_result)
+        logger.info(
+            "  witness_proof=%d bytes | norms_ok=%s | verified=%s (%.2fs)",
+            len(witness_result.proof_bundle),
+            norm_ok,
+            valid_w,
+            elapsed_w,
+        )
+        if not valid_w:
+            logger.error("ML-DSA witness proof failed verification — aborting")
+            return 1
+    except RuntimeError as exc:
+        logger.error("ML-DSA witness proof failed: %s", exc)
+        return 1
+
     if dry_run:
         logger.info("[DRY-RUN] Skipping on-chain submission.")
         logger.info("To submit, set RPC_URL, DEPLOYER_PRIVATE_KEY, REGISTRY_ADDRESS in .env")
         logger.info("=== DRY-RUN COMPLETE ===")
         return 0
+
 
     # ── Step 5: Submit on-chain ───────────────────────────────────────────────
     try:

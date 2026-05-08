@@ -312,6 +312,30 @@ def verify_mldsa_witness_stark(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_py(result.proof_bundle))
 
 
+def prove_mldsa_sig_witness_stark(
+    pk:  bytes,
+    msg: bytes,
+    sig: bytes,
+) -> MldsaWitnessResult:
+    """
+    End-to-end: decode an ML-DSA-65 signature and prove the full arithmetic
+    witness pipeline (Az → c·t₁·2^d → poly_sub → norm_check → UseHint).
+
+    Raises ValueError if the signature is invalid.
+    Raises RuntimeError if the extension is not installed or a sub-proof fails.
+    """
+    _require_ext("prove_mldsa_sig_witness_py")
+    try:
+        bundle, max_norms, w1_prime = _ext.prove_mldsa_sig_witness_py(pk, msg, sig)
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_sig_witness_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+    )
+
+
 # ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 @dataclass
