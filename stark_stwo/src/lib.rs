@@ -1,6 +1,7 @@
 pub mod air;
 pub mod mldsa;
 pub mod mldsa_intt_air;
+pub mod mldsa_norm_check_air;
 pub mod mldsa_ntt_air;
 pub mod mldsa_poly_add_air;
 pub mod mldsa_poly_mul_air;
@@ -736,6 +737,139 @@ pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Polynomial subtraction STARK (MVP-3+) ───────────────────────────────────
+
+/// Prove that `c[i] = (a[i] − b[i]) mod Q` for i = 0..255.
+///
+/// Implemented as `prove_poly_add(a, b_neg)` where `b_neg[i] = (Q − b[i]) mod Q`.
+/// This reuses the fully-sound poly_add AIR without introducing a new AIR.
+///
+/// Returns `(proof_bytes, commitment_hex, diff)`.
+pub fn prove_poly_sub(
+    a: &[i64; 256],
+    b: &[i64; 256],
+) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    for (i, (&av, &bv)) in a.iter().zip(b.iter()).enumerate() {
+        if av < 0 || av >= Q { return Err(format!("a[{i}] = {av} out of [0, Q)")); }
+        if bv < 0 || bv >= Q { return Err(format!("b[{i}] = {bv} out of [0, Q)")); }
+    }
+    // Negate b in Z_q: b_neg[i] = (Q − b[i]) mod Q.
+    let mut b_neg = [0i64; 256];
+    for i in 0..256 {
+        b_neg[i] = if b[i] == 0 { 0 } else { Q - b[i] };
+    }
+    prove_poly_add(a, &b_neg)
+}
+
+/// Verify a polynomial-subtraction proof produced by [`prove_poly_sub`].
+///
+/// Verification is identical to [`verify_poly_add`] because the same AIR is used.
+pub fn verify_poly_sub(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    verify_poly_add(proof_bytes, commitment_hex)
+}
+
+// ─── Coefficient norm check STARK (MVP-3+) ───────────────────────────────────
+
+/// Prove that `norm[i] = min(z[i], Q − z[i])` for i = 0..255 (absolute centered value).
+///
+/// Returns `(proof_bytes, commitment_hex, norm_poly, max_norm)`:
+/// - `norm_poly[i]` is the absolute centered value of each coefficient.
+/// - `max_norm` is the ∞-norm of `z` (for external bound check: must be < γ₁ − β).
+///
+/// The STARK proves the norm computation is correct.  The bound check
+/// `max_norm < NORM_BOUND` is asserted externally; range-proof soundness is
+/// deferred to MVP-4.
+pub fn prove_norm_check(z: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256], i64), String> {
+    use mldsa::Q;
+    use mldsa_norm_check_air::{NormCheckEval, NormCheckComponent, LOG_N_ROWS, build_trace};
+
+    for (i, &c) in z.iter().enumerate() {
+        if c < 0 || c >= Q { return Err(format!("z[{i}] = {c} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, norm_out) = build_trace(z);
+
+    let max_norm = norm_out.iter().copied().max().unwrap_or(0);
+
+    let fp = output_fingerprint(&norm_out);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&fp);
+
+    let component = NormCheckComponent::new(
+        &mut TraceLocationAllocator::default(),
+        NormCheckEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("norm_check proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, norm_out, max_norm))
+}
+
+/// Verify a norm-check proof produced by [`prove_norm_check`].
+pub fn verify_norm_check(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_norm_check_air::{NormCheckEval, NormCheckComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = NormCheckComponent::new(
+        &mut TraceLocationAllocator::default(),
+        NormCheckEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 /// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
@@ -995,6 +1129,10 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_poly_mul_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_poly_add_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_poly_add_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_poly_sub_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_poly_sub_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_norm_check_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_norm_check_py, m)?)?;
     Ok(())
 }
 
@@ -1036,6 +1174,49 @@ fn prove_poly_add_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec
 #[pyfunction]
 fn verify_poly_add_py(proof: Vec<u8>, commitment: String) -> bool {
     verify_poly_add(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_poly_sub_py(a, b) -> (proof: bytes, commitment: str, diff: list[int])
+///
+/// Proves c[i] = (a[i] − b[i]) mod Q for all i. Uses the poly_add AIR with negated b.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_poly_sub_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let a_arr: [i64; 256] = a.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("a must have exactly 256 elements"))?;
+    let b_arr: [i64; 256] = b.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("b must have exactly 256 elements"))?;
+    let (proof, commitment, diff) = prove_poly_sub(&a_arr, &b_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, diff.to_vec()))
+}
+
+/// verify_poly_sub_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_poly_sub_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_poly_sub(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_norm_check_py(z) -> (proof: bytes, commitment: str, norm: list[int], max_norm: int)
+///
+/// Proves norm[i] = min(z[i], Q − z[i]) for all i.
+/// Returns also `max_norm` = ||z||_∞  for external bound checking (must be < γ₁ − β = 524092).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_norm_check_py(z: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>, i64)> {
+    let z_arr: [i64; 256] = z.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 256 elements"))?;
+    let (proof, commitment, norm, max_norm) = prove_norm_check(&z_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, norm.to_vec(), max_norm))
+}
+
+/// verify_norm_check_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_norm_check_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_norm_check(&proof, &commitment).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1357,5 +1538,86 @@ mod tests {
         let mut bad = proof_bytes.clone();
         bad[20] ^= 0xFF;
         assert!(!verify_poly_add(&bad, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── Polynomial subtraction tests (MVP-3+) ────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_poly_sub() {
+        let q = mldsa::Q;
+        let a = random_q_poly(600);
+        let b = random_q_poly(700);
+        let (proof_bytes, commitment_hex, diff) =
+            prove_poly_sub(&a, &b).expect("poly_sub proving failed");
+
+        for i in 0..256 {
+            assert_eq!(diff[i], (a[i] - b[i]).rem_euclid(q), "diff[{i}]");
+        }
+
+        let valid = verify_poly_sub(&proof_bytes, &commitment_hex)
+            .expect("poly_sub verification failed");
+        assert!(valid, "poly_sub proof should verify");
+    }
+
+    #[test]
+    fn test_poly_sub_self_is_zero() {
+        let a = random_q_poly(800);
+        let (proof_bytes, commitment_hex, diff) =
+            prove_poly_sub(&a, &a).expect("poly_sub (a - a) failed");
+        assert_eq!(diff, [0i64; 256]);
+        assert!(verify_poly_sub(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_poly_sub_zero_is_identity() {
+        let a = random_q_poly(900);
+        let z = [0i64; 256];
+        let (proof_bytes, commitment_hex, diff) =
+            prove_poly_sub(&a, &z).expect("poly_sub (a - 0) failed");
+        assert_eq!(diff, a);
+        assert!(verify_poly_sub(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── Norm check tests (MVP-3+) ─────────────────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_norm_check() {
+        let z = random_q_poly(1000);
+        let (proof_bytes, commitment_hex, norm, max_norm) =
+            prove_norm_check(&z).expect("norm_check proving failed");
+
+        // Verify norm values.
+        let q = mldsa::Q;
+        let half = (q - 1) / 2;
+        for i in 0..256 {
+            let expected = if z[i] > half { q - z[i] } else { z[i] };
+            assert_eq!(norm[i], expected, "norm[{i}]");
+        }
+        let expected_max = norm.iter().copied().max().unwrap_or(0);
+        assert_eq!(max_norm, expected_max);
+
+        let valid = verify_norm_check(&proof_bytes, &commitment_hex)
+            .expect("norm_check verification failed");
+        assert!(valid, "norm_check proof should verify");
+    }
+
+    #[test]
+    fn test_norm_check_zero_poly() {
+        let z = [0i64; 256];
+        let (proof_bytes, commitment_hex, norm, max_norm) =
+            prove_norm_check(&z).expect("norm_check of zero failed");
+        assert_eq!(norm, [0i64; 256]);
+        assert_eq!(max_norm, 0);
+        assert!(verify_norm_check(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_norm_check_tampered_proof_fails() {
+        let z = random_q_poly(1100);
+        let (proof_bytes, commitment_hex, _, _) =
+            prove_norm_check(&z).expect("norm_check proving failed");
+        let mut bad = proof_bytes.clone();
+        bad[20] ^= 0xFF;
+        assert!(!verify_norm_check(&bad, &commitment_hex).unwrap_or(false));
     }
 }
