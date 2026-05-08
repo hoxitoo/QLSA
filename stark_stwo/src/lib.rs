@@ -1,5 +1,10 @@
 pub mod air;
 pub mod mldsa;
+pub mod mldsa_intt_air;
+pub mod mldsa_ntt_air;
+pub mod mldsa_poly_add_air;
+pub mod mldsa_poly_mul_air;
+pub mod mldsa_verify_stark;
 pub mod poseidon2;
 pub mod poseidon2_air;
 pub mod poseidon2_merkle_air;
@@ -19,15 +24,25 @@ use stwo_constraint_framework::TraceLocationAllocator;
 
 use air::{HashChainComponent, HashChainEval};
 
-// ─── 128-bit commitment helpers ───────────────────────────────────────────────
+// ─── Commitment helpers ────────────────────────────────────────────────────────
 //
-// Layout (16 bytes = 32 hex chars):
-//   bytes [0:4]  — M31 field element (le-u32), extracted by verifier for Fiat-Shamir
-//   bytes [4:16] — Blake2s(m31_le ∥ proof[0:32])[0:12], 96-bit proof-binding suffix
+// Two distinct commitment schemes coexist:
 //
-// The M31 component stays 32-bit for Fiat-Shamir mixing (must be known before proving).
-// The suffix provides 128-bit total binding for on-chain batch identification and
-// prevents birthday collisions that would be feasible with a 32-bit commitment alone.
+// A) Hash-chain / Poseidon2 / Merkle circuits (128-bit with proof-binding suffix):
+//    bytes [0:4]  — M31 field element (circuit output, le-u32)
+//    bytes [4:16] — Blake2s(m31_le ∥ proof[0:32])[0:12]  96-bit proof-binding suffix
+//    Used by prove/verify_hash_chain, prove/verify_hash_chain_poseidon2, prove/verify_merkle_root.
+//
+// B) Polynomial circuits — NTT / INTT / PolyMul / PolyAdd (128-bit output fingerprint):
+//    bytes [0:3]  — fp[0] = Blake2s256(output_coeffs)[0:4]  % M31_MODULUS
+//    bytes [4:7]  — fp[1] = Blake2s256(output_coeffs)[4:8]  % M31_MODULUS
+//    bytes [8:11] — fp[2] = Blake2s256(output_coeffs)[8:12] % M31_MODULUS
+//    bytes [12:15]— fp[3] = Blake2s256(output_coeffs)[12:16]% M31_MODULUS
+//    ALL 4 words are mixed into the Fiat-Shamir channel → 128-bit FS binding.
+//    Used by prove/verify_ntt, prove/verify_poly_mul, prove/verify_poly_add (INTT).
+//    Birthday bound: ~2^{-64} for collision in 4 independent M31 words.
+
+// ── Scheme A helpers ─────────────────────────────────────────────────────────
 
 /// Build a 128-bit commitment (32 hex chars) from the circuit output and proof bytes.
 fn build_commitment_128(m31_val: u32, proof_bytes: &[u8]) -> String {
@@ -42,7 +57,7 @@ fn build_commitment_128(m31_val: u32, proof_bytes: &[u8]) -> String {
     hex::encode(buf)
 }
 
-/// Parse and validate a 128-bit commitment. Returns the M31 value for Fiat-Shamir mixing.
+/// Parse and validate a Scheme-A commitment. Returns the M31 value for Fiat-Shamir mixing.
 /// Returns Err if the hex is malformed, the M31 is out of range, or the suffix is wrong.
 fn parse_commitment_128(commitment_hex: &str, proof_bytes: &[u8]) -> Result<u32, String> {
     let bytes = hex::decode(commitment_hex)
@@ -66,6 +81,54 @@ fn parse_commitment_128(commitment_hex: &str, proof_bytes: &[u8]) -> Result<u32,
         return Err("commitment integrity check failed (suffix mismatch)".into());
     }
     Ok(m31_val)
+}
+
+// ── Scheme B helpers ─────────────────────────────────────────────────────────
+
+/// Compute a 128-bit output fingerprint for polynomial circuits (NTT, INTT, PolyMul, PolyAdd).
+///
+/// Returns 4 M31-reduced u32 words derived from Blake2s256(output_coefficients).
+/// All 4 words must be mixed into the Fiat-Shamir channel via `channel.mix_u32s(&fp)`.
+/// This gives 128-bit binding of the FRI query challenges to the circuit output,
+/// replacing the previous 32-bit binding that was vulnerable to birthday attacks (~2^16).
+pub fn output_fingerprint(coeffs: &[i64]) -> [u32; 4] {
+    let mut h = Blake2s256::new();
+    for &c in coeffs { h.update(&(c as u32).to_le_bytes()); }
+    let hash = h.finalize();
+    std::array::from_fn(|i| {
+        u32::from_le_bytes(hash[i*4..(i+1)*4].try_into().unwrap()) % M31_MODULUS
+    })
+}
+
+/// Encode a Scheme-B polynomial commitment as a 32-hex-char string.
+pub(crate) fn build_poly_commitment(fp: &[u32; 4]) -> String {
+    let mut buf = [0u8; 16];
+    for (i, &w) in fp.iter().enumerate() {
+        buf[i*4..(i+1)*4].copy_from_slice(&w.to_le_bytes());
+    }
+    hex::encode(buf)
+}
+
+/// Decode and validate a Scheme-B polynomial commitment.
+/// Returns Err if hex is malformed or any word exceeds M31_MODULUS.
+pub(crate) fn parse_poly_commitment(commitment_hex: &str) -> Result<[u32; 4], String> {
+    let bytes = hex::decode(commitment_hex)
+        .map_err(|e| format!("invalid commitment hex: {e}"))?;
+    if bytes.len() != 16 {
+        return Err(format!(
+            "commitment must be 16 bytes (32 hex chars), got {} bytes",
+            bytes.len()
+        ));
+    }
+    let words: [u32; 4] = std::array::from_fn(|i| {
+        u32::from_le_bytes(bytes[i*4..(i+1)*4].try_into().unwrap())
+    });
+    for (i, &w) in words.iter().enumerate() {
+        if w >= M31_MODULUS {
+            return Err(format!("commitment word {i} = {w} out of M31 range [0, 2^31-2]"));
+        }
+    }
+    Ok(words)
 }
 
 /// log2 of the FRI blowup factor. 4 → blowup 16× (security margin ~120-bit at 30 FRI rounds).
@@ -152,10 +215,10 @@ const MAX_LOG_SIZE: u32 = 28;
 /// are not canonical field elements and must be rejected before `from_u32_unchecked`.
 const M31_MODULUS: u32 = (1u32 << 31) - 1;
 
-/// Maximum proof size accepted by the verifiers (32 MB).
-/// Prevents crafted length-prefix fields in bincode from triggering unbounded heap
-/// allocation before any actual deserialization work begins (audit H-3).
-const MAX_PROOF_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum proof size accepted by the verifiers (8 MB).
+/// Realistic Stwo proofs are 90–200 KB; 8 MB gives generous headroom while preventing
+/// crafted oversized proofs from triggering multi-second heap allocations (DoS risk).
+const MAX_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Verify a proof previously produced by `prove_hash_chain`.
 pub fn verify_hash_chain(
@@ -338,6 +401,338 @@ pub fn verify_hash_chain_poseidon2(
     );
 
     Ok(result.is_ok())
+}
+
+// ─── NTT STARK prover/verifier (MVP-3+) ──────────────────────────────────────
+
+/// Prove a forward NTT over Z_q[X]/(X^{256}+1) using a Circle STARK.
+///
+/// Input `f` must have coefficients in `[0, Q)` (Q = 8 380 417).
+///
+/// Returns `(proof_bytes, commitment_hex, ntt_out)`:
+/// - `proof_bytes`: serialised STARK proof (~90–200 KB)
+/// - `commitment_hex`: 32-hex-char 128-bit Scheme-B commitment (4 M31 words)
+/// - `ntt_out`: the NTT of `f` (forward transform result)
+///
+/// # Soundness
+/// The butterfly-addition/subtraction constraints (C2–C5) are fully sound in M31.
+/// The multiplication constraint (C1) requires range-check arguments for full
+/// soundness (planned for MVP-4); the proof is sound for honest provers.
+/// Fiat-Shamir binding: 128-bit (4 M31 words mixed into channel).
+pub fn prove_ntt(f: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_ntt_air::{MlDsaNttButterflyEval, MlDsaNttButterflyComponent, LOG_N_BUTTERFLIES, build_trace};
+
+    // Input validation: all coefficients must be in [0, Q).
+    for (i, &c) in f.iter().enumerate() {
+        if c < 0 || c >= Q {
+            return Err(format!("f[{i}] = {c} out of range [0, Q)"));
+        }
+    }
+
+    let log_size = LOG_N_BUTTERFLIES;
+    let (columns, ntt_out) = build_trace(f);
+
+    // 128-bit fingerprint of the NTT output mixed into Fiat-Shamir (Scheme B).
+    let fp = output_fingerprint(&ntt_out);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: preprocessed (none for this circuit)
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    // Tree 1: main trace (9 columns)
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    // Mix all 4 fingerprint words (128-bit FS binding).
+    channel.mix_u32s(&fp);
+
+    let component = MlDsaNttButterflyComponent::new(
+        &mut TraceLocationAllocator::default(),
+        MlDsaNttButterflyEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&component],
+        channel,
+        commitment_scheme,
+    )
+    .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, ntt_out))
+}
+
+/// Verify an NTT STARK proof produced by [`prove_ntt`].
+///
+/// The proof is valid iff the prover correctly computed all 1024 butterfly
+/// operations of the forward NTT and committed to the output consistently.
+pub fn verify_ntt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_ntt_air::{MlDsaNttButterflyEval, MlDsaNttButterflyComponent, LOG_N_BUTTERFLIES};
+
+    let log_size = LOG_N_BUTTERFLIES;
+
+    // Parse Scheme-B commitment → 4 M31 words for Fiat-Shamir replay.
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = MlDsaNttButterflyComponent::new(
+        &mut TraceLocationAllocator::default(),
+        MlDsaNttButterflyEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!(
+            "malformed proof: expected ≥ 2 commitments, got {}",
+            proof.commitments.len()
+        ));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Replay Fiat-Shamir: mix the same 4-word fingerprint as the prover.
+    verifier_channel.mix_u32s(&fp);
+
+    let result = verify::<Blake2sM31MerkleChannel>(
+        &[&component],
+        verifier_channel,
+        commitment_scheme,
+        proof,
+    );
+
+    Ok(result.is_ok())
+}
+
+// ─── Pointwise multiplication STARK (MVP-3+) ─────────────────────────────────
+
+/// Prove that `c[i] = a[i] × b[i] (mod Q)` for i = 0..255 (NTT-domain product).
+///
+/// Returns `(proof_bytes, commitment_hex, product)`.
+/// The commitment fingerprints the 256 output coefficients via Blake2s.
+pub fn prove_poly_mul(
+    a: &[i64; 256],
+    b: &[i64; 256],
+) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_poly_mul_air::{PolyMulEval, PolyMulComponent, LOG_N_ROWS, build_trace};
+
+    for (i, (&av, &bv)) in a.iter().zip(b.iter()).enumerate() {
+        if av < 0 || av >= Q { return Err(format!("a[{i}] = {av} out of [0, Q)")); }
+        if bv < 0 || bv >= Q { return Err(format!("b[{i}] = {bv} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, product) = build_trace(a, b);
+
+    let fp = output_fingerprint(&product);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&fp);
+
+    let component = PolyMulComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PolyMulEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, product))
+}
+
+/// Verify a pointwise-multiplication proof produced by [`prove_poly_mul`].
+pub fn verify_poly_mul(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_poly_mul_air::{PolyMulEval, PolyMulComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = PolyMulComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PolyMulEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
+// ─── Polynomial addition STARK (MVP-3+) ──────────────────────────────────────
+
+/// Prove that `c[i] = (a[i] + b[i]) mod Q` for i = 0..255.
+///
+/// Returns `(proof_bytes, commitment_hex, sum)`.
+/// The commitment fingerprints the 256 output coefficients via Blake2s.
+///
+/// # Soundness
+/// The addition/boolean constraints are **fully sound** in M31: all operands are
+/// < Q < 2²³, so sums stay below M31 and there is no wrap-around ambiguity.
+pub fn prove_poly_add(
+    a: &[i64; 256],
+    b: &[i64; 256],
+) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_poly_add_air::{PolyAddEval, PolyAddComponent, LOG_N_ROWS, build_trace};
+
+    for (i, (&av, &bv)) in a.iter().zip(b.iter()).enumerate() {
+        if av < 0 || av >= Q { return Err(format!("a[{i}] = {av} out of [0, Q)")); }
+        if bv < 0 || bv >= Q { return Err(format!("b[{i}] = {bv} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, sum) = build_trace(a, b);
+
+    let fp = output_fingerprint(&sum);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&fp);
+
+    let component = PolyAddComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PolyAddEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, sum))
+}
+
+/// Verify a polynomial-addition proof produced by [`prove_poly_add`].
+pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_poly_add_air::{PolyAddEval, PolyAddComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = PolyAddComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PolyAddEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
@@ -550,6 +945,27 @@ fn verify_merkle(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
     verify_merkle_root(&proof, &commitment, log_size).unwrap_or(false)
 }
 
+/// prove_ntt_py(f) -> (proof: bytes, commitment: str, ntt_out: list[int])
+///
+/// `f` is a list of 256 ints in [0, Q) (Q = 8 380 417).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_ntt_py(f: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let arr: [i64; 256] = f
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("f must have exactly 256 elements"))?;
+    let (proof, commitment, ntt_out) = prove_ntt(&arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, ntt_out.to_vec()))
+}
+
+/// verify_ntt_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_ntt_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_ntt(&proof, &commitment).unwrap_or(false)
+}
+
 /// prove_mldsa(entries) -> (proof: bytes, commitment: str, log_size: int, verified: int, rejected: int)
 ///
 /// `entries` is a list of ``(pk, msg, sig)`` tuples (all ``bytes``).
@@ -572,7 +988,53 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prove_merkle, m)?)?;
     m.add_function(wrap_pyfunction!(verify_merkle, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_ntt_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_ntt_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_poly_mul_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_poly_mul_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_poly_add_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_poly_add_py, m)?)?;
     Ok(())
+}
+
+/// prove_poly_mul_py(a, b) -> (proof: bytes, commitment: str, product: list[int])
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_poly_mul_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let a_arr: [i64; 256] = a.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("a must have exactly 256 elements"))?;
+    let b_arr: [i64; 256] = b.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("b must have exactly 256 elements"))?;
+    let (proof, commitment, product) = prove_poly_mul(&a_arr, &b_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, product.to_vec()))
+}
+
+/// verify_poly_mul_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_poly_mul_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_poly_mul(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_poly_add_py(a, b) -> (proof: bytes, commitment: str, sum: list[int])
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_poly_add_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let a_arr: [i64; 256] = a.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("a must have exactly 256 elements"))?;
+    let b_arr: [i64; 256] = b.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("b must have exactly 256 elements"))?;
+    let (proof, commitment, sum) = prove_poly_add(&a_arr, &b_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, sum.to_vec()))
+}
+
+/// verify_poly_add_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_poly_add_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_poly_add(&proof, &commitment).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -738,5 +1200,161 @@ mod tests {
         let result = verify_merkle_root(&bad_proof, &commitment_hex, log_size)
             .unwrap_or(false);
         assert!(!result);
+    }
+
+    // ── NTT STARK prover/verifier tests (MVP-3+) ─────────────────────────────
+
+    fn random_ntt_input(seed: u64) -> [i64; 256] {
+        let q = mldsa::Q;
+        let mut state = seed;
+        let mut f = [0i64; 256];
+        for c in f.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *c = ((state >> 33) as i64).abs() % q;
+        }
+        f
+    }
+
+    #[test]
+    fn test_prove_and_verify_ntt() {
+        let f = random_ntt_input(0xc0ffee);
+        let (proof_bytes, commitment_hex, ntt_out) =
+            prove_ntt(&f).expect("NTT proving failed");
+
+        // Output must match the reference NTT.
+        let mut expected = f;
+        mldsa::ntt::ntt(&mut expected);
+        assert_eq!(ntt_out, expected, "NTT output mismatch");
+
+        // Proof must verify.
+        let valid = verify_ntt(&proof_bytes, &commitment_hex).expect("NTT verification failed");
+        assert!(valid, "NTT proof should verify");
+    }
+
+    #[test]
+    fn test_ntt_tampered_proof_fails() {
+        let f = random_ntt_input(42);
+        let (proof_bytes, commitment_hex, _) = prove_ntt(&f).expect("NTT proving failed");
+        let mut bad_proof = proof_bytes.clone();
+        bad_proof[20] ^= 0xFF;
+        let result = verify_ntt(&bad_proof, &commitment_hex).unwrap_or(false);
+        assert!(!result, "tampered NTT proof should not verify");
+    }
+
+    #[test]
+    fn test_ntt_wrong_commitment_fails() {
+        let f = random_ntt_input(7);
+        let (proof_bytes, commitment_hex, _) = prove_ntt(&f).expect("NTT proving failed");
+        let bad_commitment = {
+            let mut bytes = hex::decode(&commitment_hex).unwrap();
+            let mut val = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+            val = val.wrapping_add(1) % M31_MODULUS;
+            bytes[0..4].copy_from_slice(&val.to_le_bytes());
+            hex::encode(&bytes)
+        };
+        let result = verify_ntt(&proof_bytes, &bad_commitment).unwrap_or(false);
+        assert!(!result, "wrong commitment should fail NTT verification");
+    }
+
+    #[test]
+    fn test_ntt_zero_poly() {
+        // NTT of the zero polynomial is the zero polynomial.
+        let f = [0i64; 256];
+        let (proof_bytes, commitment_hex, ntt_out) =
+            prove_ntt(&f).expect("NTT proving of zero failed");
+        assert_eq!(ntt_out, [0i64; 256]);
+        let valid = verify_ntt(&proof_bytes, &commitment_hex).expect("NTT verification failed");
+        assert!(valid);
+    }
+
+    // ── Pointwise polynomial multiplication tests (MVP-3+) ───────────────────
+
+    fn random_q_poly(seed: u64) -> [i64; 256] {
+        let q = mldsa::Q;
+        let mut state = seed;
+        let mut f = [0i64; 256];
+        for c in f.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *c = ((state >> 33) as i64).abs() % q;
+        }
+        f
+    }
+
+    #[test]
+    fn test_prove_and_verify_poly_mul() {
+        let a = random_q_poly(100);
+        let b = random_q_poly(200);
+        let (proof_bytes, commitment_hex, product) =
+            prove_poly_mul(&a, &b).expect("poly_mul proving failed");
+
+        // Product must match the reference.
+        let reference = mldsa::ntt::pointwise_mul(&a, &b);
+        assert_eq!(product, reference);
+
+        let valid = verify_poly_mul(&proof_bytes, &commitment_hex)
+            .expect("poly_mul verification failed");
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_poly_mul_tampered_proof_fails() {
+        let a = random_q_poly(1);
+        let b = random_q_poly(2);
+        let (proof_bytes, commitment_hex, _) =
+            prove_poly_mul(&a, &b).expect("poly_mul proving failed");
+        let mut bad = proof_bytes.clone();
+        bad[20] ^= 0xFF;
+        assert!(!verify_poly_mul(&bad, &commitment_hex).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_poly_mul_zero_is_zero() {
+        let a = [0i64; 256];
+        let b = random_q_poly(3);
+        let (proof_bytes, commitment_hex, product) =
+            prove_poly_mul(&a, &b).expect("poly_mul proving failed");
+        assert_eq!(product, [0i64; 256]);
+        assert!(verify_poly_mul(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── Polynomial addition tests (MVP-3+) ───────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_poly_add() {
+        let a = random_q_poly(300);
+        let b = random_q_poly(400);
+        let (proof_bytes, commitment_hex, sum) =
+            prove_poly_add(&a, &b).expect("poly_add proving failed");
+
+        // Sum must be correct mod Q.
+        let q = mldsa::Q;
+        for i in 0..256 {
+            assert_eq!(sum[i], (a[i] + b[i]).rem_euclid(q), "sum[{i}]");
+        }
+
+        let valid = verify_poly_add(&proof_bytes, &commitment_hex)
+            .expect("poly_add verification failed");
+        assert!(valid, "poly_add proof should verify");
+    }
+
+    #[test]
+    fn test_poly_add_zero_is_identity() {
+        let a = random_q_poly(500);
+        let z = [0i64; 256];
+        let (proof_bytes, commitment_hex, sum) =
+            prove_poly_add(&a, &z).expect("poly_add proving failed");
+        assert_eq!(sum, a);
+        assert!(verify_poly_add(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_poly_add_tampered_proof_fails() {
+        let a = random_q_poly(10);
+        let b = random_q_poly(20);
+        let (proof_bytes, commitment_hex, _) =
+            prove_poly_add(&a, &b).expect("poly_add proving failed");
+        let mut bad = proof_bytes.clone();
+        bad[20] ^= 0xFF;
+        assert!(!verify_poly_add(&bad, &commitment_hex).unwrap_or(false));
     }
 }

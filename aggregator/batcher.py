@@ -17,7 +17,7 @@ class BatchResult:
 
     # Populated when the Rust binary is available; None otherwise.
     proof: bytes | None = field(default=None, repr=False)
-    commitment: str | None = None       # 8 hex chars (4-byte M31 field element)
+    commitment: str | None = None  # 32 hex chars (16-byte 128-bit Scheme-B commitment)
 
     # Convenience properties for Solidity submission
     @property
@@ -27,20 +27,20 @@ class BatchResult:
 
     @property
     def stark_commitment_onchain(self) -> bytes | None:
-        """Raw bytes of the STARK commitment — use as bytes8 in Solidity.
+        """Raw 16 bytes of the STARK commitment — use as bytes16 in Solidity.
 
-        BatchRegistryV2 accepts bytes8 (8 bytes).  The Stwo prover returns
-        an 8-char hex string (4 bytes); we left-pad with zeros to produce
-        exactly 8 bytes so the contract receives a well-formed bytes8.
+        BatchRegistryV2 accepts bytes16 (16 bytes).  The Stwo prover returns
+        a 32-char hex string (16 bytes); this property decodes it directly.
         """
         if self.commitment is None:
             return None
         raw = bytes.fromhex(self.commitment)
-        if len(raw) == 8:
-            return raw
-        if len(raw) == 4:
-            return raw + b"\x00" * 4
-        raise ValueError(f"commitment must be 4 or 8 bytes, got {len(raw)}")
+        if len(raw) != 16:
+            raise ValueError(
+                f"commitment must be 16 bytes (32 hex chars), got {len(raw)} bytes. "
+                "Ensure the Rust qlsa_stark_stwo extension is up to date."
+            )
+        return raw
 
     @property
     def is_proven(self) -> bool:

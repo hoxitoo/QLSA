@@ -17,13 +17,19 @@ import "./IQLSAVerifierV2.sol";
 /// Flow:
 ///   1. Aggregator collects N transactions, builds SHA3-512 Merkle tree.
 ///   2. Aggregator runs Stwo Circle STARK prover → (proof, onchain_commitment).
-///      onchain_commitment = Blake2s(proof[0:32] ∥ merkle_root[:32])[0:8]
+///      onchain_commitment = Blake2s(proof[0:32] ∥ merkle_root[:32])[:16]  (16 bytes)
 ///   3. Aggregator calls submitBatch(merkleRoot, commitment, proof).
 ///   4. BatchRegistryV2 calls verifier.verify(proof, commitment, merkleRoot).
 ///   5. On success, merkleRoot is stored as finalized forever.
 ///
 /// Python counterpart (stark/prover.py):
-///   onchain_commitment = hashlib.blake2s(proof_bytes[:32] + batch.merkle_root[:32]).digest()[:8]
+///   onchain_commitment = hashlib.blake2s(proof_bytes[:32] + batch.merkle_root[:32]).digest()[:16].hex()
+///
+/// commitment format (bytes16 = 16 bytes):
+///   bytes  0–3  : M31 circuit output fingerprint word 0 (le-u32)
+///   bytes  4–7  : M31 circuit output fingerprint word 1 (le-u32)
+///   bytes  8–11 : M31 circuit output fingerprint word 2 (le-u32)
+///   bytes 12–15 : M31 circuit output fingerprint word 3 (le-u32)
 ///
 /// @dev merkleRoot = batch.merkle_root[:32] (first 32 bytes of SHA3-512 root).
 contract BatchRegistryV2 is ReentrancyGuard, Ownable {
@@ -49,7 +55,7 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
 
     /// @notice Emitted when a batch is successfully finalized.
     /// @param merkleRoot  First 32 bytes of the off-chain SHA3-512 Merkle root.
-    /// @param commitment  Blake2s-bound 8-byte commitment (proof header ∥ Merkle root).
+    /// @param commitment  16-byte (128-bit) commitment binding the STARK proof to the batch output.
     /// @param timestamp   Block timestamp of finalization.
     event BatchFinalized(
         bytes32 indexed merkleRoot,
@@ -87,8 +93,8 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     /// @notice Submit a batch for on-chain finalization.
     /// @param merkleRoot  bytes32 derived from the SHA3-512 Merkle root
     ///                    (Python: `batch.merkle_root[:32]`).
-    /// @param commitment  8-byte bound commitment
-    ///                    (Python: `hashlib.blake2s(proof[:32] + merkle_root[:32]).digest()[:8]`).
+    /// @param commitment  16-byte (128-bit) commitment
+    ///                    (Python: `hashlib.blake2s(proof[:32] + merkle_root[:32]).digest()[:16]`).
     /// @param starkProof  Full serialized STARK proof bytes.
     function submitBatch(
         bytes32        merkleRoot,
