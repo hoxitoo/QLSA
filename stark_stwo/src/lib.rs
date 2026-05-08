@@ -1234,6 +1234,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_hash_check_py, m)?)?;
     Ok(())
 }
 
@@ -1435,7 +1436,7 @@ fn prove_mldsa_sig_witness_py(
     pk:  Vec<u8>,
     msg: Vec<u8>,
     sig: Vec<u8>,
-) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>)> {
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String)> {
     use mldsa::encoding::{pk_decode, sig_decode};
     use mldsa::xof::{expand_a, sample_in_ball};
     use mldsa::field;
@@ -1508,7 +1509,88 @@ fn prove_mldsa_sig_witness_py(
             format!("bincode serialize failed: {e}")
         ))?;
 
-    Ok((bundle, max_norms, w1_prime))
+    // onchain_commitment = Blake2s(bundle[:32] ∥ c_tilde[:32])[:16]
+    // Binds the proof bundle to this specific signature's challenge seed.
+    let binding_input: Vec<u8> = bundle[..32.min(bundle.len())]
+        .iter()
+        .chain(c_tilde.iter().take(32))
+        .copied()
+        .collect();
+    use blake2::{Blake2s256, Digest};
+    let digest = Blake2s256::digest(&binding_input);
+    let onchain_commitment = hex::encode(&digest[..16]);
+
+    // c_tilde as hex — lets the caller re-derive the hash check off-circuit.
+    let c_tilde_hex = hex::encode(&c_tilde);
+
+    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex))
+}
+
+/// verify_mldsa_hash_check_py(pk, msg, w1_prime, c_tilde_hex) -> bool
+///
+/// Off-circuit ML-DSA.Verify hash step: recomputes
+///   μ = SHAKE-256(SHAKE-256(pk) ∥ M')
+///   c̃' = SHAKE-256(μ ∥ w1Encode(w1_prime))
+/// and checks that c̃' == c_tilde.
+///
+/// This ties the STARK witness (w1_prime) back to the original message and
+/// public key, completing the logical chain of ML-DSA.Verify.
+///
+/// `pk`         — raw public key bytes (PK_BYTES = 1952 for ML-DSA-65).
+/// `msg`        — original message bytes.
+/// `w1_prime`   — K rows × N coefficients (UseHint output, values in [0, m=16)).
+/// `c_tilde_hex`— hex-encoded c_tilde returned by prove_mldsa_sig_witness_py.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_hash_check_py(
+    pk:          Vec<u8>,
+    msg:         Vec<u8>,
+    w1_prime:    Vec<Vec<i64>>,
+    c_tilde_hex: String,
+) -> PyResult<bool> {
+    use mldsa::xof::{hash_pk, hash_mu, hash_commit};
+    use mldsa::encoding::w1_encode;
+    use mldsa::polyvec::PolyVec;
+    use mldsa::poly::Poly;
+    use mldsa::params::{K, LAMBDA_BYTES};
+    use mldsa::N;
+
+    // Decode w1_prime into PolyVec.
+    if w1_prime.len() != K {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("w1_prime must have K={K} rows, got {}", w1_prime.len())
+        ));
+    }
+    let w1_polyvec = PolyVec(w1_prime.into_iter().map(|row| {
+        let coeffs: [i64; N] = row.try_into()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                "each w1_prime row must have exactly 256 elements"
+            ))?;
+        Ok(Poly::from_coeffs(coeffs))
+    }).collect::<PyResult<Vec<_>>>()?);
+
+    // Decode c_tilde from hex.
+    let c_tilde = hex::decode(&c_tilde_hex)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+            format!("c_tilde_hex is not valid hex: {e}")
+        ))?;
+    if c_tilde.len() != LAMBDA_BYTES {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("c_tilde must be {LAMBDA_BYTES} bytes, got {}", c_tilde.len())
+        ));
+    }
+
+    // Recompute μ = SHAKE-256(tr ∥ M')  where M' = [0x00, 0x00] ∥ msg.
+    let tr = hash_pk(&pk);
+    let mut m_prime = vec![0u8, 0u8];
+    m_prime.extend_from_slice(&msg);
+    let mu = hash_mu(&tr, &m_prime);
+
+    // Recompute c̃' = SHAKE-256(μ ∥ w1Encode(w1_prime), LAMBDA_BYTES).
+    let w1_enc = w1_encode(&w1_polyvec);
+    let c_tilde_prime = hash_commit(&mu, &w1_enc, LAMBDA_BYTES);
+
+    Ok(c_tilde_prime == c_tilde)
 }
 
 #[cfg(test)]

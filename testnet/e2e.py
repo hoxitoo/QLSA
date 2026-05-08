@@ -42,7 +42,13 @@ from core.batch import create_batch
 from core.keys import generate_keypair, derive_address
 from core.signing import sign
 from core.transaction import Transaction
-from stark.prover import prove_batch, prove_mldsa_sig_witness_stark, verify_mldsa_witness_stark, NORM_BOUND
+from stark.prover import (
+    prove_batch,
+    prove_mldsa_sig_witness_stark,
+    verify_mldsa_witness_stark,
+    verify_mldsa_hash_check,
+    NORM_BOUND,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -137,17 +143,21 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
             sig=tx0.signature,
         )
         elapsed_w = time.monotonic() - t0
-        norm_ok = all(mn < NORM_BOUND for mn in witness_result.max_norms)
-        valid_w = verify_mldsa_witness_stark(witness_result)
+        norm_ok   = all(mn < NORM_BOUND for mn in witness_result.max_norms)
+        valid_w   = verify_mldsa_witness_stark(witness_result)
+        hash_ok   = verify_mldsa_hash_check(tx0.public_key, tx0.to_bytes(), witness_result)
         logger.info(
-            "  witness_proof=%d bytes | norms_ok=%s | verified=%s (%.2fs)",
+            "  witness_proof=%d bytes | norms_ok=%s | stark_ok=%s | hash_ok=%s"
+            " | onchain_commitment=%s (%.2fs)",
             len(witness_result.proof_bundle),
             norm_ok,
             valid_w,
+            hash_ok,
+            witness_result.onchain_commitment,
             elapsed_w,
         )
-        if not valid_w:
-            logger.error("ML-DSA witness proof failed verification — aborting")
+        if not valid_w or not hash_ok:
+            logger.error("ML-DSA witness proof or hash check failed — aborting")
             return 1
     except RuntimeError as exc:
         logger.error("ML-DSA witness proof failed: %s", exc)

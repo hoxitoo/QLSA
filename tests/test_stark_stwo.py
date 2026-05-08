@@ -346,6 +346,18 @@ def test_prove_mldsa_sig_witness_roundtrip():
 
     assert verify_mldsa_witness_stark(result), "Witness proof did not verify"
 
+    # onchain_commitment is 32 hex chars (16 bytes).
+    assert len(result.onchain_commitment) == 32
+    int(result.onchain_commitment, 16)  # must be valid hex
+    # c_tilde_hex is 96 hex chars (48 bytes = LAMBDA_BYTES for ML-DSA-65).
+    assert len(result.c_tilde_hex) == 96
+    int(result.c_tilde_hex, 16)
+
+    # Two independent proofs of the same sig must produce the same c_tilde_hex.
+    result2 = prove_mldsa_sig_witness_stark(pk, msg, sig)
+    assert result2.c_tilde_hex == result.c_tilde_hex, "c_tilde must be deterministic"
+    # But proof bundles may differ (randomised FRI) so onchain_commitments may too.
+
 
 @needs_oqs
 def test_prove_mldsa_sig_witness_rejects_invalid_sig():
@@ -363,3 +375,33 @@ def test_prove_mldsa_sig_witness_rejects_invalid_sig():
 
     with pytest.raises(RuntimeError, match="failed"):
         prove_mldsa_sig_witness_stark(pk, msg, bytes(bad_sig))
+
+
+@needs_oqs
+def test_mldsa_hash_check_passes_for_valid_sig():
+    """verify_mldsa_hash_check must return True for a genuine witness result."""
+    from stark.prover import prove_mldsa_sig_witness_stark, verify_mldsa_hash_check
+
+    alg = _oqs.Signature("ML-DSA-65")
+    pk = alg.generate_keypair()
+    msg = b"hash check test"
+    sig = alg.sign(msg)
+
+    result = prove_mldsa_sig_witness_stark(pk, msg, sig)
+    assert verify_mldsa_hash_check(pk, msg, result), \
+        "Hash check must pass for a valid signature's witness result"
+
+
+@needs_oqs
+def test_mldsa_hash_check_fails_wrong_message():
+    """Hash check must fail when msg is substituted for a different message."""
+    from stark.prover import prove_mldsa_sig_witness_stark, verify_mldsa_hash_check
+
+    alg = _oqs.Signature("ML-DSA-65")
+    pk = alg.generate_keypair()
+    msg = b"original"
+    sig = alg.sign(msg)
+
+    result = prove_mldsa_sig_witness_stark(pk, msg, sig)
+    assert not verify_mldsa_hash_check(pk, b"different message", result), \
+        "Hash check must fail when message is wrong"

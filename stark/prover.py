@@ -262,13 +262,20 @@ class MldsaWitnessResult:
     """
     Result of the full ML-DSA.Verify arithmetic witness pipeline.
 
-    proof_bundle  — bincode-serialized VerifyMldsaProof; pass to verify_mldsa_witness_stark.
-    max_norms     — L values, ||z[j]||_∞; each must be < NORM_BOUND (524 092).
-    w1_prime      — K rows × N coefficients; UseHint output for hash comparison.
+    proof_bundle       — bincode-serialized VerifyMldsaProof; pass to verify_mldsa_witness_stark.
+    max_norms          — L values, ||z[j]||_∞; each must be < NORM_BOUND (524 092).
+    w1_prime           — K rows × N coefficients; UseHint output for hash comparison.
+    onchain_commitment — 32-char hex (16 bytes): Blake2s(bundle[:32] ∥ c_tilde[:32])[:16].
+                         Binds the proof to this specific signature's challenge seed.
+                         Use this as the commitment when publishing to QLSAVerifierBound.
+    c_tilde_hex        — Hex-encoded c_tilde (48 bytes = LAMBDA_BYTES for ML-DSA-65).
+                         Lets the caller re-derive Hash(μ ∥ w1_encode(w1_prime)) == c_tilde.
     """
-    proof_bundle: bytes
-    max_norms:    list[int]   # L entries
-    w1_prime:     list[list[int]]  # K × N
+    proof_bundle:       bytes
+    max_norms:          list[int]        # L entries
+    w1_prime:           list[list[int]]  # K × N
+    onchain_commitment: str = field(default="")  # 32-char hex
+    c_tilde_hex:        str = field(default="")  # 96-char hex for ML-DSA-65
 
 
 def prove_mldsa_witness_stark(
@@ -312,6 +319,28 @@ def verify_mldsa_witness_stark(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_py(result.proof_bundle))
 
 
+def verify_mldsa_hash_check(
+    pk:     bytes,
+    msg:    bytes,
+    result: MldsaWitnessResult,
+) -> bool:
+    """
+    Off-circuit ML-DSA.Verify hash step.
+
+    Recomputes μ = SHAKE-256(SHAKE-256(pk) ∥ M') and
+    c̃' = SHAKE-256(μ ∥ w1Encode(w1_prime)), then checks c̃' == c_tilde.
+
+    Together with verify_mldsa_witness_stark, this completes the full logical
+    chain of ML-DSA.Verify: arithmetic correctness (STARK) + hash binding.
+
+    Returns True iff the hash check passes.
+    """
+    _require_ext("verify_mldsa_hash_check_py")
+    return bool(_ext.verify_mldsa_hash_check_py(
+        pk, msg, result.w1_prime, result.c_tilde_hex
+    ))
+
+
 def prove_mldsa_sig_witness_stark(
     pk:  bytes,
     msg: bytes,
@@ -326,13 +355,16 @@ def prove_mldsa_sig_witness_stark(
     """
     _require_ext("prove_mldsa_sig_witness_py")
     try:
-        bundle, max_norms, w1_prime = _ext.prove_mldsa_sig_witness_py(pk, msg, sig)
+        bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex = \
+            _ext.prove_mldsa_sig_witness_py(pk, msg, sig)
     except Exception as exc:
         raise RuntimeError(f"prove_mldsa_sig_witness_py failed: {exc}") from exc
     return MldsaWitnessResult(
         proof_bundle=bytes(bundle),
         max_norms=list(max_norms),
         w1_prime=[list(row) for row in w1_prime],
+        onchain_commitment=onchain_commitment,
+        c_tilde_hex=c_tilde_hex,
     )
 
 
