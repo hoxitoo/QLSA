@@ -26,12 +26,15 @@
 /// in M31.  The multiplication constraints (NTT C1, PolyMul C1, INTT C1)
 /// require range-check arguments for full soundness — tracked for MVP-4.
 
+use bincode::{Decode, Encode};
+
 use crate::mldsa::{Q, N};
 use crate::mldsa::ntt::{ntt, ntt_inv, pointwise_mul};
 
 // ── High-level polynomial multiplication via STARK pipeline ──────────────────
 
 /// Result of a STARK-proved polynomial ring multiplication.
+#[derive(Encode, Decode)]
 pub struct PolyMulProof {
     /// STARK proof for NTT(a): proof_bytes + commitment.
     pub proof_ntt_a:    (Vec<u8>, String),
@@ -253,6 +256,7 @@ pub fn verify_intt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Str
 // A_hat is accepted pre-computed (expand_A output) — no NTT proofs needed for A.
 
 /// Per-row STARK proofs for one Az[i].
+#[derive(Encode, Decode)]
 pub struct AzRowProof {
     /// L pointwise-multiplication proofs: A_hat[i][j] ⊙ z_hat[j].
     pub proofs_pmul: Vec<(Vec<u8>, String)>,
@@ -265,6 +269,7 @@ pub struct AzRowProof {
 }
 
 /// Aggregated STARK proof for the full matrix-vector product Az.
+#[derive(Encode, Decode)]
 pub struct AzProof {
     /// L NTT proofs, one per z column.
     pub proofs_ntt_z: Vec<(Vec<u8>, String)>,
@@ -414,6 +419,7 @@ pub fn verify_az(proof: &AzProof) -> Result<bool, String> {
 // Total: 1 + K + K + K = 1 + 3K proofs  (19 proofs for K=6).
 
 /// STARK proof for the computation c·t₁ (challenge × public-key components).
+#[derive(Encode, Decode)]
 pub struct Ct1Proof {
     /// NTT proof for the challenge polynomial c.
     pub proof_ntt_c: (Vec<u8>, String),
@@ -543,6 +549,7 @@ pub fn verify_ct1(proof: &Ct1Proof) -> Result<bool, String> {
 //   • Range proofs for multiplication soundness
 
 /// Combined STARK proof for the ML-DSA.Verify arithmetic witness.
+#[derive(Encode, Decode)]
 pub struct VerifyMldsaProof {
     /// STARK proofs for Az (K×L ring multiplications).
     pub az_proof:    AzProof,

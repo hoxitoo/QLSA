@@ -1231,6 +1231,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_norm_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_use_hint_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
     Ok(())
 }
 
@@ -1338,6 +1340,84 @@ fn prove_use_hint_py(r: Vec<i64>, h_bits: Vec<bool>) -> PyResult<(Vec<u8>, Strin
 #[pyfunction]
 fn verify_use_hint_py(proof: Vec<u8>, commitment: String) -> bool {
     verify_use_hint(&proof, &commitment).unwrap_or(false)
+}
+
+// ── ML-DSA full arithmetic witness pipeline ───────────────────────────────────
+
+/// prove_mldsa_witness_py(a_hat, z, c, t1, hints, k, l)
+///   -> (proof_bundle: bytes, max_norms: list[int], w1_prime: list[list[int]])
+///
+/// Proves the full ML-DSA.Verify arithmetic witness:
+///   Az  →  c·t₁  →  poly_sub  →  norm_check  →  UseHint
+///
+/// Inputs (all coefficients in [0, Q)):
+///   a_hat : k*l flat list of 256-int polynomials (NTT-domain, row-major)
+///   z     : l polynomials (signature)
+///   c     : 256-int challenge polynomial
+///   t1    : k polynomials (public key components)
+///   hints : k lists of 256 bools (hint bits from the signature)
+///   k, l  : matrix dimensions (ML-DSA-65: k=6, l=5)
+///
+/// Returns:
+///   proof_bundle : bincode-serialized VerifyMldsaProof (pass to verify_mldsa_witness_py)
+///   max_norms    : l values — ||z[j]||_∞; caller checks each < 524 092
+///   w1_prime     : k rows of 256 ints — UseHint outputs for hash comparison
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_mldsa_witness_py(
+    a_hat:  Vec<Vec<i64>>,
+    z:      Vec<Vec<i64>>,
+    c:      Vec<i64>,
+    t1:     Vec<Vec<i64>>,
+    hints:  Vec<Vec<bool>>,
+    k:      usize,
+    l:      usize,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>)> {
+    // Convert Vec<Vec<i64>> → Vec<[i64; 256]>.
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+
+    // Convert hints Vec<Vec<bool>> → Vec<Vec<bool>> (already the right type).
+    let hints_vv: Vec<Vec<bool>> = hints;
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_witness(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints_vv, k, l,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+
+    Ok((bundle, max_norms, w1_prime))
+}
+
+/// verify_mldsa_witness_py(proof_bundle: bytes) -> bool
+///
+/// Verifies all STARK sub-proofs in a bundle produced by prove_mldsa_witness_py.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProof, _
+    >(&proof_bundle, bincode::config::standard()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_proofs(&proof).unwrap_or(false)
 }
 
 #[cfg(test)]

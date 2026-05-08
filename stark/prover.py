@@ -255,6 +255,63 @@ def verify_use_hint_stark(result: UseHintResult) -> bool:
     return bool(_ext.verify_use_hint_py(result.proof, result.commitment))
 
 
+# ─── ML-DSA full arithmetic witness pipeline (MVP-3+) ────────────────────────
+
+@dataclass
+class MldsaWitnessResult:
+    """
+    Result of the full ML-DSA.Verify arithmetic witness pipeline.
+
+    proof_bundle  — bincode-serialized VerifyMldsaProof; pass to verify_mldsa_witness_stark.
+    max_norms     — L values, ||z[j]||_∞; each must be < NORM_BOUND (524 092).
+    w1_prime      — K rows × N coefficients; UseHint output for hash comparison.
+    """
+    proof_bundle: bytes
+    max_norms:    list[int]   # L entries
+    w1_prime:     list[list[int]]  # K × N
+
+
+def prove_mldsa_witness_stark(
+    a_hat:  list[list[int]],   # K*L flat list, each 256 ints, NTT-domain
+    z:      list[list[int]],   # L polynomials (signature)
+    c:      list[int],         # 256-int challenge polynomial
+    t1:     list[list[int]],   # K polynomials (public key)
+    hints:  list[list[bool]],  # K × 256 hint bits
+    k:      int,               # rows (ML-DSA-65: 6)
+    l:      int,               # columns (ML-DSA-65: 5)
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness:
+      Az  →  c·t₁  →  poly_sub  →  norm_check  →  UseHint
+
+    All coefficients must be in [0, Q) where Q = 8_380_417.
+
+    Returns MldsaWitnessResult with a serialized proof bundle,
+    ||z||_∞ norms for each of the L signature polynomials,
+    and the UseHint output w1_prime (K × 256) for hash comparison.
+
+    Raises RuntimeError if the extension is not installed or any sub-proof fails.
+    """
+    _require_ext("prove_mldsa_witness_py")
+    try:
+        bundle, max_norms, w1_prime = _ext.prove_mldsa_witness_py(
+            a_hat, z, c, t1, hints, k, l
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+    )
+
+
+def verify_mldsa_witness_stark(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult."""
+    _require_ext("verify_mldsa_witness_py")
+    return bool(_ext.verify_mldsa_witness_py(result.proof_bundle))
+
+
 # ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 @dataclass
