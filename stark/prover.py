@@ -152,6 +152,106 @@ def _call_prover_p2(
     )
 
 
+# ─── Polynomial circuit STARK provers (MVP-3+) ────────────────────────────────
+#
+# Lower-level provers for individual polynomial operations.
+# Each function corresponds directly to a Rust STARK circuit.
+# All operate on lists of 256 integers in [0, Q) where Q = 8_380_417.
+
+
+@dataclass
+class PolyProofResult:
+    """Result of a single-polynomial circuit STARK proof."""
+    proof: bytes
+    commitment: str  # 32-char hex, Scheme-B (4 M31 words)
+    output: list[int]  # 256 output coefficients
+
+
+@dataclass
+class NormCheckResult:
+    """Result of a norm-check STARK proof."""
+    proof: bytes
+    commitment: str
+    norm: list[int]   # absolute centered values
+    max_norm: int     # ||z||_∞ — caller asserts < γ₁ − β = 524 092
+
+
+@dataclass
+class UseHintResult:
+    """Result of a UseHint STARK proof."""
+    proof: bytes
+    commitment: str
+    w1: list[int]  # UseHint output: high bits in [0, m) where m=16
+
+
+def prove_poly_sub_stark(
+    a: list[int],
+    b: list[int],
+) -> PolyProofResult:
+    """
+    Prove c[i] = (a[i] − b[i]) mod Q for all 256 coefficients.
+
+    Uses the poly_add AIR with negated b.  Both a and b must be 256-element
+    lists of integers in [0, Q).
+    """
+    _require_ext("prove_poly_sub_py")
+    try:
+        proof_bytes, commitment, diff = _ext.prove_poly_sub_py(a, b)
+    except Exception as exc:
+        raise RuntimeError(f"prove_poly_sub_py failed: {exc}") from exc
+    return PolyProofResult(proof=proof_bytes, commitment=commitment, output=diff)
+
+
+def verify_poly_sub_stark(result: PolyProofResult) -> bool:
+    """Verify a polynomial-subtraction proof."""
+    _require_ext("verify_poly_sub_py")
+    return _ext.verify_poly_sub_py(result.proof, result.commitment)
+
+
+def prove_norm_check_stark(z: list[int]) -> NormCheckResult:
+    """
+    Prove norm[i] = min(z[i], Q − z[i]) for all 256 coefficients.
+
+    `z` must be a 256-element list of integers in [0, Q).
+    Returns norm polynomial and max_norm (||z||_∞).
+    Caller checks: max_norm < 524 092  (γ₁ − β for ML-DSA-65).
+    """
+    _require_ext("prove_norm_check_py")
+    try:
+        proof_bytes, commitment, norm, max_norm = _ext.prove_norm_check_py(z)
+    except Exception as exc:
+        raise RuntimeError(f"prove_norm_check_py failed: {exc}") from exc
+    return NormCheckResult(proof=proof_bytes, commitment=commitment,
+                           norm=norm, max_norm=max_norm)
+
+
+def verify_norm_check_stark(result: NormCheckResult) -> bool:
+    """Verify a norm-check proof."""
+    _require_ext("verify_norm_check_py")
+    return _ext.verify_norm_check_py(result.proof, result.commitment)
+
+
+def prove_use_hint_stark(r: list[int], h_bits: list[bool]) -> UseHintResult:
+    """
+    Prove UseHint(h_bits[i], r[i]) = w1[i] for all 256 coefficients.
+
+    `r` must be 256 ints in [0, Q).  `h_bits` must be 256 bools.
+    Returns w1 ∈ [0, 16) — the high-bits output used in the ML-DSA hash check.
+    """
+    _require_ext("prove_use_hint_py")
+    try:
+        proof_bytes, commitment, w1 = _ext.prove_use_hint_py(r, h_bits)
+    except Exception as exc:
+        raise RuntimeError(f"prove_use_hint_py failed: {exc}") from exc
+    return UseHintResult(proof=proof_bytes, commitment=commitment, w1=w1)
+
+
+def verify_use_hint_stark(result: UseHintResult) -> bool:
+    """Verify a UseHint proof."""
+    _require_ext("verify_use_hint_py")
+    return _ext.verify_use_hint_py(result.proof, result.commitment)
+
+
 # ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 @dataclass

@@ -1229,6 +1229,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_poly_sub_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_norm_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_norm_check_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_use_hint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
     Ok(())
 }
 
@@ -1313,6 +1315,29 @@ fn prove_norm_check_py(z: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>, i64)
 #[pyfunction]
 fn verify_norm_check_py(proof: Vec<u8>, commitment: String) -> bool {
     verify_norm_check(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_use_hint_py(r, h_bits) -> (proof: bytes, commitment: str, w1: list[int])
+///
+/// Proves UseHint(h_bits[i], r[i]) = w1[i] for all 256 coefficients.
+/// `r` must be 256 ints in [0, Q).  `h_bits` must be 256 bools.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_use_hint_py(r: Vec<i64>, h_bits: Vec<bool>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let r_arr: [i64; 256] = r.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("r must have exactly 256 elements"))?;
+    let h_arr: [bool; 256] = h_bits.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("h_bits must have exactly 256 elements"))?;
+    let (proof, commitment, w1) = prove_use_hint(&r_arr, &h_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, w1.to_vec()))
+}
+
+/// verify_use_hint_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_use_hint_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_use_hint(&proof, &commitment).unwrap_or(false)
 }
 
 #[cfg(test)]
