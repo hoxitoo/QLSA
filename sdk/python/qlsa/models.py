@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -11,12 +11,24 @@ class SubmitResult:
 
 
 @dataclass
+class WitnessStatus:
+    """Result of an ML-DSA-65 arithmetic witness STARK proof."""
+
+    has_witness: bool
+    onchain_commitment: str | None = None  # 32-char hex (16-byte Blake2s binding)
+    c_tilde_hex: str | None = None         # 96-char hex (48-byte ML-DSA-65 LAMBDA_BYTES)
+    max_norms: list[int] = field(default_factory=list)
+
+
+@dataclass
 class BatchStatus:
     batch_id: str
     tx_count: int
     merkle_root: str       # hex string (128 chars for SHA3-512)
     is_proven: bool
     stark_commitment: str | None = None
+    has_witness: bool = False
+    witness_commitment: str | None = None  # 32-char hex (16-byte binding for tx[0])
 
 
 @dataclass

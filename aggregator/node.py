@@ -64,24 +64,24 @@ class AggregatorNode:
         self._stats.transactions_received += 1
         logger.debug("tx accepted: %s (mempool=%d)", tx.tx_hash().hex()[:16], self.mempool.size())
 
-    def run_cycle(self) -> BatchResult | None:
+    def run_cycle(self, prove_witnesses: bool = False) -> BatchResult | None:
         """Attempt to create and prove a batch from pending transactions.
 
         Returns a BatchResult when a batch is created, None when the mempool
         has fewer transactions than min_batch_size.
         """
-        result = self.batcher.try_batch()
+        result = self.batcher.try_batch(prove_witnesses=prove_witnesses)
         if result is not None:
             self._record(result)
         return result
 
-    def force_cycle(self) -> BatchResult | None:
+    def force_cycle(self, prove_witnesses: bool = False) -> BatchResult | None:
         """Force a batch from whatever is in the mempool (≥ 1 tx).
 
         Useful for flushing at shutdown or when a deadline is reached.
         Returns None only if the mempool is completely empty.
         """
-        result = self.batcher.force_batch()
+        result = self.batcher.force_batch(prove_witnesses=prove_witnesses)
         if result is not None:
             self._record(result)
         return result

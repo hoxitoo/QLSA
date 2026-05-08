@@ -4,4 +4,5 @@ export type {
   NodeStats,
   SubmitResult,
   TransactionPayload,
+  WitnessStatus,
 } from "./types.js";

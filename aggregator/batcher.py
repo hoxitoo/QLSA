@@ -15,9 +15,14 @@ class BatchResult:
 
     batch: Batch
 
-    # Populated when the Rust binary is available; None otherwise.
+    # Populated when the PyO3 extension is available; None otherwise.
     proof: bytes | None = field(default=None, repr=False)
     commitment: str | None = None  # 32 hex chars (16-byte 128-bit Scheme-B commitment)
+
+    # ML-DSA arithmetic witness proof for the first transaction (MVP-3+).
+    # Populated when prove_witnesses=True is passed to Batcher; None otherwise.
+    witness_bundle:       bytes | None = field(default=None, repr=False)
+    witness_commitment:   str | None = None  # 32-char hex — Blake2s binding
 
     # Convenience properties for Solidity submission
     @property
@@ -46,6 +51,10 @@ class BatchResult:
     def is_proven(self) -> bool:
         return self.proof is not None and self.commitment is not None
 
+    @property
+    def has_witness(self) -> bool:
+        return self.witness_bundle is not None
+
 
 class Batcher:
     """Creates batches from a Mempool and optionally generates STARK proofs."""
@@ -66,7 +75,7 @@ class Batcher:
         self.max_batch_size = max_batch_size
         self.algorithm = algorithm
 
-    def try_batch(self) -> BatchResult | None:
+    def try_batch(self, prove_witnesses: bool = False) -> BatchResult | None:
         """Create a batch if the mempool has enough transactions.
 
         Returns None if fewer than min_batch_size transactions are pending.
@@ -74,6 +83,9 @@ class Batcher:
         Transactions with invalid signatures are dropped with a warning;
         remaining valid transactions are returned to the mempool front so they
         are included in the next batch cycle.
+
+        If prove_witnesses=True, also generates an ML-DSA arithmetic witness
+        proof for the first transaction (MVP-3+, requires PyO3 extension).
         """
         if self.mempool.size() < self.min_batch_size:
             return None
@@ -82,26 +94,29 @@ class Batcher:
         if not txs:
             return None
 
-        return self._create_and_prove(txs)
+        return self._create_and_prove(txs, prove_witnesses=prove_witnesses)
 
-    def force_batch(self) -> BatchResult | None:
+    def force_batch(self, prove_witnesses: bool = False) -> BatchResult | None:
         """Drain whatever is in the mempool (≥1 tx) and create a batch.
 
         Returns None if the mempool is empty.
         Transactions with invalid signatures are dropped with a warning;
         remaining valid transactions are returned to the mempool front so they
         are included in the next batch cycle.
+
+        If prove_witnesses=True, also generates an ML-DSA arithmetic witness
+        proof for the first transaction (MVP-3+).
         """
         txs = self.mempool.drain(self.max_batch_size)
         # Guard against TOCTOU: another thread may have drained the mempool
         # between a size() check and this drain call.
         if not txs:
             return None
-        return self._create_and_prove(txs)
+        return self._create_and_prove(txs, prove_witnesses=prove_witnesses)
 
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _create_and_prove(self, txs: list[Transaction]) -> BatchResult | None:
+    def _create_and_prove(self, txs: list[Transaction], prove_witnesses: bool = False) -> BatchResult | None:
         """Filter invalid-signature transactions, build a valid batch, and prove.
 
         Invalid transactions are logged and discarded.  Valid transactions that
@@ -128,22 +143,36 @@ class Batcher:
             logging.error("batcher: create_batch failed after pre-filter: %s", exc)
             return None
 
-        return self._try_prove(batch)
+        return self._try_prove(batch, prove_witnesses=prove_witnesses)
 
-    def _try_prove(self, batch: Batch) -> BatchResult:
-        """Run the STARK prover if the PyO3 extension is available; skip gracefully."""
+    def _try_prove(self, batch: Batch, prove_witnesses: bool = False) -> BatchResult:
+        """Run the STARK prover; optionally add an ML-DSA witness proof for tx[0]."""
+        result = BatchResult(batch=batch)
         try:
             from stark.prover import prove_batch
             pr = prove_batch(batch)
-            return BatchResult(
-                batch=batch,
-                proof=pr.proof,
-                commitment=pr.commitment,
-            )
+            result.proof = pr.proof
+            result.commitment = pr.commitment
         except RuntimeError as exc:
-            # Expected: extension not installed, prover timeout, or serialization failure.
             logging.warning("STARK proving skipped: %s", exc)
         except Exception as exc:
-            # Unexpected: log at error level so it's not silently swallowed.
             logging.error("Unexpected error during STARK proving: %s", exc, exc_info=True)
-        return BatchResult(batch=batch)
+
+        if prove_witnesses and batch.transactions:
+            tx0 = batch.transactions[0]
+            if tx0.signature is not None and tx0.public_key is not None:
+                try:
+                    from stark.prover import prove_mldsa_sig_witness_stark
+                    wr = prove_mldsa_sig_witness_stark(
+                        pk=tx0.public_key,
+                        msg=tx0.to_bytes(),
+                        sig=tx0.signature,
+                    )
+                    result.witness_bundle = wr.proof_bundle
+                    result.witness_commitment = wr.onchain_commitment
+                except RuntimeError as exc:
+                    logging.warning("ML-DSA witness proof skipped: %s", exc)
+                except Exception as exc:
+                    logging.error("Unexpected error during witness proving: %s", exc, exc_info=True)
+
+        return result
