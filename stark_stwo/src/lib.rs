@@ -976,6 +976,10 @@ pub fn verify_norm_check(proof_bytes: &[u8], commitment_hex: &str) -> Result<boo
 /// Returns `(proof_bytes, commitment_hex, az_hat_i)` where `az_hat_i` is the output polynomial.
 /// The commitment fingerprints the 256 output coefficients via Blake2s (Scheme B, 128-bit).
 ///
+/// The Fiat-Shamir transcript also binds to the L=5 input z̃ polynomials (input fingerprint
+/// mixed before the output fingerprint), so `verify_az_row` must receive the same z_hat to
+/// reconstruct the same channel state.
+///
 /// Call this K=6 times (once per output row) to prove the full matrix-vector product.
 pub fn prove_az_row(
     a_row: &[[i64; 256]; 5],
@@ -998,8 +1002,13 @@ pub fn prove_az_row(
     let log_size = LOG_N_ROWS;
     let (columns, az_hat) = build_trace(a_row, z_hat);
 
-    let fp = output_fingerprint(&az_hat);
-    let commitment_hex = build_poly_commitment(&fp);
+    // Input fingerprint: Blake2s of all L z̃ polynomials concatenated.
+    // Mixed into channel BEFORE the output fingerprint to bind the proof to the specific z_hat.
+    let z_flat: Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let input_fp = output_fingerprint(&z_flat);
+
+    let output_fp = output_fingerprint(&az_hat);
+    let commitment_hex = build_poly_commitment(&output_fp);
 
     let config = make_config(log_size);
     let lifting = log_size + LOG_BLOWUP;
@@ -1020,7 +1029,9 @@ pub fn prove_az_row(
     tree_builder.extend_evals(columns);
     tree_builder.commit(channel);
 
-    channel.mix_u32s(&fp);
+    // Bind to both input z_hat and output az_hat in this order.
+    channel.mix_u32s(&input_fp);
+    channel.mix_u32s(&output_fp);
 
     let component = AzRowComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1038,12 +1049,24 @@ pub fn prove_az_row(
 }
 
 /// Verify an Az-row proof produced by [`prove_az_row`].
-pub fn verify_az_row(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+///
+/// `z_hat` must be the same L=5 input polynomials that were used to generate the proof.
+/// The input fingerprint is recomputed from `z_hat` and mixed into the verifier channel
+/// to reconstruct the same Fiat-Shamir transcript as the prover.
+pub fn verify_az_row(
+    proof_bytes: &[u8],
+    commitment_hex: &str,
+    z_hat: &[[i64; 256]],
+) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
     use mldsa_az_air::{AzRowEval, AzRowComponent, LOG_N_ROWS};
 
     let log_size = LOG_N_ROWS;
-    let fp = parse_poly_commitment(commitment_hex)?;
+    let output_fp = parse_poly_commitment(commitment_hex)?;
+
+    // Recompute input fingerprint from the provided z_hat.
+    let z_flat: Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let input_fp = output_fingerprint(&z_flat);
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
@@ -1070,7 +1093,10 @@ pub fn verify_az_row(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, S
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
-    verifier_channel.mix_u32s(&fp);
+
+    // Reconstruct transcript: input fingerprint then output fingerprint (same order as prover).
+    verifier_channel.mix_u32s(&input_fp);
+    verifier_channel.mix_u32s(&output_fp);
 
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
@@ -1454,11 +1480,17 @@ fn prove_az_row_py(
     Ok((proof, commitment, az_hat.to_vec()))
 }
 
-/// verify_az_row_py(proof, commitment) -> bool
+/// verify_az_row_py(proof, commitment, z_hat) -> bool
+///
+/// `z_hat` must be a list of 5 lists of 256 ints — the same input used when proving.
 #[cfg(feature = "python")]
 #[pyfunction]
-fn verify_az_row_py(proof: Vec<u8>, commitment: String) -> bool {
-    verify_az_row(&proof, &commitment).unwrap_or(false)
+fn verify_az_row_py(proof: Vec<u8>, commitment: String, z_hat: Vec<Vec<i64>>) -> bool {
+    let z_slices: Vec<[i64; 256]> = z_hat.into_iter()
+        .map(|zj| zj.try_into().ok())
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    verify_az_row(&proof, &commitment, &z_slices).unwrap_or(false)
 }
 
 /// prove_norm_check_py(z) -> (proof: bytes, commitment: str, norm: list[int], max_norm: int)

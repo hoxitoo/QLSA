@@ -415,7 +415,7 @@ def test_prove_az_row_verify_roundtrip():
     z_hat = [_rand_poly(j + 30) for j in range(5)]
 
     proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
-    assert _ext.verify_az_row_py(proof, commitment)
+    assert _ext.verify_az_row_py(proof, commitment, z_hat)
 
 
 @needs_ext
@@ -450,7 +450,21 @@ def test_prove_az_row_tampered_proof_fails():
     proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
     tampered = bytearray(proof)
     tampered[len(tampered) // 2] ^= 0xFF
-    assert not _ext.verify_az_row_py(bytes(tampered), commitment)
+    assert not _ext.verify_az_row_py(bytes(tampered), commitment, z_hat)
+
+
+@needs_ext
+def test_prove_az_row_wrong_z_hat_fails():
+    """Verifying with a different z_hat must fail (input fingerprint binding)."""
+    a_row = [_rand_poly(j + 73) for j in range(5)]
+    z_hat = [_rand_poly(j + 83) for j in range(5)]
+    z_hat_other = [_rand_poly(j + 200) for j in range(5)]  # different values
+
+    proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
+    # Correct z_hat must pass.
+    assert _ext.verify_az_row_py(proof, commitment, z_hat)
+    # Wrong z_hat must fail (input fingerprint mismatch changes channel state).
+    assert not _ext.verify_az_row_py(proof, commitment, z_hat_other)
 
 
 @needs_ext
@@ -460,7 +474,7 @@ def test_prove_az_row_full_matrix():
     for i in range(6):
         a_row = [_rand_poly(i * 5 + j + 100) for j in range(5)]
         proof, commitment, az_hat = _ext.prove_az_row_py(a_row, z_hat)
-        assert _ext.verify_az_row_py(proof, commitment), f"row {i} failed verification"
+        assert _ext.verify_az_row_py(proof, commitment, z_hat), f"row {i} failed verification"
         assert len(az_hat) == N
 
 

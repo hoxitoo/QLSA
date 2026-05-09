@@ -342,7 +342,13 @@ pub fn prove_az_v2(
 }
 
 /// Verify all STARK sub-proofs in an `AzProofV2`.
+///
+/// Also performs cross-consistency checks:
+///   - Each stored z_hat[j] polynomial fingerprint matches the corresponding NTT output commitment.
+///   - Each Az-row sub-proof receives the same z_hat to reconstruct the input fingerprint in the
+///     Fiat-Shamir transcript, binding the Az-row proof to the specific z_hat used.
 pub fn verify_az_v2(proof: &AzProofV2) -> Result<bool, String> {
+    let l = proof.z_hat.len();
     let k = proof.proofs_intt.len();
 
     // Verify NTT(z[j]) proofs.
@@ -352,9 +358,23 @@ pub fn verify_az_v2(proof: &AzProofV2) -> Result<bool, String> {
             return Ok(false);
         }
     }
-    // Verify Az-row AIR proofs.
+
+    // Cross-check: stored z_hat[j] fingerprint must match the NTT output commitment.
+    // This prevents a prover from using z_hat values in Az-row that differ from the NTT outputs.
+    for j in 0..l {
+        let fp = crate::output_fingerprint(&proof.z_hat[j]);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if j < proof.proofs_ntt_z.len() && expected_cm != proof.proofs_ntt_z[j].1 {
+            return Ok(false);
+        }
+    }
+
+    // Build the z_hat slice for Az-row input fingerprint reconstruction.
+    let z_hat_slices: Vec<[i64; N]> = proof.z_hat.clone();
+
+    // Verify Az-row AIR proofs, passing z_hat so the verifier can reconstruct the input fingerprint.
     for (i, (pb, cm)) in proof.proofs_az_row.iter().enumerate() {
-        if !crate::verify_az_row(pb, cm)
+        if !crate::verify_az_row(pb, cm, &z_hat_slices)
             .map_err(|e| format!("Az-row verify row {i} failed: {e}"))? {
             return Ok(false);
         }
