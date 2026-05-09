@@ -563,6 +563,38 @@ def test_mldsa_hash_check_fails_wrong_message():
         "Hash check must fail when message is wrong"
 
 
+@needs_oqs
+def test_prove_mldsa_sig_witness_hint_weight_fields():
+    """MldsaWitnessResult includes a valid hint weight proof with total ≤ ω=55."""
+    from stark.prover import prove_mldsa_sig_witness_stark
+
+    alg = _oqs.Signature("ML-DSA-65")
+    pk = alg.generate_keypair()
+    msg = b"hint weight integration test"
+    sig = alg.sign(msg)
+
+    result = prove_mldsa_sig_witness_stark(pk, msg, sig)
+
+    # hint_weight_proof is a non-empty byte string.
+    assert isinstance(result.hint_weight_proof, bytes)
+    assert len(result.hint_weight_proof) > 0
+
+    # hint_weight_commitment is a 32-char hex string (16 bytes).
+    assert isinstance(result.hint_weight_commitment, str)
+    assert len(result.hint_weight_commitment) == 32
+    int(result.hint_weight_commitment, 16)  # must be valid hex
+
+    # hint_weight_total is a non-negative integer ≤ ω=55 for any valid ML-DSA-65 sig.
+    assert isinstance(result.hint_weight_total, int)
+    assert 0 <= result.hint_weight_total <= 55, \
+        f"hint weight {result.hint_weight_total} exceeds ω=55"
+
+    # The hint weight proof must verify independently via the low-level binding.
+    assert _ext.verify_hint_weight_py(
+        result.hint_weight_proof, result.hint_weight_commitment
+    ), "Hint weight proof did not verify"
+
+
 # ─── Hint weight check STARK (MVP-3+) ────────────────────────────────────────
 
 OMEGA = 55  # ML-DSA-65 hint weight bound
