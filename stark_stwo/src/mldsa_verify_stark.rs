@@ -26,12 +26,15 @@
 /// in M31.  The multiplication constraints (NTT C1, PolyMul C1, INTT C1)
 /// require range-check arguments for full soundness — tracked for MVP-4.
 
+use bincode::{Decode, Encode};
+
 use crate::mldsa::{Q, N};
 use crate::mldsa::ntt::{ntt, ntt_inv, pointwise_mul};
 
 // ── High-level polynomial multiplication via STARK pipeline ──────────────────
 
 /// Result of a STARK-proved polynomial ring multiplication.
+#[derive(Encode, Decode)]
 pub struct PolyMulProof {
     /// STARK proof for NTT(a): proof_bytes + commitment.
     pub proof_ntt_a:    (Vec<u8>, String),
@@ -253,6 +256,7 @@ pub fn verify_intt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Str
 // A_hat is accepted pre-computed (expand_A output) — no NTT proofs needed for A.
 
 /// Per-row STARK proofs for one Az[i].
+#[derive(Encode, Decode)]
 pub struct AzRowProof {
     /// L pointwise-multiplication proofs: A_hat[i][j] ⊙ z_hat[j].
     pub proofs_pmul: Vec<(Vec<u8>, String)>,
@@ -265,6 +269,7 @@ pub struct AzRowProof {
 }
 
 /// Aggregated STARK proof for the full matrix-vector product Az.
+#[derive(Encode, Decode)]
 pub struct AzProof {
     /// L NTT proofs, one per z column.
     pub proofs_ntt_z: Vec<(Vec<u8>, String)>,
@@ -393,6 +398,304 @@ pub fn verify_az(proof: &AzProof) -> Result<bool, String> {
         let (pb, cm) = &row.proof_intt;
         if !verify_intt(pb, cm)
             .map_err(|e| format!("INTT verify row {i}: {e}"))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+// ── Challenge × public key: c·t₁ (ML-DSA.Verify) ────────────────────────────
+//
+// In ML-DSA.Verify the verifier computes:
+//   w'[i] = INTT( Σ_j A_hat[i][j]⊙ẑ[j] − ĉ⊙t̂₁[i] )   i = 0..K−1
+//
+// This section proves the c·t₁ part: one ring multiplication per row.
+// Pipeline for the full Ct1 computation:
+//   1. NTT(c)         — one NTT proof for the challenge polynomial
+//   2. NTT(t₁[i])     — K NTT proofs, one per public-key component
+//   3. NTT(c)⊙NTT(t₁[i]) — K poly_mul proofs
+//   4. INTT(product[i])  — K INTT proofs
+//
+// Total: 1 + K + K + K = 1 + 3K proofs  (19 proofs for K=6).
+
+/// STARK proof for the computation c·t₁ (challenge × public-key components).
+#[derive(Encode, Decode)]
+pub struct Ct1Proof {
+    /// NTT proof for the challenge polynomial c.
+    pub proof_ntt_c: (Vec<u8>, String),
+    /// NTT output ĉ = NTT(c).
+    pub c_hat:       [i64; N],
+    /// NTT proofs for each t₁[i].
+    pub proofs_ntt_t1: Vec<(Vec<u8>, String)>,
+    /// Pointwise-multiplication proofs: ĉ ⊙ NTT(t₁[i]).
+    pub proofs_pmul:   Vec<(Vec<u8>, String)>,
+    /// INTT proofs for each product.
+    pub proofs_intt:   Vec<(Vec<u8>, String)>,
+    /// Output: c·t₁[i] in polynomial domain, coefficients in [0, Q).
+    pub output:        Vec<[i64; N]>,
+}
+
+/// Prove the computation `c·t₁` for all K public-key components.
+///
+/// `c`  — challenge polynomial from `SampleInBall`, coefficients in `[0, Q)`.
+/// `t1` — K public-key polynomials from `pkDecode`, coefficients in `[0, Q)`.
+pub fn prove_ct1(c: &[i64; N], t1: &[[i64; N]]) -> Result<Ct1Proof, String> {
+    let k = t1.len();
+    if k == 0 {
+        return Err("t1 must have at least 1 entry".into());
+    }
+
+    // Validate c.
+    for (i, &v) in c.iter().enumerate() {
+        if v < 0 || v >= Q {
+            return Err(format!("c[{i}] = {v} out of [0, Q)"));
+        }
+    }
+    // Validate t1.
+    for (row, poly) in t1.iter().enumerate() {
+        for (ci, &v) in poly.iter().enumerate() {
+            if v < 0 || v >= Q {
+                return Err(format!("t1[{row}][{ci}] = {v} out of [0, Q)"));
+            }
+        }
+    }
+
+    // Step 1: Prove NTT(c) once.
+    let (proof_c_bytes, commitment_c, c_hat) =
+        crate::prove_ntt(c).map_err(|e| format!("NTT proof for c failed: {e}"))?;
+
+    // Steps 2-4: For each row i.
+    let mut proofs_ntt_t1: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut proofs_pmul:   Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut proofs_intt:   Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut output:        Vec<[i64; N]>           = Vec::with_capacity(k);
+
+    for i in 0..k {
+        // Step 2: NTT(t₁[i]).
+        let (pb_ntt, cm_ntt, t1_hat_i) =
+            crate::prove_ntt(&t1[i]).map_err(|e| format!("NTT proof for t1[{i}] failed: {e}"))?;
+        proofs_ntt_t1.push((pb_ntt, cm_ntt));
+
+        // Step 3: ĉ ⊙ NTT(t₁[i]).
+        let (pb_mul, cm_mul, product_hat) =
+            crate::prove_poly_mul(&c_hat, &t1_hat_i)
+            .map_err(|e| format!("poly_mul proof c_hat⊙t1_hat[{i}] failed: {e}"))?;
+        proofs_pmul.push((pb_mul, cm_mul));
+
+        // Step 4: INTT(product).
+        let (pb_intt, cm_intt, ct1_i) =
+            prove_intt(&product_hat)
+            .map_err(|e| format!("INTT proof for c·t1[{i}] failed: {e}"))?;
+        proofs_intt.push((pb_intt, cm_intt));
+        output.push(ct1_i);
+    }
+
+    Ok(Ct1Proof {
+        proof_ntt_c: (proof_c_bytes, commitment_c),
+        c_hat,
+        proofs_ntt_t1,
+        proofs_pmul,
+        proofs_intt,
+        output,
+    })
+}
+
+/// Verify all STARK sub-proofs in a `Ct1Proof`.
+///
+/// Returns `Ok(true)` iff every NTT, poly_mul, and INTT proof is valid.
+pub fn verify_ct1(proof: &Ct1Proof) -> Result<bool, String> {
+    // Verify NTT(c).
+    if !crate::verify_ntt(&proof.proof_ntt_c.0, &proof.proof_ntt_c.1)
+        .map_err(|e| format!("NTT verify c failed: {e}"))? {
+        return Ok(false);
+    }
+    let k = proof.proofs_ntt_t1.len();
+    for i in 0..k {
+        // NTT(t₁[i]).
+        if !crate::verify_ntt(&proof.proofs_ntt_t1[i].0, &proof.proofs_ntt_t1[i].1)
+            .map_err(|e| format!("NTT verify t1[{i}] failed: {e}"))? {
+            return Ok(false);
+        }
+        // poly_mul.
+        if !crate::verify_poly_mul(&proof.proofs_pmul[i].0, &proof.proofs_pmul[i].1)
+            .map_err(|e| format!("poly_mul verify c⊙t1[{i}] failed: {e}"))? {
+            return Ok(false);
+        }
+        // INTT.
+        if !verify_intt(&proof.proofs_intt[i].0, &proof.proofs_intt[i].1)
+            .map_err(|e| format!("INTT verify ct1[{i}] failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+// ── Full ML-DSA.Verify witness proof (MVP-3+) ─────────────────────────────────
+//
+// Proves the core arithmetic of ML-DSA.Verify (FIPS 204 Algorithm 3):
+//
+//   w'[i] = (Az − c·t₁)[i]   in R_q, for i = 0..K−1
+//
+// Pipeline:
+//   1. AzProof   — K×L ring multiplications summed per row (prove_az)
+//   2. Ct1Proof  — K ring multiplications c·t₁[i] (prove_ct1)
+//   3. K poly_sub proofs — w'[i] = Az[i] − c·t₁[i] (prove_poly_sub)
+//   4. K norm_check proofs — norm[i] for each z[j] (prove_norm_check)
+//
+// Deferred to MVP-4 (not proved here):
+//   • UseHint application (high-bits rounding)
+//   • Hash check c̃ = H(μ ∥ w'₁)
+//   • Hint weight check ||h||₁ ≤ ω
+//   • Range proofs for multiplication soundness
+
+/// Combined STARK proof for the ML-DSA.Verify arithmetic witness.
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProof {
+    /// STARK proofs for Az (K×L ring multiplications).
+    pub az_proof:    AzProof,
+    /// STARK proofs for c·t₁ (K ring multiplications).
+    pub ct1_proof:   Ct1Proof,
+    /// K polynomial-subtraction proofs: w'[i] = Az[i] − c·t₁[i].
+    pub proofs_sub:  Vec<(Vec<u8>, String)>,
+    /// K norm-check proofs for the L z-polynomials (one per z column).
+    pub norm_proofs: Vec<(Vec<u8>, String)>,
+    /// K UseHint proofs: w₁'[i] = UseHint(h[i], w'[i]).
+    pub use_hint_proofs: Vec<(Vec<u8>, String)>,
+    /// w'[i] for i = 0..K−1 (pre-UseHint, polynomial domain).
+    pub w_prime:    Vec<[i64; N]>,
+    /// w₁'[i] = UseHint(h[i], w'[i]) — the high bits used in the hash check.
+    pub w1_prime:   Vec<[i64; N]>,
+    /// max_norm[j] = ||z[j]||_∞.  Caller asserts < γ₁ − β = 524 092.
+    pub max_norms:  Vec<i64>,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness.
+///
+/// # Arguments
+/// - `a_hat`: K×L NTT-domain matrix (expand_A output), row-major index i*l+j.
+/// - `z`:     L signature polynomials, coefficients in `[0, Q)`.
+/// - `c`:     Challenge polynomial (SampleInBall output), coefficients in `[0, Q)`.
+/// - `t1`:    K public-key polynomials (pkDecode output), coefficients in `[0, Q)`.
+/// - `hints`: K×N hint bits (h[i][j] for row i, coefficient j).
+/// - `k`, `l`: matrix dimensions (for ML-DSA-65: k=6, l=5).
+///
+/// # Returns
+/// `VerifyMldsaProof` with all sub-proofs, `w_prime` (pre-UseHint), and
+/// `w1_prime` (post-UseHint, used in the hash check).
+///
+/// # Deferred (MVP-4)
+/// In-circuit hash comparison `c̃ = H(μ ∥ w₁')`, hint-weight check,
+/// and full range proofs for multiplication soundness.
+pub fn prove_verify_mldsa_witness(
+    a_hat: &[[i64; N]],
+    z:     &[[i64; N]],
+    c:     &[i64; N],
+    t1:    &[[i64; N]],
+    hints: &[Vec<bool>],
+    k:     usize,
+    l:     usize,
+) -> Result<VerifyMldsaProof, String> {
+    if t1.len() != k {
+        return Err(format!("t1 must have k={k} entries, got {}", t1.len()));
+    }
+    if hints.len() != k {
+        return Err(format!("hints must have k={k} rows, got {}", hints.len()));
+    }
+    for (i, hrow) in hints.iter().enumerate() {
+        if hrow.len() != N {
+            return Err(format!("hints[{i}] must have N={N} bits, got {}", hrow.len()));
+        }
+    }
+
+    // Step 1: Prove Az.
+    let az_proof = prove_az(a_hat, z, k, l)
+        .map_err(|e| format!("prove_az failed: {e}"))?;
+
+    // Step 2: Prove c·t₁.
+    let ct1_proof = prove_ct1(c, t1)
+        .map_err(|e| format!("prove_ct1 failed: {e}"))?;
+
+    // Step 3: Prove w'[i] = Az[i] − c·t₁[i].
+    let mut proofs_sub: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut w_prime:    Vec<[i64; N]>           = Vec::with_capacity(k);
+    for i in 0..k {
+        let (pb, cm, w_i) = crate::prove_poly_sub(&az_proof.output[i], &ct1_proof.output[i])
+            .map_err(|e| format!("prove_poly_sub row {i} failed: {e}"))?;
+        proofs_sub.push((pb, cm));
+        w_prime.push(w_i);
+    }
+
+    // Step 4: Prove norm computation for each z[j].
+    let mut norm_proofs: Vec<(Vec<u8>, String)> = Vec::with_capacity(l);
+    let mut max_norms:   Vec<i64>                = Vec::with_capacity(l);
+    for j in 0..l {
+        let (pb, cm, _, mx) = crate::prove_norm_check(&z[j])
+            .map_err(|e| format!("prove_norm_check z[{j}] failed: {e}"))?;
+        norm_proofs.push((pb, cm));
+        max_norms.push(mx);
+    }
+
+    // Step 5: Prove UseHint(h[i], w'[i]) = w₁'[i] for each row.
+    let mut use_hint_proofs: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut w1_prime:        Vec<[i64; N]>           = Vec::with_capacity(k);
+    for i in 0..k {
+        let h_arr: &[bool; N] = hints[i].as_slice().try_into()
+            .map_err(|_| format!("hints[{i}] slice is not [bool; N]"))?;
+        let (pb, cm, w1_i) = crate::prove_use_hint(&w_prime[i], h_arr)
+            .map_err(|e| format!("prove_use_hint row {i} failed: {e}"))?;
+        use_hint_proofs.push((pb, cm));
+        w1_prime.push(w1_i);
+    }
+
+    Ok(VerifyMldsaProof {
+        az_proof,
+        ct1_proof,
+        proofs_sub,
+        norm_proofs,
+        use_hint_proofs,
+        w_prime,
+        w1_prime,
+        max_norms,
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProof`.
+///
+/// Returns `Ok(true)` iff all Az, Ct1, subtraction, and norm-check proofs are valid.
+///
+/// # Note
+/// This verifies the arithmetic witness only.  The caller is responsible for:
+/// - Checking `max_norms[j] < γ₁ − β` for all j (norm bound)
+/// - Running UseHint, hash comparison, and hint-weight check (MVP-4)
+pub fn verify_mldsa_witness_proofs(proof: &VerifyMldsaProof) -> Result<bool, String> {
+    // Verify Az.
+    if !verify_az(&proof.az_proof)
+        .map_err(|e| format!("verify_az failed: {e}"))? {
+        return Ok(false);
+    }
+    // Verify c·t₁.
+    if !verify_ct1(&proof.ct1_proof)
+        .map_err(|e| format!("verify_ct1 failed: {e}"))? {
+        return Ok(false);
+    }
+    // Verify subtractions.
+    for (i, (pb, cm)) in proof.proofs_sub.iter().enumerate() {
+        if !crate::verify_poly_sub(pb, cm)
+            .map_err(|e| format!("verify_poly_sub row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    // Verify norm checks.
+    for (j, (pb, cm)) in proof.norm_proofs.iter().enumerate() {
+        if !crate::verify_norm_check(pb, cm)
+            .map_err(|e| format!("verify_norm_check z[{j}] failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    // Verify UseHint proofs.
+    for (i, (pb, cm)) in proof.use_hint_proofs.iter().enumerate() {
+        if !crate::verify_use_hint(pb, cm)
+            .map_err(|e| format!("verify_use_hint row {i} failed: {e}"))? {
             return Ok(false);
         }
     }
@@ -579,5 +882,129 @@ mod tests {
 
         let expected = az_reference(&a_hat, &z_polys, k, l);
         assert_eq!(az_proof.output, expected, "Az 2×2 output mismatch");
+    }
+
+    // ── Ct1 tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_prove_ct1_1x1_output_correct() {
+        // c·t₁[0] must equal ring_mul_reference(c, t₁[0]).
+        let c   = random_poly(400);
+        let t1  = [random_poly(500)];
+
+        let proof = prove_ct1(&c, &t1).expect("prove_ct1 1×1 failed");
+
+        let expected = ring_mul_reference(&c, &t1[0]);
+        assert_eq!(proof.output[0], expected, "c·t₁[0] output mismatch");
+    }
+
+    #[test]
+    fn test_prove_ct1_1x1_verifies() {
+        let c  = random_poly(450);
+        let t1 = [random_poly(550)];
+
+        let proof = prove_ct1(&c, &t1).expect("prove_ct1 1×1 failed");
+        let valid = verify_ct1(&proof).expect("verify_ct1 1×1 failed");
+        assert!(valid, "Ct1 1×1 proof should verify");
+    }
+
+    #[test]
+    fn test_prove_ct1_2x_output_correct() {
+        let c  = random_poly(600);
+        let t1 = [random_poly(700), random_poly(800)];
+
+        let proof = prove_ct1(&c, &t1).expect("prove_ct1 2× failed");
+
+        for i in 0..2 {
+            let expected = ring_mul_reference(&c, &t1[i]);
+            assert_eq!(proof.output[i], expected, "c·t₁[{i}] output mismatch");
+        }
+    }
+
+    // ── VerifyMldsaProof tests ─────────────────────────────────────────────────
+
+    fn all_false_hints(k: usize) -> Vec<Vec<bool>> {
+        vec![vec![false; N]; k]
+    }
+
+    #[test]
+    fn test_prove_verify_mldsa_witness_1x1_output() {
+        let k = 1usize;
+        let l = 1usize;
+        let a_poly  = random_poly(1000);
+        let z_poly  = random_poly(1100);
+        let c_poly  = random_poly(1200);
+        let t1_poly = random_poly(1300);
+
+        let mut a_hat_arr = a_poly;
+        ntt(&mut a_hat_arr);
+        let a_hat = vec![a_hat_arr];
+        let z  = vec![z_poly];
+        let t1 = vec![t1_poly];
+        let h  = all_false_hints(k);
+
+        let proof = prove_verify_mldsa_witness(&a_hat, &z, &c_poly, &t1, &h, k, l)
+            .expect("prove_verify_mldsa_witness 1×1 failed");
+
+        let az_expected  = ring_mul_reference(&a_poly, &z_poly);
+        let ct1_expected = ring_mul_reference(&c_poly, &t1_poly);
+        let w_expected: [i64; N] = std::array::from_fn(|i| {
+            (az_expected[i] - ct1_expected[i]).rem_euclid(Q)
+        });
+        assert_eq!(proof.w_prime[0], w_expected, "w'[0] mismatch");
+        // With all-false hints, w₁'[i] = HighBits(w'[i]).
+        for i in 0..N {
+            let (r1, _) = crate::mldsa_use_hint_air::decompose_val_signed(proof.w_prime[0][i]);
+            assert_eq!(proof.w1_prime[0][i], r1, "w1'[0][{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn test_prove_verify_mldsa_witness_1x1_verifies() {
+        let k = 1usize;
+        let l = 1usize;
+        let a_poly  = random_poly(2000);
+        let z_poly  = random_poly(2100);
+        let c_poly  = random_poly(2200);
+        let t1_poly = random_poly(2300);
+
+        let mut a_hat_arr = a_poly;
+        ntt(&mut a_hat_arr);
+        let a_hat = vec![a_hat_arr];
+        let z  = vec![z_poly];
+        let t1 = vec![t1_poly];
+        let h  = all_false_hints(k);
+
+        let proof = prove_verify_mldsa_witness(&a_hat, &z, &c_poly, &t1, &h, k, l)
+            .expect("prove_verify_mldsa_witness 1×1 failed");
+
+        let valid = verify_mldsa_witness_proofs(&proof)
+            .expect("verify_mldsa_witness_proofs failed");
+        assert!(valid, "ML-DSA witness 1×1 proofs should verify");
+    }
+
+    #[test]
+    fn test_verify_mldsa_norm_bound_check() {
+        let k = 1usize;
+        let l = 1usize;
+        let a_poly  = random_poly(3000);
+        let z_poly  = random_poly(3100);
+        let c_poly  = random_poly(3200);
+        let t1_poly = random_poly(3300);
+
+        let mut a_hat_arr = a_poly;
+        ntt(&mut a_hat_arr);
+        let a_hat = vec![a_hat_arr];
+        let z  = vec![z_poly];
+        let t1 = vec![t1_poly];
+        let h  = all_false_hints(k);
+
+        let proof = prove_verify_mldsa_witness(&a_hat, &z, &c_poly, &t1, &h, k, l)
+            .expect("prove_verify_mldsa_witness failed");
+
+        assert_eq!(proof.max_norms.len(), l);
+        let half = (Q - 1) / 2;
+        let expected_max: i64 = z_poly.iter().map(|&v| if v > half { Q - v } else { v }).max().unwrap();
+        assert_eq!(proof.max_norms[0], expected_max);
     }
 }

@@ -33,3 +33,23 @@ def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
             "Install with: cd stark_stwo && maturin develop --features python --release"
         )
     return _ext.verify(proof, commitment, log_size)
+
+
+def verify_batch_poseidon2_proof(proof: bytes, commitment: str, log_size: int) -> bool:
+    """Verify a Poseidon2 hash-chain STARK proof (prove_batch_poseidon2 output)."""
+    if not _HAVE_EXT:
+        raise RuntimeError(
+            "qlsa_stark_stwo extension required for verify_p2. "
+            "Install with: cd stark_stwo && maturin develop --features python --release"
+        )
+    return bool(_ext.verify_p2(proof, commitment, log_size))
+
+
+def verify_batch_merkle_proof(proof: bytes, commitment: str, log_size: int) -> bool:
+    """Verify a Poseidon2 Merkle-tree STARK proof (prove_batch_merkle output)."""
+    if not _HAVE_EXT:
+        raise RuntimeError(
+            "qlsa_stark_stwo extension required for verify_merkle. "
+            "Install with: cd stark_stwo && maturin develop --features python --release"
+        )
+    return bool(_ext.verify_merkle(proof, commitment, log_size))

@@ -1,7 +1,9 @@
 pub mod air;
 pub mod mldsa;
 pub mod mldsa_intt_air;
+pub mod mldsa_norm_check_air;
 pub mod mldsa_ntt_air;
+pub mod mldsa_use_hint_air;
 pub mod mldsa_poly_add_air;
 pub mod mldsa_poly_mul_air;
 pub mod mldsa_verify_stark;
@@ -735,6 +737,234 @@ pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Polynomial subtraction STARK (MVP-3+) ───────────────────────────────────
+
+/// Prove that `c[i] = (a[i] − b[i]) mod Q` for i = 0..255.
+///
+/// Implemented as `prove_poly_add(a, b_neg)` where `b_neg[i] = (Q − b[i]) mod Q`.
+/// This reuses the fully-sound poly_add AIR without introducing a new AIR.
+///
+/// Returns `(proof_bytes, commitment_hex, diff)`.
+pub fn prove_poly_sub(
+    a: &[i64; 256],
+    b: &[i64; 256],
+) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    for (i, (&av, &bv)) in a.iter().zip(b.iter()).enumerate() {
+        if av < 0 || av >= Q { return Err(format!("a[{i}] = {av} out of [0, Q)")); }
+        if bv < 0 || bv >= Q { return Err(format!("b[{i}] = {bv} out of [0, Q)")); }
+    }
+    // Negate b in Z_q: b_neg[i] = (Q − b[i]) mod Q.
+    let mut b_neg = [0i64; 256];
+    for i in 0..256 {
+        b_neg[i] = if b[i] == 0 { 0 } else { Q - b[i] };
+    }
+    prove_poly_add(a, &b_neg)
+}
+
+/// Verify a polynomial-subtraction proof produced by [`prove_poly_sub`].
+///
+/// Verification is identical to [`verify_poly_add`] because the same AIR is used.
+pub fn verify_poly_sub(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    verify_poly_add(proof_bytes, commitment_hex)
+}
+
+// ─── UseHint STARK (MVP-3+) ───────────────────────────────────────────────────
+
+/// Prove `UseHint(h[i], r[i]) = w₁'[i]` for all 256 coefficients of one polynomial.
+///
+/// Includes inline `Decompose(r)` proof.  `r` must be in `[0, Q)`.
+///
+/// Returns `(proof_bytes, commitment_hex, w1_poly)`.
+pub fn prove_use_hint(r: &[i64; 256], h_bits: &[bool; 256]) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_use_hint_air::{UseHintEval, UseHintComponent, LOG_N_ROWS, build_trace};
+
+    for (i, &c) in r.iter().enumerate() {
+        if c < 0 || c >= Q { return Err(format!("r[{i}] = {c} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, w1_out) = build_trace(r, h_bits);
+
+    let fp = output_fingerprint(&w1_out);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&fp);
+
+    let component = UseHintComponent::new(
+        &mut TraceLocationAllocator::default(),
+        UseHintEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("use_hint proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, w1_out))
+}
+
+/// Verify a UseHint proof produced by [`prove_use_hint`].
+pub fn verify_use_hint(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_use_hint_air::{UseHintEval, UseHintComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = UseHintComponent::new(
+        &mut TraceLocationAllocator::default(),
+        UseHintEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
+// ─── Coefficient norm check STARK (MVP-3+) ───────────────────────────────────
+
+/// Prove that `norm[i] = min(z[i], Q − z[i])` for i = 0..255 (absolute centered value).
+///
+/// Returns `(proof_bytes, commitment_hex, norm_poly, max_norm)`:
+/// - `norm_poly[i]` is the absolute centered value of each coefficient.
+/// - `max_norm` is the ∞-norm of `z` (for external bound check: must be < γ₁ − β).
+///
+/// The STARK proves the norm computation is correct.  The bound check
+/// `max_norm < NORM_BOUND` is asserted externally; range-proof soundness is
+/// deferred to MVP-4.
+pub fn prove_norm_check(z: &[i64; 256]) -> Result<(Vec<u8>, String, [i64; 256], i64), String> {
+    use mldsa::Q;
+    use mldsa_norm_check_air::{NormCheckEval, NormCheckComponent, LOG_N_ROWS, build_trace};
+
+    for (i, &c) in z.iter().enumerate() {
+        if c < 0 || c >= Q { return Err(format!("z[{i}] = {c} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, norm_out) = build_trace(z);
+
+    let max_norm = norm_out.iter().copied().max().unwrap_or(0);
+
+    let fp = output_fingerprint(&norm_out);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&fp);
+
+    let component = NormCheckComponent::new(
+        &mut TraceLocationAllocator::default(),
+        NormCheckEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("norm_check proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, norm_out, max_norm))
+}
+
+/// Verify a norm-check proof produced by [`prove_norm_check`].
+pub fn verify_norm_check(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_norm_check_air::{NormCheckEval, NormCheckComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = NormCheckComponent::new(
+        &mut TraceLocationAllocator::default(),
+        NormCheckEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 /// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
@@ -994,6 +1224,16 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_poly_mul_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_poly_add_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_poly_add_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_poly_sub_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_poly_sub_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_norm_check_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_norm_check_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_use_hint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_hash_check_py, m)?)?;
     Ok(())
 }
 
@@ -1035,6 +1275,321 @@ fn prove_poly_add_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec
 #[pyfunction]
 fn verify_poly_add_py(proof: Vec<u8>, commitment: String) -> bool {
     verify_poly_add(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_poly_sub_py(a, b) -> (proof: bytes, commitment: str, diff: list[int])
+///
+/// Proves c[i] = (a[i] − b[i]) mod Q for all i. Uses the poly_add AIR with negated b.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_poly_sub_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let a_arr: [i64; 256] = a.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("a must have exactly 256 elements"))?;
+    let b_arr: [i64; 256] = b.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("b must have exactly 256 elements"))?;
+    let (proof, commitment, diff) = prove_poly_sub(&a_arr, &b_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, diff.to_vec()))
+}
+
+/// verify_poly_sub_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_poly_sub_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_poly_sub(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_norm_check_py(z) -> (proof: bytes, commitment: str, norm: list[int], max_norm: int)
+///
+/// Proves norm[i] = min(z[i], Q − z[i]) for all i.
+/// Returns also `max_norm` = ||z||_∞  for external bound checking (must be < γ₁ − β = 524092).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_norm_check_py(z: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec<i64>, i64)> {
+    let z_arr: [i64; 256] = z.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 256 elements"))?;
+    let (proof, commitment, norm, max_norm) = prove_norm_check(&z_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, norm.to_vec(), max_norm))
+}
+
+/// verify_norm_check_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_norm_check_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_norm_check(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_use_hint_py(r, h_bits) -> (proof: bytes, commitment: str, w1: list[int])
+///
+/// Proves UseHint(h_bits[i], r[i]) = w1[i] for all 256 coefficients.
+/// `r` must be 256 ints in [0, Q).  `h_bits` must be 256 bools.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_use_hint_py(r: Vec<i64>, h_bits: Vec<bool>) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let r_arr: [i64; 256] = r.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("r must have exactly 256 elements"))?;
+    let h_arr: [bool; 256] = h_bits.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("h_bits must have exactly 256 elements"))?;
+    let (proof, commitment, w1) = prove_use_hint(&r_arr, &h_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, w1.to_vec()))
+}
+
+/// verify_use_hint_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_use_hint_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_use_hint(&proof, &commitment).unwrap_or(false)
+}
+
+// ── ML-DSA full arithmetic witness pipeline ───────────────────────────────────
+
+/// prove_mldsa_witness_py(a_hat, z, c, t1, hints, k, l)
+///   -> (proof_bundle: bytes, max_norms: list[int], w1_prime: list[list[int]])
+///
+/// Proves the full ML-DSA.Verify arithmetic witness:
+///   Az  →  c·t₁  →  poly_sub  →  norm_check  →  UseHint
+///
+/// Inputs (all coefficients in [0, Q)):
+///   a_hat : k*l flat list of 256-int polynomials (NTT-domain, row-major)
+///   z     : l polynomials (signature)
+///   c     : 256-int challenge polynomial
+///   t1    : k polynomials (public key components)
+///   hints : k lists of 256 bools (hint bits from the signature)
+///   k, l  : matrix dimensions (ML-DSA-65: k=6, l=5)
+///
+/// Returns:
+///   proof_bundle : bincode-serialized VerifyMldsaProof (pass to verify_mldsa_witness_py)
+///   max_norms    : l values — ||z[j]||_∞; caller checks each < 524 092
+///   w1_prime     : k rows of 256 ints — UseHint outputs for hash comparison
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_mldsa_witness_py(
+    a_hat:  Vec<Vec<i64>>,
+    z:      Vec<Vec<i64>>,
+    c:      Vec<i64>,
+    t1:     Vec<Vec<i64>>,
+    hints:  Vec<Vec<bool>>,
+    k:      usize,
+    l:      usize,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>)> {
+    // Convert Vec<Vec<i64>> → Vec<[i64; 256]>.
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+
+    // Convert hints Vec<Vec<bool>> → Vec<Vec<bool>> (already the right type).
+    let hints_vv: Vec<Vec<bool>> = hints;
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_witness(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints_vv, k, l,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+
+    Ok((bundle, max_norms, w1_prime))
+}
+
+/// verify_mldsa_witness_py(proof_bundle: bytes) -> bool
+///
+/// Verifies all STARK sub-proofs in a bundle produced by prove_mldsa_witness_py.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProof, _
+    >(&proof_bundle, bincode::config::standard()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_proofs(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_sig_witness_py(pk: bytes, msg: bytes, sig: bytes)
+///   -> (proof_bundle: bytes, max_norms: list[int], w1_prime: list[list[int]])
+///
+/// End-to-end function: decodes an ML-DSA-65 signature, verifies it, then
+/// proves the full arithmetic witness pipeline:
+///   Az  →  c·t₁·2^d  →  poly_sub  →  norm_check  →  UseHint
+///
+/// Raises PyRuntimeError if the signature is invalid or any sub-proof fails.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_mldsa_sig_witness_py(
+    pk:  Vec<u8>,
+    msg: Vec<u8>,
+    sig: Vec<u8>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String)> {
+    use mldsa::encoding::{pk_decode, sig_decode};
+    use mldsa::xof::{expand_a, sample_in_ball};
+    use mldsa::field;
+    use mldsa::params::{K, L, D};
+    use mldsa::N;
+
+    // Verify first — reject invalid signatures immediately.
+    if !mldsa::verify::ml_dsa_verify(&pk, &msg, &sig) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ML-DSA-65 signature verification failed — cannot prove invalid witness"
+        ));
+    }
+
+    // Decode public key: rho + t1 (K polynomials in [0, 2^T1_BITS)).
+    let (rho, t1) = pk_decode(&pk)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+            format!("pk_decode failed: {e}")
+        ))?;
+
+    // Decode signature: c_tilde + z (L polys, signed) + hints (K × N bools).
+    let (c_tilde, z, hints) = sig_decode(&sig)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+            format!("sig_decode failed: {e}")
+        ))?;
+
+    // a_hat = ExpandA(rho) — K×L NTT-domain matrix (already in [0, Q)).
+    let a_hat_matrix = expand_a(&rho);
+    let mut a_hat_flat: Vec<[i64; N]> = Vec::with_capacity(K * L);
+    for row in &a_hat_matrix.rows {
+        for poly in &row.0 {
+            a_hat_flat.push(poly.coeffs);
+        }
+    }
+
+    // c = SampleInBall(c_tilde) — challenge polynomial.
+    let c_poly = sample_in_ball(&c_tilde);
+    // Reduce challenge to [0, Q) (SampleInBall produces coeffs ∈ {-1, 0, 1}).
+    let mut c_arr = [0i64; N];
+    for (i, &v) in c_poly.coeffs.iter().enumerate() {
+        c_arr[i] = field::reduce(v);
+    }
+
+    // z_reduced: signature z polynomials reduced from signed to [0, Q).
+    let mut z_arr: Vec<[i64; N]> = Vec::with_capacity(L);
+    for poly in &z.0 {
+        let mut coeffs = [0i64; N];
+        for (i, &v) in poly.coeffs.iter().enumerate() {
+            coeffs[i] = field::reduce(v);
+        }
+        z_arr.push(coeffs);
+    }
+
+    // t1_scaled = t1 * 2^D mod Q — the FIPS 204 scaling of public key components.
+    let t1_scaled = t1.scale_power2(D);
+    let mut t1_arr: Vec<[i64; N]> = Vec::with_capacity(K);
+    for poly in &t1_scaled.0 {
+        t1_arr.push(poly.coeffs);
+    }
+
+    // Run the full STARK witness pipeline.
+    let proof = mldsa_verify_stark::prove_verify_mldsa_witness(
+        &a_hat_flat, &z_arr, &c_arr, &t1_arr, &hints, K, L,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+
+    // onchain_commitment = Blake2s(bundle[:32] ∥ c_tilde[:32])[:16]
+    // Binds the proof bundle to this specific signature's challenge seed.
+    let binding_input: Vec<u8> = bundle[..32.min(bundle.len())]
+        .iter()
+        .chain(c_tilde.iter().take(32))
+        .copied()
+        .collect();
+    use blake2::{Blake2s256, Digest};
+    let digest = Blake2s256::digest(&binding_input);
+    let onchain_commitment = hex::encode(&digest[..16]);
+
+    // c_tilde as hex — lets the caller re-derive the hash check off-circuit.
+    let c_tilde_hex = hex::encode(&c_tilde);
+
+    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex))
+}
+
+/// verify_mldsa_hash_check_py(pk, msg, w1_prime, c_tilde_hex) -> bool
+///
+/// Off-circuit ML-DSA.Verify hash step: recomputes
+///   μ = SHAKE-256(SHAKE-256(pk) ∥ M')
+///   c̃' = SHAKE-256(μ ∥ w1Encode(w1_prime))
+/// and checks that c̃' == c_tilde.
+///
+/// This ties the STARK witness (w1_prime) back to the original message and
+/// public key, completing the logical chain of ML-DSA.Verify.
+///
+/// `pk`         — raw public key bytes (PK_BYTES = 1952 for ML-DSA-65).
+/// `msg`        — original message bytes.
+/// `w1_prime`   — K rows × N coefficients (UseHint output, values in [0, m=16)).
+/// `c_tilde_hex`— hex-encoded c_tilde returned by prove_mldsa_sig_witness_py.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_hash_check_py(
+    pk:          Vec<u8>,
+    msg:         Vec<u8>,
+    w1_prime:    Vec<Vec<i64>>,
+    c_tilde_hex: String,
+) -> PyResult<bool> {
+    use mldsa::xof::{hash_pk, hash_mu, hash_commit};
+    use mldsa::encoding::w1_encode;
+    use mldsa::polyvec::PolyVec;
+    use mldsa::poly::Poly;
+    use mldsa::params::{K, LAMBDA_BYTES};
+    use mldsa::N;
+
+    // Decode w1_prime into PolyVec.
+    if w1_prime.len() != K {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("w1_prime must have K={K} rows, got {}", w1_prime.len())
+        ));
+    }
+    let w1_polyvec = PolyVec(w1_prime.into_iter().map(|row| {
+        let coeffs: [i64; N] = row.try_into()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                "each w1_prime row must have exactly 256 elements"
+            ))?;
+        Ok(Poly::from_coeffs(coeffs))
+    }).collect::<PyResult<Vec<_>>>()?);
+
+    // Decode c_tilde from hex.
+    let c_tilde = hex::decode(&c_tilde_hex)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+            format!("c_tilde_hex is not valid hex: {e}")
+        ))?;
+    if c_tilde.len() != LAMBDA_BYTES {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("c_tilde must be {LAMBDA_BYTES} bytes, got {}", c_tilde.len())
+        ));
+    }
+
+    // Recompute μ = SHAKE-256(tr ∥ M')  where M' = [0x00, 0x00] ∥ msg.
+    let tr = hash_pk(&pk);
+    let mut m_prime = vec![0u8, 0u8];
+    m_prime.extend_from_slice(&msg);
+    let mu = hash_mu(&tr, &m_prime);
+
+    // Recompute c̃' = SHAKE-256(μ ∥ w1Encode(w1_prime), LAMBDA_BYTES).
+    let w1_enc = w1_encode(&w1_polyvec);
+    let c_tilde_prime = hash_commit(&mu, &w1_enc, LAMBDA_BYTES);
+
+    Ok(c_tilde_prime == c_tilde)
 }
 
 #[cfg(test)]
@@ -1356,5 +1911,134 @@ mod tests {
         let mut bad = proof_bytes.clone();
         bad[20] ^= 0xFF;
         assert!(!verify_poly_add(&bad, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── Polynomial subtraction tests (MVP-3+) ────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_poly_sub() {
+        let q = mldsa::Q;
+        let a = random_q_poly(600);
+        let b = random_q_poly(700);
+        let (proof_bytes, commitment_hex, diff) =
+            prove_poly_sub(&a, &b).expect("poly_sub proving failed");
+
+        for i in 0..256 {
+            assert_eq!(diff[i], (a[i] - b[i]).rem_euclid(q), "diff[{i}]");
+        }
+
+        let valid = verify_poly_sub(&proof_bytes, &commitment_hex)
+            .expect("poly_sub verification failed");
+        assert!(valid, "poly_sub proof should verify");
+    }
+
+    #[test]
+    fn test_poly_sub_self_is_zero() {
+        let a = random_q_poly(800);
+        let (proof_bytes, commitment_hex, diff) =
+            prove_poly_sub(&a, &a).expect("poly_sub (a - a) failed");
+        assert_eq!(diff, [0i64; 256]);
+        assert!(verify_poly_sub(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_poly_sub_zero_is_identity() {
+        let a = random_q_poly(900);
+        let z = [0i64; 256];
+        let (proof_bytes, commitment_hex, diff) =
+            prove_poly_sub(&a, &z).expect("poly_sub (a - 0) failed");
+        assert_eq!(diff, a);
+        assert!(verify_poly_sub(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── Norm check tests (MVP-3+) ─────────────────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_norm_check() {
+        let z = random_q_poly(1000);
+        let (proof_bytes, commitment_hex, norm, max_norm) =
+            prove_norm_check(&z).expect("norm_check proving failed");
+
+        // Verify norm values.
+        let q = mldsa::Q;
+        let half = (q - 1) / 2;
+        for i in 0..256 {
+            let expected = if z[i] > half { q - z[i] } else { z[i] };
+            assert_eq!(norm[i], expected, "norm[{i}]");
+        }
+        let expected_max = norm.iter().copied().max().unwrap_or(0);
+        assert_eq!(max_norm, expected_max);
+
+        let valid = verify_norm_check(&proof_bytes, &commitment_hex)
+            .expect("norm_check verification failed");
+        assert!(valid, "norm_check proof should verify");
+    }
+
+    #[test]
+    fn test_norm_check_zero_poly() {
+        let z = [0i64; 256];
+        let (proof_bytes, commitment_hex, norm, max_norm) =
+            prove_norm_check(&z).expect("norm_check of zero failed");
+        assert_eq!(norm, [0i64; 256]);
+        assert_eq!(max_norm, 0);
+        assert!(verify_norm_check(&proof_bytes, &commitment_hex).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_norm_check_tampered_proof_fails() {
+        let z = random_q_poly(1100);
+        let (proof_bytes, commitment_hex, _, _) =
+            prove_norm_check(&z).expect("norm_check proving failed");
+        let mut bad = proof_bytes.clone();
+        bad[20] ^= 0xFF;
+        assert!(!verify_norm_check(&bad, &commitment_hex).unwrap_or(false));
+    }
+
+    // ── UseHint STARK tests (MVP-3+) ─────────────────────────────────────────
+
+    #[test]
+    fn test_prove_and_verify_use_hint_no_hints() {
+        let r   = random_q_poly(1200);
+        let h   = [false; 256];
+        let (proof_bytes, commitment_hex, w1) =
+            prove_use_hint(&r, &h).expect("use_hint proving failed");
+        // No hints: w1[i] = HighBits(r[i]).
+        for i in 0..256 {
+            let (r1, _) = mldsa_use_hint_air::decompose_val_signed(r[i]);
+            assert_eq!(w1[i], r1, "no-hint w1[{i}]");
+        }
+        let valid = verify_use_hint(&proof_bytes, &commitment_hex)
+            .expect("use_hint verification failed");
+        assert!(valid, "use_hint (no hints) proof should verify");
+    }
+
+    #[test]
+    fn test_prove_and_verify_use_hint_random() {
+        use mldsa::polyvec::use_hint_val;
+        let r = random_q_poly(1300);
+        let mut state = 1301u64;
+        let h: [bool; 256] = std::array::from_fn(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 63) != 0
+        });
+        let (proof_bytes, commitment_hex, w1) =
+            prove_use_hint(&r, &h).expect("use_hint proving failed");
+        for i in 0..256 {
+            assert_eq!(w1[i], use_hint_val(h[i], r[i]), "w1[{i}]");
+        }
+        let valid = verify_use_hint(&proof_bytes, &commitment_hex)
+            .expect("use_hint verification failed");
+        assert!(valid, "use_hint proof should verify");
+    }
+
+    #[test]
+    fn test_use_hint_tampered_proof_fails() {
+        let r = random_q_poly(1400);
+        let h = [true; 256];
+        let (proof_bytes, commitment_hex, _) =
+            prove_use_hint(&r, &h).expect("use_hint proving failed");
+        let mut bad = proof_bytes.clone();
+        bad[20] ^= 0xFF;
+        assert!(!verify_use_hint(&bad, &commitment_hex).unwrap_or(false));
     }
 }

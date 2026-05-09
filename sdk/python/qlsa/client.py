@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from core.transaction import Transaction
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
-from .models import BatchStatus, NodeStats, SubmitResult
+from .models import BatchStatus, NodeStats, SubmitResult, WitnessStatus
 
 if TYPE_CHECKING:
     from aggregator.batcher import BatchResult
@@ -18,7 +18,30 @@ def _batch_status(result: BatchResult) -> BatchStatus:
         merkle_root=result.batch.merkle_root.hex(),
         is_proven=result.is_proven,
         stark_commitment=result.commitment,
+        has_witness=result.has_witness,
+        witness_commitment=result.witness_commitment,
     )
+
+
+def _prove_witness_local(tx: Transaction) -> WitnessStatus:
+    """Prove an ML-DSA-65 witness for a single transaction (pure local, no mempool)."""
+    if tx.signature is None or tx.public_key is None:
+        return WitnessStatus(has_witness=False)
+    try:
+        from stark.prover import prove_mldsa_sig_witness_stark
+        wr = prove_mldsa_sig_witness_stark(
+            pk=tx.public_key,
+            msg=tx.to_bytes(),
+            sig=tx.signature,
+        )
+        return WitnessStatus(
+            has_witness=True,
+            onchain_commitment=wr.onchain_commitment,
+            c_tilde_hex=wr.c_tilde_hex,
+            max_norms=wr.max_norms,
+        )
+    except (RuntimeError, ImportError):
+        return WitnessStatus(has_witness=False)
 
 
 class LocalClient:
@@ -48,15 +71,25 @@ class LocalClient:
                 mempool_size=self._node.pending_count(),
             )
 
-    def run_cycle(self) -> BatchStatus | None:
+    def run_cycle(self, prove_witnesses: bool = False) -> BatchStatus | None:
         """Try to create a batch (respects min_batch_size). Returns None if too few txs."""
-        result = self._node.run_cycle()
+        result = self._node.run_cycle(prove_witnesses=prove_witnesses)
         return _batch_status(result) if result is not None else None
 
-    def flush(self) -> BatchStatus | None:
+    def flush(self, prove_witnesses: bool = False) -> BatchStatus | None:
         """Force a batch from whatever is in the mempool. Returns None if empty."""
-        result = self._node.force_cycle()
+        result = self._node.force_cycle(prove_witnesses=prove_witnesses)
         return _batch_status(result) if result is not None else None
+
+    def prove_witness(self, tx: Transaction) -> WitnessStatus:
+        """Generate an ML-DSA-65 arithmetic witness STARK proof for a single transaction.
+
+        Does not touch the mempool — purely a local proving operation.
+        Requires the PyO3 extension (qlsa_stark_stwo). Returns WitnessStatus
+        with has_witness=False if the extension is not available or the
+        transaction is unsigned.
+        """
+        return _prove_witness_local(tx)
 
     def stats(self) -> NodeStats:
         s = self._node.stats()
@@ -128,6 +161,8 @@ class HttpClient:
                 merkle_root=data["merkle_root"],
                 is_proven=data["is_proven"],
                 stark_commitment=data.get("stark_commitment"),
+                has_witness=data.get("has_witness", False),
+                witness_commitment=data.get("witness_commitment"),
             )
         except KeyError as exc:
             raise RuntimeError(
@@ -148,11 +183,22 @@ class HttpClient:
                 merkle_root=data["merkle_root"],
                 is_proven=data["is_proven"],
                 stark_commitment=data.get("stark_commitment"),
+                has_witness=data.get("has_witness", False),
+                witness_commitment=data.get("witness_commitment"),
             )
         except KeyError as exc:
             raise RuntimeError(
                 f"Aggregator /batch/flush response missing field: {exc}. Got: {list(data)}"
             ) from exc
+
+    def prove_witness(self, tx: Transaction) -> WitnessStatus:
+        """Generate an ML-DSA-65 arithmetic witness STARK proof for a single transaction.
+
+        Runs locally (does not call the remote aggregator). Requires the PyO3
+        extension (qlsa_stark_stwo). Returns WitnessStatus with has_witness=False
+        if the extension is unavailable or the transaction is unsigned.
+        """
+        return _prove_witness_local(tx)
 
     def stats(self) -> NodeStats:
         httpx = self._httpx()

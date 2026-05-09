@@ -1,6 +1,6 @@
 from .builder import TransactionBuilder
 from .client import HttpClient, LocalClient
-from .models import BatchStatus, NodeStats, SubmitResult
+from .models import BatchStatus, NodeStats, SubmitResult, WitnessStatus
 from .wallet import Wallet
 
 __all__ = [
@@ -10,5 +10,6 @@ __all__ = [
     "HttpClient",
     "SubmitResult",
     "BatchStatus",
+    "WitnessStatus",
     "NodeStats",
 ]

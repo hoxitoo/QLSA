@@ -248,6 +248,37 @@ class TestBatcher:
         with pytest.raises(ValueError):
             Batcher(mp, min_batch_size=10, max_batch_size=5)
 
+    def test_batch_result_has_witness_false_by_default(self):
+        mp = Mempool()
+        txs, privs = _signed_txs(2)
+        for tx in txs:
+            mp.add(tx)
+        result = Batcher(mp).try_batch()
+        _wipe(privs)
+        assert result is not None
+        assert result.has_witness is False
+        assert result.witness_commitment is None
+
+    def test_try_batch_prove_witnesses_true_accepted(self):
+        """prove_witnesses=True runs without error; has_witness may be False without PyO3 ext."""
+        mp = Mempool()
+        txs, privs = _signed_txs(2)
+        for tx in txs:
+            mp.add(tx)
+        result = Batcher(mp).try_batch(prove_witnesses=True)
+        _wipe(privs)
+        assert result is not None
+        assert isinstance(result.has_witness, bool)
+
+    def test_force_batch_prove_witnesses_true_accepted(self):
+        mp = Mempool()
+        tx, priv = _make_signed_tx()
+        mp.add(tx)
+        wipe_key(priv)
+        result = Batcher(mp, min_batch_size=100).force_batch(prove_witnesses=True)
+        assert result is not None
+        assert isinstance(result.has_witness, bool)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AggregatorNode tests
@@ -320,6 +351,24 @@ class TestAggregatorNode:
     def test_force_cycle_returns_none_when_empty(self):
         node = AggregatorNode()
         assert node.force_cycle() is None
+
+    def test_run_cycle_prove_witnesses_param_accepted(self):
+        node = AggregatorNode(min_batch_size=1)
+        tx, priv = _make_signed_tx()
+        node.submit(tx)
+        wipe_key(priv)
+        result = node.run_cycle(prove_witnesses=True)
+        assert result is not None
+        assert isinstance(result.has_witness, bool)
+
+    def test_force_cycle_prove_witnesses_param_accepted(self):
+        node = AggregatorNode(min_batch_size=10)
+        tx, priv = _make_signed_tx()
+        node.submit(tx)
+        wipe_key(priv)
+        result = node.force_cycle(prove_witnesses=True)
+        assert result is not None
+        assert isinstance(result.has_witness, bool)
 
     def test_multiple_cycles_accumulate_stats(self):
         node = AggregatorNode(min_batch_size=1, max_batch_size=2, mempool_capacity=10)

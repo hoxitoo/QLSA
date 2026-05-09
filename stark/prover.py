@@ -36,6 +36,9 @@ def _require_ext(fn_name: str) -> None:
 
 logger = logging.getLogger(__name__)
 
+# ML-DSA-65: γ₁ − β = 524 288 − 196
+NORM_BOUND: int = 524_092
+
 
 @dataclass
 class ProofResult:
@@ -149,6 +152,219 @@ def _call_prover_p2(
         commitment=commitment,
         log_size=log_size,
         onchain_commitment=onchain_commitment,
+    )
+
+
+# ─── Polynomial circuit STARK provers (MVP-3+) ────────────────────────────────
+#
+# Lower-level provers for individual polynomial operations.
+# Each function corresponds directly to a Rust STARK circuit.
+# All operate on lists of 256 integers in [0, Q) where Q = 8_380_417.
+
+
+@dataclass
+class PolyProofResult:
+    """Result of a single-polynomial circuit STARK proof."""
+    proof: bytes
+    commitment: str  # 32-char hex, Scheme-B (4 M31 words)
+    output: list[int]  # 256 output coefficients
+
+
+@dataclass
+class NormCheckResult:
+    """Result of a norm-check STARK proof."""
+    proof: bytes
+    commitment: str
+    norm: list[int]   # absolute centered values
+    max_norm: int     # ||z||_∞ — caller asserts < γ₁ − β = 524 092
+
+
+@dataclass
+class UseHintResult:
+    """Result of a UseHint STARK proof."""
+    proof: bytes
+    commitment: str
+    w1: list[int]  # UseHint output: high bits in [0, m) where m=16
+
+
+def prove_poly_sub_stark(
+    a: list[int],
+    b: list[int],
+) -> PolyProofResult:
+    """
+    Prove c[i] = (a[i] − b[i]) mod Q for all 256 coefficients.
+
+    Uses the poly_add AIR with negated b.  Both a and b must be 256-element
+    lists of integers in [0, Q).
+    """
+    _require_ext("prove_poly_sub_py")
+    try:
+        proof_bytes, commitment, diff = _ext.prove_poly_sub_py(a, b)
+    except Exception as exc:
+        raise RuntimeError(f"prove_poly_sub_py failed: {exc}") from exc
+    return PolyProofResult(proof=proof_bytes, commitment=commitment, output=diff)
+
+
+def verify_poly_sub_stark(result: PolyProofResult) -> bool:
+    """Verify a polynomial-subtraction proof."""
+    _require_ext("verify_poly_sub_py")
+    return bool(_ext.verify_poly_sub_py(result.proof, result.commitment))
+
+
+def prove_norm_check_stark(z: list[int]) -> NormCheckResult:
+    """
+    Prove norm[i] = min(z[i], Q − z[i]) for all 256 coefficients.
+
+    `z` must be a 256-element list of integers in [0, Q).
+    Returns norm polynomial and max_norm (||z||_∞).
+    Caller checks: max_norm < 524 092  (γ₁ − β for ML-DSA-65).
+    """
+    _require_ext("prove_norm_check_py")
+    try:
+        proof_bytes, commitment, norm, max_norm = _ext.prove_norm_check_py(z)
+    except Exception as exc:
+        raise RuntimeError(f"prove_norm_check_py failed: {exc}") from exc
+    return NormCheckResult(proof=proof_bytes, commitment=commitment,
+                           norm=norm, max_norm=max_norm)
+
+
+def verify_norm_check_stark(result: NormCheckResult) -> bool:
+    """Verify a norm-check proof."""
+    _require_ext("verify_norm_check_py")
+    return bool(_ext.verify_norm_check_py(result.proof, result.commitment))
+
+
+def prove_use_hint_stark(r: list[int], h_bits: list[bool]) -> UseHintResult:
+    """
+    Prove UseHint(h_bits[i], r[i]) = w1[i] for all 256 coefficients.
+
+    `r` must be 256 ints in [0, Q).  `h_bits` must be 256 bools.
+    Returns w1 ∈ [0, 16) — the high-bits output used in the ML-DSA hash check.
+    """
+    _require_ext("prove_use_hint_py")
+    try:
+        proof_bytes, commitment, w1 = _ext.prove_use_hint_py(r, h_bits)
+    except Exception as exc:
+        raise RuntimeError(f"prove_use_hint_py failed: {exc}") from exc
+    return UseHintResult(proof=proof_bytes, commitment=commitment, w1=w1)
+
+
+def verify_use_hint_stark(result: UseHintResult) -> bool:
+    """Verify a UseHint proof."""
+    _require_ext("verify_use_hint_py")
+    return bool(_ext.verify_use_hint_py(result.proof, result.commitment))
+
+
+# ─── ML-DSA full arithmetic witness pipeline (MVP-3+) ────────────────────────
+
+@dataclass
+class MldsaWitnessResult:
+    """
+    Result of the full ML-DSA.Verify arithmetic witness pipeline.
+
+    proof_bundle       — bincode-serialized VerifyMldsaProof; pass to verify_mldsa_witness_stark.
+    max_norms          — L values, ||z[j]||_∞; each must be < NORM_BOUND (524 092).
+    w1_prime           — K rows × N coefficients; UseHint output for hash comparison.
+    onchain_commitment — 32-char hex (16 bytes): Blake2s(bundle[:32] ∥ c_tilde[:32])[:16].
+                         Binds the proof to this specific signature's challenge seed.
+                         Use this as the commitment when publishing to QLSAVerifierBound.
+    c_tilde_hex        — Hex-encoded c_tilde (48 bytes = LAMBDA_BYTES for ML-DSA-65).
+                         Lets the caller re-derive Hash(μ ∥ w1_encode(w1_prime)) == c_tilde.
+    """
+    proof_bundle:       bytes
+    max_norms:          list[int]        # L entries
+    w1_prime:           list[list[int]]  # K × N
+    onchain_commitment: str = field(default="")  # 32-char hex
+    c_tilde_hex:        str = field(default="")  # 96-char hex for ML-DSA-65
+
+
+def prove_mldsa_witness_stark(
+    a_hat:  list[list[int]],   # K*L flat list, each 256 ints, NTT-domain
+    z:      list[list[int]],   # L polynomials (signature)
+    c:      list[int],         # 256-int challenge polynomial
+    t1:     list[list[int]],   # K polynomials (public key)
+    hints:  list[list[bool]],  # K × 256 hint bits
+    k:      int,               # rows (ML-DSA-65: 6)
+    l:      int,               # columns (ML-DSA-65: 5)
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness:
+      Az  →  c·t₁  →  poly_sub  →  norm_check  →  UseHint
+
+    All coefficients must be in [0, Q) where Q = 8_380_417.
+
+    Returns MldsaWitnessResult with a serialized proof bundle,
+    ||z||_∞ norms for each of the L signature polynomials,
+    and the UseHint output w1_prime (K × 256) for hash comparison.
+
+    Raises RuntimeError if the extension is not installed or any sub-proof fails.
+    """
+    _require_ext("prove_mldsa_witness_py")
+    try:
+        bundle, max_norms, w1_prime = _ext.prove_mldsa_witness_py(
+            a_hat, z, c, t1, hints, k, l
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+    )
+
+
+def verify_mldsa_witness_stark(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult."""
+    _require_ext("verify_mldsa_witness_py")
+    return bool(_ext.verify_mldsa_witness_py(result.proof_bundle))
+
+
+def verify_mldsa_hash_check(
+    pk:     bytes,
+    msg:    bytes,
+    result: MldsaWitnessResult,
+) -> bool:
+    """
+    Off-circuit ML-DSA.Verify hash step.
+
+    Recomputes μ = SHAKE-256(SHAKE-256(pk) ∥ M') and
+    c̃' = SHAKE-256(μ ∥ w1Encode(w1_prime)), then checks c̃' == c_tilde.
+
+    Together with verify_mldsa_witness_stark, this completes the full logical
+    chain of ML-DSA.Verify: arithmetic correctness (STARK) + hash binding.
+
+    Returns True iff the hash check passes.
+    """
+    _require_ext("verify_mldsa_hash_check_py")
+    return bool(_ext.verify_mldsa_hash_check_py(
+        pk, msg, result.w1_prime, result.c_tilde_hex
+    ))
+
+
+def prove_mldsa_sig_witness_stark(
+    pk:  bytes,
+    msg: bytes,
+    sig: bytes,
+) -> MldsaWitnessResult:
+    """
+    End-to-end: decode an ML-DSA-65 signature and prove the full arithmetic
+    witness pipeline (Az → c·t₁·2^d → poly_sub → norm_check → UseHint).
+
+    Raises ValueError if the signature is invalid.
+    Raises RuntimeError if the extension is not installed or a sub-proof fails.
+    """
+    _require_ext("prove_mldsa_sig_witness_py")
+    try:
+        bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex = \
+            _ext.prove_mldsa_sig_witness_py(pk, msg, sig)
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_sig_witness_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        onchain_commitment=onchain_commitment,
+        c_tilde_hex=c_tilde_hex,
     )
 
 

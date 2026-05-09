@@ -3,6 +3,7 @@ import type {
   NodeStats,
   SubmitResult,
   TransactionPayload,
+  WitnessStatus,
 } from "./types.js";
 
 const HEX_RE = /^[0-9a-fA-F]+$/;
@@ -70,6 +71,8 @@ export class AggregatorClient {
       merkle_root?: string;
       is_proven?: boolean;
       stark_commitment?: string;
+      has_witness?: boolean;
+      witness_commitment?: string;
     }>("/batch/run", {});
     if (data.status === "no_batch") return null;
     return this._toBatchStatus(data as Required<typeof data>);
@@ -87,9 +90,35 @@ export class AggregatorClient {
       merkle_root?: string;
       is_proven?: boolean;
       stark_commitment?: string;
+      has_witness?: boolean;
+      witness_commitment?: string;
     }>("/batch/flush", {});
     if (data.status === "empty") return null;
     return this._toBatchStatus(data as Required<typeof data>);
+  }
+
+  /**
+   * Retrieve the witness status for a batch from the aggregator.
+   * Returns null if the batch had no witness proof.
+   */
+  async getWitnessStatus(batchId: string): Promise<WitnessStatus | null> {
+    try {
+      const data = await this._get<{
+        has_witness: boolean;
+        onchain_commitment?: string;
+        c_tilde_hex?: string;
+        max_norms?: number[];
+      }>(`/batch/${batchId}/witness`);
+      if (!data.has_witness) return { hasWitness: false, maxNorms: [] };
+      return {
+        hasWitness: true,
+        onchainCommitment: data.onchain_commitment,
+        cTildeHex: data.c_tilde_hex,
+        maxNorms: data.max_norms ?? [],
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** Retrieve aggregator node statistics. */
@@ -128,6 +157,8 @@ export class AggregatorClient {
     merkle_root: string;
     is_proven: boolean;
     stark_commitment?: string;
+    has_witness?: boolean;
+    witness_commitment?: string;
   }): BatchStatus {
     return {
       batchId: data.batch_id,
@@ -135,6 +166,8 @@ export class AggregatorClient {
       merkleRoot: data.merkle_root,
       isProven: data.is_proven,
       starkCommitment: data.stark_commitment,
+      hasWitness: data.has_witness ?? false,
+      witnessCommitment: data.witness_commitment,
     };
   }
 
