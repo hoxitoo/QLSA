@@ -39,7 +39,7 @@ except ImportError:
     pass  # python-dotenv is optional; env vars may already be set
 
 from core.batch import create_batch
-from core.keys import generate_keypair, derive_address
+from core.keys import generate_keypair, derive_address, wipe_key
 from core.signing import sign
 from core.transaction import Transaction
 from stark.prover import (
@@ -73,9 +73,7 @@ def _make_transactions(n: int) -> list[Transaction]:
             public_key=pk,
         )
         tx.signature = sign(tx.to_bytes(), sk)
-        # Securely erase the private key from memory.
-        for j in range(len(sk)):
-            sk[j] = 0
+        wipe_key(sk)
         txs.append(tx)
         logger.info("  tx[%02d] sender=%s…", i, addr_sender[:16])
     return txs

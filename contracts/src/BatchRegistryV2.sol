@@ -49,6 +49,10 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     /// @notice The commitment used to finalize each batch (for auditability).
     mapping(bytes32 => bytes16) public batchCommitments;
 
+    /// @notice Last accepted nonce per sender address (replay protection).
+    /// @dev senderNonces[senderAddr] = highest nonce included in any finalized batch.
+    mapping(bytes32 => uint64) public senderNonces;
+
     // ──────────────────────────────────────────────────────────────────────────
     // Events
     // ──────────────────────────────────────────────────────────────────────────
@@ -66,6 +70,9 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     /// @notice Emitted when the verifier contract is replaced by the owner.
     event VerifierUpdated(address indexed oldVerifier, address indexed newVerifier);
 
+    /// @notice Emitted for each sender whose nonce was advanced in submitBatchWithNonces.
+    event NonceAdvanced(bytes32 indexed sender, uint64 newNonce);
+
     // ──────────────────────────────────────────────────────────────────────────
     // Errors
     // ──────────────────────────────────────────────────────────────────────────
@@ -74,6 +81,8 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     error BatchAlreadyFinalized(bytes32 merkleRoot);
     error InvalidProof();
     error ZeroAddressVerifier();
+    error SenderNonceTooLow(bytes32 sender, uint64 provided, uint64 expected);
+    error NoncesLengthMismatch();
 
     // ──────────────────────────────────────────────────────────────────────────
     // Constructor
@@ -109,6 +118,51 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
         finalizedBatches[merkleRoot]  = true;
         batchTimestamps[merkleRoot]   = block.timestamp;
         batchCommitments[merkleRoot]  = commitment;
+
+        emit BatchFinalized(merkleRoot, commitment, block.timestamp);
+    }
+
+    /// @notice Submit a batch with per-sender nonce enforcement (replay protection).
+    /// @param merkleRoot   bytes32 from SHA3-512 Merkle root (first 32 bytes).
+    /// @param commitment   16-byte Blake2s commitment.
+    /// @param starkProof   Full serialized STARK proof.
+    /// @param senders      Array of sender address hashes (bytes32, SHA3-256 of ML-DSA pubkey).
+    /// @param newNonces    Array of new nonce values (must be > current stored nonce for each sender).
+    ///
+    /// Callers pass every unique sender in the batch together with the highest
+    /// nonce for that sender included in this batch. The contract rejects any
+    /// nonce that is not strictly greater than the last recorded nonce, preventing
+    /// replay of any previously finalized transaction.
+    function submitBatchWithNonces(
+        bytes32          merkleRoot,
+        bytes16          commitment,
+        bytes calldata   starkProof,
+        bytes32[] calldata senders,
+        uint64[]  calldata newNonces
+    ) external nonReentrant {
+        if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
+        if (finalizedBatches[merkleRoot]) revert BatchAlreadyFinalized(merkleRoot);
+        if (senders.length != newNonces.length) revert NoncesLengthMismatch();
+
+        // Validate all nonces before touching state (fail-fast).
+        for (uint256 i = 0; i < senders.length; ++i) {
+            uint64 current = senderNonces[senders[i]];
+            if (newNonces[i] <= current) {
+                revert SenderNonceTooLow(senders[i], newNonces[i], current + 1);
+            }
+        }
+
+        if (!verifier.verify(starkProof, commitment, merkleRoot)) revert InvalidProof();
+
+        // Persist state.
+        finalizedBatches[merkleRoot] = true;
+        batchTimestamps[merkleRoot]  = block.timestamp;
+        batchCommitments[merkleRoot] = commitment;
+
+        for (uint256 i = 0; i < senders.length; ++i) {
+            senderNonces[senders[i]] = newNonces[i];
+            emit NonceAdvanced(senders[i], newNonces[i]);
+        }
 
         emit BatchFinalized(merkleRoot, commitment, block.timestamp);
     }

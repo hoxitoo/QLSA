@@ -284,3 +284,47 @@ class TestBatchWitness:
         assert id1 != id2
         assert client.get(f"/batch/{id1}/witness").status_code == 200
         assert client.get(f"/batch/{id2}/witness").status_code == 200
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+class TestRateLimit:
+    def test_transaction_rate_limit_enforced(self, client, signed_payload):
+        """101st POST /transactions from same IP within window returns 429."""
+        import aggregator.api as api_mod
+
+        # Clear the rate-limit window so previous tests don't interfere.
+        with api_mod._rate_lock:
+            api_mod._tx_windows.clear()
+
+        for _ in range(100):
+            resp = client.post("/transactions", json=signed_payload)
+            assert resp.status_code == 200
+
+        resp = client.post("/transactions", json=signed_payload)
+        assert resp.status_code == 429
+        assert "rate limit" in resp.json()["detail"]
+
+    def test_batch_rate_limit_enforced(self, client, signed_payload):
+        """21st POST /batch/flush from same IP within window returns 429."""
+        import aggregator.api as api_mod
+
+        with api_mod._rate_lock:
+            api_mod._batch_windows.clear()
+
+        for _ in range(20):
+            client.post("/transactions", json=signed_payload)
+            resp = client.post("/batch/flush")
+            # May be empty if TX was already drained — that's fine, endpoint still counts
+            assert resp.status_code == 200
+
+        # This 21st batch op should be rate-limited
+        resp = client.post("/batch/flush")
+        assert resp.status_code == 429
+        assert "rate limit" in resp.json()["detail"]
+
+    def test_get_endpoints_not_rate_limited(self, client):
+        """GET /health and /stats are never rate-limited."""
+        for _ in range(50):
+            assert client.get("/health").status_code == 200
+            assert client.get("/stats").status_code == 200

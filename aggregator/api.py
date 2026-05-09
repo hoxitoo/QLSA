@@ -1,16 +1,70 @@
 from __future__ import annotations
 
+import threading
+import time
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
 from core.signing import verify as sig_verify
 from core.transaction import Transaction
+
+
+# ── Rate-limit configuration ──────────────────────────────────────────────────
+# Sliding-window counters keyed by client IP.  No external dependencies.
+
+_TX_LIMIT = 100          # max POST /transactions per IP per minute
+_BATCH_LIMIT = 20        # max POST /batch/* per IP per minute
+_WINDOW_SECS = 60.0
+
+# {ip: deque[timestamp]}  — one deque per IP per bucket
+_tx_windows: dict[str, deque[float]] = {}
+_batch_windows: dict[str, deque[float]] = {}
+_rate_lock = threading.Lock()
+
+
+def _check_rate(windows: dict[str, deque[float]], ip: str, limit: int) -> bool:
+    """Return True if the request is allowed, False if the limit is exceeded."""
+    now = time.monotonic()
+    cutoff = now - _WINDOW_SECS
+    with _rate_lock:
+        dq = windows.setdefault(ip, deque())
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(dq) >= limit:
+            return False
+        dq.append(now)
+        return True
+
+
+class _RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        ip = request.client.host if request.client else "unknown"
+        path = request.url.path
+        method = request.method
+
+        if method == "POST" and path == "/transactions":
+            if not _check_rate(_tx_windows, ip, _TX_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate limit exceeded: max 100 transaction submissions per minute"},
+                )
+        elif method == "POST" and (path.startswith("/batch/")):
+            if not _check_rate(_batch_windows, ip, _BATCH_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate limit exceeded: max 20 batch operations per minute"},
+                )
+
+        return await call_next(request)
 
 
 @asynccontextmanager
@@ -20,6 +74,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="QLSA Aggregator", version="0.1.0", lifespan=_lifespan)
+app.add_middleware(_RateLimitMiddleware)
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
