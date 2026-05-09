@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
 
 from core.transaction import Transaction
 from aggregator.mempool import MempoolFullError
@@ -117,7 +118,7 @@ class HttpClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
-    def _httpx(self):
+    def _httpx(self) -> Any:
         try:
             import httpx
             return httpx
@@ -217,7 +218,6 @@ class HttpClient:
         httpx = self._httpx()
         try:
             resp = httpx.get(f"{self._base_url}/health", timeout=self._timeout)
-            return resp.is_success
-        except (httpx.TransportError, httpx.TimeoutException):
-            # Expected: server is down, unreachable, or timed out.
+            return bool(resp.is_success)
+        except Exception:
             return False

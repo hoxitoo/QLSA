@@ -28,10 +28,15 @@ _REGISTRY_ABI = json.loads("""
   {"inputs":[],"name":"InvalidMerkleRoot","type":"error"},
   {"inputs":[],"name":"InvalidProof","type":"error"},
   {"inputs":[],"name":"ZeroAddressVerifier","type":"error"},
+  {"inputs":[{"internalType":"bytes32","name":"sender","type":"bytes32"},{"internalType":"uint64","name":"provided","type":"uint64"},{"internalType":"uint64","name":"expected","type":"uint64"}],"name":"SenderNonceTooLow","type":"error"},
+  {"inputs":[],"name":"NoncesLengthMismatch","type":"error"},
   {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":true,"internalType":"bytes16","name":"commitment","type":"bytes16"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BatchFinalized","type":"event"},
+  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"sender","type":"bytes32"},{"indexed":false,"internalType":"uint64","name":"newNonce","type":"uint64"}],"name":"NonceAdvanced","type":"event"},
   {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"isBatchFinalized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
   {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes16","name":"commitment","type":"bytes16"},{"internalType":"bytes","name":"starkProof","type":"bytes"}],"name":"submitBatch","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"getCommitment","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"}
+  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes16","name":"commitment","type":"bytes16"},{"internalType":"bytes","name":"starkProof","type":"bytes"},{"internalType":"bytes32[]","name":"senders","type":"bytes32[]"},{"internalType":"uint64[]","name":"newNonces","type":"uint64[]"}],"name":"submitBatchWithNonces","outputs":[],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"getCommitment","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"senderNonces","outputs":[{"internalType":"uint64","name":"","type":"uint64"}],"stateMutability":"view","type":"function"}
 ]
 """)
 
@@ -115,6 +120,66 @@ class OnchainSubmitter:
         tx_hex = tx_hash.hex()
         logger.info("tx submitted: %s", tx_hex)
         return tx_hex
+
+    def submit_batch_with_nonces(
+        self,
+        merkle_root: bytes,
+        onchain_commitment: str,
+        proof_bytes: bytes,
+        senders: list[bytes],
+        new_nonces: list[int],
+    ) -> str:
+        """Call BatchRegistryV2.submitBatchWithNonces() with replay protection.
+
+        Args:
+            merkle_root:        First 32 bytes of the SHA3-512 Merkle root.
+            onchain_commitment: 32-char hex string (16 bytes).
+            proof_bytes:        Raw STARK proof bytes.
+            senders:            List of sender address hashes (bytes, 32 bytes each).
+                                Each entry is SHA3-256(public_key) — the on-chain bytes32 sender.
+            new_nonces:         Highest nonce for each sender in this batch (must exceed stored).
+
+        Returns:
+            Transaction hash as a hex string (0x-prefixed).
+        """
+        if len(senders) != len(new_nonces):
+            raise ValueError("senders and new_nonces must have equal length")
+
+        root_bytes32 = merkle_root[:32]
+        raw = bytes.fromhex(onchain_commitment)
+        if len(raw) != 16:
+            raise ValueError(
+                f"onchain_commitment must be 32 hex chars (16 bytes), got {len(raw)} bytes"
+            )
+        commitment_bytes16 = raw
+
+        senders_b32 = [s if len(s) == 32 else s[:32] for s in senders]
+
+        nonce = self.w3.eth.get_transaction_count(self.account.address)
+        gas_price = self.w3.eth.gas_price
+
+        tx = self.registry.functions.submitBatchWithNonces(
+            root_bytes32,
+            commitment_bytes16,
+            proof_bytes,
+            senders_b32,
+            new_nonces,
+        ).build_transaction({
+            "from": self.account.address,
+            "nonce": nonce,
+            "gas": self.gas_limit,
+            "gasPrice": gas_price,
+        })
+
+        signed = self.account.sign_transaction(tx)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        tx_hex = tx_hash.hex()
+        logger.info("tx submitted (with nonces): %s", tx_hex)
+        return tx_hex
+
+    def get_sender_nonce(self, sender_hash: bytes) -> int:
+        """Return the current on-chain nonce for a sender (bytes32 address hash)."""
+        return int(self.registry.functions.senderNonces(sender_hash[:32]).call())
 
     def wait_and_verify(self, tx_hash: str, merkle_root: bytes) -> bool:
         """

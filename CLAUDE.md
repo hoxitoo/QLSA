@@ -107,8 +107,15 @@ Development: `claude/review-repo-structure-E4kPW`
 2. ML-DSA verify: off-circuit (Rust, pre-proof) — not in STARK circuit (MVP-3+)
 3. Hash AIR: `H(a,b) = a³+b` — not cryptographic (replace with RPO256 in MVP-4)
 4. FRI blowup=4: ~60-bit soundness (production needs ≥128-bit, blowup≥8)
-5. No on-chain replay protection (nonce registry not implemented)
-6. `wipe_key()` in Python: not guaranteed to zero memory due to GC
+5. `wipe_key()` in Python: not guaranteed to zero memory due to GC
+
+## Security Hardening (implemented)
+
+- **Public key validation**: `derive_address()` rejects non-ML-DSA key lengths at source
+- **API rate limiting**: per-IP sliding-window (100 tx/min, 20 batch ops/min)
+- **On-chain nonce registry**: `submitBatchWithNonces()` in `BatchRegistryV2` enforces strictly
+  increasing per-sender nonces — prevents replay of any previously finalized transaction
+- **Key wipe**: `wipe_key()` used consistently in all production paths (`testnet/e2e.py`, SDK)
 
 ## CI Pipeline
 
