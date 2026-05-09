@@ -159,4 +159,85 @@ describe("BatchRegistryV2", function () {
     const unknownRoot = "0x" + "ff".repeat(32);
     expect(await registry.isBatchFinalized(unknownRoot)).to.be.false;
   });
+
+  // ── submitBatchWithNonces — nonce replay protection ───────────────────────
+
+  describe("submitBatchWithNonces", function () {
+    let nonceRoot;
+    let nonceSender;
+
+    before(function () {
+      nonceRoot   = "0x" + "12".repeat(32);
+      nonceSender = "0x" + "34".repeat(32);   // bytes32 sender hash
+    });
+
+    async function makeNonceCommitment(merkleHex) {
+      const proofHead = "0x" + PROOF_FILL.repeat(32);
+      const input64   = proofHead + merkleHex.slice(2, 66);
+      const rootHash  = await b2s.hash(input64);
+      return toBytes16(rootHash);
+    }
+
+    it("accepts first batch with nonce=1", async function () {
+      const commitment = await makeNonceCommitment(nonceRoot);
+      await expect(
+        registry.submitBatchWithNonces(
+          nonceRoot, commitment, VALID_PROOF,
+          [nonceSender], [1n]
+        )
+      )
+        .to.emit(registry, "BatchFinalized")
+        .and.to.emit(registry, "NonceAdvanced")
+        .withArgs(nonceSender, 1n);
+
+      expect(await registry.senderNonces(nonceSender)).to.equal(1n);
+    });
+
+    it("rejects replay: same nonce (SenderNonceTooLow)", async function () {
+      const freshRoot  = "0x" + "56".repeat(32);
+      const commitment = await makeNonceCommitment(freshRoot);
+      await expect(
+        registry.submitBatchWithNonces(
+          freshRoot, commitment, VALID_PROOF,
+          [nonceSender], [1n]   // nonce=1, but current is already 1
+        )
+      ).to.be.revertedWithCustomError(registry, "SenderNonceTooLow");
+    });
+
+    it("accepts higher nonce in subsequent batch", async function () {
+      const freshRoot  = "0x" + "78".repeat(32);
+      const commitment = await makeNonceCommitment(freshRoot);
+      await expect(
+        registry.submitBatchWithNonces(
+          freshRoot, commitment, VALID_PROOF,
+          [nonceSender], [5n]
+        )
+      ).to.emit(registry, "NonceAdvanced").withArgs(nonceSender, 5n);
+
+      expect(await registry.senderNonces(nonceSender)).to.equal(5n);
+    });
+
+    it("reverts when senders/nonces arrays length mismatch", async function () {
+      const freshRoot  = "0x" + "9a".repeat(32);
+      const commitment = await makeNonceCommitment(freshRoot);
+      await expect(
+        registry.submitBatchWithNonces(
+          freshRoot, commitment, VALID_PROOF,
+          [nonceSender], [10n, 11n]   // length mismatch
+        )
+      ).to.be.revertedWithCustomError(registry, "NoncesLengthMismatch");
+    });
+
+    it("zero-nonce entry always fails (nonce must exceed stored 0)", async function () {
+      const freshRoot   = "0x" + "bc".repeat(32);
+      const freshSender = "0x" + "de".repeat(32);   // never seen before → stored=0
+      const commitment  = await makeNonceCommitment(freshRoot);
+      await expect(
+        registry.submitBatchWithNonces(
+          freshRoot, commitment, VALID_PROOF,
+          [freshSender], [0n]    // 0 is not > 0
+        )
+      ).to.be.revertedWithCustomError(registry, "SenderNonceTooLow");
+    });
+  });
 });

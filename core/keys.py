@@ -6,6 +6,12 @@ import oqs
 SUPPORTED_ALGORITHMS = ("ML-DSA-44", "ML-DSA-65", "ML-DSA-87")
 DEFAULT_ALGORITHM = "ML-DSA-65"
 
+# FIPS 204 §5.1 — public key byte lengths per parameter set
+# ML-DSA-44: ρ(32) + t1(k=4, ceil(N·10/8)=1280) = 1312
+# ML-DSA-65: ρ(32) + t1(k=6, ceil(N·10/8)=1920) = 1952
+# ML-DSA-87: ρ(32) + t1(k=8, ceil(N·10/8)=2560) = 2592
+_PUBKEY_SIZES: frozenset[int] = frozenset({1312, 1952, 2592})
+
 
 def generate_keypair(algorithm: str = DEFAULT_ALGORITHM) -> tuple[bytes, bytearray]:
     """Return (public_key, private_key). private_key is a mutable bytearray — zero it after use."""
@@ -19,6 +25,11 @@ def generate_keypair(algorithm: str = DEFAULT_ALGORITHM) -> tuple[bytes, bytearr
 
 def derive_address(public_key: bytes) -> str:
     """SHA3-256(pubkey) → lowercase hex string (address)."""
+    if len(public_key) not in _PUBKEY_SIZES:
+        raise ValueError(
+            f"public_key length {len(public_key)} is not a valid ML-DSA public key size. "
+            f"Expected one of {sorted(_PUBKEY_SIZES)} bytes."
+        )
     return hashlib.sha3_256(public_key).hexdigest()
 
 

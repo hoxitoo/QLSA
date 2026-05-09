@@ -39,7 +39,7 @@ except ImportError:
     pass  # python-dotenv is optional; env vars may already be set
 
 from core.batch import create_batch
-from core.keys import generate_keypair, derive_address
+from core.keys import generate_keypair, derive_address, wipe_key
 from core.signing import sign
 from core.transaction import Transaction
 from stark.prover import (
@@ -73,9 +73,7 @@ def _make_transactions(n: int) -> list[Transaction]:
             public_key=pk,
         )
         tx.signature = sign(tx.to_bytes(), sk)
-        # Securely erase the private key from memory.
-        for j in range(len(sk)):
-            sk[j] = 0
+        wipe_key(sk)
         txs.append(tx)
         logger.info("  tx[%02d] sender=%s…", i, addr_sender[:16])
     return txs
@@ -181,12 +179,22 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
         logger.error("Cannot connect to RPC: %s", exc)
         return 1
 
-    logger.info("Submitting batch to BatchRegistryV2…")
+    # Build per-sender nonce list: highest nonce in this batch for each unique sender.
+    sender_nonces: dict[bytes, int] = {}
+    for tx in txs:
+        import hashlib
+        sender_key = hashlib.sha3_256(tx.public_key).digest()
+        if tx.nonce > sender_nonces.get(sender_key, -1):
+            sender_nonces[sender_key] = tx.nonce
+
+    logger.info("Submitting batch to BatchRegistryV2 (with nonce replay protection)…")
     t0 = time.monotonic()
-    tx_hash = submitter.submit_batch(
+    tx_hash = submitter.submit_batch_with_nonces(
         merkle_root=batch.merkle_root,
         onchain_commitment=proof_result.onchain_commitment,
         proof_bytes=proof_result.proof,
+        senders=list(sender_nonces.keys()),
+        new_nonces=list(sender_nonces.values()),
     )
     logger.info("  tx_hash=%s (%.2fs)", tx_hash, time.monotonic() - t0)
 
