@@ -231,7 +231,7 @@
     <section class="hero">
       <div class="container hero-grid">
         <div>
-          <div class="eyebrow">Post-quantum rollup infrastructure — PyO3 native prover, 128-bit commitment, testnet infrastructure live</div>
+          <div class="eyebrow">Post-quantum rollup infrastructure — testnet live, security hardening complete, ML-DSA AIR circuits in progress</div>
           <h1>Build the post-quantum migration layer before it becomes urgent</h1>
           <p class="sub">
             QLSA aggregates thousands of post-quantum signatures into a single constant-size proof,
@@ -248,8 +248,8 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>CI</small><strong>151 Python + 93 Rust tests — all green</strong></div>
-            <div class="signal-card"><small>Status</small><strong>First batch finalized on Sepolia — 2026-05-05</strong></div>
+            <div class="signal-card"><small>CI</small><strong>192 Python + ~268 Rust + 31 TS + 155 Solidity — all green</strong></div>
+            <div class="signal-card"><small>Status</small><strong>Phase 6 ✓ — MVP-3+ AIR circuits in progress</strong></div>
           </div>
         </div>
 
@@ -283,16 +283,16 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Security audit completed May 2026. All findings resolved. PyO3 native extension (pyo3 0.24, RUSTSEC-2025-0020 patched) replaces subprocess — zero-overhead FFI. 151 Python + 93 Rust tests — all 5 CI jobs green.</p>
+            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). Security hardening done: rate limiting, nonce replay protection, key validation. 192 Python + ~268 Rust + 31 TS + 155 Solidity tests — all 5 CI jobs green.</p>
           </div>
         </div>
         <div class="progress-grid">
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Cryptographic core</strong><span>ML-DSA-65/44/87, SHA3-512 Merkle, address derivation, batch aggregation</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>STARK prover (Stwo 2.2.0)</strong><span>Circle STARK, hash-chain + Poseidon2 AIR over M31, ML-DSA-65 batch proof, FRI ×4</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts</strong><span>QLSAVerifierFull + QLSAVerifierBound (Merkle-root-bound), BatchRegistry + BatchRegistryV2</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Aggregator node</strong><span>Mempool, auto-batcher, FastAPI REST endpoint, STARK pipeline integration</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>SDK (Python)</strong><span>Wallet, transaction builder, LocalClient + HttpClient — typed API</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Security audit (May 2026)</strong><span>TOCTOU fix, API-level sig verification, memory zeroing, OOM guard in Rust verifier</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Cryptographic core</strong><span>ML-DSA-65/44/87, SHA3-512 Merkle, address derivation, pubkey validation, batch aggregation</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>STARK prover (Stwo 2.2.0)</strong><span>Circle STARK, hash-chain + Poseidon2 AIR over M31, ML-DSA-65 batch proof, FRI ×4, witness pipeline</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts — deployed Sepolia</strong><span>BatchRegistryV2 (nonce replay protection), QLSAVerifierFull + QLSAVerifierBound (128-bit Blake2s), 155 Solidity tests</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Aggregator node + API</strong><span>Mempool, auto-batcher, FastAPI REST, rate limiting (100 tx/min per IP), witness endpoint</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>SDKs (Python + TypeScript)</strong><span>Wallet, LocalClient + HttpClient, WitnessStatus, TypeScript AggregatorClient — mypy strict</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Testnet E2E (Sepolia, 2026-05-05)</strong><span>First batch: 4 tx, 3234-byte proof, 9.16 s finalization. submitBatchWithNonces on-chain.</span></div></div>
         </div>
       </div>
     </section>
@@ -319,7 +319,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr><td>ECDSA (current)</td><td>~70 bytes</td><td>~220 KB</td><td class="good">Fits today’s assumptions</td></tr>
+            <tr><td>ECDSA (current)</td><td>~70 bytes</td><td>~220 KB</td><td class="good">Fits today's assumptions</td></tr>
             <tr><td>ML-DSA-65 (FIPS 204)</td><td>~2,420 bytes</td><td>~7.2 MB</td><td class="bad">Severe throughput penalty</td></tr>
           </tbody>
         </table>
@@ -439,7 +439,7 @@
               <tr><td>MVP-1</td><td>Core crypto &amp; Merkle</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-2</td><td>Hash-chain + Poseidon2 AIR (Stwo)</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-2b</td><td>ML-DSA batch proof (Rust + STARK)</td><td class="warn">Off-chain</td><td class="good">✓ Done</td></tr>
-              <tr><td>MVP-3</td><td>Full ML-DSA verification inside AIR</td><td class="warn">Research target</td><td class="warn">Next</td></tr>
+              <tr><td>MVP-3+</td><td>ML-DSA arithmetic natively inside AIR circuit</td><td class="warn">In progress</td><td class="warn">6/~10 circuits done</td></tr>
             </tbody>
           </table>
         </div>
@@ -447,7 +447,7 @@
         <div class="card">
           <h3>Key risks</h3>
           <ul>
-            <li><strong>ML-DSA inside STARK:</strong> NTT and modular arithmetic can make AIR expensive.</li>
+            <li><strong>ML-DSA inside STARK:</strong> NTT and modular arithmetic can make AIR expensive — 6 of ~10 circuits now implemented (NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint).</li>
             <li><strong>Aggregator trust model:</strong> the MVP relies on off-chain verification before challenge systems exist.</li>
             <li><strong>Adoption timing:</strong> the need is real, but mainstream migration may still take years.</li>
           </ul>
@@ -495,14 +495,14 @@
             </ul>
           </div>
           <div class="stack-block">
-            <h3>Contracts & infra</h3>
+            <h3>Contracts &amp; infra</h3>
             <ul>
               <li>Solidity + Hardhat 2.28</li>
               <li>QLSAVerifierFull — Blake2s FRI root binding</li>
               <li>QLSAVerifierBound — Merkle-root-bound commitment</li>
-              <li>BatchRegistry + BatchRegistryV2 — upgradeable proxy</li>
-              <li>FastAPI aggregator REST endpoint</li>
-              <li>Target L2: Polygon zkEVM or Starknet</li>
+              <li>BatchRegistryV2 — nonce-based replay protection (<code>submitBatchWithNonces</code>)</li>
+              <li>FastAPI aggregator REST endpoint + rate limiting (100 tx/min per IP)</li>
+              <li>Python SDK (Wallet, LocalClient, WitnessStatus) + TypeScript SDK</li>
             </ul>
           </div>
         </div>
@@ -518,8 +518,8 @@
                 <tr><td>ML-DSA-65 sign (avg)</td><td class="good">0.12 ms / tx</td></tr>
                 <tr><td>Merkle build N=3000</td><td class="good">7.1 ms</td></tr>
                 <tr><td>Full pipeline N=3000</td><td class="good">354 ms</td></tr>
-                <tr><td>Rust test suite</td><td class="good">93 passing</td></tr>
-                <tr><td>Python test suite</td><td class="good">151 passing</td></tr>
+                <tr><td>Rust tests (~268) + TS (31) + Solidity (155)</td><td class="good">all passing</td></tr>
+                <tr><td>Python test suite</td><td class="good">192 passing</td></tr>
                 <tr><td>CI pipeline</td><td class="good">5 / 5 jobs green</td></tr>
                 <tr><td>Security audit</td><td class="good">May 2026 — all resolved</td></tr>
               </tbody>
@@ -531,13 +531,15 @@
             <div class="repo">
 <pre>QLSA/
 ├── core/          # ML-DSA, Merkle, batch
-├── aggregator/    # Mempool, batcher, FastAPI
-├── stark/         # Rust prover Python wrapper
-├── stark_stwo/    # Stwo Circle STARK + ML-DSA
-├── contracts/     # Solidity verifiers + registries
-├── sdk/           # Python SDK (wallet, client)
-├── benchmarks/
-└── tests/</pre>
+├── aggregator/    # Mempool, batcher, FastAPI + rate limit
+├── stark/         # Python prover/verifier wrappers
+├── stark_stwo/    # Stwo STARK + ML-DSA AIR circuits
+├── contracts/     # Solidity (nonce registry, verifiers)
+├── sdk/python/    # Wallet, LocalClient, WitnessStatus
+├── sdk/js/        # TypeScript AggregatorClient
+├── testnet/       # E2E demo, deploy, submit, monitor
+├── benchmarks/    # core, stark, circuits, witnesses
+└── tests/         # 192 Python + 268 Rust + 155 Sol</pre>
             </div>
           </div>
         </div>
@@ -561,7 +563,9 @@
           <div class="phase"><div class="phase-top"><h3>Phase 3 — Smart Contracts</h3><span class="phase-tag complete">✓ Complete</span></div><p>QLSAVerifierFull, QLSAVerifierBound (Merkle-root-bound Blake2s, bytes16 128-bit commitment), BatchRegistry, BatchRegistryV2 — all deployed (Hardhat). 29/29 contract tests green.</p></div>
           <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag complete">✓ Complete</span></div><p>In-memory mempool, auto-batcher, FastAPI REST endpoint. Full STARK prove→submit pipeline via PyO3 native FFI (zero subprocess overhead).</p></div>
           <div class="phase"><div class="phase-top"><h3>Phase 5 — SDK</h3><span class="phase-tag complete">✓ Complete</span></div><p>Python SDK (wallet + async client) and TypeScript/JavaScript SDK with full input validation and typed API.</p></div>
-          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag complete">✓ Complete</span></div><p>Live on Ethereum Sepolia (2026-05-05). QLSAVerifierBound: <code>0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd</code> · BatchRegistryV2: <code>0xF44A51CF1d7620e070ecaf611685418DE4679879</code>. First batch live: tx <code>0x5a9215d2aeb4…bd82</code>, proof 3234 bytes, finalized in 9.16s. Full pipeline: ML-DSA-65 × 4 → STARK → BatchRegistryV2.</p></div>
+          <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag complete">✓ Complete</span></div><p>Live on Ethereum Sepolia (2026-05-05). QLSAVerifierBound: <code>0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd</code> · BatchRegistryV2: <code>0xF44A51CF1d7620e070ecaf611685418DE4679879</code>. First batch: tx <code>0x5a9215d2aeb4…bd82</code>, 3234 bytes, finalized in 9.16 s. Security hardening: nonce registry, rate limiting, pubkey validation.</p></div>
+          <div class="phase"><div class="phase-top"><h3>MVP-3+ — ML-DSA Native in AIR</h3><span class="phase-tag active">In progress</span></div><p>Implementing ML-DSA-65 arithmetic directly inside the STARK circuit. Completed AIR circuits: NTT butterfly, INTT, pointwise PolyMul, PolyAdd (+ Az matrix-vector), NormCheck (||w'₀|| ≤ 524 092), UseHint. Remaining: lookup arguments for NTT wrap-around, full ML-DSA.Verify integration, Merkle root as STARK public input.</p></div>
+          <div class="phase"><div class="phase-top"><h3>MVP-4 — Mainnet-grade Verifier</h3><span class="phase-tag">Planned</span></div><p>Full on-chain Circle STARK FRI verifier (Solidity, ~5K lines) — decommitment, OODS, FRI queries. FRI blowup ≥8 for 128-bit soundness. RPO256 hash AIR (replace prototype H(a,b) = a³+b). Rust-wrapper for guaranteed key zeroing.</p></div>
         </div>
       </div>
     </section>
@@ -580,7 +584,7 @@
         <div class="faq">
           <div class="faq-item"><h3>Is QLSA a new signature algorithm?</h3><p>No. QLSA is an aggregation and verification architecture built around post-quantum signatures such as ML-DSA.</p></div>
           <div class="faq-item"><h3>Why not just replace ECDSA directly?</h3><p>Because the size increase of post-quantum signatures can cause major throughput and cost problems if deployed naively.</p></div>
-          <div class="faq-item"><h3>Does QLSA already prove ML-DSA inside STARK?</h3><p>Partially. ML-DSA-65 signatures are verified off-chain in Rust (FIPS 204); valid signatures are committed via Poseidon2 sponge and proven with Circle STARK. The STARK circuit does not yet execute ML-DSA arithmetic internally — that remains the MVP-3 research target.</p></div>
+          <div class="faq-item"><h3>Does QLSA already prove ML-DSA inside STARK?</h3><p>Partially. ML-DSA-65 signatures are verified off-chain in Rust (FIPS 204); the full witness pipeline (<code>prove_mldsa_sig_witness_stark</code>) produces a STARK commitment. Six AIR arithmetic circuits are implemented in MVP-3+: NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint. Full in-circuit integration with lookup arguments for soundness is the active research target.</p></div>
           <div class="faq-item"><h3>What smart contracts exist?</h3><p><code>QLSAVerifierFull</code> binds a STARK proof to a Blake2s commitment. <code>QLSAVerifierBound</code> additionally anchors the proof to the batch Merkle root via <code>Blake2s(proof[:32] ∥ merkle_root[:32])</code>, preventing replay. <code>BatchRegistry</code> and <code>BatchRegistryV2</code> store finalized roots on-chain.</p></div>
           <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is research-stage software. Phases 1–6 infrastructure is implemented and audited (May 2026), but the system should not be used in production until testnet validation is complete.</p></div>
         </div>
