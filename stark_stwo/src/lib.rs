@@ -1818,7 +1818,7 @@ fn prove_mldsa_sig_witness_py(
     pk:  Vec<u8>,
     msg: Vec<u8>,
     sig: Vec<u8>,
-) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String)> {
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String, Vec<u8>, String, usize)> {
     use mldsa::encoding::{pk_decode, sig_decode};
     use mldsa::xof::{expand_a, sample_in_ball};
     use mldsa::field;
@@ -1905,7 +1905,15 @@ fn prove_mldsa_sig_witness_py(
     // c_tilde as hex — lets the caller re-derive the hash check off-circuit.
     let c_tilde_hex = hex::encode(&c_tilde);
 
-    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex))
+    // Prove hint weight: Σᵢ ||h[i]||₁ ≤ ω (FIPS 204 §4, step 4).
+    // The hints vector comes from sig_decode and has K rows × N bits.
+    let (hw_proof, hw_commitment, hw_total) = prove_hint_weight(&hints)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("prove_hint_weight failed: {e}")
+        ))?;
+
+    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex,
+        hw_proof, hw_commitment, hw_total))
 }
 
 /// verify_mldsa_hash_check_py(pk, msg, w1_prime, c_tilde_hex) -> bool
