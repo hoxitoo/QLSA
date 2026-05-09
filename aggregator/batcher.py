@@ -23,6 +23,8 @@ class BatchResult:
     # Populated when prove_witnesses=True is passed to Batcher; None otherwise.
     witness_bundle:       bytes | None = field(default=None, repr=False)
     witness_commitment:   str | None = None  # 32-char hex — Blake2s binding
+    witness_max_norms:    list[int] | None = None  # L=5 ‖z[j]‖_∞ values
+    witness_c_tilde_hex:  str | None = None  # 96-char hex (48-byte ML-DSA-65 c̃)
 
     # Convenience properties for Solidity submission
     @property
@@ -54,6 +56,14 @@ class BatchResult:
     @property
     def has_witness(self) -> bool:
         return self.witness_bundle is not None
+
+    @property
+    def witness_norm_bound_ok(self) -> bool:
+        """True when all ‖z[j]‖_∞ are within the ML-DSA-65 NORM_BOUND (524 092)."""
+        if self.witness_max_norms is None:
+            return False
+        from stark.prover import NORM_BOUND
+        return all(mn < NORM_BOUND for mn in self.witness_max_norms)
 
 
 class Batcher:
@@ -168,8 +178,10 @@ class Batcher:
                         msg=tx0.to_bytes(),
                         sig=tx0.signature,
                     )
-                    result.witness_bundle = wr.proof_bundle
-                    result.witness_commitment = wr.onchain_commitment
+                    result.witness_bundle      = wr.proof_bundle
+                    result.witness_commitment  = wr.onchain_commitment
+                    result.witness_max_norms   = wr.max_norms
+                    result.witness_c_tilde_hex = wr.c_tilde_hex
                 except RuntimeError as exc:
                     logging.warning("ML-DSA witness proof skipped: %s", exc)
                 except Exception as exc:

@@ -12,7 +12,11 @@ from __future__ import annotations
 import pytest
 
 from stark.prover import ProofResult, _txs_to_leaves
-from stark.verifier import verify_batch_proof
+from stark.verifier import (
+    verify_batch_proof,
+    verify_batch_merkle_proof,
+    verify_batch_poseidon2_proof,
+)
 
 try:
     import qlsa_stark_stwo as _ext
@@ -219,3 +223,79 @@ def test_prove_mldsa_batch_verify_proof():
     entries = _mldsa_entries(2)
     result = prove_mldsa_batch(entries)
     assert verify_batch_proof(result.proof, result.commitment, result.log_size) is True
+
+
+# ─── prove_batch_poseidon2 ────────────────────────────────────────────────────
+
+@needs_ext
+def test_prove_batch_poseidon2_returns_result():
+    from stark.prover import prove_batch_poseidon2, Poseidon2ProofResult
+    batch = _make_signed_batch(4)
+    result = prove_batch_poseidon2(batch)
+    assert isinstance(result, Poseidon2ProofResult)
+    assert len(result.proof) > 0
+    assert len(result.commitment) == 32
+    assert result.log_size >= 3
+    assert len(result.onchain_commitment) == 32
+
+
+@needs_ext
+def test_prove_batch_poseidon2_verify_roundtrip():
+    from stark.prover import prove_batch_poseidon2
+    batch = _make_signed_batch(4)
+    result = prove_batch_poseidon2(batch)
+    assert verify_batch_poseidon2_proof(result.proof, result.commitment, result.log_size) is True
+
+
+@needs_ext
+def test_prove_batch_poseidon2_onchain_commitment_binding():
+    """onchain_commitment = Blake2s(proof[:32] ‖ merkle_root[:32])[:16]."""
+    import hashlib
+    from stark.prover import prove_batch_poseidon2
+    batch = _make_signed_batch(4)
+    result = prove_batch_poseidon2(batch)
+    expected = hashlib.blake2s(result.proof[:32] + batch.merkle_root[:32]).digest()[:16].hex()
+    assert result.onchain_commitment == expected
+
+
+# ─── prove_batch_merkle ───────────────────────────────────────────────────────
+
+@needs_ext
+def test_prove_batch_merkle_returns_result():
+    from stark.prover import prove_batch_merkle, MerkleProofResult
+    batch = _make_signed_batch(4)
+    result = prove_batch_merkle(batch)
+    assert isinstance(result, MerkleProofResult)
+    assert len(result.proof) > 0
+    assert len(result.commitment) == 32
+    assert result.log_size >= 3
+    assert len(result.onchain_commitment) == 32
+
+
+@needs_ext
+def test_prove_batch_merkle_verify_roundtrip():
+    from stark.prover import prove_batch_merkle
+    batch = _make_signed_batch(4)
+    result = prove_batch_merkle(batch)
+    assert verify_batch_merkle_proof(result.proof, result.commitment, result.log_size) is True
+
+
+@needs_ext
+def test_prove_batch_merkle_onchain_commitment_binding():
+    """onchain_commitment = Blake2s(proof[:32] ‖ merkle_root[:32])[:16]."""
+    import hashlib
+    from stark.prover import prove_batch_merkle
+    batch = _make_signed_batch(4)
+    result = prove_batch_merkle(batch)
+    expected = hashlib.blake2s(result.proof[:32] + batch.merkle_root[:32]).digest()[:16].hex()
+    assert result.onchain_commitment == expected
+
+
+@needs_ext
+def test_prove_batch_merkle_different_batches_different_commitments():
+    from stark.prover import prove_batch_merkle
+    b1 = _make_signed_batch(4)
+    b2 = _make_signed_batch(4)
+    r1 = prove_batch_merkle(b1)
+    r2 = prove_batch_merkle(b2)
+    assert r1.commitment != r2.commitment

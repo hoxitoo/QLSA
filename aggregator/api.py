@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, field_validator
 
 from aggregator.mempool import MempoolFullError
@@ -136,6 +136,28 @@ def batch_run(
         "witness_commitment": result.witness_commitment,
     }
 
+
+@app.get("/batch/{batch_id}/witness")
+def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
+    """Return witness proof metadata for a previously created batch.
+
+    Returns 404 if the batch_id is unknown to this node.
+    Returns has_witness=false if the batch exists but was created without
+    prove_witnesses=true.
+    """
+    node: AggregatorNode = request.app.state.node
+    for result in node.history():
+        if result.batch.batch_id == batch_id:
+            if not result.has_witness:
+                return {"batch_id": batch_id, "has_witness": False}
+            return {
+                "batch_id": batch_id,
+                "has_witness": True,
+                "onchain_commitment": result.witness_commitment,
+                "c_tilde_hex": result.witness_c_tilde_hex,
+                "max_norms": result.witness_max_norms,
+            }
+    raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
 
 @app.post("/batch/flush")
 def batch_flush(

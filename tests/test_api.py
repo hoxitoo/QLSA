@@ -250,3 +250,37 @@ class TestBatchFlush:
         stats = client.get("/stats").json()
         assert stats["transactions_batched"] == 2
         assert stats["batches_created"] == 1
+
+
+# ── GET /batch/{batch_id}/witness ─────────────────────────────────────────────
+
+class TestBatchWitness:
+    def test_unknown_batch_returns_404(self, client):
+        resp = client.get("/batch/nonexistent-batch-id/witness")
+        assert resp.status_code == 404
+
+    def test_batch_without_witness_returns_has_witness_false(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_resp = client.post("/batch/flush").json()
+        batch_id = batch_resp["batch_id"]
+
+        resp = client.get(f"/batch/{batch_id}/witness")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["batch_id"] == batch_id
+        assert data["has_witness"] is False
+
+    def test_witness_endpoint_returns_correct_batch_id(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_id = client.post("/batch/flush").json()["batch_id"]
+        data = client.get(f"/batch/{batch_id}/witness").json()
+        assert data["batch_id"] == batch_id
+
+    def test_multiple_batches_each_have_own_witness_record(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        id1 = client.post("/batch/flush").json()["batch_id"]
+        client.post("/transactions", json=signed_payload)
+        id2 = client.post("/batch/flush").json()["batch_id"]
+        assert id1 != id2
+        assert client.get(f"/batch/{id1}/witness").status_code == 200
+        assert client.get(f"/batch/{id2}/witness").status_code == 200
