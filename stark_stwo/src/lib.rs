@@ -1,6 +1,7 @@
 pub mod air;
 pub mod mldsa;
 pub mod mldsa_az_air;
+pub mod mldsa_hint_weight_air;
 pub mod mldsa_intt_air;
 pub mod mldsa_norm_check_air;
 pub mod mldsa_ntt_air;
@@ -1101,6 +1102,119 @@ pub fn verify_az_row(
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Hint weight check STARK (MVP-3+) ────────────────────────────────────────
+
+/// Prove that the total hint weight Σᵢ ||h[i]||₁ ≤ ω (ML-DSA-65: ω=55).
+///
+/// `hints[i][j]` is the hint bit for polynomial i, coefficient j.
+/// `hints` must have `K=6` rows, each of length `N=256`.
+///
+/// Returns `(proof_bytes, commitment_hex, total_weight)`.
+/// `commitment_hex` fingerprints the running-sum polynomial (Scheme B, 128-bit).
+/// The caller must check `total_weight ≤ OMEGA` — this is not enforced by the circuit.
+///
+/// The circuit proves:
+///   - Each hint bit ∈ {0,1}
+///   - Padding rows (≥ 1536) have h=0
+///   - The running sum is sequential: s[r] = s[r−1] + h[r]
+pub fn prove_hint_weight(hints: &[Vec<bool>]) -> Result<(Vec<u8>, String, usize), String> {
+    use mldsa_hint_weight_air::{LOG_N_ROWS, build_trace, new_component};
+    use mldsa::params::K;
+    use mldsa::N;
+
+    if hints.len() != K {
+        return Err(format!("hints must have K={K} rows, got {}", hints.len()));
+    }
+    for (i, row) in hints.iter().enumerate() {
+        if row.len() != N {
+            return Err(format!("hints[{i}] must have N={N} columns, got {}", row.len()));
+        }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (main_cols, preproc_cols, total_weight) = build_trace(hints);
+
+    // The "output" we fingerprint is the running-sum column (col 0 = s after column ordering fix).
+    let s_col_raw: Vec<i64> = main_cols[0].values.iter().map(|v| v.0 as i64).collect();
+    let fp = output_fingerprint(&s_col_raw);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: preprocessed columns (is_init, is_valid).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preproc_cols);
+    tree_builder.commit(channel);
+
+    // Tree 1: main trace (h, s).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(main_cols);
+    tree_builder.commit(channel);
+
+    // Bind output fingerprint to Fiat-Shamir transcript.
+    channel.mix_u32s(&fp);
+
+    let component = new_component(log_size);
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, total_weight))
+}
+
+/// Verify a hint weight STARK proof produced by [`prove_hint_weight`].
+///
+/// Returns `Ok(true)` iff the STARK proof is valid for the given commitment.
+/// The caller is responsible for checking `total_weight ≤ OMEGA` using the
+/// `total_weight` value returned from `prove_hint_weight`.
+pub fn verify_hint_weight(
+    proof_bytes: &[u8],
+    commitment_hex: &str,
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_hint_weight_air::{LOG_N_ROWS, new_component};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = new_component(log_size);
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 /// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
@@ -1368,6 +1482,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_az_row_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_az_row_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_hint_weight_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_hint_weight_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v2_py, m)?)?;
@@ -1491,6 +1607,25 @@ fn verify_az_row_py(proof: Vec<u8>, commitment: String, z_hat: Vec<Vec<i64>>) ->
         .collect::<Option<Vec<_>>>()
         .unwrap_or_default();
     verify_az_row(&proof, &commitment, &z_slices).unwrap_or(false)
+}
+
+/// prove_hint_weight_py(hints) -> (proof: bytes, commitment: str, total_weight: int)
+///
+/// `hints` must be a list of K=6 lists of N=256 booleans.
+/// Returns a STARK proof that each bit ∈ {0,1} and the running sum is sequential.
+/// The caller checks `total_weight ≤ 55` (ML-DSA-65 ω bound).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_hint_weight_py(hints: Vec<Vec<bool>>) -> PyResult<(Vec<u8>, String, usize)> {
+    prove_hint_weight(&hints)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// verify_hint_weight_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_hint_weight_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_hint_weight(&proof, &commitment).unwrap_or(false)
 }
 
 /// prove_norm_check_py(z) -> (proof: bytes, commitment: str, norm: list[int], max_norm: int)

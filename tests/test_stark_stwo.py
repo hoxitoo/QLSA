@@ -561,3 +561,99 @@ def test_mldsa_hash_check_fails_wrong_message():
     result = prove_mldsa_sig_witness_stark(pk, msg, sig)
     assert not verify_mldsa_hash_check(pk, b"different message", result), \
         "Hash check must fail when message is wrong"
+
+
+# ─── Hint weight check STARK (MVP-3+) ────────────────────────────────────────
+
+OMEGA = 55  # ML-DSA-65 hint weight bound
+
+
+def _zero_hints_full() -> list:
+    """All-zero hints for K=6, N=256."""
+    return [[False] * N for _ in range(6)]
+
+
+def _hints_with_count(count: int) -> list:
+    """First `count` hint bits set to True, rest False."""
+    h = [[False] * N for _ in range(6)]
+    placed = 0
+    for i in range(6):
+        for j in range(N):
+            if placed >= count:
+                break
+            h[i][j] = True
+            placed += 1
+        if placed >= count:
+            break
+    return h
+
+
+@needs_ext
+def test_prove_hint_weight_output_schema():
+    """prove_hint_weight_py returns (bytes, str, int) with correct shapes."""
+    hints = _zero_hints_full()
+    proof, commitment, total = _ext.prove_hint_weight_py(hints)
+
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32  # 16-byte hex
+    assert total == 0
+
+
+@needs_ext
+def test_prove_hint_weight_zero_hints():
+    """Zero hints → weight 0 → verify passes."""
+    hints = _zero_hints_full()
+    proof, commitment, total = _ext.prove_hint_weight_py(hints)
+    assert total == 0
+    assert _ext.verify_hint_weight_py(proof, commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_counts_correctly():
+    """Total weight matches the number of True bits in the hint vector."""
+    for count in [1, 10, 55]:
+        hints = _hints_with_count(count)
+        proof, commitment, total = _ext.prove_hint_weight_py(hints)
+        assert total == count, f"expected {count}, got {total}"
+        assert _ext.verify_hint_weight_py(proof, commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_verify_roundtrip():
+    """Honest prove → verify must succeed."""
+    hints = _hints_with_count(30)
+    proof, commitment, total = _ext.prove_hint_weight_py(hints)
+    assert total == 30
+    assert _ext.verify_hint_weight_py(proof, commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_tampered_proof_fails():
+    """Flipping a byte in the proof must cause verification to fail."""
+    hints = _hints_with_count(20)
+    proof, commitment, _ = _ext.prove_hint_weight_py(hints)
+    tampered = bytearray(proof)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_hint_weight_py(bytes(tampered), commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_wrong_commitment_fails():
+    """Wrong commitment hex must cause verification to fail."""
+    hints = _hints_with_count(5)
+    proof, commitment, _ = _ext.prove_hint_weight_py(hints)
+    # Flip a hex digit.
+    wrong = commitment[:30] + ("0" if commitment[30] != "0" else "1") + commitment[31:]
+    assert not _ext.verify_hint_weight_py(proof, wrong)
+
+
+@needs_ext
+def test_prove_hint_weight_bounds_check():
+    """The returned total_weight can be compared against OMEGA externally."""
+    for count in [0, 55, 200]:
+        hints = _hints_with_count(count)
+        _, _, total = _ext.prove_hint_weight_py(hints)
+        assert total == count
+        within_bound = total <= OMEGA
+        # This is the off-circuit check the verifier would perform.
+        assert within_bound == (count <= OMEGA)
