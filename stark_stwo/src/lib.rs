@@ -1344,6 +1344,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_az_row_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v2_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v2_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_hash_check_py, m)?)?;
     Ok(())
@@ -1579,6 +1581,60 @@ fn verify_mldsa_witness_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_proofs(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v2_py — same interface as prove_mldsa_witness_py but uses
+/// the Az-row AIR circuit (53 sub-proofs vs 101). Requires l = 5 (ML-DSA-65).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_mldsa_witness_v2_py(
+    a_hat:  Vec<Vec<i64>>,
+    z:      Vec<Vec<i64>>,
+    c:      Vec<i64>,
+    t1:     Vec<Vec<i64>>,
+    hints:  Vec<Vec<bool>>,
+    k:      usize,
+    l:      usize,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v2(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+
+    Ok((bundle, max_norms, w1_prime))
+}
+
+/// verify_mldsa_witness_v2_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v2_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV2, _
+    >(&proof_bundle, bincode::config::standard()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v2(&proof).unwrap_or(false)
 }
 
 /// prove_mldsa_sig_witness_py(pk: bytes, msg: bytes, sig: bytes)

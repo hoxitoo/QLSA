@@ -242,6 +242,261 @@ pub fn verify_intt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Str
     .is_ok())
 }
 
+// ── Matrix-vector product Az v2 (MVP-3+ — uses dedicated Az-row AIR) ─────────
+//
+// Replaces prove_az (65 sub-proofs) with the dedicated Az-row AIR circuit:
+//
+//   1. NTT(z[j]) for each j          —  L proofs      (crate::prove_ntt)
+//   2. prove_az_row per output row i  —  K proofs      (crate::prove_az_row)
+//   3. INTT(Az_hat[i]) per row i      —  K proofs      (prove_intt)
+//
+// Total: L + 2K = 5 + 12 = 17 proofs for ML-DSA-65 (vs 65 in prove_az).
+// Each Az-row AIR has 28 columns × 256 rows and 13 constraints (degree ≤ 2).
+
+/// Aggregated STARK proof for the full matrix-vector product Az (v2).
+#[derive(Encode, Decode)]
+pub struct AzProofV2 {
+    /// L NTT proofs: z_hat[j] = NTT(z[j]).
+    pub proofs_ntt_z: Vec<(Vec<u8>, String)>,
+    /// NTT outputs z_hat[j] (needed to supply to prove_az_row).
+    pub z_hat:        Vec<[i64; N]>,
+    /// K Az-row AIR proofs: Az_hat[i] = Σ_j A_hat[i][j] ⊙ z_hat[j].
+    pub proofs_az_row: Vec<(Vec<u8>, String)>,
+    /// NTT-domain outputs Az_hat[i] (needed for INTT input).
+    pub az_hat:       Vec<[i64; N]>,
+    /// K INTT proofs: Az[i] = INTT(Az_hat[i]).
+    pub proofs_intt:  Vec<(Vec<u8>, String)>,
+    /// Az[i] in polynomial domain, coefficients in [0, Q).
+    pub output:       Vec<[i64; N]>,
+}
+
+/// Prove the matrix-vector product `Az` in R_q using the dedicated Az-row AIR.
+///
+/// `a_hat` — K×L NTT-domain polynomials, row-major (index i*l + j = A[i][j]).
+/// `z`     — L polynomial-domain polynomials (from the signature).
+/// `k` / `l` must equal ML-DSA-65 params (6 / 5); the Az-row AIR is specialised for L=5.
+pub fn prove_az_v2(
+    a_hat: &[[i64; N]],
+    z:     &[[i64; N]],
+    k:     usize,
+    l:     usize,
+) -> Result<AzProofV2, String> {
+    if l != crate::mldsa::params::L {
+        return Err(format!(
+            "prove_az_v2 requires l = {} (ML-DSA-65), got l = {}",
+            crate::mldsa::params::L, l
+        ));
+    }
+    if a_hat.len() != k * l {
+        return Err(format!("a_hat must have k*l={} entries, got {}", k * l, a_hat.len()));
+    }
+    if z.len() != l {
+        return Err(format!("z must have l={l} entries, got {}", z.len()));
+    }
+
+    // Step 1: NTT(z[j]) for each j.
+    let mut proofs_ntt_z: Vec<(Vec<u8>, String)> = Vec::with_capacity(l);
+    let mut z_hat:         Vec<[i64; N]>           = Vec::with_capacity(l);
+    for (j, zj) in z.iter().enumerate() {
+        let (pb, cm, zh) = crate::prove_ntt(zj)
+            .map_err(|e| format!("NTT proof for z[{j}] failed: {e}"))?;
+        proofs_ntt_z.push((pb, cm));
+        z_hat.push(zh);
+    }
+
+    // Pack z_hat into the [L; N] fixed-size array expected by prove_az_row.
+    let z_hat_arr: [[i64; N]; 5] = z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have exactly L=5 entries".to_string())?;
+
+    // Step 2 & 3: For each row i, prove Az_hat[i] and then INTT.
+    let mut proofs_az_row: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut az_hat_out:    Vec<[i64; N]>           = Vec::with_capacity(k);
+    let mut proofs_intt:   Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut output:        Vec<[i64; N]>           = Vec::with_capacity(k);
+
+    for i in 0..k {
+        let a_row: [[i64; N]; 5] = a_hat[i * l..(i + 1) * l].try_into()
+            .map_err(|_| format!("a_hat slice for row {i} has wrong length"))?;
+
+        // Step 2: Az_hat[i] = Σ_j A_hat[i][j] ⊙ z_hat[j]  (Az-row AIR).
+        let (pb_az, cm_az, az_hat_i) = crate::prove_az_row(&a_row, &z_hat_arr)
+            .map_err(|e| format!("prove_az_row row {i} failed: {e}"))?;
+        proofs_az_row.push((pb_az, cm_az));
+        az_hat_out.push(az_hat_i);
+
+        // Step 3: Az[i] = INTT(Az_hat[i]).
+        let (pb_intt, cm_intt, az_i) = prove_intt(&az_hat_i)
+            .map_err(|e| format!("INTT proof for Az row {i} failed: {e}"))?;
+        proofs_intt.push((pb_intt, cm_intt));
+        output.push(az_i);
+    }
+
+    Ok(AzProofV2 {
+        proofs_ntt_z,
+        z_hat,
+        proofs_az_row,
+        az_hat: az_hat_out,
+        proofs_intt,
+        output,
+    })
+}
+
+/// Verify all STARK sub-proofs in an `AzProofV2`.
+pub fn verify_az_v2(proof: &AzProofV2) -> Result<bool, String> {
+    let k = proof.proofs_intt.len();
+
+    // Verify NTT(z[j]) proofs.
+    for (j, (pb, cm)) in proof.proofs_ntt_z.iter().enumerate() {
+        if !crate::verify_ntt(pb, cm)
+            .map_err(|e| format!("NTT verify z[{j}] failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    // Verify Az-row AIR proofs.
+    for (i, (pb, cm)) in proof.proofs_az_row.iter().enumerate() {
+        if !crate::verify_az_row(pb, cm)
+            .map_err(|e| format!("Az-row verify row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    // Verify INTT proofs.
+    for i in 0..k {
+        if !verify_intt(&proof.proofs_intt[i].0, &proof.proofs_intt[i].1)
+            .map_err(|e| format!("INTT verify Az row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+// ── Full ML-DSA.Verify witness v2 (uses Az-row AIR — 17 Az proofs vs 65) ─────
+
+/// Combined STARK proof for the ML-DSA.Verify arithmetic witness (v2).
+///
+/// Identical to `VerifyMldsaProof` but uses `AzProofV2` (Az-row AIR) instead of
+/// `AzProof` (PolyMul+PolyAdd chains) for the matrix-vector product.
+/// Total sub-proof count: 17 (Az) + 19 (Ct1) + K (sub) + L (norm) + K (UseHint)
+/// = 17 + 19 + 6 + 5 + 6 = 53  vs 65 + 19 + 6 + 5 + 6 = 101 in v1.
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV2 {
+    pub az_proof:        AzProofV2,
+    pub ct1_proof:       Ct1Proof,
+    pub proofs_sub:      Vec<(Vec<u8>, String)>,
+    pub norm_proofs:     Vec<(Vec<u8>, String)>,
+    pub use_hint_proofs: Vec<(Vec<u8>, String)>,
+    pub w_prime:         Vec<[i64; N]>,
+    pub w1_prime:        Vec<[i64; N]>,
+    pub max_norms:       Vec<i64>,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness using the Az-row AIR.
+///
+/// Same interface as `prove_verify_mldsa_witness` but produces 53 sub-proofs
+/// instead of 101 by using the dedicated Az-row AIR for the matrix-vector product.
+pub fn prove_verify_mldsa_v2(
+    a_hat: &[[i64; N]],
+    z:     &[[i64; N]],
+    c:     &[i64; N],
+    t1:    &[[i64; N]],
+    hints: &[Vec<bool>],
+    k:     usize,
+    l:     usize,
+) -> Result<VerifyMldsaProofV2, String> {
+    if t1.len() != k {
+        return Err(format!("t1 must have k={k} entries, got {}", t1.len()));
+    }
+    if hints.len() != k {
+        return Err(format!("hints must have k={k} rows, got {}", hints.len()));
+    }
+    for (i, hrow) in hints.iter().enumerate() {
+        if hrow.len() != N {
+            return Err(format!("hints[{i}] must have N={N} bits, got {}", hrow.len()));
+        }
+    }
+
+    // Step 1: Prove Az using the Az-row AIR.
+    let az_proof = prove_az_v2(a_hat, z, k, l)
+        .map_err(|e| format!("prove_az_v2 failed: {e}"))?;
+
+    // Step 2: Prove c·t₁.
+    let ct1_proof = prove_ct1(c, t1)
+        .map_err(|e| format!("prove_ct1 failed: {e}"))?;
+
+    // Step 3: Prove w′[i] = Az[i] − c·t₁[i].
+    let mut proofs_sub: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut w_prime:    Vec<[i64; N]>           = Vec::with_capacity(k);
+    for i in 0..k {
+        let (pb, cm, w_i) = crate::prove_poly_sub(&az_proof.output[i], &ct1_proof.output[i])
+            .map_err(|e| format!("prove_poly_sub row {i} failed: {e}"))?;
+        proofs_sub.push((pb, cm));
+        w_prime.push(w_i);
+    }
+
+    // Step 4: Prove norm for each z[j].
+    let mut norm_proofs: Vec<(Vec<u8>, String)> = Vec::with_capacity(l);
+    let mut max_norms:   Vec<i64>                = Vec::with_capacity(l);
+    for j in 0..l {
+        let (pb, cm, _, mx) = crate::prove_norm_check(&z[j])
+            .map_err(|e| format!("prove_norm_check z[{j}] failed: {e}"))?;
+        norm_proofs.push((pb, cm));
+        max_norms.push(mx);
+    }
+
+    // Step 5: Prove UseHint(h[i], w′[i]) = w₁′[i].
+    let mut use_hint_proofs: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut w1_prime:        Vec<[i64; N]>           = Vec::with_capacity(k);
+    for i in 0..k {
+        let h_arr: &[bool; N] = hints[i].as_slice().try_into()
+            .map_err(|_| format!("hints[{i}] is not [bool; N]"))?;
+        let (pb, cm, w1_i) = crate::prove_use_hint(&w_prime[i], h_arr)
+            .map_err(|e| format!("prove_use_hint row {i} failed: {e}"))?;
+        use_hint_proofs.push((pb, cm));
+        w1_prime.push(w1_i);
+    }
+
+    Ok(VerifyMldsaProofV2 {
+        az_proof,
+        ct1_proof,
+        proofs_sub,
+        norm_proofs,
+        use_hint_proofs,
+        w_prime,
+        w1_prime,
+        max_norms,
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProofV2`.
+pub fn verify_mldsa_witness_v2(proof: &VerifyMldsaProofV2) -> Result<bool, String> {
+    if !verify_az_v2(&proof.az_proof)
+        .map_err(|e| format!("verify_az_v2 failed: {e}"))? {
+        return Ok(false);
+    }
+    if !verify_ct1(&proof.ct1_proof)
+        .map_err(|e| format!("verify_ct1 failed: {e}"))? {
+        return Ok(false);
+    }
+    for (i, (pb, cm)) in proof.proofs_sub.iter().enumerate() {
+        if !crate::verify_poly_sub(pb, cm)
+            .map_err(|e| format!("verify_poly_sub row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    for (j, (pb, cm)) in proof.norm_proofs.iter().enumerate() {
+        if !crate::verify_norm_check(pb, cm)
+            .map_err(|e| format!("verify_norm_check z[{j}] failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    for (i, (pb, cm)) in proof.use_hint_proofs.iter().enumerate() {
+        if !crate::verify_use_hint(pb, cm)
+            .map_err(|e| format!("verify_use_hint row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
 //
 // Az[i] = Σ_{j=0}^{L-1} A[i][j] × z[j]   in R_q = Z_q[X]/(X^{256}+1)
@@ -838,6 +1093,74 @@ mod tests {
         let r1 = ring_mul_reference(&a_polys[1], &z_polys[1]);
         let expected0: [i64; N] = std::array::from_fn(|i| (r0[i] + r1[i]).rem_euclid(Q));
         assert_eq!(result[0], expected0, "Az[0] reference mismatch");
+    }
+
+    // ── AzProofV2 tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_prove_az_v2_1x1_output_correct() {
+        // Degenerate case: 1×1 "matrix" with L=1 fails because prove_az_v2 requires L=5.
+        // Test with k=1, l=5 (L must be 5 for ML-DSA-65).
+        let k = 1usize;
+        let l = 5usize;
+        let a_polys: Vec<[i64; N]> = (0..k*l).map(|s| random_poly(s as u64 * 7 + 10)).collect();
+        let z_polys: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 * 13 + 50)).collect();
+
+        let a_hat: Vec<[i64; N]> = a_polys.iter().map(|p| { let mut h = *p; ntt(&mut h); h }).collect();
+
+        let proof = prove_az_v2(&a_hat, &z_polys, k, l)
+            .expect("prove_az_v2 1×5 failed");
+
+        // Output must match the reference.
+        let expected = az_reference(&a_hat, &z_polys, k, l);
+        assert_eq!(proof.output, expected, "Az_v2 1×5 output mismatch");
+    }
+
+    #[test]
+    fn test_prove_az_v2_6x5_output_correct() {
+        // Full ML-DSA-65 dimensions: K=6, L=5.
+        let k = 6usize;
+        let l = 5usize;
+        let a_polys: Vec<[i64; N]> = (0..k*l).map(|s| random_poly(s as u64 * 3 + 100)).collect();
+        let z_polys: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 * 11 + 200)).collect();
+
+        let a_hat: Vec<[i64; N]> = a_polys.iter().map(|p| { let mut h = *p; ntt(&mut h); h }).collect();
+
+        let proof = prove_az_v2(&a_hat, &z_polys, k, l)
+            .expect("prove_az_v2 6×5 failed");
+
+        let expected = az_reference(&a_hat, &z_polys, k, l);
+        assert_eq!(proof.output, expected, "Az_v2 6×5 output mismatch");
+    }
+
+    #[test]
+    fn test_prove_az_v2_verifies() {
+        let k = 2usize;
+        let l = 5usize;
+        let a_hat: Vec<[i64; N]> = (0..k*l).map(|s| { let mut h = random_poly(s as u64 + 300); ntt(&mut h); h }).collect();
+        let z: Vec<[i64; N]>     = (0..l).map(|s| random_poly(s as u64 + 400)).collect();
+
+        let proof = prove_az_v2(&a_hat, &z, k, l)
+            .expect("prove_az_v2 failed");
+        let valid = verify_az_v2(&proof).expect("verify_az_v2 failed");
+        assert!(valid, "AzProofV2 should verify");
+    }
+
+    #[test]
+    fn test_prove_verify_mldsa_v2_1x5_verifies() {
+        let k = 1usize;
+        let l = 5usize;
+        let a_hat: Vec<[i64; N]> = (0..k*l).map(|s| { let mut h = random_poly(s as u64 + 500); ntt(&mut h); h }).collect();
+        let z:  Vec<[i64; N]>   = (0..l).map(|s| random_poly(s as u64 + 600)).collect();
+        let c:  [i64; N]        = random_poly(700);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 800)).collect();
+        let h   = all_false_hints(k);
+
+        let proof = prove_verify_mldsa_v2(&a_hat, &z, &c, &t1, &h, k, l)
+            .expect("prove_verify_mldsa_v2 failed");
+        let valid = verify_mldsa_witness_v2(&proof)
+            .expect("verify_mldsa_witness_v2 failed");
+        assert!(valid, "VerifyMldsaProofV2 should verify");
     }
 
     #[test]
