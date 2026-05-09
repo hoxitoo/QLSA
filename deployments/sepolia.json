@@ -1,0 +1,12 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "deployedAt": "2026-05-05",
+  "deployer": "0x8Fb32E28c22505c34520e3B0830E6789F1943e3f",
+  "contracts": {
+    "QLSAVerifierBound": "0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd",
+    "BatchRegistryV2":   "0xF44A51CF1d7620e070ecaf611685418DE4679879"
+  },
+  "commitmentScheme": "Blake2s(proof[0:32] || merkleRoot[0:32])[0:16]",
+  "note": "Research-stage testnet deployment. QLSAVerifierBound binds proof to Merkle root via Blake2s but does not perform full FRI decommitment. Replace with full Circle STARK verifier before mainnet."
+}

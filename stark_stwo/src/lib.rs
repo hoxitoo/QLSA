@@ -15,7 +15,6 @@ pub mod trace;
 use blake2::{Blake2s256, Digest};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sM31Channel, Channel};
-use stwo::core::fields::m31::BaseField; // used in tests
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::verifier::verify;
@@ -1596,7 +1595,7 @@ fn verify_mldsa_hash_check_py(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stwo::core::fields::m31::M31;
+    use stwo::core::fields::m31::{BaseField, M31};
     use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::TreeVec;
     use stwo_constraint_framework::{assert_constraints_on_trace, FrameworkEval};
