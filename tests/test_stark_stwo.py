@@ -392,6 +392,78 @@ def test_mldsa_hash_check_passes_for_valid_sig():
         "Hash check must pass for a valid signature's witness result"
 
 
+# ─── Az-row STARK (MVP-3+) ────────────────────────────────────────────────────
+
+@needs_ext
+def test_prove_az_row_output_schema():
+    """prove_az_row_py returns (bytes, str, list[int]) with correct shapes."""
+    a_row = [_rand_poly(j) for j in range(5)]
+    z_hat = [_rand_poly(j + 10) for j in range(5)]
+
+    proof, commitment, az_hat = _ext.prove_az_row_py(a_row, z_hat)
+
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32  # 16-byte hex
+    assert len(az_hat) == N
+    assert all(0 <= c < Q for c in az_hat)
+
+
+@needs_ext
+def test_prove_az_row_verify_roundtrip():
+    """prove → verify must succeed for honest witness."""
+    a_row = [_rand_poly(j + 20) for j in range(5)]
+    z_hat = [_rand_poly(j + 30) for j in range(5)]
+
+    proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
+    assert _ext.verify_az_row_py(proof, commitment)
+
+
+@needs_ext
+def test_prove_az_row_correctness():
+    """Output must equal the reference inner-product Σ_j a[j][p] * z[j][p] mod Q."""
+    a_row = [_rand_poly(j + 40) for j in range(5)]
+    z_hat = [_rand_poly(j + 50) for j in range(5)]
+
+    _, _, az_hat = _ext.prove_az_row_py(a_row, z_hat)
+
+    for p in range(N):
+        expected = sum(a_row[j][p] * z_hat[j][p] for j in range(5)) % Q
+        assert az_hat[p] == expected, f"mismatch at coefficient {p}"
+
+
+@needs_ext
+def test_prove_az_row_zero_z():
+    """Inner product with z = 0 must produce the zero polynomial."""
+    a_row = [_rand_poly(j + 60) for j in range(5)]
+    z_zero = [[0] * N for _ in range(5)]
+
+    _, _, az_hat = _ext.prove_az_row_py(a_row, z_zero)
+    assert az_hat == [0] * N
+
+
+@needs_ext
+def test_prove_az_row_tampered_proof_fails():
+    """Flipping a byte in the proof must cause verification to fail."""
+    a_row = [_rand_poly(j + 70) for j in range(5)]
+    z_hat = [_rand_poly(j + 80) for j in range(5)]
+
+    proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
+    tampered = bytearray(proof)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_az_row_py(bytes(tampered), commitment)
+
+
+@needs_ext
+def test_prove_az_row_full_matrix():
+    """Prove all K=6 output rows and verify each independently."""
+    z_hat = [_rand_poly(j + 90) for j in range(5)]
+    for i in range(6):
+        a_row = [_rand_poly(i * 5 + j + 100) for j in range(5)]
+        proof, commitment, az_hat = _ext.prove_az_row_py(a_row, z_hat)
+        assert _ext.verify_az_row_py(proof, commitment), f"row {i} failed verification"
+        assert len(az_hat) == N
+
+
 @needs_oqs
 def test_mldsa_hash_check_fails_wrong_message():
     """Hash check must fail when msg is substituted for a different message."""

@@ -1,5 +1,6 @@
 pub mod air;
 pub mod mldsa;
+pub mod mldsa_az_air;
 pub mod mldsa_intt_air;
 pub mod mldsa_norm_check_air;
 pub mod mldsa_ntt_air;
@@ -965,6 +966,115 @@ pub fn verify_norm_check(proof_bytes: &[u8], commitment_hex: &str) -> Result<boo
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Az row STARK (MVP-3+) ────────────────────────────────────────────────────
+
+/// Prove one row of the NTT-domain matrix-vector product  Az̃[i] = Σ_{j=0}^{L-1} Ã[i][j] ⊙ z̃[j].
+///
+/// `a_row` is the i-th row of Ã (L=5 polynomials in NTT domain, each of 256 coefficients).
+/// `z_hat` is the NTT-domain vector z̃ (L=5 polynomials of 256 coefficients).
+///
+/// Returns `(proof_bytes, commitment_hex, az_hat_i)` where `az_hat_i` is the output polynomial.
+/// The commitment fingerprints the 256 output coefficients via Blake2s (Scheme B, 128-bit).
+///
+/// Call this K=6 times (once per output row) to prove the full matrix-vector product.
+pub fn prove_az_row(
+    a_row: &[[i64; 256]; 5],
+    z_hat: &[[i64; 256]; 5],
+) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_az_air::{AzRowEval, AzRowComponent, LOG_N_ROWS, build_trace};
+
+    for j in 0..5 {
+        for (p, (&av, &zv)) in a_row[j].iter().zip(z_hat[j].iter()).enumerate() {
+            if av < 0 || av >= Q {
+                return Err(format!("a_row[{j}][{p}] = {av} out of [0, Q)"));
+            }
+            if zv < 0 || zv >= Q {
+                return Err(format!("z_hat[{j}][{p}] = {zv} out of [0, Q)"));
+            }
+        }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, az_hat) = build_trace(a_row, z_hat);
+
+    let fp = output_fingerprint(&az_hat);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&fp);
+
+    let component = AzRowComponent::new(
+        &mut TraceLocationAllocator::default(),
+        AzRowEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, az_hat))
+}
+
+/// Verify an Az-row proof produced by [`prove_az_row`].
+pub fn verify_az_row(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_az_air::{AzRowEval, AzRowComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = AzRowComponent::new(
+        &mut TraceLocationAllocator::default(),
+        AzRowEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 /// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
@@ -1230,6 +1340,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_norm_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_use_hint_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_az_row_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_az_row_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
@@ -1297,6 +1409,54 @@ fn prove_poly_sub_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec
 #[pyfunction]
 fn verify_poly_sub_py(proof: Vec<u8>, commitment: String) -> bool {
     verify_poly_sub(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_az_row_py(a_row, z_hat) -> (proof: bytes, commitment: str, az_hat: list[int])
+///
+/// Proves one row of the NTT-domain matrix-vector product Az̃[i] = Σ_j Ã[i][j] ⊙ z̃[j].
+/// `a_row` is a list of 5 lists of 256 ints (ML-DSA-65: L=5).
+/// `z_hat` is a list of 5 lists of 256 ints.
+/// Returns `(proof_bytes, commitment_hex, az_hat)` where az_hat is 256 ints.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_az_row_py(
+    a_row: Vec<Vec<i64>>,
+    z_hat: Vec<Vec<i64>>,
+) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let a_arr: [[i64; 256]; 5] = (0..5)
+        .map(|j| {
+            a_row.get(j)
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("a_row must have 5 elements"))?
+                .clone()
+                .try_into()
+                .map_err(|_| pyo3::exceptions::PyValueError::new_err("each a_row[j] must have 256 elements"))
+        })
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("a_row must have exactly 5 lists"))?;
+
+    let z_arr: [[i64; 256]; 5] = (0..5)
+        .map(|j| {
+            z_hat.get(j)
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("z_hat must have 5 elements"))?
+                .clone()
+                .try_into()
+                .map_err(|_| pyo3::exceptions::PyValueError::new_err("each z_hat[j] must have 256 elements"))
+        })
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z_hat must have exactly 5 lists"))?;
+
+    let (proof, commitment, az_hat) = prove_az_row(&a_arr, &z_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, az_hat.to_vec()))
+}
+
+/// verify_az_row_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_az_row_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_az_row(&proof, &commitment).unwrap_or(false)
 }
 
 /// prove_norm_check_py(z) -> (proof: bytes, commitment: str, norm: list[int], max_norm: int)
