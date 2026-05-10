@@ -1482,6 +1482,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_az_row_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_az_row_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_intt_bound_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_intt_bound_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_hint_weight_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_hint_weight_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
@@ -1607,6 +1609,37 @@ fn verify_az_row_py(proof: Vec<u8>, commitment: String, z_hat: Vec<Vec<i64>>) ->
         .collect::<Option<Vec<_>>>()
         .unwrap_or_default();
     verify_az_row(&proof, &commitment, &z_slices).unwrap_or(false)
+}
+
+/// prove_intt_bound_py(f) -> (proof: bytes, commitment: str)
+///
+/// Like `prove_intt` but also mixes the input fingerprint of `f` into the
+/// Fiat-Shamir channel before the output fingerprint, binding the proof to the
+/// specific input polynomial.  Use `verify_intt_bound_py` to verify.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_intt_bound_py(f: Vec<i64>) -> PyResult<(Vec<u8>, String)> {
+    use mldsa_verify_stark::prove_intt_with_binding;
+    let f_arr: [i64; 256] = f.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("f must have exactly 256 elements"))?;
+    let (proof, commitment, _out) = prove_intt_with_binding(&f_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment))
+}
+
+/// verify_intt_bound_py(proof, commitment, input) -> bool
+///
+/// Verify an INTT proof produced by `prove_intt_bound_py`.
+/// `input` must be the same 256-element list of ints that was passed to the prover.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_intt_bound_py(proof: Vec<u8>, commitment: String, input: Vec<i64>) -> bool {
+    use mldsa_verify_stark::verify_intt_with_binding;
+    let input_arr: [i64; 256] = match input.try_into() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    verify_intt_with_binding(&proof, &commitment, &input_arr).unwrap_or(false)
 }
 
 /// prove_hint_weight_py(hints) -> (proof: bytes, commitment: str, total_weight: int)

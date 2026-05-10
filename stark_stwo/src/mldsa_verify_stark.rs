@@ -242,6 +242,147 @@ pub fn verify_intt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Str
     .is_ok())
 }
 
+/// Prove an INTT and bind the proof to both the input and output polynomials.
+///
+/// Identical to [`prove_intt`] but mixes the input fingerprint of `f` into the
+/// Fiat-Shamir channel *before* the output fingerprint.  The verifier must supply
+/// the same `f` to [`verify_intt_with_binding`]; a wrong input causes the channel
+/// state to diverge and every FRI query check to fail.
+///
+/// Used by the v2 Az pipeline so that each INTT proof is cryptographically tied
+/// to the specific `az_hat[i]` row it was computed from.
+pub fn prove_intt_with_binding(f: &[i64; N]) -> Result<(Vec<u8>, String, [i64; N]), String> {
+    use crate::mldsa_intt_air::{
+        MlDsaInttButterflyEval, MlDsaInttButterflyComponent, LOG_N_BUTTERFLIES,
+        build_trace as intt_build_trace,
+    };
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    for (i, &c) in f.iter().enumerate() {
+        if c < 0 || c >= Q { return Err(format!("f[{i}] = {c} out of [0, Q)")); }
+    }
+
+    let log_size = LOG_N_BUTTERFLIES;
+    let (columns, intt_out) = intt_build_trace(f);
+
+    // Bind to input f (az_hat) first, then to output (same ordering as prove_az_row).
+    let input_fp  = crate::output_fingerprint(f);
+    let output_fp = crate::output_fingerprint(&intt_out);
+    let commitment_hex = crate::build_poly_commitment(&output_fp);
+
+    let log_blowup = crate::LOG_BLOWUP;
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = log_blowup;
+    let config = PcsConfig { lifting_log_size: Some(log_size + log_blowup), ..config };
+
+    let lifting = log_size + log_blowup;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tb = commitment_scheme.tree_builder();
+    tb.extend_evals(vec![]);
+    tb.commit(channel);
+
+    let mut tb = commitment_scheme.tree_builder();
+    tb.extend_evals(columns);
+    tb.commit(channel);
+
+    // Input fingerprint first, then output fingerprint.
+    channel.mix_u32s(&input_fp);
+    channel.mix_u32s(&output_fp);
+
+    let component = MlDsaInttButterflyComponent::new(
+        &mut TraceLocationAllocator::default(),
+        MlDsaInttButterflyEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&component], channel, commitment_scheme,
+    )
+    .map_err(|e| format!("INTT proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, intt_out))
+}
+
+/// Verify an INTT proof produced by [`prove_intt_with_binding`].
+///
+/// `input` must be the same `[i64; N]` polynomial that was passed to the prover.
+/// The verifier recomputes the input fingerprint, mixes it first, then mixes the
+/// output fingerprint from `commitment_hex`.  A wrong `input` causes the Fiat-Shamir
+/// transcript to diverge and verification to fail.
+pub fn verify_intt_with_binding(
+    proof_bytes:    &[u8],
+    commitment_hex: &str,
+    input:          &[i64; N],
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo::core::air::Component;
+    use stwo_constraint_framework::TraceLocationAllocator;
+    use crate::mldsa_intt_air::{MlDsaInttButterflyEval, MlDsaInttButterflyComponent, LOG_N_BUTTERFLIES};
+
+    let log_size = LOG_N_BUTTERFLIES;
+
+    let input_fp  = crate::output_fingerprint(input);
+    let output_fp = crate::parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<{ 8 * 1024 * 1024 }>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let log_blowup = crate::LOG_BLOWUP;
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = log_blowup;
+
+    let component = MlDsaInttButterflyComponent::new(
+        &mut TraceLocationAllocator::default(),
+        MlDsaInttButterflyEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: {} commitments", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Replay transcript: input fingerprint first, then output fingerprint.
+    verifier_channel.mix_u32s(&input_fp);
+    verifier_channel.mix_u32s(&output_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(
+        &[&component], verifier_channel, commitment_scheme, proof,
+    )
+    .is_ok())
+}
+
 // ── Matrix-vector product Az v2 (MVP-3+ — uses dedicated Az-row AIR) ─────────
 //
 // Replaces prove_az (65 sub-proofs) with the dedicated Az-row AIR circuit:
@@ -324,8 +465,8 @@ pub fn prove_az_v2(
         proofs_az_row.push((pb_az, cm_az));
         az_hat_out.push(az_hat_i);
 
-        // Step 3: Az[i] = INTT(Az_hat[i]).
-        let (pb_intt, cm_intt, az_i) = prove_intt(&az_hat_i)
+        // Step 3: Az[i] = INTT(Az_hat[i]) — input-bound proof ties az_hat_i to this INTT.
+        let (pb_intt, cm_intt, az_i) = prove_intt_with_binding(&az_hat_i)
             .map_err(|e| format!("INTT proof for Az row {i} failed: {e}"))?;
         proofs_intt.push((pb_intt, cm_intt));
         output.push(az_i);
@@ -343,15 +484,17 @@ pub fn prove_az_v2(
 
 /// Verify all STARK sub-proofs in an `AzProofV2`.
 ///
-/// Performs three layers of cross-consistency checks:
+/// Performs four layers of cross-consistency checks that together form an
+/// unbroken chain: NTT(z) → Az-row → INTT(Az_hat):
+///
 ///   1. NTT→z_hat: stored z_hat[j] fingerprint matches NTT output commitment.
 ///   2. z_hat→Az-row: verifier reconstructs input fingerprint from z_hat and passes it
 ///      to `verify_az_row`, binding the Az-row FRI proof to the specific z_hat used.
 ///   3. Az-row→az_hat: stored az_hat[i] fingerprint matches Az-row output commitment,
 ///      preventing the prover from claiming a different az_hat than what was proven.
-///
-/// Note: INTT input binding (az_hat[i] is the actual INTT input) is not yet enforced at
-/// the FRI level — `verify_intt` does not take an input commitment parameter (MVP-4).
+///   4. az_hat→INTT: `verify_intt_with_binding` recomputes the input fingerprint of
+///      az_hat[i] and mixes it into the verifier channel before the output fingerprint,
+///      so a proof generated with a different input polynomial will fail FRI queries.
 pub fn verify_az_v2(proof: &AzProofV2) -> Result<bool, String> {
     let l = proof.z_hat.len();
     let k = proof.proofs_intt.len();
@@ -397,10 +540,17 @@ pub fn verify_az_v2(proof: &AzProofV2) -> Result<bool, String> {
         }
     }
 
-    // Layer 3: Verify INTT proofs.
+    // Layer 4: Verify INTT(az_hat[i]) with input binding.
+    // verify_intt_with_binding recomputes the fingerprint of az_hat[i] and mixes it
+    // first into the channel — closing the az_hat[i] → INTT soundness gap.
     for i in 0..k {
-        if !verify_intt(&proof.proofs_intt[i].0, &proof.proofs_intt[i].1)
-            .map_err(|e| format!("INTT verify Az row {i} failed: {e}"))? {
+        if i >= proof.az_hat.len() { break; }
+        if !verify_intt_with_binding(
+            &proof.proofs_intt[i].0,
+            &proof.proofs_intt[i].1,
+            &proof.az_hat[i],
+        )
+        .map_err(|e| format!("INTT verify Az row {i} failed: {e}"))? {
             return Ok(false);
         }
     }

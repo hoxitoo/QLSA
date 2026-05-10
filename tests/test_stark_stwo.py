@@ -478,6 +478,60 @@ def test_prove_az_row_full_matrix():
         assert len(az_hat) == N
 
 
+# ─── INTT with input binding (MVP-3+) ────────────────────────────────────────
+
+def _rand_poly_intt(seed: int) -> list[int]:
+    """Random polynomial in [0, Q) — suitable as INTT input."""
+    import random
+    rng = random.Random(seed)
+    return [rng.randint(0, Q - 1) for _ in range(N)]
+
+
+@needs_ext
+def test_prove_intt_bound_roundtrip():
+    """prove_intt_bound_py + verify_intt_bound_py round-trips correctly."""
+    f = _rand_poly_intt(42)
+    proof, commitment = _ext.prove_intt_bound_py(f)
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32
+    int(commitment, 16)  # valid hex
+    assert _ext.verify_intt_bound_py(proof, commitment, f), "INTT bound proof did not verify"
+
+
+@needs_ext
+def test_prove_intt_bound_wrong_input_fails():
+    """Supplying a different input polynomial must cause verification to fail."""
+    f = _rand_poly_intt(7)
+    proof, commitment = _ext.prove_intt_bound_py(f)
+    # Flip one coefficient to create a different polynomial.
+    f_wrong = list(f)
+    f_wrong[0] = (f_wrong[0] + 1) % Q
+    assert not _ext.verify_intt_bound_py(proof, commitment, f_wrong), \
+        "INTT bound proof must fail with wrong input"
+
+
+@needs_ext
+def test_prove_intt_bound_tampered_proof_fails():
+    """A tampered proof byte must cause verification to fail."""
+    f = _rand_poly_intt(13)
+    proof, commitment = _ext.prove_intt_bound_py(f)
+    tampered = bytearray(proof)
+    tampered[16] ^= 0xFF
+    assert not _ext.verify_intt_bound_py(bytes(tampered), commitment, f), \
+        "INTT bound proof must fail when proof bytes are tampered"
+
+
+@needs_ext
+def test_prove_intt_bound_wrong_commitment_fails():
+    """Using a commitment from a different proof must fail."""
+    f1 = _rand_poly_intt(21)
+    f2 = _rand_poly_intt(22)
+    proof1, commitment1 = _ext.prove_intt_bound_py(f1)
+    _,      commitment2 = _ext.prove_intt_bound_py(f2)
+    assert not _ext.verify_intt_bound_py(proof1, commitment2, f1), \
+        "Wrong commitment must cause INTT bound verification to fail"
+
+
 # ─── ML-DSA witness v2 pipeline (Az-row AIR — 53 sub-proofs vs 101) ──────────
 # prove_verify_mldsa_v2 requires l = 5 (ML-DSA-65). Use k=1, l=5 for speed.
 
