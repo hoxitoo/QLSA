@@ -843,6 +843,157 @@ pub fn verify_mldsa_witness_v2(proof: &VerifyMldsaProofV2) -> Result<bool, Strin
     Ok(true)
 }
 
+// ── Full ML-DSA.Verify witness v3 (Az-full AIR — 49 sub-proofs) ──────────────
+//
+// Uses AzProofV3 (single full-matrix Az proof) and adds a hint weight proof.
+//
+// Sub-proof count breakdown:
+//   Az:          L(NTT-z) + 1(Az-full) + K(INTT)   = 5 + 1 + 6 = 12
+//   Ct1:         1(NTT-c) + K(NTT-t1) + K(pmul) + K(INTT) = 19
+//   poly_sub:    K                                  = 6
+//   norm_check:  L                                  = 5
+//   UseHint:     K                                  = 6
+//   HintWeight:  1                                  = 1
+//   Total:                                          = 49   (vs 53 in v2)
+
+/// Combined STARK proof for the full ML-DSA.Verify arithmetic witness (v3).
+///
+/// v3 improvements over v2:
+///   - AzProofV3 (single full-matrix AIR) instead of AzProofV2 (K Az-row proofs)
+///   - Hint weight proof included (Σ||h[i]||₁ ≤ ω enforcement via STARK)
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV3 {
+    pub az_proof:          AzProofV3,
+    pub ct1_proof:         Ct1Proof,
+    pub proofs_sub:        Vec<(Vec<u8>, String)>,
+    pub norm_proofs:       Vec<(Vec<u8>, String)>,
+    pub use_hint_proofs:   Vec<(Vec<u8>, String)>,
+    pub hint_weight_proof: (Vec<u8>, String),
+    pub w_prime:           Vec<[i64; N]>,
+    pub w1_prime:          Vec<[i64; N]>,
+    pub max_norms:         Vec<i64>,
+    pub hint_weight_total: usize,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness using the full-matrix Az AIR.
+///
+/// Produces 49 sub-proofs (vs 53 in v2, 101 in v1) and includes a STARK proof
+/// for the hint weight check Σ||h[i]||₁ ≤ ω=55.
+pub fn prove_verify_mldsa_v3(
+    a_hat: &[[i64; N]],
+    z:     &[[i64; N]],
+    c:     &[i64; N],
+    t1:    &[[i64; N]],
+    hints: &[Vec<bool>],
+    k:     usize,
+    l:     usize,
+) -> Result<VerifyMldsaProofV3, String> {
+    if t1.len() != k {
+        return Err(format!("t1 must have k={k} entries, got {}", t1.len()));
+    }
+    if hints.len() != k {
+        return Err(format!("hints must have k={k} rows, got {}", hints.len()));
+    }
+    for (i, hrow) in hints.iter().enumerate() {
+        if hrow.len() != N {
+            return Err(format!("hints[{i}] must have N={N} bits, got {}", hrow.len()));
+        }
+    }
+
+    // Step 1: Prove Az using the full-matrix AIR (all K rows, one proof).
+    let az_proof = prove_az_v3(a_hat, z, k, l)
+        .map_err(|e| format!("prove_az_v3 failed: {e}"))?;
+
+    // Step 2: Prove c·t₁.
+    let ct1_proof = prove_ct1(c, t1)
+        .map_err(|e| format!("prove_ct1 failed: {e}"))?;
+
+    // Step 3: Prove w′[i] = Az[i] − c·t₁[i].
+    let mut proofs_sub: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut w_prime:    Vec<[i64; N]>           = Vec::with_capacity(k);
+    for i in 0..k {
+        let (pb, cm, w_i) = crate::prove_poly_sub(&az_proof.output[i], &ct1_proof.output[i])
+            .map_err(|e| format!("prove_poly_sub row {i} failed: {e}"))?;
+        proofs_sub.push((pb, cm));
+        w_prime.push(w_i);
+    }
+
+    // Step 4: Prove norm for each z[j].
+    let mut norm_proofs: Vec<(Vec<u8>, String)> = Vec::with_capacity(l);
+    let mut max_norms:   Vec<i64>                = Vec::with_capacity(l);
+    for j in 0..l {
+        let (pb, cm, _, mx) = crate::prove_norm_check(&z[j])
+            .map_err(|e| format!("prove_norm_check z[{j}] failed: {e}"))?;
+        norm_proofs.push((pb, cm));
+        max_norms.push(mx);
+    }
+
+    // Step 5: Prove UseHint(h[i], w′[i]) = w₁′[i].
+    let mut use_hint_proofs: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut w1_prime:        Vec<[i64; N]>           = Vec::with_capacity(k);
+    for i in 0..k {
+        let h_arr: &[bool; N] = hints[i].as_slice().try_into()
+            .map_err(|_| format!("hints[{i}] is not [bool; N]"))?;
+        let (pb, cm, w1_i) = crate::prove_use_hint(&w_prime[i], h_arr)
+            .map_err(|e| format!("prove_use_hint row {i} failed: {e}"))?;
+        use_hint_proofs.push((pb, cm));
+        w1_prime.push(w1_i);
+    }
+
+    // Step 6: Prove hint weight Σ||h[i]||₁ ≤ ω.
+    let (hw_proof_bytes, hw_commitment, hint_weight_total) =
+        crate::prove_hint_weight(hints)
+            .map_err(|e| format!("prove_hint_weight failed: {e}"))?;
+
+    Ok(VerifyMldsaProofV3 {
+        az_proof,
+        ct1_proof,
+        proofs_sub,
+        norm_proofs,
+        use_hint_proofs,
+        hint_weight_proof: (hw_proof_bytes, hw_commitment),
+        w_prime,
+        w1_prime,
+        max_norms,
+        hint_weight_total,
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProofV3`.
+pub fn verify_mldsa_witness_v3(proof: &VerifyMldsaProofV3) -> Result<bool, String> {
+    if !verify_az_v3(&proof.az_proof)
+        .map_err(|e| format!("verify_az_v3 failed: {e}"))? {
+        return Ok(false);
+    }
+    if !verify_ct1(&proof.ct1_proof)
+        .map_err(|e| format!("verify_ct1 failed: {e}"))? {
+        return Ok(false);
+    }
+    for (i, (pb, cm)) in proof.proofs_sub.iter().enumerate() {
+        if !crate::verify_poly_sub(pb, cm)
+            .map_err(|e| format!("verify_poly_sub row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    for (j, (pb, cm)) in proof.norm_proofs.iter().enumerate() {
+        if !crate::verify_norm_check(pb, cm)
+            .map_err(|e| format!("verify_norm_check z[{j}] failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    for (i, (pb, cm)) in proof.use_hint_proofs.iter().enumerate() {
+        if !crate::verify_use_hint(pb, cm)
+            .map_err(|e| format!("verify_use_hint row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    if !crate::verify_hint_weight(&proof.hint_weight_proof.0, &proof.hint_weight_proof.1)
+        .map_err(|e| format!("verify_hint_weight failed: {e}"))? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
 //
 // Az[i] = Σ_{j=0}^{L-1} A[i][j] × z[j]   in R_q = Z_q[X]/(X^{256}+1)
@@ -1507,6 +1658,28 @@ mod tests {
         let valid = verify_mldsa_witness_v2(&proof)
             .expect("verify_mldsa_witness_v2 failed");
         assert!(valid, "VerifyMldsaProofV2 should verify");
+    }
+
+    #[test]
+    fn test_prove_verify_mldsa_v3_6x5_verifies() {
+        // V3 requires exactly k=6, l=5 (ML-DSA-65 full matrix).
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l).map(|s| { let mut h = random_poly(s as u64 + 900); ntt(&mut h); h }).collect();
+        let z:  Vec<[i64; N]>   = (0..l).map(|s| random_poly(s as u64 + 1000)).collect();
+        let c:  [i64; N]        = random_poly(1100);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 1200)).collect();
+        let h   = all_false_hints(k);
+
+        let proof = prove_verify_mldsa_v3(&a_hat, &z, &c, &t1, &h, k, l)
+            .expect("prove_verify_mldsa_v3 failed");
+
+        assert_eq!(proof.hint_weight_total, 0, "all-zero hints have weight 0");
+        assert!(!proof.hint_weight_proof.0.is_empty(), "hint weight proof must be non-empty");
+
+        let valid = verify_mldsa_witness_v3(&proof)
+            .expect("verify_mldsa_witness_v3 failed");
+        assert!(valid, "VerifyMldsaProofV3 should verify");
     }
 
     #[test]

@@ -667,6 +667,96 @@ def test_prove_mldsa_witness_v2_matches_v1_w1_prime():
     assert w1_v1 == w1_v2, "v1 and v2 pipelines must agree on w1_prime"
 
 
+# ─── ML-DSA witness v3 pipeline (Az-full AIR — 49 sub-proofs) ────────────────
+# prove_verify_mldsa_v3 requires k=6, l=5 (ML-DSA-65 exact).
+
+_K3 = 6   # ML-DSA-65 K
+_L3 = 5   # ML-DSA-65 L
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_output_schema():
+    """prove_mldsa_witness_v3_py returns (bytes, list[int], list[list[int]], int)."""
+    a_hat = [_rand_poly(i + 2000) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2100 + j) for j in range(_L3)]
+    c     = _rand_poly(2200)
+    t1    = [_rand_poly(2300 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v3_py(
+        a_hat, z, c, t1, hints, _K3, _L3
+    )
+
+    assert isinstance(bundle, bytes) and len(bundle) > 0
+    assert len(max_norms) == _L3
+    assert len(w1_prime) == _K3
+    for row in w1_prime:
+        assert len(row) == N
+    assert isinstance(hw_total, int) and hw_total == 0  # all-zero hints
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_verify_roundtrip():
+    """prove_mldsa_witness_v3_py → verify_mldsa_witness_v3_py must succeed."""
+    a_hat = [_rand_poly(i + 2010) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2110 + j) for j in range(_L3)]
+    c     = _rand_poly(2210)
+    t1    = [_rand_poly(2310 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+    assert _ext.verify_mldsa_witness_v3_py(bundle), "V3 bundle must verify"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_tampered_bundle_fails():
+    """Flipping a byte in the v3 bundle must cause verification to fail."""
+    a_hat = [_rand_poly(i + 2020) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2120 + j) for j in range(_L3)]
+    c     = _rand_poly(2220)
+    t1    = [_rand_poly(2320 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+    tampered = bytearray(bundle)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_mldsa_witness_v3_py(bytes(tampered))
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_matches_v2_w1_prime():
+    """v3 and v2 pipelines must produce identical w1_prime for the same inputs."""
+    a_hat = [_rand_poly(i + 2030) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2130 + j) for j in range(_L3)]
+    c     = _rand_poly(2230)
+    t1    = [_rand_poly(2330 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    _, _, w1_v2, *_ = _ext.prove_mldsa_witness_v2_py(a_hat, z, c, t1, hints, _K3, _L3)
+    _, _, w1_v3, _  = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+
+    assert w1_v2 == w1_v3, "v2 and v3 must agree on w1_prime"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_nonzero_hint_weight():
+    """V3 correctly encodes hint weight for a non-trivial hint vector."""
+    a_hat = [_rand_poly(i + 2040) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2140 + j) for j in range(_L3)]
+    c     = _rand_poly(2240)
+    t1    = [_rand_poly(2340 + i) for i in range(_K3)]
+    # Set 10 hint bits across rows.
+    hints = _zero_hints(_K3)
+    for bit in range(10):
+        hints[bit % _K3][bit] = True
+
+    bundle, _, _, hw_total = _ext.prove_mldsa_witness_v3_py(
+        a_hat, z, c, t1, hints, _K3, _L3
+    )
+    assert hw_total == 10, f"Expected hint_weight_total=10, got {hw_total}"
+    assert _ext.verify_mldsa_witness_v3_py(bundle), "V3 with non-zero hints must verify"
+
+
 @needs_oqs
 def test_mldsa_hash_check_fails_wrong_message():
     """Hash check must fail when msg is substituted for a different message."""
