@@ -478,6 +478,71 @@ def test_prove_az_row_full_matrix():
         assert len(az_hat) == N
 
 
+# ─── Full-matrix Az STARK — prove_az_full (MVP-3+) ───────────────────────────
+
+_KF = 6   # ML-DSA-65 K
+_LF = 5   # ML-DSA-65 L
+
+
+@needs_ext
+def test_prove_az_full_output_schema():
+    """prove_az_full_py returns (bytes, str, list[K lists of 256 ints])."""
+    a_hat = [_rand_poly(i + 400) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 500) for j in range(_LF)]
+    proof, commitment, az_out = _ext.prove_az_full_py(a_hat, z_hat)
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32
+    int(commitment, 16)
+    assert len(az_out) == _KF
+    for row in az_out:
+        assert len(row) == N
+        assert all(0 <= v < Q for v in row)
+
+
+@needs_ext
+def test_prove_az_full_verify_roundtrip():
+    """prove_az_full_py + verify_az_full_py round-trips."""
+    a_hat = [_rand_poly(i + 600) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 700) for j in range(_LF)]
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat)
+    assert _ext.verify_az_full_py(proof, commitment, z_hat)
+
+
+@needs_ext
+def test_prove_az_full_wrong_z_hat_fails():
+    """Supplying different z_hat to verify must fail (input fingerprint binding)."""
+    a_hat = [_rand_poly(i + 800) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 900) for j in range(_LF)]
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat)
+    z_wrong = list(z_hat)
+    z_wrong[0] = [v ^ 1 for v in z_wrong[0]]
+    assert not _ext.verify_az_full_py(proof, commitment, z_wrong), \
+        "Wrong z_hat must fail verification"
+
+
+@needs_ext
+def test_prove_az_full_tampered_proof_fails():
+    """A tampered proof byte must fail verification."""
+    a_hat = [_rand_poly(i + 1000) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1100) for j in range(_LF)]
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat)
+    tampered = bytearray(proof)
+    tampered[32] ^= 0xFF
+    assert not _ext.verify_az_full_py(bytes(tampered), commitment, z_hat)
+
+
+@needs_ext
+def test_prove_az_full_matches_az_row_per_row():
+    """az_full output must equal az_row output for each row independently."""
+    a_hat = [_rand_poly(i + 1200) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1300) for j in range(_LF)]
+    _, _, az_full = _ext.prove_az_full_py(a_hat, z_hat)
+    for i in range(_KF):
+        a_row = a_hat[i * _LF:(i + 1) * _LF]
+        _, _, az_row_i = _ext.prove_az_row_py(a_row, z_hat)
+        assert az_full[i] == az_row_i, f"row {i}: az_full ≠ az_row"
+
+
 # ─── INTT with input binding (MVP-3+) ────────────────────────────────────────
 
 def _rand_poly_intt(seed: int) -> list[int]:

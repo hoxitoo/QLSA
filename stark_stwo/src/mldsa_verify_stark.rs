@@ -557,6 +557,164 @@ pub fn verify_az_v2(proof: &AzProofV2) -> Result<bool, String> {
     Ok(true)
 }
 
+// ── Matrix-vector product Az v3 (MVP-3+ — full-matrix AIR, 1 Az proof) ────────
+//
+// Replaces K=6 separate Az-row proofs with one full-matrix STARK:
+//
+//   1. NTT(z[j]) for each j   —  L proofs    (crate::prove_ntt)
+//   2. prove_az_full           —  1 proof     (crate::prove_az_full)
+//   3. INTT(Az_hat[i])         —  K proofs    (prove_intt_with_binding)
+//
+// Total: L + 1 + K = 5 + 1 + 6 = 12 proofs (vs 17 in v2, 65 in v1).
+
+/// Aggregated STARK proof for the full matrix-vector product Az (v3 — single Az proof).
+#[derive(Encode, Decode)]
+pub struct AzProofV3 {
+    /// L NTT proofs: z_hat[j] = NTT(z[j]).
+    pub proofs_ntt_z:  Vec<(Vec<u8>, String)>,
+    /// NTT outputs z_hat[j].
+    pub z_hat:         Vec<[i64; N]>,
+    /// Single full-matrix Az proof: all K rows proved simultaneously.
+    pub proof_az_full: (Vec<u8>, String),
+    /// K NTT-domain outputs Az_hat[i] (for INTT input and cross-check).
+    pub az_hat:        Vec<[i64; N]>,
+    /// K INTT proofs: Az[i] = INTT(Az_hat[i]) with input binding.
+    pub proofs_intt:   Vec<(Vec<u8>, String)>,
+    /// Az[i] in polynomial domain.
+    pub output:        Vec<[i64; N]>,
+}
+
+/// Prove the matrix-vector product `Az` in R_q using the full-matrix Az AIR.
+///
+/// `a_hat` — K×L NTT-domain polynomials, row-major.
+/// `z`     — L polynomial-domain polynomials.
+/// Produces 12 sub-proofs total (L + 1 + K) vs 17 in v2.
+pub fn prove_az_v3(
+    a_hat: &[[i64; N]],
+    z:     &[[i64; N]],
+    k:     usize,
+    l:     usize,
+) -> Result<AzProofV3, String> {
+    use crate::mldsa::params;
+    if l != params::L {
+        return Err(format!("prove_az_v3 requires l = {} (ML-DSA-65), got {}", params::L, l));
+    }
+    if k != params::K {
+        return Err(format!("prove_az_v3 requires k = {} (ML-DSA-65), got {}", params::K, k));
+    }
+    if a_hat.len() != k * l {
+        return Err(format!("a_hat must have k*l={} entries, got {}", k * l, a_hat.len()));
+    }
+    if z.len() != l {
+        return Err(format!("z must have l={l} entries, got {}", z.len()));
+    }
+
+    // Step 1: NTT(z[j]) for each j.
+    let mut proofs_ntt_z: Vec<(Vec<u8>, String)> = Vec::with_capacity(l);
+    let mut z_hat:         Vec<[i64; N]>           = Vec::with_capacity(l);
+    for (j, zj) in z.iter().enumerate() {
+        let (pb, cm, zh) = crate::prove_ntt(zj)
+            .map_err(|e| format!("NTT proof for z[{j}] failed: {e}"))?;
+        proofs_ntt_z.push((pb, cm));
+        z_hat.push(zh);
+    }
+
+    let z_hat_arr: [[i64; N]; 5] = z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have exactly L=5 entries".to_string())?;
+
+    // Step 2: Prove Az for all K rows simultaneously.
+    let (pb_az, cm_az, az_out_arr) = crate::prove_az_full(a_hat, &z_hat_arr)
+        .map_err(|e| format!("prove_az_full failed: {e}"))?;
+    let proof_az_full = (pb_az, cm_az);
+
+    // Extract K az_hat rows from the full output.
+    let az_hat_vecs: Vec<[i64; N]> = az_out_arr.to_vec();
+
+    // Step 3: INTT(Az_hat[i]) for each row i, with input binding.
+    let mut proofs_intt: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut output:       Vec<[i64; N]>           = Vec::with_capacity(k);
+    for (i, az_hat_i) in az_hat_vecs.iter().enumerate() {
+        let (pb, cm, az_i) = prove_intt_with_binding(az_hat_i)
+            .map_err(|e| format!("INTT proof for Az row {i} failed: {e}"))?;
+        proofs_intt.push((pb, cm));
+        output.push(az_i);
+    }
+
+    Ok(AzProofV3 {
+        proofs_ntt_z,
+        z_hat,
+        proof_az_full,
+        az_hat: az_hat_vecs,
+        proofs_intt,
+        output,
+    })
+}
+
+/// Verify all STARK sub-proofs in an `AzProofV3`.
+///
+/// Four-layer cross-consistency chain:
+///   1. NTT→z_hat: stored z_hat[j] fingerprint matches NTT output commitment.
+///   2. z_hat→Az-full: verifier reconstructs input fingerprint from z_hat and passes
+///      it to `verify_az_full`, binding the full-matrix FRI proof to the specific z_hat.
+///   3. Az-full→az_hat: stored az_hat fingerprint (all K rows concatenated) matches
+///      the Az-full output commitment.
+///   4. az_hat→INTT: `verify_intt_with_binding` binds each INTT proof to its az_hat[i].
+pub fn verify_az_v3(proof: &AzProofV3) -> Result<bool, String> {
+    let l = proof.z_hat.len();
+    let k = proof.proofs_intt.len();
+
+    // Layer 1: Verify NTT(z[j]) proofs.
+    for (j, (pb, cm)) in proof.proofs_ntt_z.iter().enumerate() {
+        if !crate::verify_ntt(pb, cm)
+            .map_err(|e| format!("NTT verify z[{j}] failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+
+    // Cross-check 1: stored z_hat[j] fingerprint must match NTT output commitment.
+    for j in 0..l {
+        let fp = crate::output_fingerprint(&proof.z_hat[j]);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if j < proof.proofs_ntt_z.len() && expected_cm != proof.proofs_ntt_z[j].1 {
+            return Ok(false);
+        }
+    }
+
+    // Layer 2: Verify the full-matrix Az proof with z_hat input binding.
+    let z_hat_arr: [[i64; N]; 5] = match proof.z_hat.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return Err(format!("z_hat must have exactly L=5 entries, got {}", l)),
+    };
+    if !crate::verify_az_full(&proof.proof_az_full.0, &proof.proof_az_full.1, &z_hat_arr)
+        .map_err(|e| format!("Az-full verify failed: {e}"))? {
+        return Ok(false);
+    }
+
+    // Cross-check 2: stored az_hat fingerprint (all K rows) must match Az-full commitment.
+    {
+        let az_flat: Vec<i64> = proof.az_hat.iter().flat_map(|row| row.iter().copied()).collect();
+        let fp = crate::output_fingerprint(&az_flat);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if expected_cm != proof.proof_az_full.1 {
+            return Ok(false);
+        }
+    }
+
+    // Layer 4: Verify INTT(az_hat[i]) proofs with input binding.
+    for i in 0..k {
+        if i >= proof.az_hat.len() { break; }
+        if !verify_intt_with_binding(
+            &proof.proofs_intt[i].0,
+            &proof.proofs_intt[i].1,
+            &proof.az_hat[i],
+        )
+        .map_err(|e| format!("INTT verify Az row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 // ── Full ML-DSA.Verify witness v2 (uses Az-row AIR — 17 Az proofs vs 65) ─────
 
 /// Combined STARK proof for the ML-DSA.Verify arithmetic witness (v2).
@@ -1517,5 +1675,56 @@ mod tests {
         let half = (Q - 1) / 2;
         let expected_max: i64 = z_poly.iter().map(|&v| if v > half { Q - v } else { v }).max().unwrap();
         assert_eq!(proof.max_norms[0], expected_max);
+    }
+
+    // ── AzProofV3 tests (full-matrix Az AIR) ─────────────────────────────────
+
+    #[test]
+    fn test_prove_az_v3_output_matches_v2() {
+        // v3 and v2 must produce identical Az outputs for the same (a_hat, z).
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 1000); ntt(&mut h); h })
+            .collect();
+        let z: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 + 2000)).collect();
+
+        let v2 = prove_az_v2(&a_hat, &z, k, l).expect("prove_az_v2 failed");
+        let v3 = prove_az_v3(&a_hat, &z, k, l).expect("prove_az_v3 failed");
+
+        assert_eq!(v2.output, v3.output, "v2 and v3 Az outputs must be identical");
+        assert_eq!(v3.proofs_ntt_z.len(), l, "v3: L NTT proofs");
+        assert_eq!(v3.proofs_intt.len(), k, "v3: K INTT proofs");
+    }
+
+    #[test]
+    fn test_verify_az_v3_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 3000); ntt(&mut h); h })
+            .collect();
+        let z: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 + 4000)).collect();
+
+        let proof = prove_az_v3(&a_hat, &z, k, l).expect("prove_az_v3 failed");
+        let valid = verify_az_v3(&proof).expect("verify_az_v3 failed");
+        assert!(valid, "AzProofV3 must verify");
+    }
+
+    #[test]
+    fn test_verify_az_v3_tampered_az_hat_fails() {
+        // Flip one coefficient of az_hat[0] — cross-check 2 must catch it.
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 5000); ntt(&mut h); h })
+            .collect();
+        let z: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 + 6000)).collect();
+
+        let mut proof = prove_az_v3(&a_hat, &z, k, l).expect("prove_az_v3 failed");
+        proof.az_hat[0][0] = (proof.az_hat[0][0] + 1) % Q;
+
+        let valid = verify_az_v3(&proof).expect("verify_az_v3 should not error");
+        assert!(!valid, "Tampered az_hat must fail cross-check");
     }
 }
