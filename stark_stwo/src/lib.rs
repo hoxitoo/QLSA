@@ -2118,7 +2118,7 @@ fn prove_mldsa_sig_witness_py(
     pk:  Vec<u8>,
     msg: Vec<u8>,
     sig: Vec<u8>,
-) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String, Vec<u8>, String, usize)> {
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String, usize)> {
     use mldsa::encoding::{pk_decode, sig_decode};
     use mldsa::xof::{expand_a, sample_in_ball};
     use mldsa::field;
@@ -2178,13 +2178,14 @@ fn prove_mldsa_sig_witness_py(
         t1_arr.push(poly.coeffs);
     }
 
-    // Run the full STARK witness pipeline.
-    let proof = mldsa_verify_stark::prove_verify_mldsa_witness(
+    // Run the full V3 STARK witness pipeline (Az-full AIR + hint weight, 49 sub-proofs).
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v3(
         &a_hat_flat, &z_arr, &c_arr, &t1_arr, &hints, K, L,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
-    let max_norms = proof.max_norms.clone();
+    let max_norms       = proof.max_norms.clone();
     let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.hint_weight_total;
 
     let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
@@ -2192,7 +2193,6 @@ fn prove_mldsa_sig_witness_py(
         ))?;
 
     // onchain_commitment = Blake2s(bundle[:32] ∥ c_tilde[:32])[:16]
-    // Binds the proof bundle to this specific signature's challenge seed.
     let binding_input: Vec<u8> = bundle[..32.min(bundle.len())]
         .iter()
         .chain(c_tilde.iter().take(32))
@@ -2205,15 +2205,7 @@ fn prove_mldsa_sig_witness_py(
     // c_tilde as hex — lets the caller re-derive the hash check off-circuit.
     let c_tilde_hex = hex::encode(&c_tilde);
 
-    // Prove hint weight: Σᵢ ||h[i]||₁ ≤ ω (FIPS 204 §4, step 4).
-    // The hints vector comes from sig_decode and has K rows × N bits.
-    let (hw_proof, hw_commitment, hw_total) = prove_hint_weight(&hints)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-            format!("prove_hint_weight failed: {e}")
-        ))?;
-
-    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex,
-        hw_proof, hw_commitment, hw_total))
+    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex, hint_weight_total))
 }
 
 /// verify_mldsa_hash_check_py(pk, msg, w1_prime, c_tilde_hex) -> bool

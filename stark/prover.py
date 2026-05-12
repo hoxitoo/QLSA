@@ -260,28 +260,27 @@ def verify_use_hint_stark(result: UseHintResult) -> bool:
 @dataclass
 class MldsaWitnessResult:
     """
-    Result of the full ML-DSA.Verify arithmetic witness pipeline.
+    Result of the full ML-DSA.Verify arithmetic witness pipeline (V3).
 
-    proof_bundle          — bincode-serialized VerifyMldsaProof; pass to verify_mldsa_witness_stark.
-    max_norms             — L values, ||z[j]||_∞; each must be < NORM_BOUND (524 092).
-    w1_prime              — K rows × N coefficients; UseHint output for hash comparison.
-    onchain_commitment    — 32-char hex (16 bytes): Blake2s(bundle[:32] ∥ c_tilde[:32])[:16].
-                            Binds the proof to this specific signature's challenge seed.
-                            Use this as the commitment when publishing to QLSAVerifierBound.
-    c_tilde_hex           — Hex-encoded c_tilde (48 bytes = LAMBDA_BYTES for ML-DSA-65).
-                            Lets the caller re-derive Hash(μ ∥ w1_encode(w1_prime)) == c_tilde.
-    hint_weight_proof     — Raw bytes of the hint weight STARK proof (prove_hint_weight).
-    hint_weight_commitment— 32-char hex Scheme-B commitment to the running-sum column.
-    hint_weight_total     — Σᵢ ||h[i]||₁ (total hint weight; caller asserts ≤ ω=55).
+    proof_bundle       — bincode-serialized VerifyMldsaProofV3 (49 sub-proofs).
+                         Includes Az-full, Ct1, NormCheck, UseHint, HintWeight proofs.
+                         Pass to verify_mldsa_witness_stark.
+    max_norms          — L values, ||z[j]||_∞; each must be < NORM_BOUND (524 092).
+    w1_prime           — K rows × N coefficients; UseHint output for hash comparison.
+    onchain_commitment — 32-char hex (16 bytes): Blake2s(bundle[:32] ∥ c_tilde[:32])[:16].
+                         Binds the proof to this specific signature's challenge seed.
+                         Use this as the commitment when publishing to QLSAVerifierBound.
+    c_tilde_hex        — Hex-encoded c_tilde (48 bytes = LAMBDA_BYTES for ML-DSA-65).
+                         Lets the caller re-derive Hash(μ ∥ w1_encode(w1_prime)) == c_tilde.
+    hint_weight_total  — Σᵢ ||h[i]||₁ (total hint weight; caller asserts ≤ ω=55).
+                         The corresponding STARK proof is included in proof_bundle.
     """
-    proof_bundle:           bytes
-    max_norms:              list[int]        # L entries
-    w1_prime:               list[list[int]]  # K × N
-    onchain_commitment:     str = field(default="")  # 32-char hex
-    c_tilde_hex:            str = field(default="")  # 96-char hex for ML-DSA-65
-    hint_weight_proof:      bytes = field(default=b"")
-    hint_weight_commitment: str = field(default="")   # 32-char hex
-    hint_weight_total:      int = field(default=0)
+    proof_bundle:       bytes
+    max_norms:          list[int]        # L entries
+    w1_prime:           list[list[int]]  # K × N
+    onchain_commitment: str = field(default="")  # 32-char hex
+    c_tilde_hex:        str = field(default="")  # 96-char hex for ML-DSA-65
+    hint_weight_total:  int = field(default=0)
 
 
 def prove_mldsa_witness_stark(
@@ -290,39 +289,40 @@ def prove_mldsa_witness_stark(
     c:      list[int],         # 256-int challenge polynomial
     t1:     list[list[int]],   # K polynomials (public key)
     hints:  list[list[bool]],  # K × 256 hint bits
-    k:      int,               # rows (ML-DSA-65: 6)
-    l:      int,               # columns (ML-DSA-65: 5)
+    k:      int,               # rows (must be 6 for ML-DSA-65)
+    l:      int,               # columns (must be 5 for ML-DSA-65)
 ) -> MldsaWitnessResult:
     """
-    Prove the full ML-DSA.Verify arithmetic witness:
-      Az  →  c·t₁  →  poly_sub  →  norm_check  →  UseHint
+    Prove the full ML-DSA.Verify arithmetic witness (V3 pipeline, 49 sub-proofs):
+      Az-full  →  c·t₁  →  poly_sub  →  norm_check  →  UseHint  →  HintWeight
 
-    All coefficients must be in [0, Q) where Q = 8_380_417.
+    Requires k=6, l=5 (ML-DSA-65). All coefficients must be in [0, Q=8_380_417).
 
-    Returns MldsaWitnessResult with a serialized proof bundle,
+    Returns MldsaWitnessResult with the V3 serialized proof bundle,
     ||z||_∞ norms for each of the L signature polynomials,
     and the UseHint output w1_prime (K × 256) for hash comparison.
 
     Raises RuntimeError if the extension is not installed or any sub-proof fails.
     """
-    _require_ext("prove_mldsa_witness_py")
+    _require_ext("prove_mldsa_witness_v3_py")
     try:
-        bundle, max_norms, w1_prime = _ext.prove_mldsa_witness_py(
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v3_py(
             a_hat, z, c, t1, hints, k, l
         )
     except Exception as exc:
-        raise RuntimeError(f"prove_mldsa_witness_py failed: {exc}") from exc
+        raise RuntimeError(f"prove_mldsa_witness_v3_py failed: {exc}") from exc
     return MldsaWitnessResult(
         proof_bundle=bytes(bundle),
         max_norms=list(max_norms),
         w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
     )
 
 
 def verify_mldsa_witness_stark(result: MldsaWitnessResult) -> bool:
-    """Verify all STARK sub-proofs in an MldsaWitnessResult."""
-    _require_ext("verify_mldsa_witness_py")
-    return bool(_ext.verify_mldsa_witness_py(result.proof_bundle))
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V3 pipeline)."""
+    _require_ext("verify_mldsa_witness_v3_py")
+    return bool(_ext.verify_mldsa_witness_v3_py(result.proof_bundle))
 
 
 def verify_mldsa_hash_check(
@@ -361,8 +361,7 @@ def prove_mldsa_sig_witness_stark(
     """
     _require_ext("prove_mldsa_sig_witness_py")
     try:
-        bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex, \
-        hw_proof, hw_commitment, hw_total = \
+        bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex, hw_total = \
             _ext.prove_mldsa_sig_witness_py(pk, msg, sig)
     except Exception as exc:
         raise RuntimeError(f"prove_mldsa_sig_witness_py failed: {exc}") from exc
@@ -372,8 +371,6 @@ def prove_mldsa_sig_witness_stark(
         w1_prime=[list(row) for row in w1_prime],
         onchain_commitment=onchain_commitment,
         c_tilde_hex=c_tilde_hex,
-        hint_weight_proof=bytes(hw_proof),
-        hint_weight_commitment=hw_commitment,
         hint_weight_total=int(hw_total),
     )
 

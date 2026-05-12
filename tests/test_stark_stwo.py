@@ -248,21 +248,23 @@ def _zero_hints(k: int) -> list[list[bool]]:
 
 @needs_ext
 def test_mldsa_witness_prove_verify_roundtrip():
-    """Full pipeline: Az → c·t₁ → sub → norm_check → UseHint proves and verifies."""
+    """Full V3 pipeline (K=6, L=5): Az → c·t₁ → sub → norm_check → UseHint proves and verifies."""
     from stark.prover import prove_mldsa_witness_stark, verify_mldsa_witness_stark
 
-    a_hat = [_rand_poly(i) for i in range(K * L)]
-    z     = [_rand_poly(100 + j) for j in range(L)]
+    # V3 requires ML-DSA-65 dimensions (L=5 fixed in prove_az_v3)
+    K3, L3 = 6, 5
+    a_hat = [_rand_poly(i) for i in range(K3 * L3)]
+    z     = [_rand_poly(100 + j) for j in range(L3)]
     c     = _rand_poly(200)
-    t1    = [_rand_poly(300 + i) for i in range(K)]
-    hints = _zero_hints(K)
+    t1    = [_rand_poly(300 + i) for i in range(K3)]
+    hints = _zero_hints(K3)
 
-    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K, L)
+    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K3, L3)
 
     assert isinstance(result.proof_bundle, bytes)
     assert len(result.proof_bundle) > 0
-    assert len(result.max_norms) == L
-    assert len(result.w1_prime) == K
+    assert len(result.max_norms) == L3
+    assert len(result.w1_prime) == K3
     for row in result.w1_prime:
         assert len(row) == N
     # max_norm is absolute centred value min(z, Q-z); for random z it may exceed
@@ -278,13 +280,15 @@ def test_mldsa_witness_tampered_bundle_fails():
     """Flipping a byte in the proof bundle must cause verification to fail."""
     from stark.prover import prove_mldsa_witness_stark, verify_mldsa_witness_stark, MldsaWitnessResult
 
-    a_hat = [_rand_poly(i) for i in range(K * L)]
-    z     = [_rand_poly(100 + j) for j in range(L)]
+    # V3 requires ML-DSA-65 dimensions (L=5 fixed in prove_az_v3)
+    K3, L3 = 6, 5
+    a_hat = [_rand_poly(i) for i in range(K3 * L3)]
+    z     = [_rand_poly(100 + j) for j in range(L3)]
     c     = _rand_poly(200)
-    t1    = [_rand_poly(300 + i) for i in range(K)]
-    hints = _zero_hints(K)
+    t1    = [_rand_poly(300 + i) for i in range(K3)]
+    hints = _zero_hints(K3)
 
-    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K, L)
+    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K3, L3)
 
     tampered = bytearray(result.proof_bundle)
     tampered[len(tampered) // 2] ^= 0xFF
@@ -774,8 +778,8 @@ def test_mldsa_hash_check_fails_wrong_message():
 
 @needs_oqs
 def test_prove_mldsa_sig_witness_hint_weight_fields():
-    """MldsaWitnessResult includes a valid hint weight proof with total ≤ ω=55."""
-    from stark.prover import prove_mldsa_sig_witness_stark
+    """MldsaWitnessResult includes a valid hint_weight_total inside the V3 bundle."""
+    from stark.prover import prove_mldsa_sig_witness_stark, verify_mldsa_witness_stark
 
     alg = _oqs.Signature("ML-DSA-65")
     pk = alg.generate_keypair()
@@ -784,24 +788,14 @@ def test_prove_mldsa_sig_witness_hint_weight_fields():
 
     result = prove_mldsa_sig_witness_stark(pk, msg, sig)
 
-    # hint_weight_proof is a non-empty byte string.
-    assert isinstance(result.hint_weight_proof, bytes)
-    assert len(result.hint_weight_proof) > 0
-
-    # hint_weight_commitment is a 32-char hex string (16 bytes).
-    assert isinstance(result.hint_weight_commitment, str)
-    assert len(result.hint_weight_commitment) == 32
-    int(result.hint_weight_commitment, 16)  # must be valid hex
-
     # hint_weight_total is a non-negative integer ≤ ω=55 for any valid ML-DSA-65 sig.
+    # (The hint weight proof is now part of the unified V3 bundle, not a separate field.)
     assert isinstance(result.hint_weight_total, int)
     assert 0 <= result.hint_weight_total <= 55, \
         f"hint weight {result.hint_weight_total} exceeds ω=55"
 
-    # The hint weight proof must verify independently via the low-level binding.
-    assert _ext.verify_hint_weight_py(
-        result.hint_weight_proof, result.hint_weight_commitment
-    ), "Hint weight proof did not verify"
+    # Full bundle (including hint weight sub-proof) must verify.
+    assert verify_mldsa_witness_stark(result), "Hint weight proof inside V3 bundle did not verify"
 
 
 # ─── Hint weight check STARK (MVP-3+) ────────────────────────────────────────
