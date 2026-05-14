@@ -248,7 +248,7 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>CI</small><strong>192 Python + ~268 Rust + 31 TS + 155 Solidity — all green</strong></div>
+            <div class="signal-card"><small>CI</small><strong>243 Python + 181 Rust + 31 TS + 155 Solidity — all green</strong></div>
             <div class="signal-card"><small>Status</small><strong>Phase 6 ✓ — MVP-3+ AIR circuits in progress</strong></div>
           </div>
         </div>
@@ -283,7 +283,7 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). Security hardening done: rate limiting, nonce replay protection, key validation. 192 Python + ~268 Rust + 31 TS + 155 Solidity tests — all 5 CI jobs green.</p>
+            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). Security hardening done: rate limiting, nonce replay protection, key validation, c_tilde Fiat-Shamir binding, Q-range check AIR. 243 Python + 181 Rust + 31 TS + 155 Solidity tests — all 5 CI jobs green.</p>
           </div>
         </div>
         <div class="progress-grid">
@@ -439,7 +439,7 @@
               <tr><td>MVP-1</td><td>Core crypto &amp; Merkle</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-2</td><td>Hash-chain + Poseidon2 AIR (Stwo)</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-2b</td><td>ML-DSA batch proof (Rust + STARK)</td><td class="warn">Off-chain</td><td class="good">✓ Done</td></tr>
-              <tr><td>MVP-3+</td><td>ML-DSA arithmetic natively inside AIR circuit</td><td class="warn">In progress</td><td class="warn">6/~10 circuits done</td></tr>
+              <tr><td>MVP-3+</td><td>ML-DSA arithmetic natively inside AIR circuit</td><td class="warn">In progress</td><td class="warn">7/~10 circuits done</td></tr>
             </tbody>
           </table>
         </div>
@@ -447,7 +447,7 @@
         <div class="card">
           <h3>Key risks</h3>
           <ul>
-            <li><strong>ML-DSA inside STARK:</strong> NTT and modular arithmetic can make AIR expensive — 6 of ~10 circuits now implemented (NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint).</li>
+            <li><strong>ML-DSA inside STARK:</strong> NTT and modular arithmetic can make AIR expensive — 7 of ~10 circuits now implemented (NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint, Q-range check). c_tilde Fiat-Shamir binding closes the proof reuse soundness gap.</li>
             <li><strong>Aggregator trust model:</strong> the MVP relies on off-chain verification before challenge systems exist.</li>
             <li><strong>Adoption timing:</strong> the need is real, but mainstream migration may still take years.</li>
           </ul>
@@ -539,7 +539,7 @@
 ├── sdk/js/        # TypeScript AggregatorClient
 ├── testnet/       # E2E demo, deploy, submit, monitor
 ├── benchmarks/    # core, stark, circuits, witnesses
-└── tests/         # 192 Python + 268 Rust + 155 Sol</pre>
+└── tests/         # 243 Python + 181 Rust + 155 Sol</pre>
             </div>
           </div>
         </div>
@@ -584,7 +584,7 @@
         <div class="faq">
           <div class="faq-item"><h3>Is QLSA a new signature algorithm?</h3><p>No. QLSA is an aggregation and verification architecture built around post-quantum signatures such as ML-DSA.</p></div>
           <div class="faq-item"><h3>Why not just replace ECDSA directly?</h3><p>Because the size increase of post-quantum signatures can cause major throughput and cost problems if deployed naively.</p></div>
-          <div class="faq-item"><h3>Does QLSA already prove ML-DSA inside STARK?</h3><p>Partially. ML-DSA-65 signatures are verified off-chain in Rust (FIPS 204); the full witness pipeline (<code>prove_mldsa_sig_witness_stark</code>) produces a STARK commitment. Six AIR arithmetic circuits are implemented in MVP-3+: NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint. Full in-circuit integration with lookup arguments for soundness is the active research target.</p></div>
+          <div class="faq-item"><h3>Does QLSA already prove ML-DSA inside STARK?</h3><p>Partially. ML-DSA-65 signatures are verified off-chain in Rust (FIPS 204); the full witness pipeline (<code>prove_mldsa_sig_witness_stark</code>) produces a STARK commitment. Seven AIR arithmetic circuits are implemented in MVP-3+: NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint, Q-range check (v ∈ [0,Q) via 23-bit decomposition, closes M31 soundness gap). The FIPS 204 challenge c̃ is mixed into the Fiat-Shamir channel before the first trace commitment, binding the proof to the specific signature challenge. Full in-circuit integration with Merkle root as public input is the active research target.</p></div>
           <div class="faq-item"><h3>What smart contracts exist?</h3><p><code>QLSAVerifierFull</code> binds a STARK proof to a Blake2s commitment. <code>QLSAVerifierBound</code> additionally anchors the proof to the batch Merkle root via <code>Blake2s(proof[:32] ∥ merkle_root[:32])</code>, preventing replay. <code>BatchRegistry</code> and <code>BatchRegistryV2</code> store finalized roots on-chain.</p></div>
           <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is research-stage software. Phases 1–6 infrastructure is implemented and audited (May 2026), but the system should not be used in production until testnet validation is complete.</p></div>
         </div>
