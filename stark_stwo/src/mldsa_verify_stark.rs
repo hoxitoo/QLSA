@@ -1784,6 +1784,232 @@ pub fn verify_mldsa_witness_v7(proof: &VerifyMldsaProofV7) -> Result<bool, Strin
     Ok(true)
 }
 
+// ── VerifyMldsaProofV8 — range-Q batch AIR (MVP-3+) ──────────────────────────
+//
+// Same as V7 but replaces K individual range-Q proofs inside AzProofV3 with one
+// compact RangeQ-batch STARK (K×48 = 288 columns, 256 rows), saving K-1=5 sub-proofs.
+//
+// Sub-proof count:
+//   AzProofV4:          13 (5 NTT-z + 1 Az-full + 6 INTT-z + 1 range-Q-batch)
+//   Ct1ProofV2:         14 (1 NTT-c + 6 NTT-t1 + 1 Ct1-full + 6 INTT)
+//   WPrimeProof:         1
+//   NormCheckBatchProof: 1
+//   UseHintBatchProof:   1
+//   hint_weight:         1
+// Total: 13 + 14 + 1 + 1 + 1 + 1 = 31 sub-proofs (vs 36 in V7)
+
+/// Single STARK proof for all K Az-row range checks (batch range-Q).
+#[derive(Encode, Decode)]
+pub struct RangeQBatchProof {
+    pub proof_range_q_batch: (Vec<u8>, String),
+}
+
+/// Prove range membership for all K Az output rows at once.
+pub fn prove_range_q_batch_v(az_rows: &[[i64; N]]) -> Result<RangeQBatchProof, String> {
+    use crate::mldsa::params::K as K_PARAM;
+    if az_rows.len() != K_PARAM {
+        return Err(format!("az_rows must have K={K_PARAM} entries, got {}", az_rows.len()));
+    }
+    let arr: [[i64; N]; K_PARAM] = std::array::from_fn(|i| az_rows[i]);
+    let (pb, cm) = crate::prove_range_q_batch(&arr)
+        .map_err(|e| format!("prove_range_q_batch failed: {e}"))?;
+    Ok(RangeQBatchProof { proof_range_q_batch: (pb, cm) })
+}
+
+/// Verify a RangeQBatchProof.
+pub fn verify_range_q_batch_v(proof: &RangeQBatchProof) -> Result<bool, String> {
+    crate::verify_range_q_batch(&proof.proof_range_q_batch.0, &proof.proof_range_q_batch.1)
+        .map_err(|e| format!("verify_range_q_batch failed: {e}"))
+}
+
+/// AzProofV3 variant with batch range-Q — 13 sub-proofs (vs 18 in AzProofV3).
+#[derive(Encode, Decode)]
+pub struct AzProofV4 {
+    /// L NTT proofs: z_hat[j] = NTT(z[j]).
+    pub proofs_ntt_z:  Vec<(Vec<u8>, String)>,
+    /// NTT outputs z_hat[j].
+    pub z_hat:         Vec<[i64; N]>,
+    /// Single full-matrix Az proof (K×L outputs).
+    pub proof_az_full: (Vec<u8>, String),
+    /// K NTT-domain outputs Az_hat[i] (for INTT input binding).
+    pub az_hat:        Vec<[i64; N]>,
+    /// K INTT proofs: Az[i] = INTT(Az_hat[i]) with input binding.
+    pub proofs_intt:   Vec<(Vec<u8>, String)>,
+    /// Az[i] in polynomial domain, K entries.
+    pub output:        Vec<[i64; N]>,
+    /// Single batch range-Q proof for all K Az output rows.
+    pub range_q_proof: RangeQBatchProof,
+}
+
+/// Prove A×z using a full-matrix Az AIR with batch range-Q (AzProofV4, 13 sub-proofs).
+pub fn prove_az_v4(
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
+) -> Result<AzProofV4, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("AzProofV4 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("AzProofV4 requires l=L={L_PARAM}, got {l}")); }
+    if a_hat.len() != k * l {
+        return Err(format!("a_hat must have k*l={} entries, got {}", k * l, a_hat.len()));
+    }
+
+    // Step 1: NTT(z[j]) for each j (L proofs).
+    let mut proofs_ntt_z: Vec<(Vec<u8>, String)> = Vec::with_capacity(l);
+    let mut z_hat:        Vec<[i64; N]>           = Vec::with_capacity(l);
+    for (j, zj) in z.iter().enumerate() {
+        let (pb, cm, zh) = crate::prove_ntt(zj)
+            .map_err(|e| format!("NTT proof for z[{j}] failed: {e}"))?;
+        proofs_ntt_z.push((pb, cm));
+        z_hat.push(zh);
+    }
+
+    let z_hat_arr: [[i64; N]; L_PARAM] = z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have exactly L entries".to_string())?;
+
+    // Step 2: Full-matrix Az STARK (1 proof).
+    let (pb_az, cm_az, az_out_arr) = crate::prove_az_full(a_hat, &z_hat_arr, c_tilde)
+        .map_err(|e| format!("prove_az_full failed: {e}"))?;
+    let proof_az_full = (pb_az, cm_az);
+    let az_hat: Vec<[i64; N]> = az_out_arr.to_vec();
+
+    // Step 3: INTT(Az_hat[i]) for each row i, with input binding (K proofs).
+    let mut proofs_intt: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    let mut output:      Vec<[i64; N]>           = Vec::with_capacity(k);
+    for (i, az_hat_i) in az_hat.iter().enumerate() {
+        let (pb, cm, az_i) = prove_intt_with_binding(az_hat_i)
+            .map_err(|e| format!("INTT proof for Az row {i} failed: {e}"))?;
+        proofs_intt.push((pb, cm));
+        output.push(az_i);
+    }
+
+    // Step 4: Single batch range-Q for all K Az[i] outputs (replaces K individual proofs).
+    let range_q_proof = prove_range_q_batch_v(&output)?;
+
+    Ok(AzProofV4 { proofs_ntt_z, z_hat, proof_az_full, az_hat, proofs_intt, output, range_q_proof })
+}
+
+/// Verify all sub-proofs in an `AzProofV4`.
+///
+/// Same four-layer consistency chain as AzProofV3 but uses batch range-Q.
+pub fn verify_az_v4(proof: &AzProofV4, c_tilde_seed: &[u8]) -> Result<bool, String> {
+    let l = proof.z_hat.len();
+    let k = proof.proofs_intt.len();
+
+    // Layer 1: Verify NTT(z[j]).
+    for (j, (pb, cm)) in proof.proofs_ntt_z.iter().enumerate() {
+        if !crate::verify_ntt(pb, cm)
+            .map_err(|e| format!("verify_ntt z[{j}] failed: {e}"))? { return Ok(false); }
+    }
+
+    // Cross-check 1: stored z_hat[j] fingerprint must match NTT output commitment.
+    for j in 0..l {
+        let fp = crate::output_fingerprint(&proof.z_hat[j]);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if j < proof.proofs_ntt_z.len() && expected_cm != proof.proofs_ntt_z[j].1 {
+            return Ok(false);
+        }
+    }
+
+    // Layer 2: Verify full-matrix Az proof with z_hat input binding.
+    let z_hat_arr: [[i64; N]; crate::mldsa::params::L] = match proof.z_hat.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return Err(format!("z_hat must have L entries, got {l}")),
+    };
+    if !crate::verify_az_full(&proof.proof_az_full.0, &proof.proof_az_full.1, &z_hat_arr, c_tilde_seed)
+        .map_err(|e| format!("verify_az_full failed: {e}"))? { return Ok(false); }
+
+    // Cross-check 2: stored az_hat fingerprint must match Az-full output commitment.
+    {
+        let mut flat: Vec<i64> = Vec::with_capacity(k * N);
+        for row in &proof.az_hat { flat.extend_from_slice(row); }
+        let fp = crate::output_fingerprint(&flat);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if expected_cm != proof.proof_az_full.1 {
+            return Ok(false);
+        }
+    }
+
+    // Layer 3: Verify INTT(Az_hat[i]) with input binding.
+    for (i, (pb, cm)) in proof.proofs_intt.iter().enumerate() {
+        if i >= proof.az_hat.len() { break; }
+        if !verify_intt_with_binding(pb, cm, &proof.az_hat[i])
+            .map_err(|e| format!("verify_intt Az[{i}] failed: {e}"))? { return Ok(false); }
+    }
+
+    // Layer 4: Verify batch range-Q for all K Az outputs.
+    if !verify_range_q_batch_v(&proof.range_q_proof)? { return Ok(false); }
+
+    Ok(true)
+}
+
+/// Combined proof using AzProofV4 + batch AIRs — 31 sub-proofs.
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV8 {
+    pub az_proof:          AzProofV4,
+    pub ct1_proof:         Ct1ProofV2,
+    pub wprime_proof:      WPrimeProof,
+    pub norm_proof:        NormCheckBatchProof,
+    pub use_hint_proof:    UseHintBatchProof,
+    pub hint_weight_proof: (Vec<u8>, String),
+    pub hint_weight_total: usize,
+    pub c_tilde:           Vec<u8>,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness (V8).
+///
+/// 31 sub-proofs (vs 36 in V7) — K individual range-Q proofs replaced by RangeQ-batch.
+pub fn prove_verify_mldsa_v8(
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    c:       &[i64; N],
+    t1:      &[[i64; N]],
+    hints:   &[Vec<bool>],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
+) -> Result<VerifyMldsaProofV8, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V8 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("V8 requires l=L={L_PARAM}, got {l}")); }
+    if t1.len() != k { return Err(format!("t1 must have k={k} entries, got {}", t1.len())); }
+    if hints.len() != k { return Err(format!("hints must have k={k} rows, got {}", hints.len())); }
+    for (i, hrow) in hints.iter().enumerate() {
+        if hrow.len() != N { return Err(format!("hints[{i}] must have N={N} bits")); }
+    }
+
+    let az_proof     = prove_az_v4(a_hat, z, k, l, c_tilde)?;
+    let ct1_proof    = prove_ct1_v2(c, t1, c_tilde)?;
+    let wprime_proof = prove_wprime(&az_proof.output, &ct1_proof.output)?;
+    let norm_proof   = prove_norm_batch(z)?;
+
+    let use_hint_proof = prove_use_hint_batch_v(&wprime_proof.output, hints)?;
+
+    let (hw_bytes, hw_cm, hint_weight_total) = crate::prove_hint_weight(hints)?;
+
+    Ok(VerifyMldsaProofV8 {
+        az_proof, ct1_proof, wprime_proof, norm_proof, use_hint_proof,
+        hint_weight_proof: (hw_bytes, hw_cm),
+        hint_weight_total,
+        c_tilde: c_tilde.to_vec(),
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProofV8`.
+pub fn verify_mldsa_witness_v8(proof: &VerifyMldsaProofV8) -> Result<bool, String> {
+    if !verify_az_v4(&proof.az_proof, &proof.c_tilde)? { return Ok(false); }
+    if !verify_ct1_v2(&proof.ct1_proof, &proof.c_tilde)? { return Ok(false); }
+    if !verify_wprime(&proof.wprime_proof)? { return Ok(false); }
+    if !verify_norm_batch(&proof.norm_proof)? { return Ok(false); }
+    if !verify_use_hint_batch_v(&proof.use_hint_proof)? { return Ok(false); }
+    if !crate::verify_hint_weight(&proof.hint_weight_proof.0, &proof.hint_weight_proof.1)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
 //
 // Az[i] = Σ_{j=0}^{L-1} A[i][j] × z[j]   in R_q = Z_q[X]/(X^{256}+1)
@@ -3122,5 +3348,82 @@ mod tests {
         proof.c_tilde = c_tilde_b;
         assert!(!verify_mldsa_witness_v7(&proof).expect("verify should not error after tamper"),
             "tampered c_tilde must cause V7 verification failure");
+    }
+
+    // ── V8 tests (RangeQ-batch AIR) ───────────────────────────────────────────
+
+    #[test]
+    fn test_prove_verify_mldsa_v8_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 16000); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 16100)).collect();
+        let c:  [i64; N]       = random_poly(16200);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 16300)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (78u8..126).collect();
+
+        let proof = prove_verify_mldsa_v8(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v8 failed");
+
+        assert_eq!(proof.norm_proof.max_norms.len(), l, "max_norms must have L entries");
+        assert_eq!(proof.use_hint_proof.output.len(), k, "w1_prime must have K entries");
+        assert!(verify_mldsa_witness_v8(&proof).expect("verify_mldsa_witness_v8 failed"),
+            "V8 proof must verify");
+    }
+
+    #[test]
+    fn test_prove_verify_mldsa_v8_matches_v7() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 16400); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 16500)).collect();
+        let c:  [i64; N]       = random_poly(16600);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 16700)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (79u8..127).collect();
+
+        let v7 = prove_verify_mldsa_v7(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v7 failed");
+        let v8 = prove_verify_mldsa_v8(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v8 failed");
+
+        for i in 0..k {
+            assert_eq!(v7.use_hint_proof.output[i], v8.use_hint_proof.output[i],
+                "w1_prime[{i}] mismatch v7 vs v8");
+        }
+        assert_eq!(v7.norm_proof.max_norms, v8.norm_proof.max_norms,
+            "max_norms mismatch v7 vs v8");
+        assert_eq!(v7.hint_weight_total, v8.hint_weight_total, "hint_weight_total mismatch");
+    }
+
+    #[test]
+    fn test_prove_verify_mldsa_v8_c_tilde_binding() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 16800); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 16900)).collect();
+        let c:  [i64; N]       = random_poly(17000);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 17100)).collect();
+        let h  = all_false_hints(k);
+
+        let c_tilde_a: Vec<u8> = (80u8..128).collect();
+        let c_tilde_b: Vec<u8> = (81u8..129).collect();
+
+        let mut proof = prove_verify_mldsa_v8(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde_a)
+            .expect("prove_verify_mldsa_v8 failed");
+
+        assert!(verify_mldsa_witness_v8(&proof).expect("verify should not error"),
+            "V8 must verify with original c_tilde");
+
+        proof.c_tilde = c_tilde_b;
+        assert!(!verify_mldsa_witness_v8(&proof).expect("verify should not error after tamper"),
+            "tampered c_tilde must cause V8 verification failure");
     }
 }
