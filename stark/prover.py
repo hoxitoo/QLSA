@@ -331,6 +331,50 @@ def verify_mldsa_witness_stark(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v3_py(result.proof_bundle))
 
 
+def prove_mldsa_witness_stark_v4(
+    a_hat:   list[list[int]],
+    z:       list[list[int]],
+    c:       list[int],
+    t1:      list[list[int]],
+    hints:   list[list[bool]],
+    k:       int,
+    l:       int,
+    c_tilde: bytes | None = None,
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness (V4 pipeline, 50 sub-proofs):
+      Az-full  →  c·t₁ (Ct1-full AIR)  →  poly_sub  →  norm_check  →  UseHint  →  HintWeight
+
+    Identical to prove_mldsa_witness_stark (V3) but uses the compact 295-column
+    Ct1-full STARK instead of K individual PolyMul proofs, saving 5 sub-proofs.
+
+    Requires k=6, l=5 (ML-DSA-65). All coefficients must be in [0, Q=8_380_417).
+    c_tilde (48 bytes for ML-DSA-65) is mixed into both Az-full and Ct1-full
+    Fiat-Shamir channels, binding both proofs to the specific challenge.
+
+    Raises RuntimeError if the extension is not installed or any sub-proof fails.
+    """
+    _require_ext("prove_mldsa_witness_v4_py")
+    try:
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v4_py(
+            a_hat, z, c, t1, hints, k, l, c_tilde
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_v4_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
+    )
+
+
+def verify_mldsa_witness_stark_v4(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V4 pipeline)."""
+    _require_ext("verify_mldsa_witness_v4_py")
+    return bool(_ext.verify_mldsa_witness_v4_py(result.proof_bundle))
+
+
 def verify_mldsa_hash_check(
     pk:     bytes,
     msg:    bytes,
