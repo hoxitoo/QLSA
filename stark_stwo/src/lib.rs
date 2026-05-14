@@ -2,6 +2,7 @@ pub mod air;
 pub mod mldsa;
 pub mod mldsa_az_air;
 pub mod mldsa_az_full_air;
+pub mod range_check_air;
 pub mod mldsa_hint_weight_air;
 pub mod mldsa_intt_air;
 pub mod mldsa_norm_check_air;
@@ -1273,6 +1274,107 @@ pub fn verify_az_full(
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Q-range check STARK (MVP-3+) ────────────────────────────────────────────
+
+/// Prove that all N=256 coefficients of `poly` are in [0, Q).
+///
+/// Uses a 23-bit decomposition circuit: for each v, also proves d = Q-1-v has a
+/// 23-bit decomposition, which together prove v ∈ [0, Q) exactly.
+///
+/// Returns `(proof_bytes, commitment_hex)`.  The verifier does not need the input
+/// polynomial — the proof is self-contained.
+pub fn prove_range_q(poly: &[i64; mldsa::N]) -> Result<(Vec<u8>, String), String> {
+    use range_check_air::{RangeCheckEval, LOG_N_ROWS, build_trace};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let (columns, valid) = build_trace(poly);
+    if !valid {
+        return Err("prove_range_q: one or more coefficients are outside [0, Q)".to_string());
+    }
+
+    let log_size = LOG_N_ROWS;
+    let input_fp = output_fingerprint(poly);
+    let commitment = build_poly_commitment(&input_fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&input_fp);
+
+    let component = range_check_air::new_component(log_size);
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("prove_range_q: proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("prove_range_q: serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment))
+}
+
+/// Verify a Q-range proof produced by [`prove_range_q`].
+///
+/// The `commitment_hex` must match the one returned by the prover.
+pub fn verify_range_q(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use range_check_air::{RangeCheckEval, LOG_N_ROWS};
+    use stwo::core::proof::StarkProof;
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo::core::air::Component;
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("verify_range_q: deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = range_check_air::new_component(log_size);
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("verify_range_q: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 // ─── Hint weight check STARK (MVP-3+) ────────────────────────────────────────
 
 /// Prove that the total hint weight Σᵢ ||h[i]||₁ ≤ ω (ML-DSA-65: ω=55).
@@ -1667,6 +1769,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v3_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_hash_check_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_range_q_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_range_q_py, m)?)?;
     Ok(())
 }
 
@@ -2246,6 +2350,31 @@ fn prove_mldsa_sig_witness_py(
     let c_tilde_hex = hex::encode(&c_tilde);
 
     Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex, hint_weight_total))
+}
+
+/// prove_range_q_py(poly: list[int]) -> (proof: bytes, commitment: str)
+///
+/// Proves all 256 coefficients of `poly` are in [0, Q) using the 48-column
+/// Circle STARK range-check circuit.  Raises ValueError if any coefficient
+/// is outside [0, Q).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_range_q_py(poly: Vec<i64>) -> PyResult<(Vec<u8>, String)> {
+    let arr: [i64; mldsa::N] = poly.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            "poly must have exactly 256 elements"
+        ))?;
+    prove_range_q(&arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// verify_range_q_py(proof: bytes, commitment: str) -> bool
+///
+/// Verifies a proof produced by `prove_range_q_py`.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_range_q_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_range_q(&proof, &commitment).unwrap_or(false)
 }
 
 /// verify_mldsa_hash_check_py(pk, msg, w1_prime, c_tilde_hex) -> bool

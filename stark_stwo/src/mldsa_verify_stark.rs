@@ -564,31 +564,36 @@ pub fn verify_az_v2(proof: &AzProofV2) -> Result<bool, String> {
 //   1. NTT(z[j]) for each j   —  L proofs    (crate::prove_ntt)
 //   2. prove_az_full           —  1 proof     (crate::prove_az_full)
 //   3. INTT(Az_hat[i])         —  K proofs    (prove_intt_with_binding)
+//   4. range_q(Az[i])          —  K proofs    (crate::prove_range_q)
 //
-// Total: L + 1 + K = 5 + 1 + 6 = 12 proofs (vs 17 in v2, 65 in v1).
+// Total: L + 1 + K + K = 5 + 1 + 6 + 6 = 18 proofs (vs 17 in v2, 65 in v1).
+// The range-Q proofs close the M31 wrap-around soundness gap in mul constraints.
 
 /// Aggregated STARK proof for the full matrix-vector product Az (v3 — single Az proof).
 #[derive(Encode, Decode)]
 pub struct AzProofV3 {
     /// L NTT proofs: z_hat[j] = NTT(z[j]).
-    pub proofs_ntt_z:  Vec<(Vec<u8>, String)>,
+    pub proofs_ntt_z:   Vec<(Vec<u8>, String)>,
     /// NTT outputs z_hat[j].
-    pub z_hat:         Vec<[i64; N]>,
+    pub z_hat:           Vec<[i64; N]>,
     /// Single full-matrix Az proof: all K rows proved simultaneously.
-    pub proof_az_full: (Vec<u8>, String),
+    pub proof_az_full:   (Vec<u8>, String),
     /// K NTT-domain outputs Az_hat[i] (for INTT input and cross-check).
-    pub az_hat:        Vec<[i64; N]>,
+    pub az_hat:          Vec<[i64; N]>,
     /// K INTT proofs: Az[i] = INTT(Az_hat[i]) with input binding.
-    pub proofs_intt:   Vec<(Vec<u8>, String)>,
+    pub proofs_intt:     Vec<(Vec<u8>, String)>,
     /// Az[i] in polynomial domain.
-    pub output:        Vec<[i64; N]>,
+    pub output:          Vec<[i64; N]>,
+    /// K Q-range proofs: each Az[i] output coefficient is in [0, Q).
+    /// Closes the M31 wrap-around soundness gap in the mul constraints.
+    pub proofs_range_q:  Vec<(Vec<u8>, String)>,
 }
 
 /// Prove the matrix-vector product `Az` in R_q using the full-matrix Az AIR.
 ///
 /// `a_hat` — K×L NTT-domain polynomials, row-major.
 /// `z`     — L polynomial-domain polynomials.
-/// Produces 12 sub-proofs total (L + 1 + K) vs 17 in v2.
+/// Produces 18 sub-proofs total (L NTT + 1 Az-full + K INTT + K range-Q).
 pub fn prove_az_v3(
     a_hat:        &[[i64; N]],
     z:            &[[i64; N]],
@@ -641,6 +646,16 @@ pub fn prove_az_v3(
         output.push(az_i);
     }
 
+    // Step 4: Q-range proof for each Az[i] output polynomial.
+    // Closes the M31 wrap-around soundness gap in the multiplication constraints.
+    let mut proofs_range_q: Vec<(Vec<u8>, String)> = Vec::with_capacity(k);
+    for (i, az_i) in output.iter().enumerate() {
+        let az_arr: &[i64; N] = az_i;
+        let (pb, cm) = crate::prove_range_q(az_arr)
+            .map_err(|e| format!("prove_range_q for Az row {i} failed: {e}"))?;
+        proofs_range_q.push((pb, cm));
+    }
+
     Ok(AzProofV3 {
         proofs_ntt_z,
         z_hat,
@@ -648,6 +663,7 @@ pub fn prove_az_v3(
         az_hat: az_hat_vecs,
         proofs_intt,
         output,
+        proofs_range_q,
     })
 }
 
@@ -711,6 +727,23 @@ pub fn verify_az_v3(proof: &AzProofV3, c_tilde_seed: &[u8]) -> Result<bool, Stri
         )
         .map_err(|e| format!("INTT verify Az row {i} failed: {e}"))? {
             return Ok(false);
+        }
+    }
+
+    // Layer 5: Verify Q-range proofs for each Az[i] output polynomial.
+    // The commitment encodes the polynomial fingerprint; the verifier cross-checks it.
+    for (i, (pb, cm)) in proof.proofs_range_q.iter().enumerate() {
+        if !crate::verify_range_q(pb, cm)
+            .map_err(|e| format!("verify_range_q Az row {i} failed: {e}"))? {
+            return Ok(false);
+        }
+        // Cross-check: range proof commitment must match the fingerprint of output[i].
+        if i < proof.output.len() {
+            let fp = crate::output_fingerprint(&proof.output[i]);
+            let expected_cm = crate::build_poly_commitment(&fp);
+            if expected_cm != *cm {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
