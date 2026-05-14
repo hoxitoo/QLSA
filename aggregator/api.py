@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
+from core.keys import derive_address
 from core.signing import verify as sig_verify
 from core.transaction import Transaction
 
@@ -112,6 +113,8 @@ class TxPayload(BaseModel):
     def must_be_non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("must be non-negative")
+        if v > (1 << 64) - 1:
+            raise ValueError("must fit in uint64")
         return v
 
 
@@ -161,6 +164,12 @@ def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
                 accepted=False,
                 mempool_size=node.pending_count(),
                 error="invalid signature",
+            )
+        if payload.sender != derive_address(pub_key):
+            return SubmitResponse(
+                accepted=False,
+                mempool_size=node.pending_count(),
+                error="sender does not match public key",
             )
         tx.signature = sig_bytes
         node.submit(tx)

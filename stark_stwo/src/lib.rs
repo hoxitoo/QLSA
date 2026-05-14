@@ -2174,7 +2174,7 @@ fn prove_mldsa_witness_py(
 fn verify_mldsa_witness_py(proof_bundle: Vec<u8>) -> bool {
     let Ok((proof, _)) = bincode::decode_from_slice::<
         mldsa_verify_stark::VerifyMldsaProof, _
-    >(&proof_bundle, bincode::config::standard()) else {
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_proofs(&proof).unwrap_or(false)
@@ -2228,7 +2228,7 @@ fn prove_mldsa_witness_v2_py(
 fn verify_mldsa_witness_v2_py(proof_bundle: Vec<u8>) -> bool {
     let Ok((proof, _)) = bincode::decode_from_slice::<
         mldsa_verify_stark::VerifyMldsaProofV2, _
-    >(&proof_bundle, bincode::config::standard()) else {
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v2(&proof).unwrap_or(false)
@@ -2289,7 +2289,7 @@ fn prove_mldsa_witness_v3_py(
 fn verify_mldsa_witness_v3_py(proof_bundle: Vec<u8>) -> bool {
     let Ok((proof, _)) = bincode::decode_from_slice::<
         mldsa_verify_stark::VerifyMldsaProofV3, _
-    >(&proof_bundle, bincode::config::standard()) else {
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v3(&proof).unwrap_or(false)
