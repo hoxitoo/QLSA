@@ -1,15 +1,16 @@
 /// ML-DSA-65 batch NTT butterfly AIR (Circle STARK — Stwo 2.2.0)
 ///
-/// Proves K=6 independent forward NTT computations simultaneously in a
-/// single STARK.  All K polynomials follow the same butterfly sequence
-/// (same ζ twiddle per row), so one shared `zeta` column is sufficient —
-/// saving K-1=5 columns versus K independent NTTs.
+/// Proves M independent forward NTT computations simultaneously in a single
+/// STARK.  All M polynomials follow the same butterfly sequence (same ζ
+/// twiddle per row), so one shared `zeta` column is sufficient — saving M-1
+/// columns versus M independent NTTs.  M is supplied at construction time
+/// via `NttBatchEval { n_polys: M }` (default K=6 for backward compat).
 ///
-/// # Trace layout  (1 + K×54 = 325 columns, 1024 rows)
+/// # Trace layout  (1 + M×54 columns, 1024 rows)
 ///
 ///   col 0        zeta             ∈ [0, Q)   shared CT twiddle ζ_k
 ///
-///   Per polynomial j = 0..K-1  (54 columns each, base = 1 + j×54):
+///   Per polynomial j = 0..M-1  (54 columns each, base = 1 + j×54):
 ///     col base+0    a_in[j]      ∈ [0, Q)   input a
 ///     col base+1    b_in[j]      ∈ [0, Q)   input b
 ///     col base+2    t[j]         ∈ [0, Q)   ζ × b_in mod Q (witness)
@@ -21,9 +22,9 @@
 ///     col base+8..30  t_bits[j][0..22]      23-bit decomp of t
 ///     col base+31..53 ct_bits[j][0..22]     23-bit decomp of carry_t
 ///
-/// # Constraints  (53 × K = 318 total per row, max degree 2)
+/// # Constraints  (53 × M total per row, max degree 2)
 ///
-/// Per polynomial j in 0..K:
+/// Per polynomial j in 0..M:
 ///   C1   zeta × b_in[j] − t[j] − carry_t[j] × Q = 0  (shared zeta, degree 2)
 ///   C2   a_out[j] − a_in[j] − t[j] + carry_a[j] × Q = 0
 ///   C3   carry_a[j]² − carry_a[j] = 0
@@ -49,6 +50,11 @@ use crate::mldsa::{Q, N, ZETA};
 use crate::mldsa::field;
 use crate::mldsa::params::K;
 
+/// Dynamic column count for a batch NTT with `n_polys` polynomials.
+pub fn n_cols_for(n_polys: usize) -> usize {
+    1 + n_polys * COLS_PER_POLY
+}
+
 // ── Type aliases ─────────────────────────────────────────────────────────────
 
 type TraceCol = CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>;
@@ -71,6 +77,8 @@ pub const N_COLS: usize = 1 + K * COLS_PER_POLY; // 325
 
 pub struct NttBatchEval {
     pub log_n_rows: u32,
+    /// Number of polynomials in this batch (default K=6; use L=5 for NTT-z).
+    pub n_polys: usize,
 }
 
 pub type NttBatchComponent = FrameworkComponent<NttBatchEval>;
@@ -88,7 +96,7 @@ impl FrameworkEval for NttBatchEval {
         // Col 0: shared twiddle ζ_k.
         let [zeta] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
 
-        for _j in 0..K {
+        for _j in 0..self.n_polys {
             let [a_in]    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
             let [b_in]    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
             let [t]       = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
@@ -153,22 +161,30 @@ impl FrameworkEval for NttBatchEval {
     }
 }
 
+/// Create a K=6 batch NTT component (backward compat).
 pub fn new_component(log_n_rows: u32) -> NttBatchComponent {
+    new_component_m(log_n_rows, K)
+}
+
+/// Create a batch NTT component for an arbitrary number of polynomials.
+pub fn new_component_m(log_n_rows: u32, n_polys: usize) -> NttBatchComponent {
     NttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
-        NttBatchEval { log_n_rows },
+        NttBatchEval { log_n_rows, n_polys },
         SecureField::from(0u32),
     )
 }
 
 // ── Trace builder ─────────────────────────────────────────────────────────────
 
-/// Build the batch NTT butterfly trace for K input polynomials.
+/// Build the batch NTT butterfly trace for M input polynomials.
 ///
 /// Returns `(columns, outputs)` where:
-/// - `columns`: 325 columns in circle-domain bit-reversed order
-/// - `outputs`: K NTT results (all coefficients in [0, Q))
-pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
+/// - `columns`: `1 + M×54` columns in circle-domain bit-reversed order
+/// - `outputs`: M NTT results (all coefficients in [0, Q))
+pub fn build_trace(polys: &[[i64; N]]) -> (TraceColumns, Vec<[i64; N]>) {
+    let n_polys = polys.len();
+
     // Forward twiddle table (same as single NTT AIR).
     let mut zeta_fwd = [0i64; 256];
     for k in 0u8..=255u8 {
@@ -183,7 +199,7 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
     let mut states: Vec<[i64; N]> = polys.iter().map(|p| *p).collect();
 
     let mut zeta_col: Vec<BaseField>                  = vec![bf0; n];
-    let mut per_poly: Vec<Vec<Vec<BaseField>>> = (0..K)
+    let mut per_poly: Vec<Vec<Vec<BaseField>>> = (0..n_polys)
         .map(|_| vec![vec![bf0; n]; COLS_PER_POLY])
         .collect();
 
@@ -200,7 +216,7 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
             for j_coeff in start..start + len {
                 zeta_col[row_idx] = bf(zeta_k);
 
-                for poly_j in 0..K {
+                for poly_j in 0..n_polys {
                     let a_in = states[poly_j][j_coeff];
                     let b_in = states[poly_j][j_coeff + len];
 
@@ -246,10 +262,7 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
 
     debug_assert_eq!(row_idx, N_BUTTERFLIES);
 
-    let mut outputs = [[0i64; N]; K];
-    for (j, state) in states.iter().enumerate() {
-        outputs[j] = *state;
-    }
+    let outputs: Vec<[i64; N]> = states;
 
     bit_reverse_coset_to_circle_domain_order(&mut zeta_col);
     for pc in per_poly.iter_mut() {
@@ -258,7 +271,8 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
         }
     }
 
-    let mut columns: TraceColumns = Vec::with_capacity(N_COLS);
+    let n_cols = n_cols_for(n_polys);
+    let mut columns: TraceColumns = Vec::with_capacity(n_cols);
     columns.push(CircleEvaluation::new(domain, zeta_col));
     for pc in per_poly {
         for col in pc {
@@ -266,7 +280,7 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
         }
     }
 
-    debug_assert_eq!(columns.len(), N_COLS);
+    debug_assert_eq!(columns.len(), n_cols);
     (columns, outputs)
 }
 
@@ -296,6 +310,8 @@ mod tests {
         assert_eq!(COLS_PER_POLY, 54);
         assert_eq!(N_COLS, 1 + K * 54);
         assert_eq!(N_COLS, 325);
+        assert_eq!(n_cols_for(K), 325);
+        assert_eq!(n_cols_for(5), 1 + 5 * 54); // L=5 case
     }
 
     #[test]
@@ -314,15 +330,45 @@ mod tests {
     }
 
     #[test]
+    fn test_outputs_match_reference_l5() {
+        let polys: Vec<[i64; N]> = (0..5).map(|j| random_poly(j as u64 + 100)).collect();
+        let (_, outputs) = build_trace(&polys);
+
+        for (j, poly) in polys.iter().enumerate() {
+            let mut expected = *poly;
+            ntt(&mut expected);
+            assert_eq!(outputs[j], expected, "L=5 batch NTT output mismatch for poly j={j}");
+        }
+    }
+
+    #[test]
     fn test_constraints_on_trace() {
         let polys: [[i64; N]; K] = std::array::from_fn(|j| random_poly(j as u64 * 7 + 3));
         let (cols, _) = build_trace(&polys);
 
-        assert_eq!(cols.len(), N_COLS);
+        assert_eq!(cols.len(), n_cols_for(K));
         let col_vecs: Vec<Vec<M31>> = cols.iter().map(|c| c.values.clone()).collect();
         let col_refs: Vec<&Vec<M31>> = col_vecs.iter().collect();
         let evals: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![vec![], col_refs]);
-        let evaluator = NttBatchEval { log_n_rows: LOG_N_ROWS };
+        let evaluator = NttBatchEval { log_n_rows: LOG_N_ROWS, n_polys: K };
+        assert_constraints_on_trace(
+            &evals,
+            LOG_N_ROWS,
+            |eval| { evaluator.evaluate(eval); },
+            SecureField::from(0u32),
+        );
+    }
+
+    #[test]
+    fn test_constraints_on_trace_l5() {
+        let polys: Vec<[i64; N]> = (0..5).map(|j| random_poly(j as u64 * 7 + 200)).collect();
+        let (cols, _) = build_trace(&polys);
+
+        assert_eq!(cols.len(), n_cols_for(5));
+        let col_vecs: Vec<Vec<M31>> = cols.iter().map(|c| c.values.clone()).collect();
+        let col_refs: Vec<&Vec<M31>> = col_vecs.iter().collect();
+        let evals: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![vec![], col_refs]);
+        let evaluator = NttBatchEval { log_n_rows: LOG_N_ROWS, n_polys: 5 };
         assert_constraints_on_trace(
             &evals,
             LOG_N_ROWS,

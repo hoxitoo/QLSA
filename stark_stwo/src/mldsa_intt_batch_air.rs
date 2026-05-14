@@ -57,6 +57,11 @@ use crate::mldsa::{Q, N, ZETA, N_INV};
 use crate::mldsa::field;
 use crate::mldsa::params::K;
 
+/// Dynamic column count for a batch INTT with `n_polys` polynomials.
+pub fn n_cols_for(n_polys: usize) -> usize {
+    1 + n_polys * COLS_PER_POLY
+}
+
 // ── Type aliases ─────────────────────────────────────────────────────────────
 
 type TraceCol = CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>;
@@ -80,6 +85,8 @@ pub const N_COLS: usize = 1 + K * COLS_PER_POLY; // 325
 
 pub struct InttBatchEval {
     pub log_n_rows: u32,
+    /// Number of polynomials in this batch (default K=6).
+    pub n_polys: usize,
 }
 
 pub type InttBatchComponent = FrameworkComponent<InttBatchEval>;
@@ -97,7 +104,7 @@ impl FrameworkEval for InttBatchEval {
         // Col 0: shared twiddle factor ζ_k^{-1}.
         let [zeta_inv] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
 
-        for _j in 0..K {
+        for _j in 0..self.n_polys {
             // Per-poly base columns.
             let [a_in]    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
             let [b_in]    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
@@ -165,22 +172,30 @@ impl FrameworkEval for InttBatchEval {
     }
 }
 
+/// Create a K=6 batch INTT component (backward compat).
 pub fn new_component(log_n_rows: u32) -> InttBatchComponent {
+    new_component_m(log_n_rows, K)
+}
+
+/// Create a batch INTT component for an arbitrary number of polynomials.
+pub fn new_component_m(log_n_rows: u32, n_polys: usize) -> InttBatchComponent {
     InttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
-        InttBatchEval { log_n_rows },
+        InttBatchEval { log_n_rows, n_polys },
         SecureField::from(0u32),
     )
 }
 
 // ── Trace builder ─────────────────────────────────────────────────────────────
 
-/// Build the batch INTT butterfly trace for K input polynomials.
+/// Build the batch INTT butterfly trace for M input polynomials.
 ///
 /// Returns `(columns, outputs)` where:
-/// - `columns`: 325 columns in circle-domain bit-reversed order
-/// - `outputs`: K INTT results with the N^{-1} scaling step applied
-pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
+/// - `columns`: `1 + M×54` columns in circle-domain bit-reversed order
+/// - `outputs`: M INTT results with the N^{-1} scaling step applied
+pub fn build_trace(polys: &[[i64; N]]) -> (TraceColumns, Vec<[i64; N]>) {
+    let n_polys = polys.len();
+
     // Inverse twiddle table (same as single INTT AIR).
     let mut zeta_inv_tbl = [0i64; 256];
     for k in 0u8..=255u8 {
@@ -199,8 +214,7 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
 
     // Allocate output columns: [zeta_inv_col] + [per_poly_cols[j][c][row]].
     let mut zeta_inv_col: Vec<BaseField>              = vec![bf0; n];
-    // per_poly_cols[j][col_within_block][row]
-    let mut per_poly: Vec<Vec<Vec<BaseField>>> = (0..K)
+    let mut per_poly: Vec<Vec<Vec<BaseField>>> = (0..n_polys)
         .map(|_| vec![vec![bf0; n]; COLS_PER_POLY])
         .collect();
 
@@ -220,7 +234,7 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
                 zeta_inv_col[row_idx] = bf(zeta_inv_k);
 
                 // For each polynomial, compute and store butterfly witness.
-                for poly_j in 0..K {
+                for poly_j in 0..n_polys {
                     let a_in = states[poly_j][j_coeff];
                     let b_in = states[poly_j][j_coeff + len];
 
@@ -268,12 +282,13 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
     debug_assert_eq!(row_idx, N_BUTTERFLIES);
 
     // Apply N^{-1} scaling.
-    let mut outputs = [[0i64; N]; K];
-    for (j, state) in states.iter().enumerate() {
+    let outputs: Vec<[i64; N]> = states.iter().map(|state| {
+        let mut out = [0i64; N];
         for (p, &v) in state.iter().enumerate() {
-            outputs[j][p] = field::mul(v, N_INV);
+            out[p] = field::mul(v, N_INV);
         }
-    }
+        out
+    }).collect();
 
     // Bit-reverse all columns.
     bit_reverse_coset_to_circle_domain_order(&mut zeta_inv_col);
@@ -284,7 +299,8 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
     }
 
     // Assemble: [zeta_inv] then per-poly blocks in order.
-    let mut columns: TraceColumns = Vec::with_capacity(N_COLS);
+    let n_cols = n_cols_for(n_polys);
+    let mut columns: TraceColumns = Vec::with_capacity(n_cols);
     columns.push(CircleEvaluation::new(domain, zeta_inv_col));
     for pc in per_poly {
         for col in pc {
@@ -292,7 +308,7 @@ pub fn build_trace(polys: &[[i64; N]; K]) -> (TraceColumns, [[i64; N]; K]) {
         }
     }
 
-    debug_assert_eq!(columns.len(), N_COLS);
+    debug_assert_eq!(columns.len(), n_cols);
     (columns, outputs)
 }
 
@@ -324,6 +340,7 @@ mod tests {
         assert_eq!(COLS_PER_POLY, 54);
         assert_eq!(N_COLS, 1 + K * 54);
         assert_eq!(N_COLS, 325);
+        assert_eq!(n_cols_for(K), 325);
     }
 
     #[test]
@@ -356,7 +373,8 @@ mod tests {
         for p in polys_ntt.iter_mut() { ntt(p); }
 
         let (_, outputs) = build_trace(&polys_ntt);
-        assert_eq!(outputs, originals, "INTT(NTT(f)) ≠ f for batch");
+        let outputs_arr: [[i64; N]; K] = outputs.try_into().unwrap();
+        assert_eq!(outputs_arr, originals, "INTT(NTT(f)) ≠ f for batch");
     }
 
     #[test]
@@ -364,11 +382,11 @@ mod tests {
         let polys: [[i64; N]; K] = std::array::from_fn(|j| random_poly_ntt(j as u64 * 7 + 3));
         let (cols, _) = build_trace(&polys);
 
-        assert_eq!(cols.len(), N_COLS);
+        assert_eq!(cols.len(), n_cols_for(K));
         let col_vecs: Vec<Vec<M31>> = cols.iter().map(|c| c.values.clone()).collect();
         let col_refs: Vec<&Vec<M31>> = col_vecs.iter().collect();
         let evals: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![vec![], col_refs]);
-        let evaluator = InttBatchEval { log_n_rows: LOG_N_ROWS };
+        let evaluator = InttBatchEval { log_n_rows: LOG_N_ROWS, n_polys: K };
         assert_constraints_on_trace(
             &evals,
             LOG_N_ROWS,
