@@ -1,5 +1,9 @@
 pub mod air;
 pub mod mldsa;
+pub mod mldsa_az_air;
+pub mod mldsa_az_full_air;
+pub mod range_check_air;
+pub mod mldsa_hint_weight_air;
 pub mod mldsa_intt_air;
 pub mod mldsa_norm_check_air;
 pub mod mldsa_ntt_air;
@@ -965,6 +969,525 @@ pub fn verify_norm_check(proof_bytes: &[u8], commitment_hex: &str) -> Result<boo
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Az row STARK (MVP-3+) ────────────────────────────────────────────────────
+
+/// Prove one row of the NTT-domain matrix-vector product  Az̃[i] = Σ_{j=0}^{L-1} Ã[i][j] ⊙ z̃[j].
+///
+/// `a_row` is the i-th row of Ã (L=5 polynomials in NTT domain, each of 256 coefficients).
+/// `z_hat` is the NTT-domain vector z̃ (L=5 polynomials of 256 coefficients).
+///
+/// Returns `(proof_bytes, commitment_hex, az_hat_i)` where `az_hat_i` is the output polynomial.
+/// The commitment fingerprints the 256 output coefficients via Blake2s (Scheme B, 128-bit).
+///
+/// The Fiat-Shamir transcript also binds to the L=5 input z̃ polynomials (input fingerprint
+/// mixed before the output fingerprint), so `verify_az_row` must receive the same z_hat to
+/// reconstruct the same channel state.
+///
+/// Call this K=6 times (once per output row) to prove the full matrix-vector product.
+pub fn prove_az_row(
+    a_row: &[[i64; 256]; 5],
+    z_hat: &[[i64; 256]; 5],
+) -> Result<(Vec<u8>, String, [i64; 256]), String> {
+    use mldsa::Q;
+    use mldsa_az_air::{AzRowEval, AzRowComponent, LOG_N_ROWS, build_trace};
+
+    for j in 0..5 {
+        for (p, (&av, &zv)) in a_row[j].iter().zip(z_hat[j].iter()).enumerate() {
+            if av < 0 || av >= Q {
+                return Err(format!("a_row[{j}][{p}] = {av} out of [0, Q)"));
+            }
+            if zv < 0 || zv >= Q {
+                return Err(format!("z_hat[{j}][{p}] = {zv} out of [0, Q)"));
+            }
+        }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, az_hat) = build_trace(a_row, z_hat);
+
+    // Input fingerprint: Blake2s of all L z̃ polynomials concatenated.
+    // Mixed into channel BEFORE the output fingerprint to bind the proof to the specific z_hat.
+    let z_flat: Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let input_fp = output_fingerprint(&z_flat);
+
+    let output_fp = output_fingerprint(&az_hat);
+    let commitment_hex = build_poly_commitment(&output_fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    // Bind to both input z_hat and output az_hat in this order.
+    channel.mix_u32s(&input_fp);
+    channel.mix_u32s(&output_fp);
+
+    let component = AzRowComponent::new(
+        &mut TraceLocationAllocator::default(),
+        AzRowEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, az_hat))
+}
+
+/// Verify an Az-row proof produced by [`prove_az_row`].
+///
+/// `z_hat` must be the same L=5 input polynomials that were used to generate the proof.
+/// The input fingerprint is recomputed from `z_hat` and mixed into the verifier channel
+/// to reconstruct the same Fiat-Shamir transcript as the prover.
+pub fn verify_az_row(
+    proof_bytes: &[u8],
+    commitment_hex: &str,
+    z_hat: &[[i64; 256]],
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_az_air::{AzRowEval, AzRowComponent, LOG_N_ROWS};
+
+    let log_size = LOG_N_ROWS;
+    let output_fp = parse_poly_commitment(commitment_hex)?;
+
+    // Recompute input fingerprint from the provided z_hat.
+    let z_flat: Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let input_fp = output_fingerprint(&z_flat);
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = AzRowComponent::new(
+        &mut TraceLocationAllocator::default(),
+        AzRowEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Reconstruct transcript: input fingerprint then output fingerprint (same order as prover).
+    verifier_channel.mix_u32s(&input_fp);
+    verifier_channel.mix_u32s(&output_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
+// ─── Full-matrix Az STARK (MVP-3+) ────────────────────────────────────────────
+
+/// Prove the full NTT-domain matrix-vector product Az in a single STARK.
+///
+/// Proves all K=6 output rows simultaneously: az_out[i] = Σ_j Ã[i][j] ⊙ z̃[j].
+///
+/// `a_hat` — K×L NTT-domain polynomials in row-major order (a_hat[i*L+j] = Ã[i][j]).
+/// `z_hat` — L NTT-domain input polynomials.
+///
+/// Returns `(proof_bytes, commitment_hex, az_out)`.
+/// The commitment fingerprints all K output polynomials concatenated (Scheme B, 128-bit).
+/// Both input (z_hat) and output fingerprints are mixed into the Fiat-Shamir channel.
+pub fn prove_az_full(
+    a_hat:        &[[i64; mldsa::N]],
+    z_hat:        &[[i64; mldsa::N]; mldsa::params::L],
+    c_tilde_seed: &[u8],
+) -> Result<(Vec<u8>, String, [[i64; mldsa::N]; mldsa::params::K]), String> {
+    use mldsa_az_full_air::{AzFullEval, AzFullComponent, LOG_N_ROWS, build_trace};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let k = mldsa::params::K;
+    let l = mldsa::params::L;
+    if a_hat.len() != k * l {
+        return Err(format!("a_hat must have k*l={} entries, got {}", k * l, a_hat.len()));
+    }
+    for (idx, row) in a_hat.iter().enumerate() {
+        for (p, &v) in row.iter().enumerate() {
+            if v < 0 || v >= mldsa::Q {
+                return Err(format!("a_hat[{idx}][{p}] = {v} out of [0, Q)"));
+            }
+        }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (columns, az_out) = build_trace(a_hat, z_hat);
+
+    // Input fingerprint: concatenate all L z_hat polynomials.
+    let z_flat: Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let input_fp = output_fingerprint(&z_flat);
+
+    // Output fingerprint: concatenate all K az_out polynomials.
+    let az_flat: Vec<i64> = az_out.iter().flat_map(|row| row.iter().copied()).collect();
+    let output_fp  = output_fingerprint(&az_flat);
+    let commitment_hex = build_poly_commitment(&output_fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    // Mix c_tilde as STARK public input before any trace commitment.
+    // This binds the Fiat-Shamir randomness (query positions) to the specific
+    // signature challenge, making the proof non-reusable for a different c_tilde.
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        channel.mix_u32s(&words);
+    }
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    // Bind to input z_hat first, then output az_out (same pattern as prove_az_row).
+    channel.mix_u32s(&input_fp);
+    channel.mix_u32s(&output_fp);
+
+    let component = AzFullComponent::new(
+        &mut TraceLocationAllocator::default(),
+        AzFullEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, az_out))
+}
+
+/// Verify a full-matrix Az proof produced by [`prove_az_full`].
+///
+/// `z_hat` must be the same L polynomials used to generate the proof.
+/// The verifier recomputes the input fingerprint from z_hat and mixes it first
+/// into the Fiat-Shamir channel, binding the proof to the specific inputs.
+pub fn verify_az_full(
+    proof_bytes:    &[u8],
+    commitment_hex: &str,
+    z_hat:          &[[i64; mldsa::N]; mldsa::params::L],
+    c_tilde_seed:   &[u8],
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_az_full_air::{AzFullEval, AzFullComponent, LOG_N_ROWS};
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo::core::air::Component;
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let log_size = LOG_N_ROWS;
+
+    // Recompute input fingerprint from z_hat.
+    let z_flat: Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let input_fp  = output_fingerprint(&z_flat);
+    let output_fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = AzFullComponent::new(
+        &mut TraceLocationAllocator::default(),
+        AzFullEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    // Replay c_tilde domain separator to match prover transcript.
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        verifier_channel.mix_u32s(&words);
+    }
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    // Reconstruct transcript: input fingerprint then output fingerprint.
+    verifier_channel.mix_u32s(&input_fp);
+    verifier_channel.mix_u32s(&output_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
+// ─── Q-range check STARK (MVP-3+) ────────────────────────────────────────────
+
+/// Prove that all N=256 coefficients of `poly` are in [0, Q).
+///
+/// Uses a 23-bit decomposition circuit: for each v, also proves d = Q-1-v has a
+/// 23-bit decomposition, which together prove v ∈ [0, Q) exactly.
+///
+/// Returns `(proof_bytes, commitment_hex)`.  The verifier does not need the input
+/// polynomial — the proof is self-contained.
+pub fn prove_range_q(poly: &[i64; mldsa::N]) -> Result<(Vec<u8>, String), String> {
+    use range_check_air::{RangeCheckEval, LOG_N_ROWS, build_trace};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let (columns, valid) = build_trace(poly);
+    if !valid {
+        return Err("prove_range_q: one or more coefficients are outside [0, Q)".to_string());
+    }
+
+    let log_size = LOG_N_ROWS;
+    let input_fp = output_fingerprint(poly);
+    let commitment = build_poly_commitment(&input_fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(columns);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&input_fp);
+
+    let component = range_check_air::new_component(log_size);
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("prove_range_q: proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("prove_range_q: serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment))
+}
+
+/// Verify a Q-range proof produced by [`prove_range_q`].
+///
+/// The `commitment_hex` must match the one returned by the prover.
+pub fn verify_range_q(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
+    use range_check_air::{RangeCheckEval, LOG_N_ROWS};
+    use stwo::core::proof::StarkProof;
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo::core::air::Component;
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("verify_range_q: deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = range_check_air::new_component(log_size);
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("verify_range_q: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
+// ─── Hint weight check STARK (MVP-3+) ────────────────────────────────────────
+
+/// Prove that the total hint weight Σᵢ ||h[i]||₁ ≤ ω (ML-DSA-65: ω=55).
+///
+/// `hints[i][j]` is the hint bit for polynomial i, coefficient j.
+/// `hints` must have `K=6` rows, each of length `N=256`.
+///
+/// Returns `(proof_bytes, commitment_hex, total_weight)`.
+/// `commitment_hex` fingerprints the running-sum polynomial (Scheme B, 128-bit).
+/// The caller must check `total_weight ≤ OMEGA` — this is not enforced by the circuit.
+///
+/// The circuit proves:
+///   - Each hint bit ∈ {0,1}
+///   - Padding rows (≥ 1536) have h=0
+///   - The running sum is sequential: s[r] = s[r−1] + h[r]
+pub fn prove_hint_weight(hints: &[Vec<bool>]) -> Result<(Vec<u8>, String, usize), String> {
+    use mldsa_hint_weight_air::{LOG_N_ROWS, build_trace, new_component};
+    use mldsa::params::K;
+    use mldsa::N;
+
+    if hints.len() != K {
+        return Err(format!("hints must have K={K} rows, got {}", hints.len()));
+    }
+    for (i, row) in hints.iter().enumerate() {
+        if row.len() != N {
+            return Err(format!("hints[{i}] must have N={N} columns, got {}", row.len()));
+        }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (main_cols, preproc_cols, total_weight) = build_trace(hints);
+
+    // The "output" we fingerprint is the running-sum column (col 0 = s after column ordering fix).
+    let s_col_raw: Vec<i64> = main_cols[0].values.iter().map(|v| v.0 as i64).collect();
+    let fp = output_fingerprint(&s_col_raw);
+    let commitment_hex = build_poly_commitment(&fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: preprocessed columns (is_init, is_valid).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preproc_cols);
+    tree_builder.commit(channel);
+
+    // Tree 1: main trace (h, s).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(main_cols);
+    tree_builder.commit(channel);
+
+    // Bind output fingerprint to Fiat-Shamir transcript.
+    channel.mix_u32s(&fp);
+
+    let component = new_component(log_size);
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("proving error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, total_weight))
+}
+
+/// Verify a hint weight STARK proof produced by [`prove_hint_weight`].
+///
+/// Returns `Ok(true)` iff the STARK proof is valid for the given commitment.
+/// The caller is responsible for checking `total_weight ≤ OMEGA` using the
+/// `total_weight` value returned from `prove_hint_weight`.
+pub fn verify_hint_weight(
+    proof_bytes: &[u8],
+    commitment_hex: &str,
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_hint_weight_air::{LOG_N_ROWS, new_component};
+
+    let log_size = LOG_N_ROWS;
+    let fp = parse_poly_commitment(commitment_hex)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = new_component(log_size);
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+    verifier_channel.mix_u32s(&fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 // ─── ML-DSA batch verification + STARK proof ─────────────────────────────────
 
 /// Verify N ML-DSA-65 signatures and generate a STARK proof over the valid set.
@@ -1230,10 +1753,24 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_norm_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_use_hint_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_use_hint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_az_row_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_az_row_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_az_full_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_az_full_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_intt_bound_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_intt_bound_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_hint_weight_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_hint_weight_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v2_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v2_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v3_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v3_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_hash_check_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_range_q_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_range_q_py, m)?)?;
     Ok(())
 }
 
@@ -1297,6 +1834,179 @@ fn prove_poly_sub_py(a: Vec<i64>, b: Vec<i64>) -> PyResult<(Vec<u8>, String, Vec
 #[pyfunction]
 fn verify_poly_sub_py(proof: Vec<u8>, commitment: String) -> bool {
     verify_poly_sub(&proof, &commitment).unwrap_or(false)
+}
+
+/// prove_az_row_py(a_row, z_hat) -> (proof: bytes, commitment: str, az_hat: list[int])
+///
+/// Proves one row of the NTT-domain matrix-vector product Az̃[i] = Σ_j Ã[i][j] ⊙ z̃[j].
+/// `a_row` is a list of 5 lists of 256 ints (ML-DSA-65: L=5).
+/// `z_hat` is a list of 5 lists of 256 ints.
+/// Returns `(proof_bytes, commitment_hex, az_hat)` where az_hat is 256 ints.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_az_row_py(
+    a_row: Vec<Vec<i64>>,
+    z_hat: Vec<Vec<i64>>,
+) -> PyResult<(Vec<u8>, String, Vec<i64>)> {
+    let a_arr: [[i64; 256]; 5] = (0..5)
+        .map(|j| {
+            a_row.get(j)
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("a_row must have 5 elements"))?
+                .clone()
+                .try_into()
+                .map_err(|_| pyo3::exceptions::PyValueError::new_err("each a_row[j] must have 256 elements"))
+        })
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("a_row must have exactly 5 lists"))?;
+
+    let z_arr: [[i64; 256]; 5] = (0..5)
+        .map(|j| {
+            z_hat.get(j)
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("z_hat must have 5 elements"))?
+                .clone()
+                .try_into()
+                .map_err(|_| pyo3::exceptions::PyValueError::new_err("each z_hat[j] must have 256 elements"))
+        })
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z_hat must have exactly 5 lists"))?;
+
+    let (proof, commitment, az_hat) = prove_az_row(&a_arr, &z_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment, az_hat.to_vec()))
+}
+
+/// verify_az_row_py(proof, commitment, z_hat) -> bool
+///
+/// `z_hat` must be a list of 5 lists of 256 ints — the same input used when proving.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_az_row_py(proof: Vec<u8>, commitment: String, z_hat: Vec<Vec<i64>>) -> bool {
+    let z_slices: Vec<[i64; 256]> = z_hat.into_iter()
+        .map(|zj| zj.try_into().ok())
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    verify_az_row(&proof, &commitment, &z_slices).unwrap_or(false)
+}
+
+/// prove_az_full_py(a_hat, z_hat, c_tilde=None) -> (proof: bytes, commitment: str, az_out: list[list[int]])
+///
+/// Proves all K=6 rows of Az in one STARK.
+/// `a_hat` — list of K*L=30 lists of 256 ints (row-major: a_hat[i*L+j] = Ã[i][j]).
+/// `z_hat` — list of L=5 lists of 256 ints.
+/// `c_tilde` — optional bytes; if provided, mixed into Fiat-Shamir channel as public input.
+/// Returns `(proof_bytes, commitment_hex, az_out)` where az_out is K lists of 256 ints.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z_hat, c_tilde=None))]
+fn prove_az_full_py(
+    a_hat:   Vec<Vec<i64>>,
+    z_hat:   Vec<Vec<i64>>,
+    c_tilde: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, String, Vec<Vec<i64>>)> {
+    use mldsa::params::{K, L};
+    if a_hat.len() != K * L {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("a_hat must have K*L={} lists, got {}", K * L, a_hat.len())
+        ));
+    }
+    if z_hat.len() != L {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("z_hat must have L={} lists, got {}", L, z_hat.len())
+        ));
+    }
+    let a_arr: Vec<[i64; 256]> = a_hat.into_iter()
+        .map(|row| row.try_into()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("each a_hat[k] must have 256 elements")))
+        .collect::<PyResult<_>>()?;
+    let z_arr: [[i64; 256]; 5] = (0..L)
+        .map(|j| z_hat[j].clone().try_into()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("each z_hat[j] must have 256 elements")))
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z_hat must have exactly L=5 lists"))?;
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+    let (proof, commitment, az_out) = prove_az_full(&a_arr, &z_arr, seed)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    let az_out_py: Vec<Vec<i64>> = az_out.iter().map(|row| row.to_vec()).collect();
+    Ok((proof, commitment, az_out_py))
+}
+
+/// verify_az_full_py(proof, commitment, z_hat, c_tilde=None) -> bool
+///
+/// `z_hat` must be the same L=5 lists of 256 ints used when proving.
+/// `c_tilde` must match the value passed during proving (if any).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (proof, commitment, z_hat, c_tilde=None))]
+fn verify_az_full_py(
+    proof:      Vec<u8>,
+    commitment: String,
+    z_hat:      Vec<Vec<i64>>,
+    c_tilde:    Option<Vec<u8>>,
+) -> bool {
+    use mldsa::params::L;
+    let z_arr: [[i64; 256]; 5] = match (0..L)
+        .map(|j| z_hat.get(j).and_then(|zj| zj.clone().try_into().ok()))
+        .collect::<Option<Vec<[i64; 256]>>>()
+        .and_then(|v| v.try_into().ok())
+    {
+        Some(a) => a,
+        None => return false,
+    };
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+    verify_az_full(&proof, &commitment, &z_arr, seed).unwrap_or(false)
+}
+
+/// prove_intt_bound_py(f) -> (proof: bytes, commitment: str)
+///
+/// Like `prove_intt` but also mixes the input fingerprint of `f` into the
+/// Fiat-Shamir channel before the output fingerprint, binding the proof to the
+/// specific input polynomial.  Use `verify_intt_bound_py` to verify.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_intt_bound_py(f: Vec<i64>) -> PyResult<(Vec<u8>, String)> {
+    use mldsa_verify_stark::prove_intt_with_binding;
+    let f_arr: [i64; 256] = f.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("f must have exactly 256 elements"))?;
+    let (proof, commitment, _out) = prove_intt_with_binding(&f_arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    Ok((proof, commitment))
+}
+
+/// verify_intt_bound_py(proof, commitment, input) -> bool
+///
+/// Verify an INTT proof produced by `prove_intt_bound_py`.
+/// `input` must be the same 256-element list of ints that was passed to the prover.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_intt_bound_py(proof: Vec<u8>, commitment: String, input: Vec<i64>) -> bool {
+    use mldsa_verify_stark::verify_intt_with_binding;
+    let input_arr: [i64; 256] = match input.try_into() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    verify_intt_with_binding(&proof, &commitment, &input_arr).unwrap_or(false)
+}
+
+/// prove_hint_weight_py(hints) -> (proof: bytes, commitment: str, total_weight: int)
+///
+/// `hints` must be a list of K=6 lists of N=256 booleans.
+/// Returns a STARK proof that each bit ∈ {0,1} and the running sum is sequential.
+/// The caller checks `total_weight ≤ 55` (ML-DSA-65 ω bound).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_hint_weight_py(hints: Vec<Vec<bool>>) -> PyResult<(Vec<u8>, String, usize)> {
+    prove_hint_weight(&hints)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// verify_hint_weight_py(proof, commitment) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_hint_weight_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_hint_weight(&proof, &commitment).unwrap_or(false)
 }
 
 /// prove_norm_check_py(z) -> (proof: bytes, commitment: str, norm: list[int], max_norm: int)
@@ -1421,6 +2131,121 @@ fn verify_mldsa_witness_py(proof_bundle: Vec<u8>) -> bool {
     mldsa_verify_stark::verify_mldsa_witness_proofs(&proof).unwrap_or(false)
 }
 
+/// prove_mldsa_witness_v2_py — same interface as prove_mldsa_witness_py but uses
+/// the Az-row AIR circuit (53 sub-proofs vs 101). Requires l = 5 (ML-DSA-65).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_mldsa_witness_v2_py(
+    a_hat:  Vec<Vec<i64>>,
+    z:      Vec<Vec<i64>>,
+    c:      Vec<i64>,
+    t1:     Vec<Vec<i64>>,
+    hints:  Vec<Vec<bool>>,
+    k:      usize,
+    l:      usize,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v2(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+
+    Ok((bundle, max_norms, w1_prime))
+}
+
+/// verify_mldsa_witness_v2_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v2_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV2, _
+    >(&proof_bundle, bincode::config::standard()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v2(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v3_py — full-matrix Az AIR + hint weight proof (49 sub-proofs).
+///
+/// Returns `(bundle: bytes, max_norms: list[int], w1_prime: list[list[int]], hint_weight_total: int)`.
+/// Requires k = 6, l = 5 (ML-DSA-65).
+/// `c_tilde` — optional bytes; if provided, mixed into Fiat-Shamir as STARK public input.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None))]
+fn prove_mldsa_witness_v3_py(
+    a_hat:   Vec<Vec<i64>>,
+    z:       Vec<Vec<i64>>,
+    c:       Vec<i64>,
+    t1:      Vec<Vec<i64>>,
+    hints:   Vec<Vec<bool>>,
+    k:       usize,
+    l:       usize,
+    c_tilde: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v3(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.hint_weight_total;
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+
+    Ok((bundle, max_norms, w1_prime, hint_weight_total))
+}
+
+/// verify_mldsa_witness_v3_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v3_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV3, _
+    >(&proof_bundle, bincode::config::standard()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v3(&proof).unwrap_or(false)
+}
+
 /// prove_mldsa_sig_witness_py(pk: bytes, msg: bytes, sig: bytes)
 ///   -> (proof_bundle: bytes, max_norms: list[int], w1_prime: list[list[int]])
 ///
@@ -1435,7 +2260,7 @@ fn prove_mldsa_sig_witness_py(
     pk:  Vec<u8>,
     msg: Vec<u8>,
     sig: Vec<u8>,
-) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String)> {
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, String, String, usize)> {
     use mldsa::encoding::{pk_decode, sig_decode};
     use mldsa::xof::{expand_a, sample_in_ball};
     use mldsa::field;
@@ -1495,13 +2320,16 @@ fn prove_mldsa_sig_witness_py(
         t1_arr.push(poly.coeffs);
     }
 
-    // Run the full STARK witness pipeline.
-    let proof = mldsa_verify_stark::prove_verify_mldsa_witness(
-        &a_hat_flat, &z_arr, &c_arr, &t1_arr, &hints, K, L,
+    // Run the full V3 STARK witness pipeline (Az-full AIR + hint weight, 49 sub-proofs).
+    // c_tilde is mixed into the Az-full Fiat-Shamir channel as a STARK public input,
+    // binding the proof to this specific signature challenge.
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v3(
+        &a_hat_flat, &z_arr, &c_arr, &t1_arr, &hints, K, L, &c_tilde,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
-    let max_norms = proof.max_norms.clone();
+    let max_norms       = proof.max_norms.clone();
     let w1_prime: Vec<Vec<i64>> = proof.w1_prime.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.hint_weight_total;
 
     let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
@@ -1509,7 +2337,6 @@ fn prove_mldsa_sig_witness_py(
         ))?;
 
     // onchain_commitment = Blake2s(bundle[:32] ∥ c_tilde[:32])[:16]
-    // Binds the proof bundle to this specific signature's challenge seed.
     let binding_input: Vec<u8> = bundle[..32.min(bundle.len())]
         .iter()
         .chain(c_tilde.iter().take(32))
@@ -1522,7 +2349,32 @@ fn prove_mldsa_sig_witness_py(
     // c_tilde as hex — lets the caller re-derive the hash check off-circuit.
     let c_tilde_hex = hex::encode(&c_tilde);
 
-    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex))
+    Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex, hint_weight_total))
+}
+
+/// prove_range_q_py(poly: list[int]) -> (proof: bytes, commitment: str)
+///
+/// Proves all 256 coefficients of `poly` are in [0, Q) using the 48-column
+/// Circle STARK range-check circuit.  Raises ValueError if any coefficient
+/// is outside [0, Q).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn prove_range_q_py(poly: Vec<i64>) -> PyResult<(Vec<u8>, String)> {
+    let arr: [i64; mldsa::N] = poly.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            "poly must have exactly 256 elements"
+        ))?;
+    prove_range_q(&arr)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// verify_range_q_py(proof: bytes, commitment: str) -> bool
+///
+/// Verifies a proof produced by `prove_range_q_py`.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_range_q_py(proof: Vec<u8>, commitment: String) -> bool {
+    verify_range_q(&proof, &commitment).unwrap_or(false)
 }
 
 /// verify_mldsa_hash_check_py(pk, msg, w1_prime, c_tilde_hex) -> bool

@@ -1,74 +1,95 @@
 # QLSA — Project Context
 
-## Статус
-- Фаза: **MVP-3 завершён** → следующий этап: Phase 6 (Testnet) + MVP-3+ (ML-DSA native in AIR)
-- Готово: Phase 1 → Phase 5 + Phase 3++ + QLSAVerifierFull + **ML-DSA batch verifier (Rust) + STARK bridge**
-- Следующий шаг: Phase 6 — Testnet (Polygon zkEVM / Starknet) и/или MVP-3+ AIR circuit для ML-DSA
+## Статус (обновлено 2026-05-14)
+
+- Фаза: **Phase 6 завершена** (Sepolia, 2026-05-05) + **MVP-3+ в процессе** (7 из ~10 AIR circuits)
+- Все Phase 1–6, MVP-3 — завершены полностью
+- Следующий приоритет: MVP-3+ — замкнуть оставшиеся circuits, интегрировать в единый STARK proof
 
 ### Что готово
+
+#### Core / Aggregator / SDK
 - `core/keys.py` — ML-DSA-44/65/87 keygen, derive_address (SHA3-256), wipe_key
 - `core/signing.py` — sign / verify через liboqs
 - `core/transaction.py` — Transaction dataclass, детерминированная сериализация, tx_hash
 - `core/merkle.py` — SHA3-512 Merkle tree, build / root / proof / verify
 - `core/batch.py` — create_batch, merkle_root_onchain(), stark_commitment_onchain()
-- `stark/` — Winterfell prover (Python subprocess обёртки, устаревает)
-- `stark_stwo/` — **Stwo Circle STARK prover** (Rust, nightly-2025-07-01), Python обёртки в `stark/prover.py` / `stark/verifier.py`
-- `stark_stwo/src/mldsa/` — **чистый Rust ML-DSA-65 верификатор** (FIPS 204 Algorithm 3, без liboqs):
-  - `params.rs` — все константы ML-DSA-65 (k=6, l=5, η=4, τ=49, β=196, γ₁=2¹⁹, d=13, λ=192, ω=55)
-  - `field.rs` / `ntt.rs` / `poly.rs` — арифметика над Zq, NTT/INTT, полиномы
-  - `polyvec.rs` — PolyVec, NTTPolyVec, NTTMatrix, UseHint, Decompose
-  - `encoding.rs` — pkDecode, sigDecode, HintBitUnpack, w1Encode, bit_pack/unpack
-  - `xof.rs` — ExpandA (SHAKE-128), SampleInBall, hash_pk/hash_mu/hash_commit (SHAKE-256)
-  - `verify.rs` — `ml_dsa_verify()` FIPS 204 внешний API (M' = 0x00‖0x00‖msg)
-- `stark_stwo/src/lib.rs` — `prove_mldsa_batch()`: N ML-DSA-65 верификаций → STARK hash-chain proof
-- `stark_stwo/src/main.rs` — CLI команда `mldsa_batch` (JSON/base64 I/O)
-- `stark/prover.py` — `MldsaBatchResult`, `prove_mldsa_batch()` (Python обёртка)
-- `contracts/src/` — BatchRegistry.sol, QLSAVerifier.sol (**stub — всегда true**), IQLSAVerifier.sol (Hardhat + OZ v5)
-- `aggregator/` — Mempool (thread-safe), Batcher, AggregatorNode (Phase 4)
-- `benchmarks/bench_core.py` — benchmark suite (ML-DSA sign/verify + Merkle)
-- `benchmarks/bench_stark.py` — **hash-chain + ML-DSA batch STARK benchmarks**
-- `contracts/src/verifier/M31.sol` — **M31 field arithmetic library** (add/sub/mul/pow/inv/neg, LE encoding)
-- `contracts/src/verifier/Blake2s.sol` — **Blake2s-256 library** (RFC 7693, pure Solidity, 10-round compression)
-- `contracts/src/QLSAVerifierV2.sol` — **Structural verifier** (M31 validation, replaces stub)
-- `contracts/src/QLSAVerifierV3.sol` — **Phase 3++ verifier** (MIN_PROOF_LENGTH=700, trivial-proof guard, keccak256 binding groundwork, Blake2s imported)
-- `contracts/src/QLSAVerifierFull.sol` — **QLSAVerifierFull** (Blake2s FRI root binding: commitment = Blake2s(proof[0:32])[:8])
-- `sdk/python/qlsa/` — **Python SDK**: Wallet, TransactionBuilder, LocalClient, HttpClient (Phase 5)
-- `sdk/js/src/` — **JS SDK**: AggregatorClient (TypeScript, Phase 5)
-- `aggregator/api.py` — HTTP API (FastAPI), запуск: `uvicorn aggregator.api:app`
-- `tests/` — **135 тестов** (core + stark + aggregator + sdk), все зелёные; Rust — 61 тест
-- CI: python (3.10/3.12) + rust (nightly-2025-07-01) + contracts (Hardhat) джобы
+- `aggregator/` — Mempool (thread-safe), Batcher (min_batch_size, force_batch), AggregatorNode
+- `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`
+  - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min)
+- `sdk/python/qlsa/` — Wallet, LocalClient, HttpClient, WitnessStatus, BatchStatus
+  - `prove_witness(tx)` — локальный ML-DSA witness без обращения к серверу
+- `sdk/js/src/` — TypeScript SDK: AggregatorClient, types
+
+#### STARK / Rust
+- `stark_stwo/src/mldsa/` — чистый Rust ML-DSA-65 верификатор (FIPS 204 Algorithm 3)
+  - `params.rs` — k=6, l=5, η=4, τ=49, β=196, γ₁=2¹⁹, d=13, λ=192, ω=55
+  - `field.rs` / `ntt.rs` / `poly.rs` / `polyvec.rs` / `encoding.rs` / `xof.rs` / `verify.rs`
+- `stark_stwo/src/lib.rs` — все PyO3 биндинги + Rust-уровневые prove/verify функции
+- `stark_stwo/src/mldsa_verify_stark.rs` — ML-DSA arithmetic STARK pipeline:
+  - `AzProofV3` — 18 sub-proofs: L NTT + 1 Az-full + K INTT + K Q-range check
+  - `VerifyMldsaProofV3` — 55 sub-proofs: AzProofV3 + poly_sub + norm_check + use_hint + hint_weight
+  - `prove_verify_mldsa_v3(a_hat, z, c, t1, hints, k, l, c_tilde)` → `VerifyMldsaProofV3`
+  - `verify_mldsa_witness_v3(proof)` → верификация всех sub-proofs
+- `stark_stwo/src/range_check_air.rs` — **новый** Q-range check AIR (256 строк × 48 колонок)
+- `stark/prover.py` — Python обёртки: `prove_mldsa_batch`, `prove_mldsa_sig_witness_stark`, `verify_mldsa_witness_stark`, `verify_mldsa_hash_check`
+
+#### AIR Circuits (MVP-3+)
+
+| Circuit | Файл | Статус | Что доказывает |
+|---------|------|--------|----------------|
+| NTT | `mldsa_verify_stark.rs` | ✅ Done | Forward NTT над Zq корректен |
+| INTT | `mldsa_verify_stark.rs` | ✅ Done | Inverse NTT + fingerprint binding |
+| PolyMul | `mldsa_verify_stark.rs` | ✅ Done | Coefficient-wise mul mod Q |
+| PolyAdd | `mldsa_verify_stark.rs` | ✅ Done | Coefficient-wise add mod Q |
+| NormCheck | `mldsa_verify_stark.rs` | ✅ Done | norm[i] = min(z[i], Q−z[i]) |
+| UseHint | `mldsa_verify_stark.rs` | ✅ Done | UseHint(h, r) = w1 |
+| Q-range check | `range_check_air.rs` | ✅ Done (2026-05-14) | v ∈ [0, Q) — 23-bit decomp + complement |
+| Az-full (AzProofV3) | `mldsa_verify_stark.rs` | ✅ Done | Полное A·z matrix-vector product |
+| c_tilde binding | `lib.rs` | ✅ Done (2026-05-14) | c̃ mixed в Fiat-Shamir до первого commitment |
+
+#### Contracts
+- `BatchRegistry.sol` — v1, `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
+- `BatchRegistryV2.sol` — `submitBatchWithNonces()`: строгий порядок nonce per sender
+- `QLSAVerifier.sol` — **заглушка** (всегда true)
+- `QLSAVerifierV2.sol` — M31 структурный верификатор
+- `QLSAVerifierV3.sol` — MIN_PROOF_LENGTH=700, Blake2s imported
+- `QLSAVerifierFull.sol` — onchain_commitment = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
+- `M31.sol` — field arithmetic library
+- `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
+
+#### Тесты
+- Python: **243 тестов** (pytest), все зелёные
+- Rust: **181 тест** (cargo test), все зелёные
+- TypeScript SDK: 31 тест (jest)
+- Solidity: 155 тестов (hardhat)
+- mypy --strict: все 16 файлов `core/ + aggregator/ + sdk/python/` чистые
+
+#### Деплой
+- Сеть: **Ethereum Sepolia** (2026-05-05)
+- Первый батч финализирован: 4 транзакции, 3234 байт proof, 9.16 секунды
+- `testnet/e2e.py` — end-to-end тест с реальными подписями
 
 ---
 
-## Стек (актуально на апрель 2026)
+## Стек (актуально на май 2026)
 
-### Фаза 1–2 (криптоядро + STARK прототип)
+### Фаза 1–2 (криптоядро + STARK)
 - Python 3.10+
-- liboqs-python **0.14.1** (PyPI) + liboqs C **0.14.0** (собирается из исходников)
-  - Примечание: liboqs-python 0.15.x ещё не вышел на PyPI
-  - liboqs C 0.15.0 существует как тег на GitHub, но соответствующего Python wrapper нет
-  - liboqs-python 0.14.1 совместим с liboqs C 0.14.0 (проверено локально)
-- SHA3-512 (hashlib — стандартная библиотека) — Merkle tree
-- SHA3-256 (hashlib) — адресная схема
-- pytest 8.3.5
+- liboqs-python **0.14.1** (PyPI) + liboqs C **0.14.0**
+- SHA3-512 (Merkle), SHA3-256 (адреса), Blake2s-256 (commitment binding)
+- pytest, mypy, bandit, pip-audit
 
-### Фаза 2 (STARK circuit — текущий прототип)
-- **Stwo 2.2.0** (Circle STARK, Rust nightly-2025-07-01, Apache 2.0) — **активно используется**
-- Rust toolchain: `nightly-2025-07-01`
-- AIR circuit: hash chain `H(a,b) = a³ + b` над M31 (Mersenne prime 2³¹−1)
-- **ВНИМАНИЕ: Stwo НЕ имеет perfect zero-knowledge**
-- **ВНИМАНИЕ: `H(a,b) = a³ + b` — не криптографически стойкая хэш-функция** (алгебраический прототип)
-  - SHA3-512 нельзя эффективно выразить как AIR constraints (не алгебраическая функция)
-  - Продакшн: заменить на Rescue Prime / RPO256 (ZK-friendly hash)
-- Winterfell v0.13.1 сохранён в `stark/` (для архива, не используется активно)
+### Фаза 2 (STARK circuit)
+- **Stwo 2.2.0** (Circle STARK, Rust nightly-2025-07-01, Apache 2.0) — **активно**
+- AIR constraints: hash chain `H(a,b) = a³ + b` над M31 (прото, не крипто-стойкий)
+- ML-DSA arithmetic circuits: 7 из ~10 реализованы
+- **ВНИМАНИЕ: FRI blowup=4 → ~60-бит soundness** (для mainnet нужен ≥8)
+- Winterfell v0.13.1 — архив, не используется активно
 
 ### Фаза 3 (смарт-контракты)
-- Solidity + Hardhat
-- `QLSAVerifier.sol` — **заглушка** (не деплоить без реальной верификации)
-- `QLSAVerifierV3.sol` — **Phase 3++ структурный верификатор** (MIN_PROOF_LENGTH=700, Blake2s imported)
-- `QLSAVerifierFull.sol` — **Blake2s FRI root binding** (commitment = Blake2s(proof[0:32])[:8], deployed)
-- Полный on-chain Stwo STARK verifier (FRI queries + OODS + ML-DSA in AIR) — следующий этап (MVP-3+)
-- Деплой: Polygon zkEVM или Starknet L2
+- Solidity + Hardhat + OpenZeppelin v5
+- Сеть: Ethereum Sepolia testnet
 
 ---
 
@@ -76,102 +97,118 @@
 
 ### ИСПОЛЬЗОВАТЬ
 - ML-DSA-65 → FIPS 204 (подписи, основной)
-- ML-DSA-44 → FIPS 204 (лёгкий вариант)
-- ML-DSA-87 → FIPS 204 (максимальная безопасность)
 - SLH-DSA → FIPS 205 (хэш-based, долгосрочный архив)
 - ML-KEM-768 → FIPS 203 (обмен ключами)
 
 ### НЕ ИСПОЛЬЗОВАТЬ (устарело/удалено)
 - ~~Dilithium3/5~~ — удалён в liboqs 0.15.0
-- ~~SPHINCS+~~ — удаляется в liboqs 0.16.0 (заменён SLH-DSA)
-- ~~Stone Prover~~ — заменён Stwo
+- ~~SPHINCS+~~ — заменён SLH-DSA
 - ~~ECDSA~~ — квантово-уязвим
 
 ---
 
 ## Архитектура QLSA
 
-### Слой 1 — Подписи (реализован)
+### Слой 1 — Подписи
 - ML-DSA-65 (FIPS 204)
 - Адрес = SHA3-256(pubkey)
 
-### Слой 2 — Агрегация (реализован MVP-3)
-- Collect transactions
-- Verify ML-DSA-65 signatures (Rust FIPS 204 верификатор, внутри `prove_mldsa_batch`)
-- Build SHA3-512 Merkle tree → `merkle_root`
-- Hash chain STARK commitment → `stark_commitment` (M31 field element, 4 bytes)
-- Generate STARK proof (Stwo, hash chain AIR over SHA3-256 leaf hashes of valid sigs)
-- **Примечание:** ML-DSA верификация происходит в Rust вне AIR circuit; AIR доказывает hash chain над результатами. Полная ML-DSA-in-AIR — MVP-3+.
+### Слой 2 — Агрегация
+1. Collect txs (Mempool → Batcher)
+2. Verify ML-DSA-65 (Rust FIPS 204, вне AIR)
+3. Build SHA3-512 Merkle tree → `merkle_root`
+4. Generate STARK proof → `onchain_commitment` = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
+5. Optional witness pipeline (MVP-3+): AzProofV3 (18 sub-proofs) + VerifyMldsaProofV3 (55 total)
 
-### Слой 3 — Верификация (следующий этап)
-- On-chain STARK verifier (Solidity) — **stub, не готов**
-- BatchRegistry: хранит `merkle_root`
-- Finalize batch
+### Слой 3 — Верификация
+- BatchRegistryV2.sol: `submitBatchWithNonces()` + nonce registry (replay protection)
+- QLSAVerifierFull.sol: проверяет `onchain_commitment` (Blake2s binding)
+- Merkle root хранится on-chain
 
 ---
 
-## Ключевые решения
+## MVP план
 
-- Подпись: ML-DSA-65 (NIST FIPS 204)
-- Merkle хэш: SHA3-512 (вне STARK, для data availability)
-- STARK prover: Stwo 2.2.0 (Circle STARK)
-- Адрес: SHA3-256(pubkey) — pubkey скрыт до подписи
-- Батч: 3000 транзакций по умолчанию
-- Proof size цель: ~90–200 KB (константа)
-- public_inputs содержит commitment + log_size (не массивы pubkeys)
-
-### MVP план
-- **MVP-1** ✅ — ML-DSA + Merkle без STARK (Phase 1)
-- **MVP-2** ✅ — STARK hash chain prover (Phase 2, Stwo)
-  - Прим.: hash chain STARK (не Merkle-in-STARK) — SHA3-512 в AIR нецелесообразна
-  - Переход на ZK-friendly hash (RPO256) запланирован при реализации MVP-3+
-- **SDK** ✅ — Python SDK + JS SDK + HTTP API (Phase 5)
-- **MVP-3** ✅ — ML-DSA batch verifier + STARK bridge (май 2026)
-  - Чистый Rust FIPS 204 верификатор (`stark_stwo/src/mldsa/`), 61 тест
-  - `prove_mldsa_batch()`: N ML-DSA-65 sig → STARK proof (Python + Rust CLI)
-  - Test fixtures: реальные liboqs векторы (binary, не hex) через `include_bytes!`
-  - FIPS 204 внешний API (M' = 0x00‖0x00‖msg) верифицирован end-to-end
-- **Phase 6** — Testnet deployment (Polygon zkEVM / Starknet) — следующий этап
-- **MVP-3+** — ML-DSA верификация native в AIR (NTT + решётчатая арифметика в constraints)
-- Fraud-proof модель — future feature (Phase 4+)
-- Batch economics — future feature (Phase 4+)
+| MVP | Статус | Детали |
+|-----|--------|--------|
+| MVP-1 | ✅ Done | ML-DSA + Merkle без STARK |
+| MVP-2 | ✅ Done | STARK hash chain prover (Stwo) |
+| SDK | ✅ Done | Python + JS + HTTP API |
+| MVP-3 | ✅ Done | ML-DSA batch verifier (Rust FIPS 204) + STARK bridge |
+| Phase 6 | ✅ Done | Sepolia testnet, первый батч финализирован 2026-05-05 |
+| MVP-3+ | 🔄 50% | 7 AIR circuits готовы; интеграция + оставшиеся circuits в процессе |
+| MVP-4 | ⏳ Future | Полный on-chain FRI верификатор (~5K строк Solidity), blowup≥8, RPO256 |
 
 ---
 
 ## Открытые вопросы
 
 ### Архитектурные (критично)
-- **ML-DSA верификация вне AIR** — `prove_mldsa_batch` верифицирует подписи в Rust (вне STARK circuit). AIR доказывает hash chain над SHA3-256(pk‖msg) листьями валидных подписей. Нативная ML-DSA-in-AIR — MVP-3+.
-- **Merkle-root не публичный вход STARK** — связь между on-chain `merkle_root` и STARK proof требует явного включения root chunks в public inputs AIR. Открыто для MVP-3+.
-- **Replay-защита отсутствует** — одна транзакция (sender, nonce) может войти в несколько батчей; on-chain реестр использованных nonce не реализован.
-- **M31-коммитмент — 32 бита** — пространство перебора ~2·10⁹, не является криптографически связывающим. При production-использовании заменить на хэш всего witness (SHA3-256 или BLAKE3).
-- **AIR-схема для ML-DSA в Stwo** — главная сложность MVP-3+ (NTT и решётчатая арифметика в constraints).
+- **ML-DSA верификация в AIR** — 7 circuits готово, нужна финальная интеграция в один proof
+- **Merkle-root не публичный вход STARK** — root не внутри proof; открыт вопрос о включении root chunks в public inputs AIR
+- **M31 wrap-around soundness** — ✅ **Закрыт**: Q-range check AIR (23-bit decomp + complement d=Q-1-v) доказывает v ∈ [0, Q) для каждого Az[i]; реализован 2026-05-14
+- **c_tilde не привязан к STARK** — ✅ **Закрыт**: c̃ mixed в Fiat-Shamir channel до первого trace commitment; разные c̃ → разные query positions → FRI fail; реализован 2026-05-14
+- **Replay-защита on-chain** — ✅ **Закрыто**: `submitBatchWithNonces()` в BatchRegistryV2.sol; строго возрастающий nonce per sender
 
 ### Реализационные
-- Замена прototipного хэша `H(a,b) = a³ + b` на RPO256 при переходе к MVP-3
-- ~~FRI blowup=2~~ **FRI blowup=4** (log_blowup_factor=2, ~60-бит soundness); для production нужен blowup≥8
-- `wipe_key()` в Python ненадёжен: `bytes(private_key)` в `signing.py` создаёт иммутабельную копию, которую нельзя обнулить — для production нужна Rust-обёртка с `SecureZeroingMemory`
-- `QLSAVerifier.sol` — заглушка оставлена для совместимости; `QLSAVerifierV2` — структурный верификатор с M31 валидацией; `QLSAVerifierV3` — Phase 3++ (Blake2s + тайтенный минимум 700 байт); полный FRI в QLSAVerifierFull
-- `BatchRegistry.submitBatch()` — ✅ контроль доступа реализован: `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
-- Усечение tx_hash до 8 байт при конвертации в M31: из 256 бит SHA3-256 используется 31 бит
+- Замена `H(a,b) = a³ + b` на RPO256 или Poseidon2 — отложено до MVP-4
+- FRI blowup=4 (~60-бит soundness) — для mainnet нужен blowup≥8 (MVP-4)
+- `wipe_key()` в Python: `bytes(private_key)` создаёт иммутабельную копию — для production нужна Rust-обёртка с SecureZeroingMemory
+- tx_hash усекается до 31 бита для M31 коммитмента
 
 ### Инфраструктурные
 - CI: Python джобы — сборка liboqs из исходников в GitHub Actions
-- Выбор L2: Polygon zkEVM vs Starknet (решить при старте Phase 3+)
-- Интеграция Stwo кастомного AIR (не Cairo) — документация ограничена
+- Выбор mainnet L2: Ethereum + Sepolia ✅, будущий mainnet TBD
 
 ---
 
-## Benchmark цели (измерять с первого дня)
+## Безопасность
 
-- `proof_size` vs N (100, 500, 1000, 3000 tx)
-- `merkle_build_time` vs N
-- `sign_time`, `verify_time` vs N
-- `gas_cost` (после контрактов)
+### Реализованные меры
+- Приватные ключи: только `bytearray`, `wipe_key()` обнуляет после использования (best-effort)
+- Тесты: эфемерные ключи, никаких hardcoded секретов
+- Логирование: только публичные данные
+- RNG: только liboqs внутренний CSPRNG
+- CI: bandit + pip-audit на каждый пуш
+- Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min)
+- Nonce registry: `BatchRegistryV2.submitBatchWithNonces()` — строго возрастающий nonce per sender
+- c_tilde binding: Az-full Fiat-Shamir смешивает c̃ до первого commitment
+- Q-range check AIR: закрывает soundness gap умножения в M31
+
+### Таблица рисков (обновлено 2026-05-14)
+
+| Риск | Уровень | Статус |
+|------|---------|--------|
+| ML-DSA верификация вне AIR circuit | Критично | 🔄 Partial (7 circuits, MVP-3+) |
+| QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (MVP-4) |
+| Merkle-root не публичный вход STARK | Критично | Open (MVP-3+) |
+| FRI blowup=4 → ~60-бит soundness | Высокий | Partial (нужен blowup≥8, MVP-4) |
+| M31 wrap-around soundness gap (mul constraints) | Высокий | ✅ Закрыт (Q-range check AIR, 2026-05-14) |
+| c_tilde не привязан к STARK proof | Высокий | ✅ Закрыт (Fiat-Shamir mixing, 2026-05-14) |
+| Нет replay-защиты on-chain | Высокий | ✅ Done (BatchRegistryV2 nonce registry) |
+| Rate limiting отсутствует | Средний | ✅ Done (sliding-window per IP) |
+| bytes(private_key) — иммутабельная копия в Python | Средний | Open (нужна Rust-обёртка, MVP-4) |
+| H(a,b) = a³+b — не крипто-стойкая | Низкий | Принято для прото |
+| tx_hash усекается до 31 бита для M31 | Низкий | Open |
 
 ---
 
-## Зависимости (зафиксированные версии)
+## Ключевые решения (design decisions)
+
+- Подпись: ML-DSA-65 (NIST FIPS 204)
+- Merkle хэш: SHA3-512 (вне STARK)
+- STARK prover: Stwo 2.2.0 (Circle STARK, M31 field)
+- Адрес: SHA3-256(pubkey)
+- onchain_commitment: Blake2s(proof[:32] ∥ c_tilde[:32])[:16] — 128-bit binding
+- c_tilde как публичный вход: mixed в Fiat-Shamir channel до trace commitment
+- Q-range check: 48-column AIR (v, 23 bits of v, d=Q-1-v, 23 bits of d); C0 + 23 boolean + C24 + 23 boolean = 48 constraints
+- Сериализация: bincode (Encode/Decode) для `[i64; 256]` — serde не поддерживает такие массивы
+- Батч: до 3000 транзакций по умолчанию
+- Deплой: Ethereum Sepolia (testnet)
+
+---
+
+## Зависимости
 
 ```
 liboqs-python==0.14.1   # Python wrapper
@@ -187,27 +224,12 @@ Rust: `nightly-2025-07-01` (зафиксирован в `stark_stwo/rust-toolcha
 
 ---
 
-## Безопасность
+## Benchmark цели
 
-### Реализованные меры
-- Приватные ключи: только `bytearray`, `wipe_key()` обнуляет после использования
-- Тесты: эфемерные ключи, никаких hardcoded секретов в репозитории
-- Логирование: только публичные данные (address, pubkey_hash, batch_id)
-- RNG: только liboqs внутренний CSPRNG
-- CI: bandit (статический анализ) + pip-audit (CVE scan) на каждый пуш
-- Rust binary: входные данные (JSON/base64) обрабатываются через `match` без `.expect()` на untrusted input
-- Subprocess: timeout 300s (prove) / 120s (verify), decode(errors='replace'), output validation
+- `proof_size` vs N (100, 500, 1000, 3000 tx)
+- `merkle_build_time` vs N
+- `sign_time`, `verify_time` vs N
+- `witness_prove_time` (MVP-3+, sub-proof latency)
+- `gas_cost` (on-chain verification per batch)
 
-### Известные ограничения (требуют решения до production)
-| Риск | Уровень | Статус |
-|------|---------|--------|
-| ML-DSA верификация вне AIR circuit | Критично | Partial ✅ (Rust FIPS 204, prove_mldsa_batch) |
-| QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (QLSAVerifierFull, deployed) |
-| Merkle-root не публичный вход STARK | Критично | Open (MVP-3+) |
-| M31-коммитмент 32 бита — не binding | Высокий | Open |
-| bytes(private_key) — иммутабельная копия в Python | Высокий | Open (нужна Rust-обёртка) |
-| Нет replay-защиты on-chain | Высокий | Open |
-| FRI blowup=4 → ~60-бит soundness (улучшено с 2x) | Средний | Partial (нужен blowup≥8) |
-| BatchRegistry access control | Средний | ✅ Done (Ownable + nonReentrant + replay guard) |
-| tx_hash усекается до 31 бита для M31 | Низкий | Open |
-| H(a,b) = a³+b — не крипто-стойкая | Низкий | Принято для прото |
+Benchmarks: `benchmarks/bench_core.py`, `bench_stark.py`, `bench_poly_circuits.py`, `bench_witnesses.py`

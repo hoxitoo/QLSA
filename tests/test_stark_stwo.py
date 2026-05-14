@@ -248,21 +248,23 @@ def _zero_hints(k: int) -> list[list[bool]]:
 
 @needs_ext
 def test_mldsa_witness_prove_verify_roundtrip():
-    """Full pipeline: Az → c·t₁ → sub → norm_check → UseHint proves and verifies."""
+    """Full V3 pipeline (K=6, L=5): Az → c·t₁ → sub → norm_check → UseHint proves and verifies."""
     from stark.prover import prove_mldsa_witness_stark, verify_mldsa_witness_stark
 
-    a_hat = [_rand_poly(i) for i in range(K * L)]
-    z     = [_rand_poly(100 + j) for j in range(L)]
+    # V3 requires ML-DSA-65 dimensions (L=5 fixed in prove_az_v3)
+    K3, L3 = 6, 5
+    a_hat = [_rand_poly(i) for i in range(K3 * L3)]
+    z     = [_rand_poly(100 + j) for j in range(L3)]
     c     = _rand_poly(200)
-    t1    = [_rand_poly(300 + i) for i in range(K)]
-    hints = _zero_hints(K)
+    t1    = [_rand_poly(300 + i) for i in range(K3)]
+    hints = _zero_hints(K3)
 
-    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K, L)
+    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K3, L3)
 
     assert isinstance(result.proof_bundle, bytes)
     assert len(result.proof_bundle) > 0
-    assert len(result.max_norms) == L
-    assert len(result.w1_prime) == K
+    assert len(result.max_norms) == L3
+    assert len(result.w1_prime) == K3
     for row in result.w1_prime:
         assert len(row) == N
     # max_norm is absolute centred value min(z, Q-z); for random z it may exceed
@@ -278,13 +280,15 @@ def test_mldsa_witness_tampered_bundle_fails():
     """Flipping a byte in the proof bundle must cause verification to fail."""
     from stark.prover import prove_mldsa_witness_stark, verify_mldsa_witness_stark, MldsaWitnessResult
 
-    a_hat = [_rand_poly(i) for i in range(K * L)]
-    z     = [_rand_poly(100 + j) for j in range(L)]
+    # V3 requires ML-DSA-65 dimensions (L=5 fixed in prove_az_v3)
+    K3, L3 = 6, 5
+    a_hat = [_rand_poly(i) for i in range(K3 * L3)]
+    z     = [_rand_poly(100 + j) for j in range(L3)]
     c     = _rand_poly(200)
-    t1    = [_rand_poly(300 + i) for i in range(K)]
-    hints = _zero_hints(K)
+    t1    = [_rand_poly(300 + i) for i in range(K3)]
+    hints = _zero_hints(K3)
 
-    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K, L)
+    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K3, L3)
 
     tampered = bytearray(result.proof_bundle)
     tampered[len(tampered) // 2] ^= 0xFF
@@ -392,6 +396,413 @@ def test_mldsa_hash_check_passes_for_valid_sig():
         "Hash check must pass for a valid signature's witness result"
 
 
+# ─── Az-row STARK (MVP-3+) ────────────────────────────────────────────────────
+
+@needs_ext
+def test_prove_az_row_output_schema():
+    """prove_az_row_py returns (bytes, str, list[int]) with correct shapes."""
+    a_row = [_rand_poly(j) for j in range(5)]
+    z_hat = [_rand_poly(j + 10) for j in range(5)]
+
+    proof, commitment, az_hat = _ext.prove_az_row_py(a_row, z_hat)
+
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32  # 16-byte hex
+    assert len(az_hat) == N
+    assert all(0 <= c < Q for c in az_hat)
+
+
+@needs_ext
+def test_prove_az_row_verify_roundtrip():
+    """prove → verify must succeed for honest witness."""
+    a_row = [_rand_poly(j + 20) for j in range(5)]
+    z_hat = [_rand_poly(j + 30) for j in range(5)]
+
+    proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
+    assert _ext.verify_az_row_py(proof, commitment, z_hat)
+
+
+@needs_ext
+def test_prove_az_row_correctness():
+    """Output must equal the reference inner-product Σ_j a[j][p] * z[j][p] mod Q."""
+    a_row = [_rand_poly(j + 40) for j in range(5)]
+    z_hat = [_rand_poly(j + 50) for j in range(5)]
+
+    _, _, az_hat = _ext.prove_az_row_py(a_row, z_hat)
+
+    for p in range(N):
+        expected = sum(a_row[j][p] * z_hat[j][p] for j in range(5)) % Q
+        assert az_hat[p] == expected, f"mismatch at coefficient {p}"
+
+
+@needs_ext
+def test_prove_az_row_zero_z():
+    """Inner product with z = 0 must produce the zero polynomial."""
+    a_row = [_rand_poly(j + 60) for j in range(5)]
+    z_zero = [[0] * N for _ in range(5)]
+
+    _, _, az_hat = _ext.prove_az_row_py(a_row, z_zero)
+    assert az_hat == [0] * N
+
+
+@needs_ext
+def test_prove_az_row_tampered_proof_fails():
+    """Flipping a byte in the proof must cause verification to fail."""
+    a_row = [_rand_poly(j + 70) for j in range(5)]
+    z_hat = [_rand_poly(j + 80) for j in range(5)]
+
+    proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
+    tampered = bytearray(proof)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_az_row_py(bytes(tampered), commitment, z_hat)
+
+
+@needs_ext
+def test_prove_az_row_wrong_z_hat_fails():
+    """Verifying with a different z_hat must fail (input fingerprint binding)."""
+    a_row = [_rand_poly(j + 73) for j in range(5)]
+    z_hat = [_rand_poly(j + 83) for j in range(5)]
+    z_hat_other = [_rand_poly(j + 200) for j in range(5)]  # different values
+
+    proof, commitment, _ = _ext.prove_az_row_py(a_row, z_hat)
+    # Correct z_hat must pass.
+    assert _ext.verify_az_row_py(proof, commitment, z_hat)
+    # Wrong z_hat must fail (input fingerprint mismatch changes channel state).
+    assert not _ext.verify_az_row_py(proof, commitment, z_hat_other)
+
+
+@needs_ext
+def test_prove_az_row_full_matrix():
+    """Prove all K=6 output rows and verify each independently."""
+    z_hat = [_rand_poly(j + 90) for j in range(5)]
+    for i in range(6):
+        a_row = [_rand_poly(i * 5 + j + 100) for j in range(5)]
+        proof, commitment, az_hat = _ext.prove_az_row_py(a_row, z_hat)
+        assert _ext.verify_az_row_py(proof, commitment, z_hat), f"row {i} failed verification"
+        assert len(az_hat) == N
+
+
+# ─── Full-matrix Az STARK — prove_az_full (MVP-3+) ───────────────────────────
+
+_KF = 6   # ML-DSA-65 K
+_LF = 5   # ML-DSA-65 L
+
+
+@needs_ext
+def test_prove_az_full_output_schema():
+    """prove_az_full_py returns (bytes, str, list[K lists of 256 ints])."""
+    a_hat = [_rand_poly(i + 400) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 500) for j in range(_LF)]
+    proof, commitment, az_out = _ext.prove_az_full_py(a_hat, z_hat)
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32
+    int(commitment, 16)
+    assert len(az_out) == _KF
+    for row in az_out:
+        assert len(row) == N
+        assert all(0 <= v < Q for v in row)
+
+
+@needs_ext
+def test_prove_az_full_verify_roundtrip():
+    """prove_az_full_py + verify_az_full_py round-trips."""
+    a_hat = [_rand_poly(i + 600) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 700) for j in range(_LF)]
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat)
+    assert _ext.verify_az_full_py(proof, commitment, z_hat)
+
+
+@needs_ext
+def test_prove_az_full_wrong_z_hat_fails():
+    """Supplying different z_hat to verify must fail (input fingerprint binding)."""
+    a_hat = [_rand_poly(i + 800) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 900) for j in range(_LF)]
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat)
+    z_wrong = list(z_hat)
+    z_wrong[0] = [v ^ 1 for v in z_wrong[0]]
+    assert not _ext.verify_az_full_py(proof, commitment, z_wrong), \
+        "Wrong z_hat must fail verification"
+
+
+@needs_ext
+def test_prove_az_full_tampered_proof_fails():
+    """A tampered proof byte must fail verification."""
+    a_hat = [_rand_poly(i + 1000) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1100) for j in range(_LF)]
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat)
+    tampered = bytearray(proof)
+    tampered[32] ^= 0xFF
+    assert not _ext.verify_az_full_py(bytes(tampered), commitment, z_hat)
+
+
+@needs_ext
+def test_prove_az_full_matches_az_row_per_row():
+    """az_full output must equal az_row output for each row independently."""
+    a_hat = [_rand_poly(i + 1200) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1300) for j in range(_LF)]
+    _, _, az_full = _ext.prove_az_full_py(a_hat, z_hat)
+    for i in range(_KF):
+        a_row = a_hat[i * _LF:(i + 1) * _LF]
+        _, _, az_row_i = _ext.prove_az_row_py(a_row, z_hat)
+        assert az_full[i] == az_row_i, f"row {i}: az_full ≠ az_row"
+
+
+# ─── Az-full c_tilde public input (MVP-3+) ───────────────────────────────────
+
+@needs_ext
+def test_prove_az_full_c_tilde_bound_verifies():
+    """prove_az_full_py with c_tilde + verify with same c_tilde must pass."""
+    a_hat = [_rand_poly(i + 1400) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1500) for j in range(_LF)]
+    c_tilde = bytes(range(48))  # 48-byte challenge (ML-DSA-65 λ/4)
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat, c_tilde)
+    assert _ext.verify_az_full_py(proof, commitment, z_hat, c_tilde), \
+        "az_full with c_tilde should verify with matching c_tilde"
+
+
+@needs_ext
+def test_prove_az_full_wrong_c_tilde_fails():
+    """Verifying with a different c_tilde must fail (Fiat-Shamir mismatch)."""
+    a_hat = [_rand_poly(i + 1600) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1700) for j in range(_LF)]
+    c_tilde_a = bytes(range(48))
+    c_tilde_b = bytes(range(1, 49))  # different challenge
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat, c_tilde_a)
+    assert not _ext.verify_az_full_py(proof, commitment, z_hat, c_tilde_b), \
+        "az_full must fail verification with wrong c_tilde"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_c_tilde_binding():
+    """V3 proof with c_tilde stores it in bundle; tampered c_tilde fails verify."""
+    from stark.prover import prove_mldsa_witness_stark, verify_mldsa_witness_stark, MldsaWitnessResult
+
+    K3, L3 = 6, 5
+    a_hat = [_rand_poly(i + 1800) for i in range(K3 * L3)]
+    z     = [_rand_poly(100 + j + 1800) for j in range(L3)]
+    c     = _rand_poly(200 + 1800)
+    t1    = [_rand_poly(300 + i + 1800) for i in range(K3)]
+    hints = _zero_hints(K3)
+
+    c_tilde = bytes(range(48))
+    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K3, L3, c_tilde=c_tilde)
+    assert verify_mldsa_witness_stark(result), "V3 proof with c_tilde must verify"
+
+
+# ─── INTT with input binding (MVP-3+) ────────────────────────────────────────
+
+def _rand_poly_intt(seed: int) -> list[int]:
+    """Random polynomial in [0, Q) — suitable as INTT input."""
+    import random
+    rng = random.Random(seed)
+    return [rng.randint(0, Q - 1) for _ in range(N)]
+
+
+@needs_ext
+def test_prove_intt_bound_roundtrip():
+    """prove_intt_bound_py + verify_intt_bound_py round-trips correctly."""
+    f = _rand_poly_intt(42)
+    proof, commitment = _ext.prove_intt_bound_py(f)
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32
+    int(commitment, 16)  # valid hex
+    assert _ext.verify_intt_bound_py(proof, commitment, f), "INTT bound proof did not verify"
+
+
+@needs_ext
+def test_prove_intt_bound_wrong_input_fails():
+    """Supplying a different input polynomial must cause verification to fail."""
+    f = _rand_poly_intt(7)
+    proof, commitment = _ext.prove_intt_bound_py(f)
+    # Flip one coefficient to create a different polynomial.
+    f_wrong = list(f)
+    f_wrong[0] = (f_wrong[0] + 1) % Q
+    assert not _ext.verify_intt_bound_py(proof, commitment, f_wrong), \
+        "INTT bound proof must fail with wrong input"
+
+
+@needs_ext
+def test_prove_intt_bound_tampered_proof_fails():
+    """A tampered proof byte must cause verification to fail."""
+    f = _rand_poly_intt(13)
+    proof, commitment = _ext.prove_intt_bound_py(f)
+    tampered = bytearray(proof)
+    tampered[16] ^= 0xFF
+    assert not _ext.verify_intt_bound_py(bytes(tampered), commitment, f), \
+        "INTT bound proof must fail when proof bytes are tampered"
+
+
+@needs_ext
+def test_prove_intt_bound_wrong_commitment_fails():
+    """Using a commitment from a different proof must fail."""
+    f1 = _rand_poly_intt(21)
+    f2 = _rand_poly_intt(22)
+    proof1, commitment1 = _ext.prove_intt_bound_py(f1)
+    _,      commitment2 = _ext.prove_intt_bound_py(f2)
+    assert not _ext.verify_intt_bound_py(proof1, commitment2, f1), \
+        "Wrong commitment must cause INTT bound verification to fail"
+
+
+# ─── ML-DSA witness v2 pipeline (Az-row AIR — 53 sub-proofs vs 101) ──────────
+# prove_verify_mldsa_v2 requires l = 5 (ML-DSA-65). Use k=1, l=5 for speed.
+
+_K2 = 1   # rows for v2 tests
+_L2 = 5   # cols for v2 tests (must equal ML-DSA-65 L)
+
+
+@needs_ext
+def test_prove_mldsa_witness_v2_output_schema():
+    """prove_mldsa_witness_v2_py returns (bytes, list[int], list[list[int]])."""
+    a_hat = [_rand_poly(i) for i in range(_K2 * _L2)]
+    z     = [_rand_poly(100 + j) for j in range(_L2)]
+    c     = _rand_poly(200)
+    t1    = [_rand_poly(300 + i) for i in range(_K2)]
+    hints = _zero_hints(_K2)
+
+    bundle, max_norms, w1_prime = _ext.prove_mldsa_witness_v2_py(
+        a_hat, z, c, t1, hints, _K2, _L2
+    )
+
+    assert isinstance(bundle, bytes) and len(bundle) > 0
+    assert len(max_norms) == _L2
+    assert len(w1_prime) == _K2
+    for row in w1_prime:
+        assert len(row) == N
+
+
+@needs_ext
+def test_prove_mldsa_witness_v2_verify_roundtrip():
+    """prove_mldsa_witness_v2_py → verify_mldsa_witness_v2_py must succeed."""
+    a_hat = [_rand_poly(i + 10) for i in range(_K2 * _L2)]
+    z     = [_rand_poly(110 + j) for j in range(_L2)]
+    c     = _rand_poly(210)
+    t1    = [_rand_poly(310 + i) for i in range(_K2)]
+    hints = _zero_hints(_K2)
+
+    bundle, _, _ = _ext.prove_mldsa_witness_v2_py(a_hat, z, c, t1, hints, _K2, _L2)
+    assert _ext.verify_mldsa_witness_v2_py(bundle)
+
+
+@needs_ext
+def test_prove_mldsa_witness_v2_tampered_bundle_fails():
+    """Flipping a byte in the v2 bundle must cause verification to fail."""
+    a_hat = [_rand_poly(i + 20) for i in range(_K2 * _L2)]
+    z     = [_rand_poly(120 + j) for j in range(_L2)]
+    c     = _rand_poly(220)
+    t1    = [_rand_poly(320 + i) for i in range(_K2)]
+    hints = _zero_hints(_K2)
+
+    bundle, _, _ = _ext.prove_mldsa_witness_v2_py(a_hat, z, c, t1, hints, _K2, _L2)
+    tampered = bytearray(bundle)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_mldsa_witness_v2_py(bytes(tampered))
+
+
+@needs_ext
+def test_prove_mldsa_witness_v2_matches_v1_w1_prime():
+    """v2 and v1 pipelines must produce the same w1_prime for the same inputs."""
+    a_hat = [_rand_poly(i + 30) for i in range(_K2 * _L2)]
+    z     = [_rand_poly(130 + j) for j in range(_L2)]
+    c     = _rand_poly(230)
+    t1    = [_rand_poly(330 + i) for i in range(_K2)]
+    hints = _zero_hints(_K2)
+
+    _, _, w1_v1 = _ext.prove_mldsa_witness_py(a_hat, z, c, t1, hints, _K2, _L2)
+    _, _, w1_v2 = _ext.prove_mldsa_witness_v2_py(a_hat, z, c, t1, hints, _K2, _L2)
+
+    assert w1_v1 == w1_v2, "v1 and v2 pipelines must agree on w1_prime"
+
+
+# ─── ML-DSA witness v3 pipeline (Az-full AIR — 49 sub-proofs) ────────────────
+# prove_verify_mldsa_v3 requires k=6, l=5 (ML-DSA-65 exact).
+
+_K3 = 6   # ML-DSA-65 K
+_L3 = 5   # ML-DSA-65 L
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_output_schema():
+    """prove_mldsa_witness_v3_py returns (bytes, list[int], list[list[int]], int)."""
+    a_hat = [_rand_poly(i + 2000) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2100 + j) for j in range(_L3)]
+    c     = _rand_poly(2200)
+    t1    = [_rand_poly(2300 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v3_py(
+        a_hat, z, c, t1, hints, _K3, _L3
+    )
+
+    assert isinstance(bundle, bytes) and len(bundle) > 0
+    assert len(max_norms) == _L3
+    assert len(w1_prime) == _K3
+    for row in w1_prime:
+        assert len(row) == N
+    assert isinstance(hw_total, int) and hw_total == 0  # all-zero hints
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_verify_roundtrip():
+    """prove_mldsa_witness_v3_py → verify_mldsa_witness_v3_py must succeed."""
+    a_hat = [_rand_poly(i + 2010) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2110 + j) for j in range(_L3)]
+    c     = _rand_poly(2210)
+    t1    = [_rand_poly(2310 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+    assert _ext.verify_mldsa_witness_v3_py(bundle), "V3 bundle must verify"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_tampered_bundle_fails():
+    """Flipping a byte in the v3 bundle must cause verification to fail."""
+    a_hat = [_rand_poly(i + 2020) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2120 + j) for j in range(_L3)]
+    c     = _rand_poly(2220)
+    t1    = [_rand_poly(2320 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+    tampered = bytearray(bundle)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_mldsa_witness_v3_py(bytes(tampered))
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_matches_v2_w1_prime():
+    """v3 and v2 pipelines must produce identical w1_prime for the same inputs."""
+    a_hat = [_rand_poly(i + 2030) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2130 + j) for j in range(_L3)]
+    c     = _rand_poly(2230)
+    t1    = [_rand_poly(2330 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    _, _, w1_v2, *_ = _ext.prove_mldsa_witness_v2_py(a_hat, z, c, t1, hints, _K3, _L3)
+    _, _, w1_v3, _  = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+
+    assert w1_v2 == w1_v3, "v2 and v3 must agree on w1_prime"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_nonzero_hint_weight():
+    """V3 correctly encodes hint weight for a non-trivial hint vector."""
+    a_hat = [_rand_poly(i + 2040) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(2140 + j) for j in range(_L3)]
+    c     = _rand_poly(2240)
+    t1    = [_rand_poly(2340 + i) for i in range(_K3)]
+    # Set 10 hint bits across rows.
+    hints = _zero_hints(_K3)
+    for bit in range(10):
+        hints[bit % _K3][bit] = True
+
+    bundle, _, _, hw_total = _ext.prove_mldsa_witness_v3_py(
+        a_hat, z, c, t1, hints, _K3, _L3
+    )
+    assert hw_total == 10, f"Expected hint_weight_total=10, got {hw_total}"
+    assert _ext.verify_mldsa_witness_v3_py(bundle), "V3 with non-zero hints must verify"
+
+
 @needs_oqs
 def test_mldsa_hash_check_fails_wrong_message():
     """Hash check must fail when msg is substituted for a different message."""
@@ -405,3 +816,121 @@ def test_mldsa_hash_check_fails_wrong_message():
     result = prove_mldsa_sig_witness_stark(pk, msg, sig)
     assert not verify_mldsa_hash_check(pk, b"different message", result), \
         "Hash check must fail when message is wrong"
+
+
+@needs_oqs
+def test_prove_mldsa_sig_witness_hint_weight_fields():
+    """MldsaWitnessResult includes a valid hint_weight_total inside the V3 bundle."""
+    from stark.prover import prove_mldsa_sig_witness_stark, verify_mldsa_witness_stark
+
+    alg = _oqs.Signature("ML-DSA-65")
+    pk = alg.generate_keypair()
+    msg = b"hint weight integration test"
+    sig = alg.sign(msg)
+
+    result = prove_mldsa_sig_witness_stark(pk, msg, sig)
+
+    # hint_weight_total is a non-negative integer ≤ ω=55 for any valid ML-DSA-65 sig.
+    # (The hint weight proof is now part of the unified V3 bundle, not a separate field.)
+    assert isinstance(result.hint_weight_total, int)
+    assert 0 <= result.hint_weight_total <= 55, \
+        f"hint weight {result.hint_weight_total} exceeds ω=55"
+
+    # Full bundle (including hint weight sub-proof) must verify.
+    assert verify_mldsa_witness_stark(result), "Hint weight proof inside V3 bundle did not verify"
+
+
+# ─── Hint weight check STARK (MVP-3+) ────────────────────────────────────────
+
+OMEGA = 55  # ML-DSA-65 hint weight bound
+
+
+def _zero_hints_full() -> list:
+    """All-zero hints for K=6, N=256."""
+    return [[False] * N for _ in range(6)]
+
+
+def _hints_with_count(count: int) -> list:
+    """First `count` hint bits set to True, rest False."""
+    h = [[False] * N for _ in range(6)]
+    placed = 0
+    for i in range(6):
+        for j in range(N):
+            if placed >= count:
+                break
+            h[i][j] = True
+            placed += 1
+        if placed >= count:
+            break
+    return h
+
+
+@needs_ext
+def test_prove_hint_weight_output_schema():
+    """prove_hint_weight_py returns (bytes, str, int) with correct shapes."""
+    hints = _zero_hints_full()
+    proof, commitment, total = _ext.prove_hint_weight_py(hints)
+
+    assert isinstance(proof, bytes) and len(proof) > 0
+    assert isinstance(commitment, str) and len(commitment) == 32  # 16-byte hex
+    assert total == 0
+
+
+@needs_ext
+def test_prove_hint_weight_zero_hints():
+    """Zero hints → weight 0 → verify passes."""
+    hints = _zero_hints_full()
+    proof, commitment, total = _ext.prove_hint_weight_py(hints)
+    assert total == 0
+    assert _ext.verify_hint_weight_py(proof, commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_counts_correctly():
+    """Total weight matches the number of True bits in the hint vector."""
+    for count in [1, 10, 55]:
+        hints = _hints_with_count(count)
+        proof, commitment, total = _ext.prove_hint_weight_py(hints)
+        assert total == count, f"expected {count}, got {total}"
+        assert _ext.verify_hint_weight_py(proof, commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_verify_roundtrip():
+    """Honest prove → verify must succeed."""
+    hints = _hints_with_count(30)
+    proof, commitment, total = _ext.prove_hint_weight_py(hints)
+    assert total == 30
+    assert _ext.verify_hint_weight_py(proof, commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_tampered_proof_fails():
+    """Flipping a byte in the proof must cause verification to fail."""
+    hints = _hints_with_count(20)
+    proof, commitment, _ = _ext.prove_hint_weight_py(hints)
+    tampered = bytearray(proof)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_hint_weight_py(bytes(tampered), commitment)
+
+
+@needs_ext
+def test_prove_hint_weight_wrong_commitment_fails():
+    """Wrong commitment hex must cause verification to fail."""
+    hints = _hints_with_count(5)
+    proof, commitment, _ = _ext.prove_hint_weight_py(hints)
+    # Flip a hex digit.
+    wrong = commitment[:30] + ("0" if commitment[30] != "0" else "1") + commitment[31:]
+    assert not _ext.verify_hint_weight_py(proof, wrong)
+
+
+@needs_ext
+def test_prove_hint_weight_bounds_check():
+    """The returned total_weight can be compared against OMEGA externally."""
+    for count in [0, 55, 200]:
+        hints = _hints_with_count(count)
+        _, _, total = _ext.prove_hint_weight_py(hints)
+        assert total == count
+        within_bound = total <= OMEGA
+        # This is the off-circuit check the verifier would perform.
+        assert within_bound == (count <= OMEGA)
