@@ -2546,6 +2546,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_intt_roundtrip() {
         // INTT(NTT(f)) == f (the fundamental identity).
         let f = random_poly(77);
@@ -2565,6 +2566,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ring_mul_output_correct() {
         let a = random_poly(50);
         let b = random_poly(60);
@@ -2577,6 +2579,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ring_mul_verifies() {
         let a = random_poly(111);
         let b = random_poly(222);
@@ -2611,6 +2614,7 @@ mod tests {
     // ── AzProofV2 tests ───────────────────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_az_v2_1x1_output_correct() {
         // Degenerate case: 1×1 "matrix" with L=1 fails because prove_az_v2 requires L=5.
         // Test with k=1, l=5 (L must be 5 for ML-DSA-65).
@@ -2630,6 +2634,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_az_v2_6x5_output_correct() {
         // Full ML-DSA-65 dimensions: K=6, L=5.
         let k = 6usize;
@@ -2647,6 +2652,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_az_v2_verifies() {
         let k = 2usize;
         let l = 5usize;
@@ -2660,6 +2666,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v2_1x5_verifies() {
         let k = 1usize;
         let l = 5usize;
@@ -2677,6 +2684,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v3_6x5_verifies() {
         // V3 requires exactly k=6, l=5 (ML-DSA-65 full matrix).
         let k = crate::mldsa::params::K;
@@ -2699,6 +2707,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_az_1x1_output_correct() {
         // Smallest possible case: 1×1 "matrix" — equivalent to one ring multiplication.
         let a_poly = random_poly(999);
@@ -2714,6 +2723,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_az_1x1_verifies() {
         let a_poly = random_poly(777);
         let z_poly = random_poly(666);
@@ -2727,6 +2737,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_az_2x2_output_correct() {
         let k = 2usize;
         let l = 2usize;
@@ -2745,6 +2756,7 @@ mod tests {
     // ── Ct1 tests ─────────────────────────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ct1_1x1_output_correct() {
         // c·t₁[0] must equal ring_mul_reference(c, t₁[0]).
         let c   = random_poly(400);
@@ -2757,6 +2769,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ct1_1x1_verifies() {
         let c  = random_poly(450);
         let t1 = [random_poly(550)];
@@ -2767,6 +2780,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ct1_2x_output_correct() {
         let c  = random_poly(600);
         let t1 = [random_poly(700), random_poly(800)];
@@ -2786,6 +2800,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_witness_1x1_output() {
         let k = 1usize;
         let l = 1usize;
@@ -2818,6 +2833,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_witness_1x1_verifies() {
         let k = 1usize;
         let l = 1usize;
@@ -2842,6 +2858,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_verify_mldsa_norm_bound_check() {
         let k = 1usize;
         let l = 1usize;
@@ -2869,6 +2886,7 @@ mod tests {
     // ── AzProofV3 tests (full-matrix Az AIR) ─────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_az_v3_output_matches_v2() {
         // v3 and v2 must produce identical Az outputs for the same (a_hat, z).
         let k = crate::mldsa::params::K;
@@ -2887,6 +2905,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_verify_az_v3_roundtrip() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -2901,6 +2920,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_verify_az_v3_tampered_az_hat_fails() {
         // Flip one coefficient of az_hat[0] — cross-check 2 must catch it.
         let k = crate::mldsa::params::K;
@@ -2918,6 +2938,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_verify_az_v3_wrong_c_tilde_fails() {
         // Prove with c_tilde A, verify with c_tilde B — must fail (Fiat-Shamir mismatch).
         let k = crate::mldsa::params::K;
@@ -2940,6 +2961,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v3_c_tilde_binding() {
         // Prove V3 with c_tilde A, then tamper c_tilde in bundle → verify must fail.
         let k = crate::mldsa::params::K;
@@ -2968,6 +2990,7 @@ mod tests {
     // ── Ct1ProofV2 tests ───────────────────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ct1_v2_output_correct() {
         let k = crate::mldsa::params::K;
         let c  = random_poly(5000);
@@ -2982,6 +3005,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ct1_v2_verifies() {
         let k = crate::mldsa::params::K;
         let c  = random_poly(5200);
@@ -2993,6 +3017,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ct1_v2_c_tilde_binding() {
         let k = crate::mldsa::params::K;
         let c  = random_poly(5400);
@@ -3014,6 +3039,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_ct1_v2_matches_ct1_v1() {
         let k = crate::mldsa::params::K;
         let c  = random_poly(5600);
@@ -3030,6 +3056,7 @@ mod tests {
     // ── VerifyMldsaProofV4 tests ───────────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v4_6x5_verifies() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3050,6 +3077,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v4_output_matches_v3() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3076,6 +3104,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v4_c_tilde_binding() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3104,6 +3133,7 @@ mod tests {
     // ── WPrimeProof tests ──────────────────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_wprime_output_correct() {
         let k = crate::mldsa::params::K;
         let az:  Vec<[i64; N]> = (0..k).map(|i| random_poly(9000 + i as u64)).collect();
@@ -3118,6 +3148,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_wprime_verifies() {
         let k = crate::mldsa::params::K;
         let az:  Vec<[i64; N]> = (0..k).map(|i| random_poly(9200 + i as u64)).collect();
@@ -3129,6 +3160,7 @@ mod tests {
     // ── VerifyMldsaProofV5 tests ───────────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v5_6x5_verifies() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3149,6 +3181,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v5_output_matches_v4() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3174,6 +3207,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v5_c_tilde_binding() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3202,6 +3236,7 @@ mod tests {
     // ── V6 tests (NormCheck-batch AIR) ────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v6_roundtrip() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3223,6 +3258,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v6_matches_v5() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3248,6 +3284,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v6_c_tilde_binding() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3276,6 +3313,7 @@ mod tests {
     // ── V7 tests (UseHint-batch AIR) ──────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v7_roundtrip() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3298,6 +3336,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v7_matches_v6() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3325,6 +3364,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v7_c_tilde_binding() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3353,6 +3393,7 @@ mod tests {
     // ── V8 tests (RangeQ-batch AIR) ───────────────────────────────────────────
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v8_roundtrip() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3375,6 +3416,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v8_matches_v7() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;
@@ -3402,6 +3444,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
     fn test_prove_verify_mldsa_v8_c_tilde_binding() {
         let k = crate::mldsa::params::K;
         let l = crate::mldsa::params::L;

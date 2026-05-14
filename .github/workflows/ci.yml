@@ -175,7 +175,7 @@ jobs:
 
       - name: Run unit tests
         working-directory: stark_stwo
-        timeout-minutes: 10
+        timeout-minutes: 5
         run: cargo +nightly-2025-07-01 test
 
       - name: Build release binary
@@ -192,7 +192,7 @@ jobs:
           import sys, json
           d = json.load(sys.stdin)
           assert len(d['proof']) > 0
-          assert len(d['commitment']) == 32, f'commitment len={len(d["commitment"])}'
+          assert len(d['commitment']) == 32, f'commitment len={len(d[\"commitment\"])}'
           assert d['log_size'] >= 3
           print('prove OK — log_size', d['log_size'], 'commitment', d['commitment'])
           "
@@ -203,6 +203,40 @@ jobs:
             | ./target/release/qlsa-stark-stwo verify \
             | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['valid'], 'Proof invalid!'"
           echo "Smoke test passed"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Rust: Stwo slow integration tests (manual/scheduled only)
+  # Full STARK pipeline proofs V2–V8, ~2-4 min each, ~43 tests total.
+  # Triggered only on workflow_dispatch or schedule to avoid blocking CI.
+  # Run locally: cargo test --lib -- --include-ignored
+  # ────────────────────────────────────────────────────────────────────────────
+  stark_stwo_slow:
+    name: Stwo integration tests (slow)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly-2025-07-01
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-07-01
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            stark_stwo/target
+          key: cargo-stwo-${{ runner.os }}-${{ hashFiles('stark_stwo/Cargo.lock') }}
+          restore-keys: cargo-stwo-${{ runner.os }}-
+
+      - name: Run slow integration tests
+        working-directory: stark_stwo
+        timeout-minutes: 30
+        run: cargo +nightly-2025-07-01 test -- --include-ignored --test-threads=2
 
   # ────────────────────────────────────────────────────────────────────────────
   # TypeScript SDK: type check + unit tests (Jest + ts-jest)
