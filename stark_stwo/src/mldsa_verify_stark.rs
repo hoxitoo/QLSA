@@ -2010,6 +2010,443 @@ pub fn verify_mldsa_witness_v8(proof: &VerifyMldsaProofV8) -> Result<bool, Strin
     Ok(true)
 }
 
+// ── VerifyMldsaProofV9 — batch INTT for Az (MVP-3+) ──────────────────────────
+//
+// Same as V8 but replaces K individual INTT proofs inside AzProofV4 with one
+// compact batch INTT STARK (325 columns, 1024 rows), saving K-1=5 sub-proofs.
+//
+// Sub-proof count:
+//   AzProofV5:           8 (5 NTT-z + 1 Az-full + 1 INTT-batch + 1 range-Q-batch)
+//   Ct1ProofV2:         14 (1 NTT-c + 6 NTT-t1 + 1 Ct1-full + 6 INTT)
+//   WPrimeProof:         1
+//   NormCheckBatchProof: 1
+//   UseHintBatchProof:   1
+//   hint_weight:         1
+// Total: 8 + 14 + 1 + 1 + 1 + 1 = 26 sub-proofs (vs 31 in V8)
+
+/// AzProofV4 variant with batch INTT — 8 sub-proofs (vs 13 in AzProofV4).
+#[derive(Encode, Decode)]
+pub struct AzProofV5 {
+    /// L NTT proofs: z_hat[j] = NTT(z[j]).
+    pub proofs_ntt_z:    Vec<(Vec<u8>, String)>,
+    /// NTT outputs z_hat[j].
+    pub z_hat:           Vec<[i64; N]>,
+    /// Single full-matrix Az proof (K×L outputs).
+    pub proof_az_full:   (Vec<u8>, String),
+    /// K NTT-domain outputs Az_hat[i] (for INTT batch input binding).
+    pub az_hat:          Vec<[i64; N]>,
+    /// Single batch INTT proof for all K az_hat rows.
+    pub proof_intt_batch: (Vec<u8>, String),
+    /// Az[i] in polynomial domain, K entries.
+    pub output:          Vec<[i64; N]>,
+    /// Single batch range-Q proof for all K Az output rows.
+    pub range_q_proof:   RangeQBatchProof,
+}
+
+/// Prove A×z using full-matrix Az AIR + batch INTT (AzProofV5, 8 sub-proofs).
+pub fn prove_az_v5(
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
+) -> Result<AzProofV5, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("AzProofV5 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("AzProofV5 requires l=L={L_PARAM}, got {l}")); }
+    if a_hat.len() != k * l {
+        return Err(format!("a_hat must have k*l={} entries, got {}", k * l, a_hat.len()));
+    }
+
+    // Step 1: NTT(z[j]) for each j (L proofs).
+    let mut proofs_ntt_z: Vec<(Vec<u8>, String)> = Vec::with_capacity(l);
+    let mut z_hat:        Vec<[i64; N]>           = Vec::with_capacity(l);
+    for (j, zj) in z.iter().enumerate() {
+        let (pb, cm, zh) = crate::prove_ntt(zj)
+            .map_err(|e| format!("NTT proof for z[{j}] failed: {e}"))?;
+        proofs_ntt_z.push((pb, cm));
+        z_hat.push(zh);
+    }
+
+    let z_hat_arr: [[i64; N]; L_PARAM] = z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have exactly L entries".to_string())?;
+
+    // Step 2: Full-matrix Az STARK (1 proof).
+    let (pb_az, cm_az, az_out_arr) = crate::prove_az_full(a_hat, &z_hat_arr, c_tilde)
+        .map_err(|e| format!("prove_az_full failed: {e}"))?;
+    let proof_az_full = (pb_az, cm_az);
+    let az_hat: Vec<[i64; N]> = az_out_arr.to_vec();
+
+    // Step 3: Batch INTT for all K az_hat rows (1 proof, replaces K individual proofs).
+    let az_hat_arr: [[i64; N]; K_PARAM] = az_hat.as_slice().try_into()
+        .map_err(|_| "az_hat must have K entries".to_string())?;
+    let (pb_intt, cm_intt, outputs_arr) = crate::prove_intt_batch(&az_hat_arr)
+        .map_err(|e| format!("prove_intt_batch failed: {e}"))?;
+    let output: Vec<[i64; N]> = outputs_arr.to_vec();
+
+    // Step 4: Single batch range-Q for all K Az[i] outputs.
+    let range_q_proof = prove_range_q_batch_v(&output)?;
+
+    Ok(AzProofV5 {
+        proofs_ntt_z,
+        z_hat,
+        proof_az_full,
+        az_hat,
+        proof_intt_batch: (pb_intt, cm_intt),
+        output,
+        range_q_proof,
+    })
+}
+
+/// Verify all sub-proofs in an `AzProofV5`.
+///
+/// Same four-layer chain as AzProofV4 but uses batch INTT for step 3.
+/// Cross-check 3: batch INTT output commitment must match range-Q input commitment
+/// (both fingerprint all K output polynomials concatenated).
+pub fn verify_az_v5(proof: &AzProofV5, c_tilde_seed: &[u8]) -> Result<bool, String> {
+    let l = proof.z_hat.len();
+    let k = proof.az_hat.len();
+
+    // Layer 1: Verify NTT(z[j]).
+    for (j, (pb, cm)) in proof.proofs_ntt_z.iter().enumerate() {
+        if !crate::verify_ntt(pb, cm)
+            .map_err(|e| format!("verify_ntt z[{j}] failed: {e}"))? { return Ok(false); }
+    }
+
+    // Cross-check 1: stored z_hat[j] fingerprint must match NTT output commitment.
+    for j in 0..l {
+        let fp = crate::output_fingerprint(&proof.z_hat[j]);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if j < proof.proofs_ntt_z.len() && expected_cm != proof.proofs_ntt_z[j].1 {
+            return Ok(false);
+        }
+    }
+
+    // Layer 2: Verify full-matrix Az proof with z_hat input binding.
+    let z_hat_arr: [[i64; N]; crate::mldsa::params::L] = match proof.z_hat.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return Err(format!("z_hat must have L entries, got {l}")),
+    };
+    if !crate::verify_az_full(&proof.proof_az_full.0, &proof.proof_az_full.1, &z_hat_arr, c_tilde_seed)
+        .map_err(|e| format!("verify_az_full failed: {e}"))? { return Ok(false); }
+
+    // Cross-check 2: stored az_hat fingerprint (all K rows) must match Az-full commitment.
+    {
+        let mut flat: Vec<i64> = Vec::with_capacity(k * N);
+        for row in &proof.az_hat { flat.extend_from_slice(row); }
+        let fp = crate::output_fingerprint(&flat);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if expected_cm != proof.proof_az_full.1 {
+            return Ok(false);
+        }
+    }
+
+    // Layer 3: Verify batch INTT with az_hat as inputs.
+    let az_hat_arr: [[i64; N]; crate::mldsa::params::K] = match proof.az_hat.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return Err(format!("az_hat must have K entries, got {k}")),
+    };
+    if !crate::verify_intt_batch(&proof.proof_intt_batch.0, &proof.proof_intt_batch.1, &az_hat_arr)
+        .map_err(|e| format!("verify_intt_batch failed: {e}"))? { return Ok(false); }
+
+    // Cross-check 3: batch INTT output commitment must match range-Q input commitment.
+    // Both fingerprint all K output polynomials concatenated.
+    if proof.proof_intt_batch.1 != proof.range_q_proof.proof_range_q_batch.1 {
+        return Ok(false);
+    }
+
+    // Layer 4: Verify batch range-Q for all K Az outputs.
+    if !verify_range_q_batch_v(&proof.range_q_proof)? { return Ok(false); }
+
+    Ok(true)
+}
+
+/// Combined proof using AzProofV5 + Ct1ProofV2 + batch AIRs — 26 sub-proofs.
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV9 {
+    pub az_proof:          AzProofV5,
+    pub ct1_proof:         Ct1ProofV2,
+    pub wprime_proof:      WPrimeProof,
+    pub norm_proof:        NormCheckBatchProof,
+    pub use_hint_proof:    UseHintBatchProof,
+    pub hint_weight_proof: (Vec<u8>, String),
+    pub hint_weight_total: usize,
+    pub c_tilde:           Vec<u8>,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness (V9).
+///
+/// 26 sub-proofs (vs 31 in V8) — K individual INTT proofs in Az replaced by batch INTT.
+pub fn prove_verify_mldsa_v9(
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    c:       &[i64; N],
+    t1:      &[[i64; N]],
+    hints:   &[Vec<bool>],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
+) -> Result<VerifyMldsaProofV9, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V9 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("V9 requires l=L={L_PARAM}, got {l}")); }
+    if t1.len() != k { return Err(format!("t1 must have k={k} entries, got {}", t1.len())); }
+    if hints.len() != k { return Err(format!("hints must have k={k} rows, got {}", hints.len())); }
+    for (i, hrow) in hints.iter().enumerate() {
+        if hrow.len() != N { return Err(format!("hints[{i}] must have N={N} bits")); }
+    }
+
+    let az_proof     = prove_az_v5(a_hat, z, k, l, c_tilde)?;
+    let ct1_proof    = prove_ct1_v2(c, t1, c_tilde)?;
+    let wprime_proof = prove_wprime(&az_proof.output, &ct1_proof.output)?;
+    let norm_proof   = prove_norm_batch(z)?;
+    let use_hint_proof = prove_use_hint_batch_v(&wprime_proof.output, hints)?;
+    let (hw_bytes, hw_cm, hint_weight_total) = crate::prove_hint_weight(hints)?;
+
+    Ok(VerifyMldsaProofV9 {
+        az_proof, ct1_proof, wprime_proof, norm_proof, use_hint_proof,
+        hint_weight_proof: (hw_bytes, hw_cm),
+        hint_weight_total,
+        c_tilde: c_tilde.to_vec(),
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProofV9`.
+pub fn verify_mldsa_witness_v9(proof: &VerifyMldsaProofV9) -> Result<bool, String> {
+    if !verify_az_v5(&proof.az_proof, &proof.c_tilde)? { return Ok(false); }
+    if !verify_ct1_v2(&proof.ct1_proof, &proof.c_tilde)? { return Ok(false); }
+    if !verify_wprime(&proof.wprime_proof)? { return Ok(false); }
+    if !verify_norm_batch(&proof.norm_proof)? { return Ok(false); }
+    if !verify_use_hint_batch_v(&proof.use_hint_proof)? { return Ok(false); }
+    if !crate::verify_hint_weight(&proof.hint_weight_proof.0, &proof.hint_weight_proof.1)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+// ── VerifyMldsaProofV10 — batch NTT-t1 + batch INTT-ct1 (MVP-3+) ─────────────
+//
+// Same as V9 but replaces Ct1ProofV2 (14 sub-proofs) with Ct1ProofV3 (4 sub-proofs):
+// K individual NTT(t1[i]) proofs → 1 batch NTT-t1 proof
+// K individual INTT(ct1_hat[i]) proofs → 1 batch INTT-ct1 proof
+//
+// Sub-proof count:
+//   AzProofV5:           8 (5 NTT-z + 1 Az-full + 1 INTT-batch + 1 range-Q-batch)
+//   Ct1ProofV3:          4 (1 NTT-c + 1 NTT-t1-batch + 1 Ct1-full + 1 INTT-ct1-batch)
+//   WPrimeProof:         1
+//   NormCheckBatchProof: 1
+//   UseHintBatchProof:   1
+//   hint_weight:         1
+// Total: 8 + 4 + 1 + 1 + 1 + 1 = 16 sub-proofs (vs 26 in V9)
+
+/// Combined proof for c·t₁ using batch NTT-t1 + batch INTT-ct1 — 4 sub-proofs.
+#[derive(Encode, Decode)]
+pub struct Ct1ProofV3 {
+    /// NTT proof for the challenge polynomial c.
+    pub proof_ntt_c:          (Vec<u8>, String),
+    /// NTT output ĉ = NTT(c).
+    pub c_hat:                 [i64; N],
+    /// Single batch NTT proof for all K t1 polynomials.
+    pub proof_ntt_t1_batch:    (Vec<u8>, String),
+    /// NTT outputs t̂₁[i] = NTT(t₁[i]) for all K rows.
+    pub t1_hat:                Vec<[i64; N]>,
+    /// Single Ct1-full STARK proof: all K products ĉ ⊙ t̂₁[i] simultaneously.
+    pub proof_ct1_full:        (Vec<u8>, String),
+    /// Pointwise products ĉ[p] × t̂₁[i][p] mod Q, for all K rows.
+    pub ct1_hat_out:           Vec<[i64; N]>,
+    /// Single batch INTT proof for all K ct1_hat polynomials.
+    pub proof_intt_ct1_batch:  (Vec<u8>, String),
+    /// Final output: c·t₁[i] in polynomial domain, K entries.
+    pub output:                Vec<[i64; N]>,
+}
+
+/// Prove `c·t₁` for all K components using batch NTT-t1 + Ct1-full + batch INTT-ct1.
+pub fn prove_ct1_v3(
+    c:            &[i64; N],
+    t1:           &[[i64; N]],
+    c_tilde_seed: &[u8],
+) -> Result<Ct1ProofV3, String> {
+    use crate::mldsa::params::K as K_PARAM;
+
+    let k = t1.len();
+    if k != K_PARAM {
+        return Err(format!("t1 must have K={K_PARAM} entries for Ct1ProofV3, got {k}"));
+    }
+    for (i, &v) in c.iter().enumerate() {
+        if v < 0 || v >= Q { return Err(format!("c[{i}] = {v} out of [0, Q)")); }
+    }
+    for (row, poly) in t1.iter().enumerate() {
+        for (ci, &v) in poly.iter().enumerate() {
+            if v < 0 || v >= Q { return Err(format!("t1[{row}][{ci}] = {v} out of [0, Q)")); }
+        }
+    }
+
+    // Step 1: Prove NTT(c) once.
+    let (pb_c, cm_c, c_hat) =
+        crate::prove_ntt(c).map_err(|e| format!("NTT proof for c failed: {e}"))?;
+
+    // Step 2: Prove batch NTT(t1) for all K rows (1 proof, replaces K individual proofs).
+    let t1_arr: [[i64; N]; K_PARAM] = std::array::from_fn(|i| t1[i]);
+    let (pb_ntt_t1, cm_ntt_t1, t1_hat_arr) = crate::prove_ntt_batch(&t1_arr)
+        .map_err(|e| format!("prove_ntt_batch for t1 failed: {e}"))?;
+    let t1_hat: Vec<[i64; N]> = t1_hat_arr.to_vec();
+
+    // Step 3: Prove all K pointwise products simultaneously via Ct1-full AIR.
+    let (pb_ct1, cm_ct1, ct1_hat_arr) =
+        crate::prove_ct1_full(&c_hat, &t1_hat_arr, c_tilde_seed)
+            .map_err(|e| format!("prove_ct1_full failed: {e}"))?;
+    let ct1_hat_out: Vec<[i64; N]> = ct1_hat_arr.to_vec();
+
+    // Step 4: Prove batch INTT(ct1_hat) for all K rows (1 proof, replaces K individual proofs).
+    let (pb_intt_ct1, cm_intt_ct1, output_arr) = crate::prove_intt_batch(&ct1_hat_arr)
+        .map_err(|e| format!("prove_intt_batch for ct1 failed: {e}"))?;
+    let output: Vec<[i64; N]> = output_arr.to_vec();
+
+    Ok(Ct1ProofV3 {
+        proof_ntt_c:         (pb_c, cm_c),
+        c_hat,
+        proof_ntt_t1_batch:  (pb_ntt_t1, cm_ntt_t1),
+        t1_hat,
+        proof_ct1_full:      (pb_ct1, cm_ct1),
+        ct1_hat_out,
+        proof_intt_ct1_batch: (pb_intt_ct1, cm_intt_ct1),
+        output,
+    })
+}
+
+/// Verify all STARK sub-proofs in a `Ct1ProofV3`.
+pub fn verify_ct1_v3(proof: &Ct1ProofV3, c_tilde_seed: &[u8]) -> Result<bool, String> {
+    use crate::mldsa::params::K as K_PARAM;
+
+    // Verify NTT(c).
+    if !crate::verify_ntt(&proof.proof_ntt_c.0, &proof.proof_ntt_c.1)
+        .map_err(|e| format!("NTT verify c failed: {e}"))? {
+        return Ok(false);
+    }
+
+    // Verify batch NTT(t1) (output-only binding: no inputs needed).
+    if !crate::verify_ntt_batch(&proof.proof_ntt_t1_batch.0, &proof.proof_ntt_t1_batch.1)
+        .map_err(|e| format!("verify_ntt_batch t1 failed: {e}"))? {
+        return Ok(false);
+    }
+
+    // Cross-check: stored t1_hat fingerprint must match NTT-batch output commitment.
+    {
+        let mut flat: Vec<i64> = Vec::with_capacity(K_PARAM * N);
+        for row in &proof.t1_hat { flat.extend_from_slice(row); }
+        let fp = crate::output_fingerprint(&flat);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if expected_cm != proof.proof_ntt_t1_batch.1 {
+            return Ok(false);
+        }
+    }
+
+    // Verify Ct1-full with c_hat and t1_hat inputs.
+    let t1_hat_arr: [[i64; N]; K_PARAM] = match proof.t1_hat.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return Err(format!("t1_hat must have K={K_PARAM} entries")),
+    };
+    if !crate::verify_ct1_full(
+        &proof.proof_ct1_full.0,
+        &proof.proof_ct1_full.1,
+        &proof.c_hat,
+        &t1_hat_arr,
+        c_tilde_seed,
+    ).map_err(|e| format!("verify_ct1_full failed: {e}"))? {
+        return Ok(false);
+    }
+
+    // Cross-check: stored ct1_hat_out fingerprint must match Ct1-full output commitment.
+    {
+        let mut flat: Vec<i64> = Vec::with_capacity(K_PARAM * N);
+        for row in &proof.ct1_hat_out { flat.extend_from_slice(row); }
+        let fp = crate::output_fingerprint(&flat);
+        let expected_cm = crate::build_poly_commitment(&fp);
+        if expected_cm != proof.proof_ct1_full.1 {
+            return Ok(false);
+        }
+    }
+
+    // Verify batch INTT(ct1_hat) with ct1_hat as inputs.
+    let ct1_hat_arr: [[i64; N]; K_PARAM] = match proof.ct1_hat_out.as_slice().try_into() {
+        Ok(a) => a,
+        Err(_) => return Err(format!("ct1_hat_out must have K={K_PARAM} entries")),
+    };
+    if !crate::verify_intt_batch(
+        &proof.proof_intt_ct1_batch.0,
+        &proof.proof_intt_ct1_batch.1,
+        &ct1_hat_arr,
+    ).map_err(|e| format!("verify_intt_batch ct1 failed: {e}"))? {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+/// Combined proof using AzProofV5 + Ct1ProofV3 + batch AIRs — 16 sub-proofs.
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV10 {
+    pub az_proof:          AzProofV5,
+    pub ct1_proof:         Ct1ProofV3,
+    pub wprime_proof:      WPrimeProof,
+    pub norm_proof:        NormCheckBatchProof,
+    pub use_hint_proof:    UseHintBatchProof,
+    pub hint_weight_proof: (Vec<u8>, String),
+    pub hint_weight_total: usize,
+    pub c_tilde:           Vec<u8>,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness (V10).
+///
+/// 16 sub-proofs (vs 26 in V9) — batch NTT-t1 and batch INTT-ct1 collapse
+/// 12 individual Ct1 sub-proofs into 2.
+pub fn prove_verify_mldsa_v10(
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    c:       &[i64; N],
+    t1:      &[[i64; N]],
+    hints:   &[Vec<bool>],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
+) -> Result<VerifyMldsaProofV10, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V10 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("V10 requires l=L={L_PARAM}, got {l}")); }
+    if t1.len() != k { return Err(format!("t1 must have k={k} entries, got {}", t1.len())); }
+    if hints.len() != k { return Err(format!("hints must have k={k} rows, got {}", hints.len())); }
+    for (i, hrow) in hints.iter().enumerate() {
+        if hrow.len() != N { return Err(format!("hints[{i}] must have N={N} bits")); }
+    }
+
+    let az_proof     = prove_az_v5(a_hat, z, k, l, c_tilde)?;
+    let ct1_proof    = prove_ct1_v3(c, t1, c_tilde)?;
+    let wprime_proof = prove_wprime(&az_proof.output, &ct1_proof.output)?;
+    let norm_proof   = prove_norm_batch(z)?;
+    let use_hint_proof = prove_use_hint_batch_v(&wprime_proof.output, hints)?;
+    let (hw_bytes, hw_cm, hint_weight_total) = crate::prove_hint_weight(hints)?;
+
+    Ok(VerifyMldsaProofV10 {
+        az_proof, ct1_proof, wprime_proof, norm_proof, use_hint_proof,
+        hint_weight_proof: (hw_bytes, hw_cm),
+        hint_weight_total,
+        c_tilde: c_tilde.to_vec(),
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProofV10`.
+pub fn verify_mldsa_witness_v10(proof: &VerifyMldsaProofV10) -> Result<bool, String> {
+    if !verify_az_v5(&proof.az_proof, &proof.c_tilde)? { return Ok(false); }
+    if !verify_ct1_v3(&proof.ct1_proof, &proof.c_tilde)? { return Ok(false); }
+    if !verify_wprime(&proof.wprime_proof)? { return Ok(false); }
+    if !verify_norm_batch(&proof.norm_proof)? { return Ok(false); }
+    if !verify_use_hint_batch_v(&proof.use_hint_proof)? { return Ok(false); }
+    if !crate::verify_hint_weight(&proof.hint_weight_proof.0, &proof.hint_weight_proof.1)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
 //
 // Az[i] = Σ_{j=0}^{L-1} A[i][j] × z[j]   in R_q = Z_q[X]/(X^{256}+1)
@@ -3468,5 +3905,165 @@ mod tests {
         proof.c_tilde = c_tilde_b;
         assert!(!verify_mldsa_witness_v8(&proof).expect("verify should not error after tamper"),
             "tampered c_tilde must cause V8 verification failure");
+    }
+
+    // ── V9 tests (batch INTT for Az) ──────────────────────────────────────────
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v9_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 17200); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 17300)).collect();
+        let c:  [i64; N]       = random_poly(17400);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 17500)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (82u8..130).collect();
+
+        let proof = prove_verify_mldsa_v9(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v9 failed");
+
+        assert_eq!(proof.norm_proof.max_norms.len(), l, "max_norms must have L entries");
+        assert_eq!(proof.use_hint_proof.output.len(), k, "w1_prime must have K entries");
+        assert!(verify_mldsa_witness_v9(&proof).expect("verify_mldsa_witness_v9 failed"),
+            "V9 proof must verify");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v9_matches_v8() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 17600); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 17700)).collect();
+        let c:  [i64; N]       = random_poly(17800);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 17900)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (83u8..131).collect();
+
+        let v8 = prove_verify_mldsa_v8(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v8 failed");
+        let v9 = prove_verify_mldsa_v9(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v9 failed");
+
+        for i in 0..k {
+            assert_eq!(v8.use_hint_proof.output[i], v9.use_hint_proof.output[i],
+                "w1_prime[{i}] mismatch v8 vs v9");
+        }
+        assert_eq!(v8.norm_proof.max_norms, v9.norm_proof.max_norms,
+            "max_norms mismatch v8 vs v9");
+        assert_eq!(v8.hint_weight_total, v9.hint_weight_total, "hint_weight_total mismatch v8 vs v9");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v9_c_tilde_binding() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 18000); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 18100)).collect();
+        let c:  [i64; N]       = random_poly(18200);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 18300)).collect();
+        let h  = all_false_hints(k);
+
+        let c_tilde_a: Vec<u8> = (84u8..132).collect();
+        let c_tilde_b: Vec<u8> = (85u8..133).collect();
+
+        let mut proof = prove_verify_mldsa_v9(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde_a)
+            .expect("prove_verify_mldsa_v9 failed");
+
+        assert!(verify_mldsa_witness_v9(&proof).expect("verify should not error"),
+            "V9 must verify with original c_tilde");
+
+        proof.c_tilde = c_tilde_b;
+        assert!(!verify_mldsa_witness_v9(&proof).expect("verify should not error after tamper"),
+            "tampered c_tilde must cause V9 verification failure");
+    }
+
+    // ── V10 tests (batch NTT-t1 + batch INTT-ct1) ─────────────────────────────
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v10_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 18400); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 18500)).collect();
+        let c:  [i64; N]       = random_poly(18600);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 18700)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (86u8..134).collect();
+
+        let proof = prove_verify_mldsa_v10(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v10 failed");
+
+        assert_eq!(proof.norm_proof.max_norms.len(), l, "max_norms must have L entries");
+        assert_eq!(proof.use_hint_proof.output.len(), k, "w1_prime must have K entries");
+        assert!(verify_mldsa_witness_v10(&proof).expect("verify_mldsa_witness_v10 failed"),
+            "V10 proof must verify");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v10_matches_v9() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 18800); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 18900)).collect();
+        let c:  [i64; N]       = random_poly(19000);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 19100)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (87u8..135).collect();
+
+        let v9  = prove_verify_mldsa_v9 (&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v9 failed");
+        let v10 = prove_verify_mldsa_v10(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v10 failed");
+
+        for i in 0..k {
+            assert_eq!(v9.use_hint_proof.output[i], v10.use_hint_proof.output[i],
+                "w1_prime[{i}] mismatch v9 vs v10");
+        }
+        assert_eq!(v9.norm_proof.max_norms, v10.norm_proof.max_norms,
+            "max_norms mismatch v9 vs v10");
+        assert_eq!(v9.hint_weight_total, v10.hint_weight_total, "hint_weight_total mismatch v9 vs v10");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v10_c_tilde_binding() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 19200); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 19300)).collect();
+        let c:  [i64; N]       = random_poly(19400);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 19500)).collect();
+        let h  = all_false_hints(k);
+
+        let c_tilde_a: Vec<u8> = (88u8..136).collect();
+        let c_tilde_b: Vec<u8> = (89u8..137).collect();
+
+        let mut proof = prove_verify_mldsa_v10(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde_a)
+            .expect("prove_verify_mldsa_v10 failed");
+
+        assert!(verify_mldsa_witness_v10(&proof).expect("verify should not error"),
+            "V10 must verify with original c_tilde");
+
+        proof.c_tilde = c_tilde_b;
+        assert!(!verify_mldsa_witness_v10(&proof).expect("verify should not error after tamper"),
+            "tampered c_tilde must cause V10 verification failure");
     }
 }
