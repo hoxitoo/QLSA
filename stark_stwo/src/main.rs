@@ -78,7 +78,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            match qlsa_stark_stwo::prove_hash_chain(&req.leaves) {
+            match qlsa_stark_stwo::prove_hash_chain(&req.leaves, &[]) {
                 Ok((proof_bytes, commitment, log_size)) => {
                     let out = ProveOutput {
                         proof: base64_encode(&proof_bytes),
@@ -111,7 +111,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            match qlsa_stark_stwo::verify_hash_chain(&proof_bytes, &req.commitment, req.log_size) {
+            match qlsa_stark_stwo::verify_hash_chain(&proof_bytes, &req.commitment, req.log_size, &[]) {
                 Ok(valid) => {
                     match serde_json::to_string(&VerifyOutput { valid }) {
                         Ok(s) => println!("{s}"),

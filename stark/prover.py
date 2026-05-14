@@ -76,7 +76,9 @@ def _txs_to_leaves(batch: Batch) -> list[int]:
 def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofResult:
     _require_ext("prove")
     try:
-        proof_bytes, commitment, log_size = _ext.prove(leaves)
+        # Pass the Merkle root as a Fiat-Shamir seed so the STARK proof is
+        # cryptographically bound to this specific batch root.
+        proof_bytes, commitment, log_size = _ext.prove(leaves, merkle_root=merkle_root)
     except Exception as exc:
         raise RuntimeError(f"qlsa-stark-stwo prove failed: {exc}") from exc
 

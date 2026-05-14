@@ -15,14 +15,21 @@ except ImportError:
     _HAVE_EXT = False
 
 
-def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
+def verify_batch_proof(
+    proof: bytes,
+    commitment: str,
+    log_size: int,
+    merkle_root: bytes | None = None,
+) -> bool:
     """
     Verify a Circle STARK proof (Stwo 2.2.0) for the given batch.
 
     Args:
-        proof:      Raw proof bytes (from ProofResult.proof).
-        commitment: 32-char hex commitment string (from ProofResult.commitment).
-        log_size:   log₂(trace length) (from ProofResult.log_size).
+        proof:       Raw proof bytes (from ProofResult.proof).
+        commitment:  32-char hex commitment string (from ProofResult.commitment).
+        log_size:    log₂(trace length) (from ProofResult.log_size).
+        merkle_root: Optional SHA3-512 Merkle root bytes.  Must match the root
+                     used during proving; otherwise verification fails.
 
     Returns:
         True if the proof is valid, False otherwise.
@@ -32,7 +39,7 @@ def verify_batch_proof(proof: bytes, commitment: str, log_size: int) -> bool:
             "qlsa_stark_stwo extension required for verify. "
             "Install with: cd stark_stwo && maturin develop --features python --release"
         )
-    return _ext.verify(proof, commitment, log_size)
+    return bool(_ext.verify(proof, commitment, log_size, merkle_root=merkle_root))
 
 
 def verify_batch_poseidon2_proof(proof: bytes, commitment: str, log_size: int) -> bool:

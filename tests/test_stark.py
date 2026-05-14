@@ -147,7 +147,20 @@ def test_verify_valid_proof():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
     result = prove_batch(batch)
-    assert verify_batch_proof(result.proof, result.commitment, result.log_size) is True
+    # Merkle root is now a Fiat-Shamir public input — must pass the same root.
+    assert verify_batch_proof(result.proof, result.commitment, result.log_size,
+                              merkle_root=batch.merkle_root) is True
+
+
+@needs_ext
+def test_verify_wrong_merkle_root_fails():
+    """Proof generated for one batch must not verify with a different Merkle root."""
+    from stark.prover import prove_batch
+    batch = _make_signed_batch(4)
+    result = prove_batch(batch)
+    wrong_root = bytes([b ^ 0xFF for b in batch.merkle_root])
+    assert verify_batch_proof(result.proof, result.commitment, result.log_size,
+                              merkle_root=wrong_root) is False
 
 
 @needs_ext
@@ -157,7 +170,8 @@ def test_verify_tampered_proof_fails():
     result = prove_batch(batch)
     bad_proof = bytearray(result.proof)
     bad_proof[10] ^= 0xFF
-    assert verify_batch_proof(bytes(bad_proof), result.commitment, result.log_size) is False
+    assert verify_batch_proof(bytes(bad_proof), result.commitment, result.log_size,
+                              merkle_root=batch.merkle_root) is False
 
 
 @needs_ext

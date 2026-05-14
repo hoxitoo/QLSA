@@ -48,6 +48,18 @@ use air::{HashChainComponent, HashChainEval};
 //    Used by prove/verify_ntt, prove/verify_poly_mul, prove/verify_poly_add (INTT).
 //    Birthday bound: ~2^{-64} for collision in 4 independent M31 words.
 
+// ── Fiat-Shamir seed helper ───────────────────────────────────────────────────
+
+/// Convert arbitrary bytes into M31-safe u32 words for `channel.mix_u32s`.
+/// Bytes are chunked by 4 (little-endian); the last partial chunk is zero-padded.
+fn seed_to_u32_words(seed: &[u8]) -> Vec<u32> {
+    seed.chunks(4).map(|b| {
+        let mut arr = [0u8; 4];
+        arr[..b.len()].copy_from_slice(b);
+        u32::from_le_bytes(arr)
+    }).collect()
+}
+
 // ── Scheme A helpers ─────────────────────────────────────────────────────────
 
 /// Build a 128-bit commitment (32 hex chars) from the circuit output and proof bytes.
@@ -154,7 +166,13 @@ fn make_config(log_size: u32) -> PcsConfig {
 ///
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
 /// `commitment_hex` is the 8-char little-endian hex of `h[last_row]` (4 bytes, M31).
-pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String> {
+/// Prove a hash-chain over `leaves`.
+///
+/// `merkle_root_seed` — if non-empty, its bytes are mixed into the Fiat-Shamir
+/// channel **before** the first trace commitment.  This binds the proof to a
+/// specific Merkle root: a proof for root R₁ will not verify with root R₂.
+/// Pass `&[]` (or the Python default `None`) for backward-compatible behaviour.
+pub fn prove_hash_chain(leaves: &[u64], merkle_root_seed: &[u8]) -> Result<(Vec<u8>, String, u32), String> {
     if leaves.is_empty() {
         return Err("leaves must not be empty".into());
     }
@@ -175,6 +193,14 @@ pub fn prove_hash_chain(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String
     );
 
     let channel = &mut Blake2sM31Channel::default();
+
+    // Bind the Merkle root to the Fiat-Shamir transcript BEFORE the first trace commitment.
+    // This makes FRI query positions depend on the root: a proof for root R₁ cannot
+    // verify for root R₂ even though the trace columns are identical.
+    if !merkle_root_seed.is_empty() {
+        channel.mix_u32s(&seed_to_u32_words(merkle_root_seed));
+    }
+
     let mut commitment_scheme =
         CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
     commitment_scheme.set_store_polynomials_coefficients();
@@ -227,10 +253,15 @@ const M31_MODULUS: u32 = (1u32 << 31) - 1;
 const MAX_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Verify a proof previously produced by `prove_hash_chain`.
+///
+/// `merkle_root_seed` must match the value passed to `prove_hash_chain`
+/// (same bytes → same FRI queries → valid; any difference → invalid).
+/// Pass `&[]` for proofs produced without a root seed.
 pub fn verify_hash_chain(
     proof_bytes: &[u8],
     commitment_hex: &str,
     log_size: u32,
+    merkle_root_seed: &[u8],
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
 
@@ -258,6 +289,12 @@ pub fn verify_hash_chain(
     );
 
     let verifier_channel = &mut Blake2sM31Channel::default();
+
+    // Mirror the prover's root mixing (must happen BEFORE any commit).
+    if !merkle_root_seed.is_empty() {
+        verifier_channel.mix_u32s(&seed_to_u32_words(merkle_root_seed));
+    }
+
     let commitment_scheme =
         &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
@@ -1524,7 +1561,7 @@ pub fn prove_mldsa_batch(
         return Err("no valid ML-DSA-65 signatures in batch".into());
     }
 
-    let (proof_bytes, commitment, log_size) = prove_hash_chain(&leaves)?;
+    let (proof_bytes, commitment, log_size) = prove_hash_chain(&leaves, &[])?;
     Ok((proof_bytes, commitment, log_size, verified, rejected))
 }
 
@@ -1655,19 +1692,31 @@ use pyo3::prelude::*;
 
 /// prove(leaves) -> (proof: bytes, commitment: str, log_size: int)
 #[cfg(feature = "python")]
+/// prove(leaves, merkle_root=None) -> (proof: bytes, commitment: str, log_size: int)
+///
+/// `merkle_root` — optional bytes; if provided, mixed into Fiat-Shamir before
+/// the first trace commitment, binding the proof to this specific root.
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "prove")]
-fn py_prove(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
-    prove_hash_chain(&leaves).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+#[pyo3(signature = (leaves, merkle_root=None))]
+fn py_prove(leaves: Vec<u64>, merkle_root: Option<Vec<u8>>) -> PyResult<(Vec<u8>, String, u32)> {
+    let seed = merkle_root.as_deref().unwrap_or(&[]);
+    prove_hash_chain(&leaves, seed).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
-/// verify(proof, commitment, log_size) -> bool
+/// verify(proof, commitment, log_size, merkle_root=None) -> bool
+///
+/// `merkle_root` must match the value used during proving (same bytes = same
+/// FRI queries).  Pass `None` for proofs produced without a root seed.
 /// Returns False on any verification failure; never raises.
 #[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "verify")]
-fn py_verify(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
-    verify_hash_chain(&proof, &commitment, log_size).unwrap_or(false)
+#[pyo3(signature = (proof, commitment, log_size, merkle_root=None))]
+fn py_verify(proof: Vec<u8>, commitment: String, log_size: u32, merkle_root: Option<Vec<u8>>) -> bool {
+    let seed = merkle_root.as_deref().unwrap_or(&[]);
+    verify_hash_chain(&proof, &commitment, log_size, seed).unwrap_or(false)
 }
 
 /// prove_p2(leaves) -> (proof: bytes, commitment: str, log_size: int)
@@ -2478,10 +2527,30 @@ mod tests {
     fn test_prove_and_verify() {
         let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_hash_chain(&leaves).expect("proving failed");
-        let valid = verify_hash_chain(&proof_bytes, &commitment_hex, log_size)
+            prove_hash_chain(&leaves, &[]).expect("proving failed");
+        let valid = verify_hash_chain(&proof_bytes, &commitment_hex, log_size, &[])
             .expect("verification failed");
         assert!(valid);
+    }
+
+    #[test]
+    fn test_hash_chain_merkle_root_binding() {
+        let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
+        let root_a = b"merkle_root_batch_A_64_bytes_padding_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let root_b = b"merkle_root_batch_B_64_bytes_padding_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_hash_chain(&leaves, root_a).expect("proving failed");
+
+        // Same root → must verify.
+        let ok = verify_hash_chain(&proof_bytes, &commitment_hex, log_size, root_a)
+            .expect("verify failed");
+        assert!(ok, "same root must verify");
+
+        // Different root → must fail (different FRI query positions).
+        let fail = verify_hash_chain(&proof_bytes, &commitment_hex, log_size, root_b)
+            .unwrap_or(false);
+        assert!(!fail, "different root must not verify");
     }
 
     // ── Poseidon2 tests ───────────────────────────────────────────────────────
@@ -2524,7 +2593,7 @@ mod tests {
     fn test_wrong_commitment_fails_hash_chain() {
         let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_hash_chain(&leaves).expect("proving failed");
+            prove_hash_chain(&leaves, &[]).expect("proving failed");
         // Mutate the M31 component (bytes [0:4]) — the suffix check will catch it.
         let bad_commitment = {
             let mut bytes = hex::decode(&commitment_hex).unwrap();
@@ -2534,7 +2603,7 @@ mod tests {
             hex::encode(&bytes)
         };
         // Wrong commitment → suffix mismatch; parse_commitment_128 returns Err → false.
-        let result = verify_hash_chain(&proof_bytes, &bad_commitment, log_size)
+        let result = verify_hash_chain(&proof_bytes, &bad_commitment, log_size, &[])
             .unwrap_or(false);
         assert!(!result, "wrong commitment should cause verification failure");
     }
