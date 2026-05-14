@@ -328,7 +328,7 @@ pub fn verify_hash_chain(
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
 /// `commitment_hex` is the 8-char little-endian hex of the M31 commitment (s0 at
 /// the last real row — i.e. after absorbing all leaves).
-pub fn prove_hash_chain_poseidon2(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String> {
+pub fn prove_hash_chain_poseidon2(leaves: &[u64], seed: &[u8]) -> Result<(Vec<u8>, String, u32), String> {
     use poseidon2_air::{build_trace, compute_log_size, preprocessed_column_ids};
 
     if leaves.is_empty() {
@@ -348,6 +348,12 @@ pub fn prove_hash_chain_poseidon2(leaves: &[u64]) -> Result<(Vec<u8>, String, u3
     );
 
     let channel = &mut Blake2sM31Channel::default();
+
+    // Bind seed (batch Merkle root) to Fiat-Shamir transcript before first commit.
+    if !seed.is_empty() {
+        channel.mix_u32s(&seed_to_u32_words(seed));
+    }
+
     let mut commitment_scheme =
         CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
     commitment_scheme.set_store_polynomials_coefficients();
@@ -391,6 +397,7 @@ pub fn verify_hash_chain_poseidon2(
     proof_bytes: &[u8],
     commitment_hex: &str,
     log_size: u32,
+    seed: &[u8],
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
     use poseidon2_air::preprocessed_column_ids;
@@ -420,6 +427,12 @@ pub fn verify_hash_chain_poseidon2(
     );
 
     let verifier_channel = &mut Blake2sM31Channel::default();
+
+    // Replay seed mixing — must match the prover's transcript exactly.
+    if !seed.is_empty() {
+        verifier_channel.mix_u32s(&seed_to_u32_words(seed));
+    }
+
     let commitment_scheme =
         &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
@@ -1571,7 +1584,7 @@ pub fn prove_mldsa_batch(
 ///
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
 /// `commitment_hex` is the 8-char little-endian hex of the Merkle root (M31).
-pub fn prove_merkle_root(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), String> {
+pub fn prove_merkle_root(leaves: &[u64], seed: &[u8]) -> Result<(Vec<u8>, String, u32), String> {
     use poseidon2_merkle_air::{build_trace, compute_log_size};
 
     if leaves.is_empty() {
@@ -1591,6 +1604,12 @@ pub fn prove_merkle_root(leaves: &[u64]) -> Result<(Vec<u8>, String, u32), Strin
     );
 
     let channel = &mut Blake2sM31Channel::default();
+
+    // Bind seed (batch Merkle root) to Fiat-Shamir transcript before first commit.
+    if !seed.is_empty() {
+        channel.mix_u32s(&seed_to_u32_words(seed));
+    }
+
     let mut commitment_scheme =
         CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
     commitment_scheme.set_store_polynomials_coefficients();
@@ -1629,6 +1648,7 @@ pub fn verify_merkle_root(
     proof_bytes: &[u8],
     commitment_hex: &str,
     log_size: u32,
+    seed: &[u8],
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
 
@@ -1652,6 +1672,12 @@ pub fn verify_merkle_root(
     let component = poseidon2_merkle_air::new_component(log_size);
 
     let verifier_channel = &mut Blake2sM31Channel::default();
+
+    // Replay seed mixing — must match the prover's transcript exactly.
+    if !seed.is_empty() {
+        verifier_channel.mix_u32s(&seed_to_u32_words(seed));
+    }
+
     let commitment_scheme =
         &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
@@ -1719,32 +1745,46 @@ fn py_verify(proof: Vec<u8>, commitment: String, log_size: u32, merkle_root: Opt
     verify_hash_chain(&proof, &commitment, log_size, seed).unwrap_or(false)
 }
 
-/// prove_p2(leaves) -> (proof: bytes, commitment: str, log_size: int)
+/// prove_p2(leaves, seed=None) -> (proof: bytes, commitment: str, log_size: int)
+///
+/// `seed` (optional bytes): batch Merkle root to mix into the Fiat-Shamir transcript
+/// as a domain separator, binding the proof to a specific batch.
 #[cfg(feature = "python")]
 #[pyfunction]
-fn prove_p2(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
-    prove_hash_chain_poseidon2(&leaves).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+#[pyo3(signature = (leaves, seed=None))]
+fn prove_p2(leaves: Vec<u64>, seed: Option<Vec<u8>>) -> PyResult<(Vec<u8>, String, u32)> {
+    prove_hash_chain_poseidon2(&leaves, seed.as_deref().unwrap_or(&[]))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
-/// verify_p2(proof, commitment, log_size) -> bool
+/// verify_p2(proof, commitment, log_size, seed=None) -> bool
 #[cfg(feature = "python")]
 #[pyfunction]
-fn verify_p2(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
-    verify_hash_chain_poseidon2(&proof, &commitment, log_size).unwrap_or(false)
+#[pyo3(signature = (proof, commitment, log_size, seed=None))]
+fn verify_p2(proof: Vec<u8>, commitment: String, log_size: u32, seed: Option<Vec<u8>>) -> bool {
+    verify_hash_chain_poseidon2(&proof, &commitment, log_size, seed.as_deref().unwrap_or(&[]))
+        .unwrap_or(false)
 }
 
-/// prove_merkle(leaves) -> (proof: bytes, commitment: str, log_size: int)
+/// prove_merkle(leaves, seed=None) -> (proof: bytes, commitment: str, log_size: int)
+///
+/// `seed` (optional bytes): batch Merkle root to mix into the Fiat-Shamir transcript
+/// as a domain separator, binding the proof to a specific batch.
 #[cfg(feature = "python")]
 #[pyfunction]
-fn prove_merkle(leaves: Vec<u64>) -> PyResult<(Vec<u8>, String, u32)> {
-    prove_merkle_root(&leaves).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+#[pyo3(signature = (leaves, seed=None))]
+fn prove_merkle(leaves: Vec<u64>, seed: Option<Vec<u8>>) -> PyResult<(Vec<u8>, String, u32)> {
+    prove_merkle_root(&leaves, seed.as_deref().unwrap_or(&[]))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
-/// verify_merkle(proof, commitment, log_size) -> bool
+/// verify_merkle(proof, commitment, log_size, seed=None) -> bool
 #[cfg(feature = "python")]
 #[pyfunction]
-fn verify_merkle(proof: Vec<u8>, commitment: String, log_size: u32) -> bool {
-    verify_merkle_root(&proof, &commitment, log_size).unwrap_or(false)
+#[pyo3(signature = (proof, commitment, log_size, seed=None))]
+fn verify_merkle(proof: Vec<u8>, commitment: String, log_size: u32, seed: Option<Vec<u8>>) -> bool {
+    verify_merkle_root(&proof, &commitment, log_size, seed.as_deref().unwrap_or(&[]))
+        .unwrap_or(false)
 }
 
 /// prove_ntt_py(f) -> (proof: bytes, commitment: str, ntt_out: list[int])
@@ -2559,8 +2599,8 @@ mod tests {
     fn test_poseidon2_prove_and_verify() {
         let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_hash_chain_poseidon2(&leaves).expect("poseidon2 proving failed");
-        let valid = verify_hash_chain_poseidon2(&proof_bytes, &commitment_hex, log_size)
+            prove_hash_chain_poseidon2(&leaves, &[]).expect("poseidon2 proving failed");
+        let valid = verify_hash_chain_poseidon2(&proof_bytes, &commitment_hex, log_size, &[])
             .expect("poseidon2 verification failed");
         assert!(valid);
     }
@@ -2570,7 +2610,7 @@ mod tests {
         use poseidon2::poseidon2_chain;
         let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
         let (_, commitment_hex, _) =
-            prove_hash_chain_poseidon2(&leaves).expect("poseidon2 proving failed");
+            prove_hash_chain_poseidon2(&leaves, &[]).expect("poseidon2 proving failed");
         let (expected_s0, _) = poseidon2_chain(&leaves);
         let expected_m31_hex = hex::encode(BaseField::from_u32_unchecked(expected_s0 as u32).0.to_le_bytes());
         // Commitment is now 128-bit; the first 8 chars (4 bytes) encode the M31 value.
@@ -2581,12 +2621,67 @@ mod tests {
     fn test_poseidon2_tampered_proof_fails() {
         let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_hash_chain_poseidon2(&leaves).expect("poseidon2 proving failed");
+            prove_hash_chain_poseidon2(&leaves, &[]).expect("poseidon2 proving failed");
         let mut bad_proof = proof_bytes.clone();
         bad_proof[20] ^= 0xFF;
-        let result = verify_hash_chain_poseidon2(&bad_proof, &commitment_hex, log_size)
+        let result = verify_hash_chain_poseidon2(&bad_proof, &commitment_hex, log_size, &[])
             .unwrap_or(false);
         assert!(!result);
+    }
+
+    #[test]
+    fn test_poseidon2_seed_binds_proof() {
+        // A proof generated with seed_a must NOT verify against seed_b.
+        // The seed is mixed into the Fiat-Shamir channel before the first tree commit,
+        // so any seed mismatch causes divergent FRI query positions → verification fails.
+        let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
+        let seed_a = b"batch_merkle_root_32_bytes_aaaaaa";
+        let seed_b = b"batch_merkle_root_32_bytes_bbbbbb";
+
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_hash_chain_poseidon2(&leaves, seed_a).expect("poseidon2 proving failed");
+
+        // Same seed → should verify.
+        assert!(
+            verify_hash_chain_poseidon2(&proof_bytes, &commitment_hex, log_size, seed_a)
+                .unwrap_or(false),
+            "proof should verify with correct seed"
+        );
+
+        // Different seed → should fail.
+        assert!(
+            !verify_hash_chain_poseidon2(&proof_bytes, &commitment_hex, log_size, seed_b)
+                .unwrap_or(false),
+            "proof should NOT verify with wrong seed"
+        );
+
+        // Empty seed → should also fail.
+        assert!(
+            !verify_hash_chain_poseidon2(&proof_bytes, &commitment_hex, log_size, &[])
+                .unwrap_or(false),
+            "proof should NOT verify with no seed when proven with seed"
+        );
+    }
+
+    #[test]
+    fn test_merkle_seed_binds_proof() {
+        let leaves = vec![1u64, 2, 3, 4];
+        let seed_a = b"merkle_seed_aaaaaaaaaaaaaaaaaaaaa";
+        let seed_b = b"merkle_seed_bbbbbbbbbbbbbbbbbbbbb";
+
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_merkle_root(&leaves, seed_a).expect("merkle proving failed");
+
+        assert!(
+            verify_merkle_root(&proof_bytes, &commitment_hex, log_size, seed_a)
+                .unwrap_or(false),
+            "proof should verify with correct seed"
+        );
+        assert!(
+            !verify_merkle_root(&proof_bytes, &commitment_hex, log_size, seed_b)
+                .unwrap_or(false),
+            "proof should NOT verify with wrong seed"
+        );
     }
 
     #[test]
@@ -2612,7 +2707,7 @@ mod tests {
     fn test_wrong_commitment_fails_poseidon2() {
         let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_hash_chain_poseidon2(&leaves).expect("poseidon2 proving failed");
+            prove_hash_chain_poseidon2(&leaves, &[]).expect("poseidon2 proving failed");
         let bad_commitment = {
             let mut bytes = hex::decode(&commitment_hex).unwrap();
             let mut val = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
@@ -2620,7 +2715,7 @@ mod tests {
             bytes[0..4].copy_from_slice(&val.to_le_bytes());
             hex::encode(&bytes)
         };
-        let result = verify_hash_chain_poseidon2(&proof_bytes, &bad_commitment, log_size)
+        let result = verify_hash_chain_poseidon2(&proof_bytes, &bad_commitment, log_size, &[])
             .unwrap_or(false);
         assert!(!result, "wrong commitment should cause poseidon2 verification failure");
     }
@@ -2629,7 +2724,7 @@ mod tests {
     fn test_wrong_commitment_fails_merkle() {
         let leaves = vec![1u64, 2, 3, 4];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_merkle_root(&leaves).expect("merkle proving failed");
+            prove_merkle_root(&leaves, &[]).expect("merkle proving failed");
         let bad_commitment = {
             let mut bytes = hex::decode(&commitment_hex).unwrap();
             let mut val = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
@@ -2637,7 +2732,7 @@ mod tests {
             bytes[0..4].copy_from_slice(&val.to_le_bytes());
             hex::encode(&bytes)
         };
-        let result = verify_merkle_root(&proof_bytes, &bad_commitment, log_size)
+        let result = verify_merkle_root(&proof_bytes, &bad_commitment, log_size, &[])
             .unwrap_or(false);
         assert!(!result, "wrong commitment should cause merkle verification failure");
     }
@@ -2648,8 +2743,8 @@ mod tests {
     fn test_merkle_prove_and_verify() {
         let leaves = vec![1u64, 2, 3, 4];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_merkle_root(&leaves).expect("merkle proving failed");
-        let valid = verify_merkle_root(&proof_bytes, &commitment_hex, log_size)
+            prove_merkle_root(&leaves, &[]).expect("merkle proving failed");
+        let valid = verify_merkle_root(&proof_bytes, &commitment_hex, log_size, &[])
             .expect("merkle verification failed");
         assert!(valid);
     }
@@ -2658,7 +2753,7 @@ mod tests {
     fn test_merkle_commitment_matches_root() {
         let leaves = vec![10u64, 20, 30, 40];
         let (_, commitment_hex, _) =
-            prove_merkle_root(&leaves).expect("merkle proving failed");
+            prove_merkle_root(&leaves, &[]).expect("merkle proving failed");
         let expected = poseidon2_merkle_air::merkle_root(&leaves);
         let expected_m31_hex =
             hex::encode(BaseField::from_u32_unchecked(expected as u32).0.to_le_bytes());
@@ -2670,10 +2765,10 @@ mod tests {
     fn test_merkle_tampered_proof_fails() {
         let leaves = vec![1u64, 2, 3, 4];
         let (proof_bytes, commitment_hex, log_size) =
-            prove_merkle_root(&leaves).expect("merkle proving failed");
+            prove_merkle_root(&leaves, &[]).expect("merkle proving failed");
         let mut bad_proof = proof_bytes.clone();
         bad_proof[20] ^= 0xFF;
-        let result = verify_merkle_root(&bad_proof, &commitment_hex, log_size)
+        let result = verify_merkle_root(&bad_proof, &commitment_hex, log_size, &[])
             .unwrap_or(false);
         assert!(!result);
     }

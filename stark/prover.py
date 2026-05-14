@@ -134,7 +134,7 @@ def _call_prover_p2(
 ) -> Poseidon2ProofResult:
     _require_ext("prove_p2")
     try:
-        proof_bytes, commitment, log_size = _ext.prove_p2(leaves)
+        proof_bytes, commitment, log_size = _ext.prove_p2(leaves, merkle_root)
     except Exception as exc:
         raise RuntimeError(f"qlsa-stark-stwo prove_p2 failed: {exc}") from exc
 
@@ -454,7 +454,7 @@ def _call_prover_merkle(
         )
 
     try:
-        proof_bytes, commitment, log_size = _ext.prove_merkle(leaves)
+        proof_bytes, commitment, log_size = _ext.prove_merkle(leaves, merkle_root)
     except Exception as exc:
         raise RuntimeError(f"qlsa-stark-stwo merkle_prove failed: {exc}") from exc
 

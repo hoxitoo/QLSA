@@ -258,7 +258,10 @@ def test_prove_batch_poseidon2_verify_roundtrip():
     from stark.prover import prove_batch_poseidon2
     batch = _make_signed_batch(4)
     result = prove_batch_poseidon2(batch)
-    assert verify_batch_poseidon2_proof(result.proof, result.commitment, result.log_size) is True
+    assert verify_batch_poseidon2_proof(
+        result.proof, result.commitment, result.log_size,
+        seed=batch.merkle_root,
+    ) is True
 
 
 @needs_ext
@@ -291,7 +294,10 @@ def test_prove_batch_merkle_verify_roundtrip():
     from stark.prover import prove_batch_merkle
     batch = _make_signed_batch(4)
     result = prove_batch_merkle(batch)
-    assert verify_batch_merkle_proof(result.proof, result.commitment, result.log_size) is True
+    assert verify_batch_merkle_proof(
+        result.proof, result.commitment, result.log_size,
+        seed=batch.merkle_root,
+    ) is True
 
 
 @needs_ext

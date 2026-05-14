@@ -42,21 +42,39 @@ def verify_batch_proof(
     return bool(_ext.verify(proof, commitment, log_size, merkle_root=merkle_root))
 
 
-def verify_batch_poseidon2_proof(proof: bytes, commitment: str, log_size: int) -> bool:
-    """Verify a Poseidon2 hash-chain STARK proof (prove_batch_poseidon2 output)."""
+def verify_batch_poseidon2_proof(
+    proof: bytes,
+    commitment: str,
+    log_size: int,
+    seed: bytes | None = None,
+) -> bool:
+    """Verify a Poseidon2 hash-chain STARK proof (prove_batch_poseidon2 output).
+
+    `seed` must match the batch Merkle root passed to prove_batch_poseidon2 —
+    it was mixed into the Fiat-Shamir transcript and must be replayed here.
+    """
     if not _HAVE_EXT:
         raise RuntimeError(
             "qlsa_stark_stwo extension required for verify_p2. "
             "Install with: cd stark_stwo && maturin develop --features python --release"
         )
-    return bool(_ext.verify_p2(proof, commitment, log_size))
+    return bool(_ext.verify_p2(proof, commitment, log_size, seed))
 
 
-def verify_batch_merkle_proof(proof: bytes, commitment: str, log_size: int) -> bool:
-    """Verify a Poseidon2 Merkle-tree STARK proof (prove_batch_merkle output)."""
+def verify_batch_merkle_proof(
+    proof: bytes,
+    commitment: str,
+    log_size: int,
+    seed: bytes | None = None,
+) -> bool:
+    """Verify a Poseidon2 Merkle-tree STARK proof (prove_batch_merkle output).
+
+    `seed` must match the batch Merkle root passed to prove_batch_merkle —
+    it was mixed into the Fiat-Shamir transcript and must be replayed here.
+    """
     if not _HAVE_EXT:
         raise RuntimeError(
             "qlsa_stark_stwo extension required for verify_merkle. "
             "Install with: cd stark_stwo && maturin develop --features python --release"
         )
-    return bool(_ext.verify_merkle(proof, commitment, log_size))
+    return bool(_ext.verify_merkle(proof, commitment, log_size, seed))
