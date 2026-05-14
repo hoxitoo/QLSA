@@ -284,19 +284,23 @@ class MldsaWitnessResult:
 
 
 def prove_mldsa_witness_stark(
-    a_hat:  list[list[int]],   # K*L flat list, each 256 ints, NTT-domain
-    z:      list[list[int]],   # L polynomials (signature)
-    c:      list[int],         # 256-int challenge polynomial
-    t1:     list[list[int]],   # K polynomials (public key)
-    hints:  list[list[bool]],  # K × 256 hint bits
-    k:      int,               # rows (must be 6 for ML-DSA-65)
-    l:      int,               # columns (must be 5 for ML-DSA-65)
+    a_hat:   list[list[int]],       # K*L flat list, each 256 ints, NTT-domain
+    z:       list[list[int]],       # L polynomials (signature)
+    c:       list[int],             # 256-int challenge polynomial
+    t1:      list[list[int]],       # K polynomials (public key)
+    hints:   list[list[bool]],      # K × 256 hint bits
+    k:       int,                   # rows (must be 6 for ML-DSA-65)
+    l:       int,                   # columns (must be 5 for ML-DSA-65)
+    c_tilde: bytes | None = None,   # FIPS 204 signature challenge (48 bytes); binds proof to (pk, msg)
 ) -> MldsaWitnessResult:
     """
     Prove the full ML-DSA.Verify arithmetic witness (V3 pipeline, 49 sub-proofs):
       Az-full  →  c·t₁  →  poly_sub  →  norm_check  →  UseHint  →  HintWeight
 
     Requires k=6, l=5 (ML-DSA-65). All coefficients must be in [0, Q=8_380_417).
+
+    c_tilde, if provided, is mixed into the Az-full Fiat-Shamir channel as a STARK
+    public input, binding the proof to the specific FIPS 204 signing challenge.
 
     Returns MldsaWitnessResult with the V3 serialized proof bundle,
     ||z||_∞ norms for each of the L signature polynomials,
@@ -307,7 +311,7 @@ def prove_mldsa_witness_stark(
     _require_ext("prove_mldsa_witness_v3_py")
     try:
         bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v3_py(
-            a_hat, z, c, t1, hints, k, l
+            a_hat, z, c, t1, hints, k, l, c_tilde
         )
     except Exception as exc:
         raise RuntimeError(f"prove_mldsa_witness_v3_py failed: {exc}") from exc

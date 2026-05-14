@@ -1116,8 +1116,9 @@ pub fn verify_az_row(
 /// The commitment fingerprints all K output polynomials concatenated (Scheme B, 128-bit).
 /// Both input (z_hat) and output fingerprints are mixed into the Fiat-Shamir channel.
 pub fn prove_az_full(
-    a_hat: &[[i64; mldsa::N]],
-    z_hat: &[[i64; mldsa::N]; mldsa::params::L],
+    a_hat:        &[[i64; mldsa::N]],
+    z_hat:        &[[i64; mldsa::N]; mldsa::params::L],
+    c_tilde_seed: &[u8],
 ) -> Result<(Vec<u8>, String, [[i64; mldsa::N]; mldsa::params::K]), String> {
     use mldsa_az_full_air::{AzFullEval, AzFullComponent, LOG_N_ROWS, build_trace};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
@@ -1161,6 +1162,17 @@ pub fn prove_az_full(
     );
 
     let channel = &mut Blake2sM31Channel::default();
+    // Mix c_tilde as STARK public input before any trace commitment.
+    // This binds the Fiat-Shamir randomness (query positions) to the specific
+    // signature challenge, making the proof non-reusable for a different c_tilde.
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        channel.mix_u32s(&words);
+    }
     let mut commitment_scheme =
         CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
     commitment_scheme.set_store_polynomials_coefficients();
@@ -1201,6 +1213,7 @@ pub fn verify_az_full(
     proof_bytes:    &[u8],
     commitment_hex: &str,
     z_hat:          &[[i64; mldsa::N]; mldsa::params::L],
+    c_tilde_seed:   &[u8],
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
     use mldsa_az_full_air::{AzFullEval, AzFullComponent, LOG_N_ROWS};
@@ -1235,6 +1248,15 @@ pub fn verify_az_full(
     );
 
     let verifier_channel = &mut Blake2sM31Channel::default();
+    // Replay c_tilde domain separator to match prover transcript.
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        verifier_channel.mix_u32s(&words);
+    }
     let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
     let sizes = component.trace_log_degree_bounds();
@@ -1764,17 +1786,20 @@ fn verify_az_row_py(proof: Vec<u8>, commitment: String, z_hat: Vec<Vec<i64>>) ->
     verify_az_row(&proof, &commitment, &z_slices).unwrap_or(false)
 }
 
-/// prove_az_full_py(a_hat, z_hat) -> (proof: bytes, commitment: str, az_out: list[list[int]])
+/// prove_az_full_py(a_hat, z_hat, c_tilde=None) -> (proof: bytes, commitment: str, az_out: list[list[int]])
 ///
 /// Proves all K=6 rows of Az in one STARK.
 /// `a_hat` — list of K*L=30 lists of 256 ints (row-major: a_hat[i*L+j] = Ã[i][j]).
 /// `z_hat` — list of L=5 lists of 256 ints.
+/// `c_tilde` — optional bytes; if provided, mixed into Fiat-Shamir channel as public input.
 /// Returns `(proof_bytes, commitment_hex, az_out)` where az_out is K lists of 256 ints.
 #[cfg(feature = "python")]
 #[pyfunction]
+#[pyo3(signature = (a_hat, z_hat, c_tilde=None))]
 fn prove_az_full_py(
-    a_hat: Vec<Vec<i64>>,
-    z_hat: Vec<Vec<i64>>,
+    a_hat:   Vec<Vec<i64>>,
+    z_hat:   Vec<Vec<i64>>,
+    c_tilde: Option<Vec<u8>>,
 ) -> PyResult<(Vec<u8>, String, Vec<Vec<i64>>)> {
     use mldsa::params::{K, L};
     if a_hat.len() != K * L {
@@ -1797,18 +1822,26 @@ fn prove_az_full_py(
         .collect::<PyResult<Vec<[i64; 256]>>>()?
         .try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("z_hat must have exactly L=5 lists"))?;
-    let (proof, commitment, az_out) = prove_az_full(&a_arr, &z_arr)
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+    let (proof, commitment, az_out) = prove_az_full(&a_arr, &z_arr, seed)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
     let az_out_py: Vec<Vec<i64>> = az_out.iter().map(|row| row.to_vec()).collect();
     Ok((proof, commitment, az_out_py))
 }
 
-/// verify_az_full_py(proof, commitment, z_hat) -> bool
+/// verify_az_full_py(proof, commitment, z_hat, c_tilde=None) -> bool
 ///
 /// `z_hat` must be the same L=5 lists of 256 ints used when proving.
+/// `c_tilde` must match the value passed during proving (if any).
 #[cfg(feature = "python")]
 #[pyfunction]
-fn verify_az_full_py(proof: Vec<u8>, commitment: String, z_hat: Vec<Vec<i64>>) -> bool {
+#[pyo3(signature = (proof, commitment, z_hat, c_tilde=None))]
+fn verify_az_full_py(
+    proof:      Vec<u8>,
+    commitment: String,
+    z_hat:      Vec<Vec<i64>>,
+    c_tilde:    Option<Vec<u8>>,
+) -> bool {
     use mldsa::params::L;
     let z_arr: [[i64; 256]; 5] = match (0..L)
         .map(|j| z_hat.get(j).and_then(|zj| zj.clone().try_into().ok()))
@@ -1818,7 +1851,8 @@ fn verify_az_full_py(proof: Vec<u8>, commitment: String, z_hat: Vec<Vec<i64>>) -
         Some(a) => a,
         None => return false,
     };
-    verify_az_full(&proof, &commitment, &z_arr).unwrap_or(false)
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+    verify_az_full(&proof, &commitment, &z_arr, seed).unwrap_or(false)
 }
 
 /// prove_intt_bound_py(f) -> (proof: bytes, commitment: str)
@@ -2051,16 +2085,19 @@ fn verify_mldsa_witness_v2_py(proof_bundle: Vec<u8>) -> bool {
 ///
 /// Returns `(bundle: bytes, max_norms: list[int], w1_prime: list[list[int]], hint_weight_total: int)`.
 /// Requires k = 6, l = 5 (ML-DSA-65).
+/// `c_tilde` — optional bytes; if provided, mixed into Fiat-Shamir as STARK public input.
 #[cfg(feature = "python")]
 #[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None))]
 fn prove_mldsa_witness_v3_py(
-    a_hat:  Vec<Vec<i64>>,
-    z:      Vec<Vec<i64>>,
-    c:      Vec<i64>,
-    t1:     Vec<Vec<i64>>,
-    hints:  Vec<Vec<bool>>,
-    k:      usize,
-    l:      usize,
+    a_hat:   Vec<Vec<i64>>,
+    z:       Vec<Vec<i64>>,
+    c:       Vec<i64>,
+    t1:      Vec<Vec<i64>>,
+    hints:   Vec<Vec<bool>>,
+    k:       usize,
+    l:       usize,
+    c_tilde: Option<Vec<u8>>,
 ) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
     let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
         vv.into_iter().enumerate().map(|(i, v)| {
@@ -2075,9 +2112,10 @@ fn prove_mldsa_witness_v3_py(
     let c_arr: [i64; 256] = c.try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
     let t1_arr  = to_poly_vec(t1, "t1")?;
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
 
     let proof = mldsa_verify_stark::prove_verify_mldsa_v3(
-        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l,
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
     let max_norms = proof.max_norms.clone();
@@ -2179,8 +2217,10 @@ fn prove_mldsa_sig_witness_py(
     }
 
     // Run the full V3 STARK witness pipeline (Az-full AIR + hint weight, 49 sub-proofs).
+    // c_tilde is mixed into the Az-full Fiat-Shamir channel as a STARK public input,
+    // binding the proof to this specific signature challenge.
     let proof = mldsa_verify_stark::prove_verify_mldsa_v3(
-        &a_hat_flat, &z_arr, &c_arr, &t1_arr, &hints, K, L,
+        &a_hat_flat, &z_arr, &c_arr, &t1_arr, &hints, K, L, &c_tilde,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
     let max_norms       = proof.max_norms.clone();

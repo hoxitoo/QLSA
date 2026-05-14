@@ -590,10 +590,11 @@ pub struct AzProofV3 {
 /// `z`     — L polynomial-domain polynomials.
 /// Produces 12 sub-proofs total (L + 1 + K) vs 17 in v2.
 pub fn prove_az_v3(
-    a_hat: &[[i64; N]],
-    z:     &[[i64; N]],
-    k:     usize,
-    l:     usize,
+    a_hat:        &[[i64; N]],
+    z:            &[[i64; N]],
+    k:            usize,
+    l:            usize,
+    c_tilde_seed: &[u8],
 ) -> Result<AzProofV3, String> {
     use crate::mldsa::params;
     if l != params::L {
@@ -622,8 +623,8 @@ pub fn prove_az_v3(
     let z_hat_arr: [[i64; N]; 5] = z_hat.as_slice().try_into()
         .map_err(|_| "z_hat must have exactly L=5 entries".to_string())?;
 
-    // Step 2: Prove Az for all K rows simultaneously.
-    let (pb_az, cm_az, az_out_arr) = crate::prove_az_full(a_hat, &z_hat_arr)
+    // Step 2: Prove Az for all K rows simultaneously, with c_tilde as public input.
+    let (pb_az, cm_az, az_out_arr) = crate::prove_az_full(a_hat, &z_hat_arr, c_tilde_seed)
         .map_err(|e| format!("prove_az_full failed: {e}"))?;
     let proof_az_full = (pb_az, cm_az);
 
@@ -659,7 +660,7 @@ pub fn prove_az_v3(
 ///   3. Az-full→az_hat: stored az_hat fingerprint (all K rows concatenated) matches
 ///      the Az-full output commitment.
 ///   4. az_hat→INTT: `verify_intt_with_binding` binds each INTT proof to its az_hat[i].
-pub fn verify_az_v3(proof: &AzProofV3) -> Result<bool, String> {
+pub fn verify_az_v3(proof: &AzProofV3, c_tilde_seed: &[u8]) -> Result<bool, String> {
     let l = proof.z_hat.len();
     let k = proof.proofs_intt.len();
 
@@ -685,7 +686,7 @@ pub fn verify_az_v3(proof: &AzProofV3) -> Result<bool, String> {
         Ok(a) => a,
         Err(_) => return Err(format!("z_hat must have exactly L=5 entries, got {}", l)),
     };
-    if !crate::verify_az_full(&proof.proof_az_full.0, &proof.proof_az_full.1, &z_hat_arr)
+    if !crate::verify_az_full(&proof.proof_az_full.0, &proof.proof_az_full.1, &z_hat_arr, c_tilde_seed)
         .map_err(|e| format!("Az-full verify failed: {e}"))? {
         return Ok(false);
     }
@@ -873,6 +874,10 @@ pub struct VerifyMldsaProofV3 {
     pub w1_prime:          Vec<[i64; N]>,
     pub max_norms:         Vec<i64>,
     pub hint_weight_total: usize,
+    /// FIPS 204 signature challenge (c̃, 48 bytes for ML-DSA-65).
+    /// Mixed into the Az-full Fiat-Shamir channel as a STARK public input,
+    /// binding the proof to the specific (pk, msg) pair.
+    pub c_tilde:           Vec<u8>,
 }
 
 /// Prove the full ML-DSA.Verify arithmetic witness using the full-matrix Az AIR.
@@ -880,13 +885,14 @@ pub struct VerifyMldsaProofV3 {
 /// Produces 49 sub-proofs (vs 53 in v2, 101 in v1) and includes a STARK proof
 /// for the hint weight check Σ||h[i]||₁ ≤ ω=55.
 pub fn prove_verify_mldsa_v3(
-    a_hat: &[[i64; N]],
-    z:     &[[i64; N]],
-    c:     &[i64; N],
-    t1:    &[[i64; N]],
-    hints: &[Vec<bool>],
-    k:     usize,
-    l:     usize,
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    c:       &[i64; N],
+    t1:      &[[i64; N]],
+    hints:   &[Vec<bool>],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
 ) -> Result<VerifyMldsaProofV3, String> {
     if t1.len() != k {
         return Err(format!("t1 must have k={k} entries, got {}", t1.len()));
@@ -901,7 +907,8 @@ pub fn prove_verify_mldsa_v3(
     }
 
     // Step 1: Prove Az using the full-matrix AIR (all K rows, one proof).
-    let az_proof = prove_az_v3(a_hat, z, k, l)
+    // c_tilde is threaded as a STARK public input into the Az-full channel.
+    let az_proof = prove_az_v3(a_hat, z, k, l, c_tilde)
         .map_err(|e| format!("prove_az_v3 failed: {e}"))?;
 
     // Step 2: Prove c·t₁.
@@ -956,12 +963,14 @@ pub fn prove_verify_mldsa_v3(
         w1_prime,
         max_norms,
         hint_weight_total,
+        c_tilde: c_tilde.to_vec(),
     })
 }
 
 /// Verify all STARK sub-proofs in a `VerifyMldsaProofV3`.
 pub fn verify_mldsa_witness_v3(proof: &VerifyMldsaProofV3) -> Result<bool, String> {
-    if !verify_az_v3(&proof.az_proof)
+    // Thread stored c_tilde back into verify_az_v3 to replay the Fiat-Shamir domain separator.
+    if !verify_az_v3(&proof.az_proof, &proof.c_tilde)
         .map_err(|e| format!("verify_az_v3 failed: {e}"))? {
         return Ok(false);
     }
@@ -1671,7 +1680,7 @@ mod tests {
         let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 1200)).collect();
         let h   = all_false_hints(k);
 
-        let proof = prove_verify_mldsa_v3(&a_hat, &z, &c, &t1, &h, k, l)
+        let proof = prove_verify_mldsa_v3(&a_hat, &z, &c, &t1, &h, k, l, b"")
             .expect("prove_verify_mldsa_v3 failed");
 
         assert_eq!(proof.hint_weight_total, 0, "all-zero hints have weight 0");
@@ -1863,7 +1872,7 @@ mod tests {
         let z: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 + 2000)).collect();
 
         let v2 = prove_az_v2(&a_hat, &z, k, l).expect("prove_az_v2 failed");
-        let v3 = prove_az_v3(&a_hat, &z, k, l).expect("prove_az_v3 failed");
+        let v3 = prove_az_v3(&a_hat, &z, k, l, b"").expect("prove_az_v3 failed");
 
         assert_eq!(v2.output, v3.output, "v2 and v3 Az outputs must be identical");
         assert_eq!(v3.proofs_ntt_z.len(), l, "v3: L NTT proofs");
@@ -1879,8 +1888,8 @@ mod tests {
             .collect();
         let z: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 + 4000)).collect();
 
-        let proof = prove_az_v3(&a_hat, &z, k, l).expect("prove_az_v3 failed");
-        let valid = verify_az_v3(&proof).expect("verify_az_v3 failed");
+        let proof = prove_az_v3(&a_hat, &z, k, l, b"").expect("prove_az_v3 failed");
+        let valid = verify_az_v3(&proof, b"").expect("verify_az_v3 failed");
         assert!(valid, "AzProofV3 must verify");
     }
 
@@ -1894,10 +1903,58 @@ mod tests {
             .collect();
         let z: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 + 6000)).collect();
 
-        let mut proof = prove_az_v3(&a_hat, &z, k, l).expect("prove_az_v3 failed");
+        let mut proof = prove_az_v3(&a_hat, &z, k, l, b"").expect("prove_az_v3 failed");
         proof.az_hat[0][0] = (proof.az_hat[0][0] + 1) % Q;
 
-        let valid = verify_az_v3(&proof).expect("verify_az_v3 should not error");
+        let valid = verify_az_v3(&proof, b"").expect("verify_az_v3 should not error");
         assert!(!valid, "Tampered az_hat must fail cross-check");
+    }
+
+    #[test]
+    fn test_verify_az_v3_wrong_c_tilde_fails() {
+        // Prove with c_tilde A, verify with c_tilde B — must fail (Fiat-Shamir mismatch).
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 7000); ntt(&mut h); h })
+            .collect();
+        let z: Vec<[i64; N]> = (0..l).map(|s| random_poly(s as u64 + 8000)).collect();
+
+        let c_tilde_a = b"c_tilde_challenge_A_48_bytes____padding__padding".as_slice();
+        let c_tilde_b = b"c_tilde_challenge_B_48_bytes____padding__padding".as_slice();
+
+        let proof = prove_az_v3(&a_hat, &z, k, l, c_tilde_a).expect("prove_az_v3 failed");
+
+        // Correct c_tilde must verify.
+        assert!(verify_az_v3(&proof, c_tilde_a).expect("verify should not error with correct c_tilde"));
+        // Wrong c_tilde must fail — Fiat-Shamir query positions are different.
+        assert!(!verify_az_v3(&proof, c_tilde_b).expect("verify should not error with wrong c_tilde"),
+            "verify with wrong c_tilde must fail");
+    }
+
+    #[test]
+    fn test_prove_verify_mldsa_v3_c_tilde_binding() {
+        // Prove V3 with c_tilde A, then tamper c_tilde in bundle → verify must fail.
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l).map(|s| { let mut h = random_poly(s as u64 + 9000); ntt(&mut h); h }).collect();
+        let z:  Vec<[i64; N]>   = (0..l).map(|s| random_poly(s as u64 + 9100)).collect();
+        let c:  [i64; N]        = random_poly(9200);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 9300)).collect();
+        let h   = all_false_hints(k);
+
+        let c_tilde_a: Vec<u8> = (0u8..48).collect();
+        let c_tilde_b: Vec<u8> = (1u8..49).collect();
+
+        let mut proof = prove_verify_mldsa_v3(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde_a)
+            .expect("prove_verify_mldsa_v3 failed");
+
+        // Correct c_tilde — must verify.
+        assert!(verify_mldsa_witness_v3(&proof).expect("verify should not error"));
+
+        // Tamper the stored c_tilde — Az-full Fiat-Shamir won't match → fail.
+        proof.c_tilde = c_tilde_b;
+        assert!(!verify_mldsa_witness_v3(&proof).expect("verify should not error after tamper"),
+            "tampered c_tilde must cause verification failure");
     }
 }

@@ -547,6 +547,48 @@ def test_prove_az_full_matches_az_row_per_row():
         assert az_full[i] == az_row_i, f"row {i}: az_full ≠ az_row"
 
 
+# ─── Az-full c_tilde public input (MVP-3+) ───────────────────────────────────
+
+@needs_ext
+def test_prove_az_full_c_tilde_bound_verifies():
+    """prove_az_full_py with c_tilde + verify with same c_tilde must pass."""
+    a_hat = [_rand_poly(i + 1400) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1500) for j in range(_LF)]
+    c_tilde = bytes(range(48))  # 48-byte challenge (ML-DSA-65 λ/4)
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat, c_tilde)
+    assert _ext.verify_az_full_py(proof, commitment, z_hat, c_tilde), \
+        "az_full with c_tilde should verify with matching c_tilde"
+
+
+@needs_ext
+def test_prove_az_full_wrong_c_tilde_fails():
+    """Verifying with a different c_tilde must fail (Fiat-Shamir mismatch)."""
+    a_hat = [_rand_poly(i + 1600) for i in range(_KF * _LF)]
+    z_hat = [_rand_poly(j + 1700) for j in range(_LF)]
+    c_tilde_a = bytes(range(48))
+    c_tilde_b = bytes(range(1, 49))  # different challenge
+    proof, commitment, _ = _ext.prove_az_full_py(a_hat, z_hat, c_tilde_a)
+    assert not _ext.verify_az_full_py(proof, commitment, z_hat, c_tilde_b), \
+        "az_full must fail verification with wrong c_tilde"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v3_c_tilde_binding():
+    """V3 proof with c_tilde stores it in bundle; tampered c_tilde fails verify."""
+    from stark.prover import prove_mldsa_witness_stark, verify_mldsa_witness_stark, MldsaWitnessResult
+
+    K3, L3 = 6, 5
+    a_hat = [_rand_poly(i + 1800) for i in range(K3 * L3)]
+    z     = [_rand_poly(100 + j + 1800) for j in range(L3)]
+    c     = _rand_poly(200 + 1800)
+    t1    = [_rand_poly(300 + i + 1800) for i in range(K3)]
+    hints = _zero_hints(K3)
+
+    c_tilde = bytes(range(48))
+    result = prove_mldsa_witness_stark(a_hat, z, c, t1, hints, K3, L3, c_tilde=c_tilde)
+    assert verify_mldsa_witness_stark(result), "V3 proof with c_tilde must verify"
+
+
 # ─── INTT with input binding (MVP-3+) ────────────────────────────────────────
 
 def _rand_poly_intt(seed: int) -> list[int]:
