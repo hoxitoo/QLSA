@@ -2456,6 +2456,574 @@ pub fn verify_norm_use_hint_combined(
     ).is_ok())
 }
 
+// ─── Combined Az+Ct1+NormCheck+UseHintBatchV2 STARK (MVP-3+, V19) ─────────────
+
+/// Prove Az-full, Ct1-full, NormCheckBatch, AND UseHintBatchV2 in ONE STARK.
+///
+/// All four AIRs share LOG_N_ROWS=8.  A shared `TraceLocationAllocator` with
+/// `is_init_uh` registered places the four component traces in one 1894-column
+/// commitment tree:
+///   Az (1523) + Ct1 (295) + NormCheck (15) + UseHintV2 (61) = 1894 main cols
+///   + 1 preprocessed col (is_init_uh).
+///
+/// c_tilde is mixed into the channel before the first tree commit (same as
+/// the Az+Ct1 binding in V16), binding the FRI challenge to the signature.
+///
+/// Returns `(proof_bytes, az_cm, ct1_cm, norm_cm, uh_cm,
+///           az_hat_out, ct1_hat_out, max_norms, w1_out, hint_weight_total)`.
+pub fn prove_az_ct1_norm_use_hint_combined(
+    a_hat:   &[[i64; mldsa::N]],
+    z_hat:   &[[i64; mldsa::N]; mldsa::params::L],
+    c_hat:   &[i64; mldsa::N],
+    t1_hat:  &[[i64; mldsa::N]; mldsa::params::K],
+    z:       &[[i64; mldsa::N]; mldsa::params::L],
+    w_prime: &[[i64; mldsa::N]; mldsa::params::K],
+    hints:   &[[bool; mldsa::N]; mldsa::params::K],
+    c_tilde_seed: &[u8],
+) -> Result<(
+    Vec<u8>, String, String, String, String,
+    [[i64; mldsa::N]; mldsa::params::K],
+    [[i64; mldsa::N]; mldsa::params::K],
+    [i64; mldsa::params::L],
+    [[i64; mldsa::N]; mldsa::params::K],
+    usize,
+), String> {
+    use mldsa_az_full_air::{
+        AzFullEval, AzFullComponent,
+        LOG_N_ROWS as AZ_LOG, N_COLS as AZ_N_COLS, build_trace as az_build_trace,
+    };
+    use mldsa_ct1_full_air::{
+        Ct1FullEval, Ct1FullComponent,
+        N_COLS as CT1_N_COLS, build_trace as ct1_build_trace,
+    };
+    use mldsa_norm_check_batch_air::{
+        NormCheckBatchEval, NormCheckBatchComponent,
+        N_COLS as NORM_N_COLS, build_trace as norm_build_trace,
+    };
+    use mldsa_use_hint_batch_air::{
+        UseHintBatchV2Eval, UseHintBatchV2Component,
+        N_COLS_V2 as UH_N_COLS, build_trace_v2, pc_is_init_uh,
+    };
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+    use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+
+    let log_size = AZ_LOG; // 8 — all four AIRs share this
+
+    // Build all four traces.
+    let (az_cols,   az_out)                          = az_build_trace(a_hat, z_hat);
+    let (ct1_cols,  ct1_out)                         = ct1_build_trace(c_hat, t1_hat);
+    let (norm_cols, norm_out, max_norms)             = norm_build_trace(z);
+    let (uh_main_cols, uh_preproc_cols, w1_out, hint_weight_total) = build_trace_v2(w_prime, hints);
+
+    debug_assert_eq!(az_cols.len(),   AZ_N_COLS);
+    debug_assert_eq!(ct1_cols.len(),  CT1_N_COLS);
+    debug_assert_eq!(norm_cols.len(), NORM_N_COLS);
+    debug_assert_eq!(uh_main_cols.len(), UH_N_COLS);
+
+    // Fingerprints for all four components.
+    let z_flat:    Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let az_in_fp   = output_fingerprint(&z_flat);
+    let az_out_flat: Vec<i64> = az_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let az_out_fp  = output_fingerprint(&az_out_flat);
+    let az_cm      = build_poly_commitment(&az_out_fp);
+
+    let ct1_in_flat: Vec<i64> = c_hat.iter().copied()
+        .chain(t1_hat.iter().flat_map(|r| r.iter().copied())).collect();
+    let ct1_in_fp  = output_fingerprint(&ct1_in_flat);
+    let ct1_out_flat: Vec<i64> = ct1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let ct1_out_fp = output_fingerprint(&ct1_out_flat);
+    let ct1_cm     = build_poly_commitment(&ct1_out_fp);
+
+    let norm_flat: Vec<i64> = norm_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let norm_fp    = output_fingerprint(&norm_flat);
+    let norm_cm    = build_poly_commitment(&norm_fp);
+
+    let mut uh_flat: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    uh_flat.push(hint_weight_total as i64);
+    let uh_fp  = output_fingerprint(&uh_flat);
+    let uh_cm  = build_poly_commitment(&uh_fp);
+
+    let config  = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    // c_tilde binding: bind FRI challenge to this specific signature (same as V16).
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        channel.mix_u32s(&words);
+    }
+
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: UseHintBatchV2 preprocessed column (is_init_uh).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(uh_preproc_cols);
+    tree_builder.commit(channel);
+
+    // Tree 1: all 1894 main cols in one commitment.
+    let mut combined_main = az_cols;
+    combined_main.extend(ct1_cols);
+    combined_main.extend(norm_cols);
+    combined_main.extend(uh_main_cols);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(combined_main);
+    tree_builder.commit(channel);
+
+    // Transcript: Az input→output, Ct1 input→output, Norm output, UseHint output.
+    channel.mix_u32s(&az_in_fp);
+    channel.mix_u32s(&az_out_fp);
+    channel.mix_u32s(&ct1_in_fp);
+    channel.mix_u32s(&ct1_out_fp);
+    channel.mix_u32s(&norm_fp);
+    channel.mix_u32s(&uh_fp);
+
+    // Shared allocator with is_init_uh registered (needed by UseHintBatchV2).
+    let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
+    let az_comp = AzFullComponent::new(
+        &mut alloc,
+        AzFullEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let ct1_comp = Ct1FullComponent::new(
+        &mut alloc,
+        Ct1FullEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let norm_comp = NormCheckBatchComponent::new(
+        &mut alloc,
+        NormCheckBatchEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let uh_comp = UseHintBatchV2Component::new(
+        &mut alloc,
+        UseHintBatchV2Eval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&az_comp, &ct1_comp, &norm_comp, &uh_comp], channel, commitment_scheme,
+    ).map_err(|e| format!("prove_az_ct1_norm_use_hint_combined error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, az_cm, ct1_cm, norm_cm, uh_cm,
+        az_out, ct1_out, max_norms, w1_out, hint_weight_total))
+}
+
+/// Verify a combined Az+Ct1+NormCheck+UseHintBatchV2 proof.
+pub fn verify_az_ct1_norm_use_hint_combined(
+    proof_bytes: &[u8],
+    az_cm:       &str,
+    ct1_cm:      &str,
+    norm_cm:     &str,
+    uh_cm:       &str,
+    z_hat:       &[[i64; mldsa::N]; mldsa::params::L],
+    c_hat:       &[i64; mldsa::N],
+    t1_hat:      &[[i64; mldsa::N]; mldsa::params::K],
+    az_hat_out:  &[[i64; mldsa::N]; mldsa::params::K],
+    ct1_hat_out: &[[i64; mldsa::N]; mldsa::params::K],
+    w1_out:      &[[i64; mldsa::N]; mldsa::params::K],
+    hint_weight_total: usize,
+    c_tilde_seed: &[u8],
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_az_full_air::{
+        AzFullEval, AzFullComponent,
+        LOG_N_ROWS as AZ_LOG, N_COLS as AZ_N_COLS,
+    };
+    use mldsa_ct1_full_air::{Ct1FullEval, Ct1FullComponent, N_COLS as CT1_N_COLS};
+    use mldsa_norm_check_batch_air::{NormCheckBatchEval, NormCheckBatchComponent, N_COLS as NORM_N_COLS};
+    use mldsa_use_hint_batch_air::{
+        UseHintBatchV2Eval, UseHintBatchV2Component,
+        N_COLS_V2 as UH_N_COLS, pc_is_init_uh,
+    };
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo_constraint_framework::TraceLocationAllocator;
+    use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+
+    let log_size = AZ_LOG;
+
+    // Recompute fingerprints.
+    let z_flat: Vec<i64> = z_hat.iter().flat_map(|zj| zj.iter().copied()).collect();
+    let az_in_fp  = output_fingerprint(&z_flat);
+    let az_out_flat: Vec<i64> = az_hat_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let az_out_fp = output_fingerprint(&az_out_flat);
+    if build_poly_commitment(&az_out_fp) != az_cm { return Ok(false); }
+
+    let ct1_in_flat: Vec<i64> = c_hat.iter().copied()
+        .chain(t1_hat.iter().flat_map(|r| r.iter().copied())).collect();
+    let ct1_in_fp  = output_fingerprint(&ct1_in_flat);
+    let ct1_out_flat: Vec<i64> = ct1_hat_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let ct1_out_fp = output_fingerprint(&ct1_out_flat);
+    if build_poly_commitment(&ct1_out_fp) != ct1_cm { return Ok(false); }
+
+    let norm_fp = parse_poly_commitment(norm_cm)?;
+
+    let mut uh_flat: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    uh_flat.push(hint_weight_total as i64);
+    let uh_fp      = output_fingerprint(&uh_flat);
+    let expected_uh_cm = build_poly_commitment(&uh_fp);
+    if expected_uh_cm != uh_cm { return Ok(false); }
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
+    let az_comp = AzFullComponent::new(
+        &mut alloc,
+        AzFullEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let ct1_comp = Ct1FullComponent::new(
+        &mut alloc,
+        Ct1FullEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let norm_comp = NormCheckBatchComponent::new(
+        &mut alloc,
+        NormCheckBatchEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let uh_comp = UseHintBatchV2Component::new(
+        &mut alloc,
+        UseHintBatchV2Eval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        verifier_channel.mix_u32s(&words);
+    }
+
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    // Tree 0: 1 preproc col; Tree 1: 1894 main cols.
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &[log_size; 1], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &[log_size; AZ_N_COLS + CT1_N_COLS + NORM_N_COLS + UH_N_COLS], verifier_channel);
+
+    // Replay transcript.
+    verifier_channel.mix_u32s(&az_in_fp);
+    verifier_channel.mix_u32s(&az_out_fp);
+    verifier_channel.mix_u32s(&ct1_in_fp);
+    verifier_channel.mix_u32s(&ct1_out_fp);
+    verifier_channel.mix_u32s(&norm_fp);
+    verifier_channel.mix_u32s(&uh_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(
+        &[&az_comp, &ct1_comp, &norm_comp, &uh_comp],
+        verifier_channel, commitment_scheme, proof,
+    ).is_ok())
+}
+
+// ─── Combined NTT+AzFull+Ct1Full STARK (MVP-3+, V19) ────────────────────────
+//
+// Merges AllNttProof + AzCt1ProofV16 (2 sub-proofs, sizes LOG=10 + LOG=8+8)
+// into one 3-component mixed-size STARK covering all 12 NTTs, Az-full, and
+// Ct1-full in one FRI polynomial commitment.
+//
+// Tree 1 column layout:
+//   NttBatch (LOG=10, 649 cols) ++ AzFull (LOG=8, 1523 cols) ++ Ct1Full (LOG=8, 295 cols)
+//   = 2467 total main columns
+//
+// Twiddles computed at LOG=10+4+1=15 (max component level).
+
+/// Prove all 12 NTTs (z,c,t1), Az-full, and Ct1-full in ONE STARK.
+///
+/// Returns `(proof_bytes, ntt_cm, az_cm, ct1_cm, z_hat, c_hat, t1_hat, az_hat_out, ct1_hat_out)`.
+pub fn prove_ntt_az_ct1_combined(
+    z:            &[[i64; mldsa::N]; mldsa::params::L],
+    c:            &[i64; mldsa::N],
+    t1:           &[[i64; mldsa::N]; mldsa::params::K],
+    a_hat:        &[[i64; mldsa::N]],
+    c_tilde_seed: &[u8],
+) -> Result<(
+    Vec<u8>, String, String, String,
+    Vec<[i64; mldsa::N]>, [i64; mldsa::N], Vec<[i64; mldsa::N]>,
+    [[i64; mldsa::N]; mldsa::params::K],
+    [[i64; mldsa::N]; mldsa::params::K],
+), String> {
+    use mldsa_ntt_batch_air::{
+        NttBatchEval, LOG_N_ROWS as NTT_LOG, n_cols_for as ntt_n_cols_for,
+        build_trace as ntt_build_trace,
+    };
+    use mldsa_az_full_air::{
+        AzFullEval, AzFullComponent,
+        LOG_N_ROWS as AZ_LOG, N_COLS as AZ_N_COLS, build_trace as az_build_trace,
+    };
+    use mldsa_ct1_full_air::{
+        Ct1FullEval, Ct1FullComponent,
+        LOG_N_ROWS as CT1_LOG, N_COLS as CT1_N_COLS, build_trace as ct1_build_trace,
+    };
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let l = mldsa::params::L;
+    let k = mldsa::params::K;
+    let n_polys = l + 1 + k; // 12 for ML-DSA-65
+
+    if a_hat.len() != k * l {
+        return Err(format!("a_hat must have k*l={} entries, got {}", k * l, a_hat.len()));
+    }
+
+    // NTT trace: z[0..L] ++ c ++ t1[0..K] = 12 polys.
+    let mut all_ntt_inputs: Vec<[i64; mldsa::N]> = Vec::with_capacity(n_polys);
+    all_ntt_inputs.extend_from_slice(z);
+    all_ntt_inputs.push(*c);
+    all_ntt_inputs.extend_from_slice(t1);
+    let (ntt_cols, ntt_outputs) = ntt_build_trace(&all_ntt_inputs);
+
+    let z_hat: Vec<[i64; mldsa::N]> = ntt_outputs[0..l].to_vec();
+    let c_hat: [i64; mldsa::N] = ntt_outputs[l];
+    let t1_hat: Vec<[i64; mldsa::N]> = ntt_outputs[l + 1..l + 1 + k].to_vec();
+
+    // Az trace using NTT outputs.
+    let z_hat_arr: [[i64; mldsa::N]; mldsa::params::L] = z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have L entries".to_string())?;
+    let (az_cols, az_out) = az_build_trace(a_hat, &z_hat_arr);
+
+    // Ct1 trace using NTT outputs.
+    let t1_hat_arr: [[i64; mldsa::N]; mldsa::params::K] = t1_hat.as_slice().try_into()
+        .map_err(|_| "t1_hat must have K entries".to_string())?;
+    let (ct1_cols, ct1_out) = ct1_build_trace(&c_hat, &t1_hat_arr);
+
+    debug_assert_eq!(ntt_cols.len(), ntt_n_cols_for(n_polys));
+    debug_assert_eq!(az_cols.len(), AZ_N_COLS);
+    debug_assert_eq!(ct1_cols.len(), CT1_N_COLS);
+
+    // NTT output fingerprint (all 12 polys concatenated).
+    let ntt_out_flat: Vec<i64> = ntt_outputs.iter().flat_map(|p| p.iter().copied()).collect();
+    let ntt_out_fp = output_fingerprint(&ntt_out_flat);
+    let ntt_cm = build_poly_commitment(&ntt_out_fp);
+
+    // Az and Ct1 output fingerprints.
+    let az_out_flat: Vec<i64> = az_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let az_out_fp = output_fingerprint(&az_out_flat);
+    let az_cm = build_poly_commitment(&az_out_fp);
+
+    let ct1_out_flat: Vec<i64> = ct1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let ct1_out_fp = output_fingerprint(&ct1_out_flat);
+    let ct1_cm = build_poly_commitment(&ct1_out_fp);
+
+    // Twiddles at NTT level (max of the three components: NTT_LOG=10 > AZ_LOG=CT1_LOG=8).
+    let max_log = NTT_LOG;
+    let config = make_config(max_log);
+    let lifting = max_log + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        channel.mix_u32s(&words);
+    }
+
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: empty (no preprocessed columns needed).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    // Tree 1: NTT cols (649, log=10) ++ Az cols (1523, log=8) ++ Ct1 cols (295, log=8) = 2467.
+    let mut combined_main = ntt_cols;
+    combined_main.extend(az_cols);
+    combined_main.extend(ct1_cols);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(combined_main);
+    tree_builder.commit(channel);
+
+    // Transcript: NTT output fp (cross-links to Az+Ct1 inputs), Az output fp, Ct1 output fp.
+    channel.mix_u32s(&ntt_out_fp);
+    channel.mix_u32s(&az_out_fp);
+    channel.mix_u32s(&ct1_out_fp);
+
+    // Shared allocator: NTT [0..649], Az [649..2172], Ct1 [2172..2467].
+    let mut alloc = TraceLocationAllocator::default();
+    let ntt_comp = mldsa_ntt_batch_air::NttBatchComponent::new(
+        &mut alloc,
+        NttBatchEval { log_n_rows: NTT_LOG, n_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let az_comp = AzFullComponent::new(
+        &mut alloc,
+        AzFullEval { log_n_rows: AZ_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let ct1_comp = Ct1FullComponent::new(
+        &mut alloc,
+        Ct1FullEval { log_n_rows: CT1_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&ntt_comp, &az_comp, &ct1_comp], channel, commitment_scheme,
+    ).map_err(|e| format!("prove_ntt_az_ct1_combined error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, ntt_cm, az_cm, ct1_cm, z_hat, c_hat, t1_hat, az_out, ct1_out))
+}
+
+/// Verify a combined NTT+AzFull+Ct1Full proof produced by [`prove_ntt_az_ct1_combined`].
+pub fn verify_ntt_az_ct1_combined(
+    proof_bytes:  &[u8],
+    ntt_cm:       &str,
+    az_cm:        &str,
+    ct1_cm:       &str,
+    z_hat:        &[[i64; mldsa::N]],
+    c_hat:        &[i64; mldsa::N],
+    t1_hat:       &[[i64; mldsa::N]],
+    az_hat_out:   &[[i64; mldsa::N]; mldsa::params::K],
+    ct1_hat_out:  &[[i64; mldsa::N]; mldsa::params::K],
+    c_tilde_seed: &[u8],
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_ntt_batch_air::{
+        NttBatchEval, LOG_N_ROWS as NTT_LOG, n_cols_for as ntt_n_cols_for,
+    };
+    use mldsa_az_full_air::{
+        AzFullEval, AzFullComponent,
+        LOG_N_ROWS as AZ_LOG, N_COLS as AZ_N_COLS,
+    };
+    use mldsa_ct1_full_air::{
+        Ct1FullEval, Ct1FullComponent,
+        LOG_N_ROWS as CT1_LOG, N_COLS as CT1_N_COLS,
+    };
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let l = mldsa::params::L;
+    let k = mldsa::params::K;
+    let n_polys = l + 1 + k; // 12
+
+    // Recompute NTT output fingerprint from stored z_hat, c_hat, t1_hat.
+    let ntt_out_flat: Vec<i64> = z_hat.iter().chain(std::iter::once(c_hat as &[i64; mldsa::N]))
+        .chain(t1_hat.iter()).flat_map(|p| p.iter().copied()).collect();
+    let ntt_out_fp = output_fingerprint(&ntt_out_flat);
+    if build_poly_commitment(&ntt_out_fp) != ntt_cm { return Ok(false); }
+
+    // Recompute Az output fingerprint.
+    let az_out_flat: Vec<i64> = az_hat_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let az_out_fp = output_fingerprint(&az_out_flat);
+    if build_poly_commitment(&az_out_fp) != az_cm { return Ok(false); }
+
+    // Recompute Ct1 output fingerprint.
+    let ct1_out_flat: Vec<i64> = ct1_hat_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let ct1_out_fp = output_fingerprint(&ct1_out_flat);
+    if build_poly_commitment(&ct1_out_fp) != ct1_cm { return Ok(false); }
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let mut alloc = TraceLocationAllocator::default();
+    let ntt_comp = mldsa_ntt_batch_air::NttBatchComponent::new(
+        &mut alloc,
+        NttBatchEval { log_n_rows: NTT_LOG, n_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let az_comp = AzFullComponent::new(
+        &mut alloc,
+        AzFullEval { log_n_rows: AZ_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let ct1_comp = Ct1FullComponent::new(
+        &mut alloc,
+        Ct1FullEval { log_n_rows: CT1_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    if !c_tilde_seed.is_empty() {
+        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
+            let mut arr = [0u8; 4];
+            arr[..b.len()].copy_from_slice(b);
+            u32::from_le_bytes(arr)
+        }).collect();
+        verifier_channel.mix_u32s(&words);
+    }
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    // Tree 0: empty; Tree 1: [NTT_LOG; ntt_n_cols] ++ [AZ_LOG; AZ_N_COLS] ++ [CT1_LOG; CT1_N_COLS].
+    let ntt_n_cols = ntt_n_cols_for(n_polys);
+    let mut tree1_sizes: Vec<u32> = vec![NTT_LOG; ntt_n_cols];
+    tree1_sizes.extend(vec![AZ_LOG; AZ_N_COLS]);
+    tree1_sizes.extend(vec![CT1_LOG; CT1_N_COLS]);
+
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &[], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &tree1_sizes, verifier_channel);
+
+    // Replay transcript.
+    verifier_channel.mix_u32s(&ntt_out_fp);
+    verifier_channel.mix_u32s(&az_out_fp);
+    verifier_channel.mix_u32s(&ct1_out_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(
+        &[&ntt_comp, &az_comp, &ct1_comp], verifier_channel, commitment_scheme, proof,
+    ).is_ok())
+}
+
 /// Verify a UseHint-batch proof produced by [`prove_use_hint_batch`].
 pub fn verify_use_hint_batch(
     proof_bytes:    &[u8],
@@ -3907,6 +4475,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v4_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v5_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v5_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v19_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v19_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v18_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v18_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v17_py, m)?)?;
@@ -4812,6 +5382,61 @@ fn verify_mldsa_witness_v10_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v10(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v19_py — NTT+Az+Ct1 merged multi-component STARK (3 sub-proofs).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None))]
+fn prove_mldsa_witness_v19_py(
+    a_hat:   Vec<Vec<i64>>,
+    z:       Vec<Vec<i64>>,
+    c:       Vec<i64>,
+    t1:      Vec<Vec<i64>>,
+    hints:   Vec<Vec<bool>>,
+    k:       usize,
+    l:       usize,
+    c_tilde: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v19(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.norm_use_hint_proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.norm_use_hint_proof.output.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.norm_use_hint_proof.hint_weight_total;
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+    Ok((bundle, max_norms, w1_prime, hint_weight_total))
+}
+
+/// verify_mldsa_witness_v19_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v19_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV19, _
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v19(&proof).unwrap_or(false)
 }
 
 /// prove_mldsa_witness_v18_py — INTT+WPrime merged multi-component STARK (4 sub-proofs).
