@@ -2271,6 +2271,191 @@ pub fn verify_use_hint_batch_v2(
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Combined NormCheck+UseHintBatchV2 STARK (MVP-3+, V17) ────────────────────
+
+/// Prove NormCheck AND UseHintBatchV2 in a single multi-component STARK.
+///
+/// Both AIRs share `LOG_N_ROWS=8`. UseHintBatchV2 has one preprocessed column
+/// (`is_init_uh`); NormCheck has none. A shared allocator interleaves their
+/// columns in a single commitment tree.
+///
+/// Returns:
+///   `(proof_bytes, norm_commitment, use_hint_commitment,
+///     max_norms, w1_out, hint_weight_total)`
+pub fn prove_norm_use_hint_combined(
+    z:       &[[i64; mldsa::N]; mldsa::params::L],
+    w_prime: &[[i64; mldsa::N]; mldsa::params::K],
+    hints:   &[[bool; mldsa::N]; mldsa::params::K],
+) -> Result<(Vec<u8>, String, String, [i64; mldsa::params::L], [[i64; mldsa::N]; mldsa::params::K], usize), String> {
+    use mldsa_norm_check_batch_air::{
+        NormCheckBatchEval, NormCheckBatchComponent,
+        LOG_N_ROWS as NORM_LOG, N_COLS as NORM_N_COLS, build_trace as norm_build_trace,
+    };
+    use mldsa_use_hint_batch_air::{
+        UseHintBatchV2Eval, UseHintBatchV2Component,
+        N_COLS_V2 as UH_N_COLS, build_trace_v2, pc_is_init_uh,
+    };
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+    use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+
+    let log_size = NORM_LOG; // 8 — same for both AIRs
+
+    // Build traces.
+    let (norm_cols, norm_out, max_norms) = norm_build_trace(z);
+    let (uh_main_cols, uh_preproc_cols, w1_out, hint_weight_total) = build_trace_v2(w_prime, hints);
+
+    debug_assert_eq!(norm_cols.len(), NORM_N_COLS);
+    debug_assert_eq!(uh_main_cols.len(), UH_N_COLS);
+
+    // Fingerprints.
+    let norm_flat: Vec<i64> = norm_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let norm_fp  = output_fingerprint(&norm_flat);
+    let norm_cm  = build_poly_commitment(&norm_fp);
+
+    let mut uh_combined: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    uh_combined.push(hint_weight_total as i64);
+    let uh_fp = output_fingerprint(&uh_combined);
+    let uh_cm = build_poly_commitment(&uh_fp);
+
+    let config = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: UseHintBatchV2 preprocessed column (is_init_uh).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(uh_preproc_cols);
+    tree_builder.commit(channel);
+
+    // Tree 1: NormCheck cols (15) ++ UseHintBatchV2 main cols (61) = 76.
+    let mut combined_main = norm_cols;
+    combined_main.extend(uh_main_cols);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(combined_main);
+    tree_builder.commit(channel);
+
+    // Transcript: norm fingerprint first, then use_hint fingerprint.
+    channel.mix_u32s(&norm_fp);
+    channel.mix_u32s(&uh_fp);
+
+    // Shared allocator — UseHintBatchV2 needs is_init_uh registered.
+    let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
+
+    let norm_comp = NormCheckBatchComponent::new(
+        &mut alloc,
+        NormCheckBatchEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let uh_comp = UseHintBatchV2Component::new(
+        &mut alloc,
+        UseHintBatchV2Eval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&norm_comp, &uh_comp], channel, commitment_scheme,
+    ).map_err(|e| format!("prove_norm_use_hint_combined error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, norm_cm, uh_cm, max_norms, w1_out, hint_weight_total))
+}
+
+/// Verify a combined NormCheck+UseHintBatchV2 proof.
+pub fn verify_norm_use_hint_combined(
+    proof_bytes:       &[u8],
+    norm_commitment:   &str,
+    use_hint_commitment: &str,
+    w1_out:            &[[i64; mldsa::N]; mldsa::params::K],
+    hint_weight_total: usize,
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_norm_check_batch_air::{
+        NormCheckBatchEval, NormCheckBatchComponent,
+        LOG_N_ROWS as NORM_LOG, N_COLS as NORM_N_COLS,
+    };
+    use mldsa_use_hint_batch_air::{
+        UseHintBatchV2Eval, UseHintBatchV2Component,
+        N_COLS_V2 as UH_N_COLS, pc_is_init_uh,
+    };
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo_constraint_framework::TraceLocationAllocator;
+    use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+
+    let log_size = NORM_LOG;
+
+    let norm_fp = parse_poly_commitment(norm_commitment)?;
+
+    // Rebuild use_hint fingerprint.
+    let mut uh_combined: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    uh_combined.push(hint_weight_total as i64);
+    let expected_uh_fp = output_fingerprint(&uh_combined);
+    let expected_uh_cm = build_poly_commitment(&expected_uh_fp);
+    if expected_uh_cm != use_hint_commitment {
+        return Ok(false);
+    }
+    let uh_fp = parse_poly_commitment(use_hint_commitment)?;
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
+
+    let norm_comp = NormCheckBatchComponent::new(
+        &mut alloc,
+        NormCheckBatchEval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let uh_comp = UseHintBatchV2Component::new(
+        &mut alloc,
+        UseHintBatchV2Eval { log_n_rows: log_size },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    // Tree 0: 1 preproc col (is_init_uh) at log_size=8.
+    // Tree 1: NORM_N_COLS + UH_N_COLS = 15+61=76 main cols at log_size=8.
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &[log_size; 1], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &[log_size; NORM_N_COLS + UH_N_COLS], verifier_channel);
+
+    verifier_channel.mix_u32s(&norm_fp);
+    verifier_channel.mix_u32s(&uh_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(
+        &[&norm_comp, &uh_comp], verifier_channel, commitment_scheme, proof,
+    ).is_ok())
+}
+
 /// Verify a UseHint-batch proof produced by [`prove_use_hint_batch`].
 pub fn verify_use_hint_batch(
     proof_bytes:    &[u8],
@@ -3501,6 +3686,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v4_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v5_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v5_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v17_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v17_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v16_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v16_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v15_py, m)?)?;
@@ -4402,6 +4589,61 @@ fn verify_mldsa_witness_v10_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v10(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v17_py — NormCheck+UseHintBatchV2 merged (5 sub-proofs).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None))]
+fn prove_mldsa_witness_v17_py(
+    a_hat:   Vec<Vec<i64>>,
+    z:       Vec<Vec<i64>>,
+    c:       Vec<i64>,
+    t1:      Vec<Vec<i64>>,
+    hints:   Vec<Vec<bool>>,
+    k:       usize,
+    l:       usize,
+    c_tilde: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v17(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.norm_use_hint_proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.norm_use_hint_proof.output.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.norm_use_hint_proof.hint_weight_total;
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+    Ok((bundle, max_norms, w1_prime, hint_weight_total))
+}
+
+/// verify_mldsa_witness_v17_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v17_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV17, _
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v17(&proof).unwrap_or(false)
 }
 
 /// prove_mldsa_witness_v16_py — Az+Ct1 merged multi-component STARK (6 sub-proofs).
