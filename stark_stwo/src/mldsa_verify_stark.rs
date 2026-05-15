@@ -4264,6 +4264,186 @@ pub fn verify_mldsa_witness_v19(proof: &VerifyMldsaProofV19) -> Result<bool, Str
     Ok(true)
 }
 
+// ── VerifyMldsaProofV20 — 2 sub-proofs: NttAzCt1 + INTT+WPrime+Norm+UseHint ──
+//
+// Merges InttWPrimeProofV18 + NormUseHintProofV17 (2 sub-proofs from V19) into
+// one 4-component mixed-size STARK, yielding the minimum 2 total sub-proofs:
+//
+//   AllNttAzCt1ProofV19:             1 (NTT+Az+Ct1, LOG=10/8/8) ← unchanged from V19
+//   InttWPrimeNormUseHintProofV20:   1 (INTT+WPrime+NormCheck+UseHintV2, LOG=10/8/8/8)
+// Total: 2 sub-proofs (vs 3 in V19)
+
+/// Combined INTT+WPrime+NormCheck+UseHintBatchV2 proof (4-component STARK, V20).
+#[derive(Encode, Decode)]
+pub struct InttWPrimeNormUseHintProofV20 {
+    /// Bytes of the combined STARK proof.
+    pub proof_combined:       Vec<u8>,
+    /// INTT output commitment = fingerprint(az_out ++ ct1_out flat).
+    pub intt_commitment:      String,
+    /// WPrime output commitment = fingerprint(w_prime flat).
+    pub wp_commitment:        String,
+    /// NormCheck output commitment.
+    pub norm_commitment:      String,
+    /// UseHintBatchV2 output commitment (fingerprint of w1_prime ++ [hw_total]).
+    pub use_hint_commitment:  String,
+    /// K INTT outputs for az (polynomial domain).
+    pub az_out:               Vec<[i64; N]>,
+    /// K INTT outputs for ct1 (polynomial domain).
+    pub ct1_out:              Vec<[i64; N]>,
+    /// K WPrime outputs w' = az - ct1.
+    pub w_prime:              Vec<[i64; N]>,
+    /// L maximum norms from NormCheck.
+    pub max_norms:            Vec<i64>,
+    /// K UseHint w1_prime outputs.
+    pub output:               Vec<[i64; N]>,
+    /// Hint weight total (committed inside use_hint_commitment).
+    pub hint_weight_total:    usize,
+}
+
+/// Prove INTT+WPrime+NormCheck+UseHintBatchV2 in one 4-component STARK (V20).
+pub fn prove_intt_wp_norm_uh_v20(
+    az_hat:  &[[i64; N]],
+    ct1_hat: &[[i64; N]],
+    z:       &[[i64; N]],
+    hints:   &[Vec<bool>],
+    k:       usize,
+) -> Result<InttWPrimeNormUseHintProofV20, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V20 requires k=K={K_PARAM}, got {k}")); }
+
+    let az_arr:  [[i64; N]; K_PARAM] = az_hat.try_into()
+        .map_err(|_| format!("az_hat must have K={K_PARAM} entries"))?;
+    let ct1_arr: [[i64; N]; K_PARAM] = ct1_hat.try_into()
+        .map_err(|_| format!("ct1_hat must have K={K_PARAM} entries"))?;
+    let z_arr:   [[i64; N]; L_PARAM] = z.try_into()
+        .map_err(|_| format!("z must have L={L_PARAM} entries"))?;
+    if hints.len() != K_PARAM {
+        return Err(format!("hints must have K={K_PARAM} entries, got {}", hints.len()));
+    }
+    let h_arr: [[bool; N]; K_PARAM] = std::array::from_fn(|i| {
+        let s: &[bool] = &hints[i];
+        std::array::from_fn(|p| s[p])
+    });
+
+    let (proof_bytes, intt_cm, wp_cm, norm_cm, uh_cm,
+         az_out, ct1_out, w_prime, max_norms, w1_arr, hint_weight_total) =
+        crate::prove_intt_wprime_norm_use_hint_combined(&az_arr, &ct1_arr, &z_arr, &h_arr)
+            .map_err(|e| format!("prove_intt_wprime_norm_use_hint_combined failed: {e}"))?;
+
+    Ok(InttWPrimeNormUseHintProofV20 {
+        proof_combined:      proof_bytes,
+        intt_commitment:     intt_cm,
+        wp_commitment:       wp_cm,
+        norm_commitment:     norm_cm,
+        use_hint_commitment: uh_cm,
+        az_out:              az_out.to_vec(),
+        ct1_out:             ct1_out.to_vec(),
+        w_prime:             w_prime.to_vec(),
+        max_norms:           max_norms.to_vec(),
+        output:              w1_arr.to_vec(),
+        hint_weight_total,
+    })
+}
+
+/// Verify an InttWPrimeNormUseHintProofV20.
+pub fn verify_intt_wp_norm_uh_v20(
+    proof:   &InttWPrimeNormUseHintProofV20,
+    az_hat:  &[[i64; N]],
+    ct1_hat: &[[i64; N]],
+) -> Result<bool, String> {
+    use crate::mldsa::params::K as K_PARAM;
+
+    let az_hat_arr:  [[i64; N]; K_PARAM] = az_hat.try_into()
+        .map_err(|_| format!("az_hat must have K={K_PARAM} entries, got {}", az_hat.len()))?;
+    let ct1_hat_arr: [[i64; N]; K_PARAM] = ct1_hat.try_into()
+        .map_err(|_| format!("ct1_hat must have K={K_PARAM} entries, got {}", ct1_hat.len()))?;
+    let az_out_arr:  [[i64; N]; K_PARAM] = proof.az_out.as_slice().try_into()
+        .map_err(|_| "az_out must have K entries".to_string())?;
+    let ct1_out_arr: [[i64; N]; K_PARAM] = proof.ct1_out.as_slice().try_into()
+        .map_err(|_| "ct1_out must have K entries".to_string())?;
+    let w_prime_arr: [[i64; N]; K_PARAM] = proof.w_prime.as_slice().try_into()
+        .map_err(|_| "w_prime must have K entries".to_string())?;
+    let w1_arr:      [[i64; N]; K_PARAM] = proof.output.as_slice().try_into()
+        .map_err(|_| "output must have K entries".to_string())?;
+
+    crate::verify_intt_wprime_norm_use_hint_combined(
+        &proof.proof_combined,
+        &proof.intt_commitment,
+        &proof.wp_commitment,
+        &proof.norm_commitment,
+        &proof.use_hint_commitment,
+        &az_hat_arr,
+        &ct1_hat_arr,
+        &az_out_arr,
+        &ct1_out_arr,
+        &w_prime_arr,
+        &w1_arr,
+        proof.hint_weight_total,
+    ).map_err(|e| format!("verify_intt_wprime_norm_use_hint_combined failed: {e}"))
+}
+
+/// Combined proof — 2 sub-proofs (NttAzCt1 + InttWPrimeNormUseHint).
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV20 {
+    pub ntt_az_ct1_proof:        AllNttAzCt1ProofV19,
+    pub intt_wp_norm_uh_proof:   InttWPrimeNormUseHintProofV20,
+    pub c_tilde:                 Vec<u8>,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness (V20).
+///
+/// 2 sub-proofs (vs 3 in V19) — INTT+WPrime+NormCheck+UseHint merged into one STARK.
+pub fn prove_verify_mldsa_v20(
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    c:       &[i64; N],
+    t1:      &[[i64; N]],
+    hints:   &[Vec<bool>],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
+) -> Result<VerifyMldsaProofV20, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V20 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("V20 requires l=L={L_PARAM}, got {l}")); }
+
+    // Step 1: prove NTT+Az+Ct1 together (unchanged from V19).
+    let ntt_az_ct1_proof = prove_ntt_az_ct1_v19(a_hat, z, c, t1, k, l, c_tilde)?;
+
+    // Step 2: prove INTT+WPrime+NormCheck+UseHint in one 4-component STARK.
+    let intt_wp_norm_uh_proof = prove_intt_wp_norm_uh_v20(
+        &ntt_az_ct1_proof.az_hat,
+        &ntt_az_ct1_proof.ct1_hat_out,
+        z,
+        hints,
+        k,
+    )?;
+
+    Ok(VerifyMldsaProofV20 {
+        ntt_az_ct1_proof,
+        intt_wp_norm_uh_proof,
+        c_tilde: c_tilde.to_vec(),
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProofV20`.
+pub fn verify_mldsa_witness_v20(proof: &VerifyMldsaProofV20) -> Result<bool, String> {
+    use crate::mldsa::params::OMEGA;
+
+    if !verify_ntt_az_ct1_v19(&proof.ntt_az_ct1_proof, &proof.c_tilde)? { return Ok(false); }
+
+    if !verify_intt_wp_norm_uh_v20(
+        &proof.intt_wp_norm_uh_proof,
+        &proof.ntt_az_ct1_proof.az_hat,
+        &proof.ntt_az_ct1_proof.ct1_hat_out,
+    )? { return Ok(false); }
+
+    if proof.intt_wp_norm_uh_proof.hint_weight_total > OMEGA {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
 //
 // Az[i] = Σ_{j=0}^{L-1} A[i][j] × z[j]   in R_q = Z_q[X]/(X^{256}+1)
@@ -6611,5 +6791,93 @@ mod tests {
         proof.c_tilde = c_tilde_b;
         assert!(!verify_mldsa_witness_v19(&proof).expect("verify should not error after tamper"),
             "tampered c_tilde must cause V19 verification failure");
+    }
+
+    // ── V20 tests (2 sub-proofs: NttAzCt1 + INTT+WPrime+Norm+UseHint merged) ──
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v20_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 30800); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 30900)).collect();
+        let c:  [i64; N]       = random_poly(31000);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 31100)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8>   = (130u8..178).collect();
+
+        let proof = prove_verify_mldsa_v20(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v20 failed");
+
+        assert!(verify_mldsa_witness_v20(&proof).expect("V20 verify error"),
+            "V20 must verify");
+        assert_eq!(proof.intt_wp_norm_uh_proof.hint_weight_total, 0,
+            "all-false hints → weight 0");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v20_matches_v19() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 31200); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 31300)).collect();
+        let c:  [i64; N]       = random_poly(31400);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 31500)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8>   = (131u8..179).collect();
+
+        let proof_v19 = prove_verify_mldsa_v19(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v19 failed");
+        let proof_v20 = prove_verify_mldsa_v20(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v20 failed");
+
+        assert!(verify_mldsa_witness_v19(&proof_v19).expect("V19 verify error"), "V19 must verify");
+        assert!(verify_mldsa_witness_v20(&proof_v20).expect("V20 verify error"), "V20 must verify");
+
+        // Both share the same NTT+Az+Ct1 sub-proof structure, so z_hat must match.
+        assert_eq!(proof_v19.ntt_az_ct1_proof.z_hat, proof_v20.ntt_az_ct1_proof.z_hat,
+            "V19 and V20 z_hat must match");
+        // INTT w_prime must be identical.
+        assert_eq!(proof_v19.intt_wprime_proof.w_prime, proof_v20.intt_wp_norm_uh_proof.w_prime,
+            "V19 and V20 w_prime must match");
+        // NormCheck max_norms must be identical.
+        assert_eq!(proof_v19.norm_use_hint_proof.max_norms, proof_v20.intt_wp_norm_uh_proof.max_norms,
+            "V19 and V20 max_norms must match");
+        // UseHint outputs must be identical.
+        assert_eq!(proof_v19.norm_use_hint_proof.output, proof_v20.intt_wp_norm_uh_proof.output,
+            "V19 and V20 UseHint outputs must match");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v20_c_tilde_binding() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 31600); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 31700)).collect();
+        let c:  [i64; N]       = random_poly(31800);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 31900)).collect();
+        let h  = all_false_hints(k);
+
+        let c_tilde_a: Vec<u8> = (132u8..180).collect();
+        let c_tilde_b: Vec<u8> = (133u8..181).collect();
+
+        let mut proof = prove_verify_mldsa_v20(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde_a)
+            .expect("prove_verify_mldsa_v20 failed");
+
+        assert!(verify_mldsa_witness_v20(&proof).expect("verify should not error"),
+            "V20 must verify with original c_tilde");
+
+        proof.c_tilde = c_tilde_b;
+        assert!(!verify_mldsa_witness_v20(&proof).expect("verify should not error after tamper"),
+            "tampered c_tilde must cause V20 verification failure");
     }
 }
