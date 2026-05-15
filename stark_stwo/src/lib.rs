@@ -2844,6 +2844,227 @@ pub fn verify_intt_batch(
     Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ─── Combined INTT+WPrime STARK (MVP-3+, V18) ────────────────────────────────
+
+/// Prove the 2K-poly INTT batch AND the K-poly WPrime subtraction in one STARK.
+///
+/// INTT batch uses LOG_N_ROWS=10 (1024 rows, 649 cols); WPrime uses LOG_N_ROWS=8
+/// (256 rows, 24 cols).  A shared `TraceLocationAllocator` places INTT cols
+/// [0..649] and WPrime cols [649..673] in Tree 1.  Twiddles are computed at the
+/// INTT level (LOG=10+4+1=15) so they cover both domains.
+///
+/// The transcript mixes 2K per-input INTT fingerprints, then the shared
+/// INTT-output = WPrime-input fingerprint (once), then the WPrime output
+/// fingerprint — collapsing the cross-check into the FRI channel itself.
+///
+/// Returns `(proof_bytes, intt_commitment, wprime_commitment, az_out, ct1_out, w_prime)`.
+pub fn prove_intt_wprime_combined(
+    az_hat:  &[[i64; mldsa::N]; mldsa::params::K],
+    ct1_hat: &[[i64; mldsa::N]; mldsa::params::K],
+) -> Result<(Vec<u8>, String, String,
+            [[i64; mldsa::N]; mldsa::params::K],
+            [[i64; mldsa::N]; mldsa::params::K],
+            [[i64; mldsa::N]; mldsa::params::K]), String> {
+    use mldsa_intt_batch_air::{
+        InttBatchEval, LOG_N_ROWS as INTT_LOG, n_cols_for as intt_n_cols_for,
+        build_trace as intt_build_trace,
+    };
+    use mldsa_wprime_full_air::{
+        WPrimeFullEval, WPrimeFullComponent,
+        LOG_N_ROWS as WP_LOG, N_COLS as WP_N_COLS, build_trace as wp_build_trace,
+    };
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let k = mldsa::params::K;
+    let n_polys = 2 * k; // 12 for ML-DSA-65
+
+    // Build INTT trace for az_hat ++ ct1_hat (2K inputs).
+    let mut all_inputs: Vec<[i64; mldsa::N]> = Vec::with_capacity(n_polys);
+    all_inputs.extend_from_slice(az_hat);
+    all_inputs.extend_from_slice(ct1_hat);
+    let (intt_cols, intt_out) = intt_build_trace(&all_inputs);
+
+    let az_out:  [[i64; mldsa::N]; mldsa::params::K] = intt_out[..k].try_into().map_err(|_| "az slice err".to_string())?;
+    let ct1_out: [[i64; mldsa::N]; mldsa::params::K] = intt_out[k..].try_into().map_err(|_| "ct1 slice err".to_string())?;
+
+    // Build WPrime trace from INTT outputs.
+    let (wp_cols, w_prime_out) = wp_build_trace(&az_out, &ct1_out);
+
+    let intt_n_cols = intt_n_cols_for(n_polys);
+    debug_assert_eq!(intt_cols.len(), intt_n_cols);
+    debug_assert_eq!(wp_cols.len(), WP_N_COLS);
+
+    // INTT fingerprints: per-input (2K) + concatenated output.
+    let intt_out_flat: Vec<i64> = intt_out.iter().flat_map(|p| p.iter().copied()).collect();
+    let intt_out_fp   = output_fingerprint(&intt_out_flat);
+    let intt_cm       = build_poly_commitment(&intt_out_fp);
+
+    // WPrime fingerprints: input = INTT output (shared), output = w_prime.
+    let wp_in_flat: Vec<i64> = az_out.iter().chain(ct1_out.iter()).flat_map(|r| r.iter().copied()).collect();
+    let wp_in_fp    = output_fingerprint(&wp_in_flat);    // same values as intt_out_fp
+    let wp_out_flat: Vec<i64> = w_prime_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let wp_out_fp   = output_fingerprint(&wp_out_flat);
+    let wp_cm       = build_poly_commitment(&wp_out_fp);
+
+    // Twiddles at INTT level (max of the two components).
+    let max_log = INTT_LOG; // 10 > WP_LOG (8)
+    let config  = make_config(max_log);
+    let lifting = max_log + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: empty (neither component has preprocessed columns).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(vec![]);
+    tree_builder.commit(channel);
+
+    // Tree 1: INTT cols (649, log=10) ++ WPrime cols (24, log=8) = 673 total.
+    let mut combined_main = intt_cols;
+    combined_main.extend(wp_cols);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(combined_main);
+    tree_builder.commit(channel);
+
+    // Transcript binding:
+    //   1. Per-input INTT fingerprints (2K).
+    //   2. INTT output = WPrime input fingerprint (shared, mixed once).
+    //   3. WPrime output fingerprint.
+    for poly in all_inputs.iter() {
+        channel.mix_u32s(&output_fingerprint(poly));
+    }
+    channel.mix_u32s(&intt_out_fp);   // = wp_in_fp — mixed once as shared binding
+    debug_assert_eq!(intt_out_fp, wp_in_fp, "INTT output and WPrime input fingerprints must match");
+    channel.mix_u32s(&wp_out_fp);
+
+    // Shared allocator: INTT cols first [0..649], then WPrime cols [649..673].
+    let mut alloc = TraceLocationAllocator::default();
+    let intt_comp = mldsa_intt_batch_air::InttBatchComponent::new(
+        &mut alloc,
+        InttBatchEval { log_n_rows: INTT_LOG, n_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let wp_comp = WPrimeFullComponent::new(
+        &mut alloc,
+        WPrimeFullEval { log_n_rows: WP_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&intt_comp, &wp_comp], channel, commitment_scheme,
+    ).map_err(|e| format!("prove_intt_wprime_combined error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes, intt_cm, wp_cm, az_out, ct1_out, w_prime_out))
+}
+
+/// Verify a combined INTT+WPrime proof.
+pub fn verify_intt_wprime_combined(
+    proof_bytes: &[u8],
+    intt_cm:     &str,
+    wp_cm:       &str,
+    az_hat:      &[[i64; mldsa::N]; mldsa::params::K],
+    ct1_hat:     &[[i64; mldsa::N]; mldsa::params::K],
+    az_out:      &[[i64; mldsa::N]; mldsa::params::K],
+    ct1_out:     &[[i64; mldsa::N]; mldsa::params::K],
+    w_prime:     &[[i64; mldsa::N]; mldsa::params::K],
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_intt_batch_air::{
+        InttBatchEval, LOG_N_ROWS as INTT_LOG, n_cols_for as intt_n_cols_for,
+    };
+    use mldsa_wprime_full_air::{
+        WPrimeFullEval, WPrimeFullComponent,
+        LOG_N_ROWS as WP_LOG, N_COLS as WP_N_COLS,
+    };
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo_constraint_framework::TraceLocationAllocator;
+
+    let k = mldsa::params::K;
+    let n_polys = 2 * k;
+
+    // Recompute INTT output fingerprint.
+    let intt_out_flat: Vec<i64> = az_out.iter().chain(ct1_out.iter()).flat_map(|r| r.iter().copied()).collect();
+    let intt_out_fp   = output_fingerprint(&intt_out_flat);
+
+    // Verify stored commitments match reconstructed fingerprints.
+    let expected_intt_cm = build_poly_commitment(&intt_out_fp);
+    if expected_intt_cm != intt_cm {
+        return Ok(false);
+    }
+    let wp_out_flat: Vec<i64> = w_prime.iter().flat_map(|r| r.iter().copied()).collect();
+    let wp_out_fp   = output_fingerprint(&wp_out_flat);
+    let expected_wp_cm = build_poly_commitment(&wp_out_fp);
+    if expected_wp_cm != wp_cm {
+        return Ok(false);
+    }
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let mut alloc = TraceLocationAllocator::default();
+    let intt_comp = mldsa_intt_batch_air::InttBatchComponent::new(
+        &mut alloc,
+        InttBatchEval { log_n_rows: INTT_LOG, n_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let wp_comp = WPrimeFullComponent::new(
+        &mut alloc,
+        WPrimeFullEval { log_n_rows: WP_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    // Tree 0: empty; Tree 1: [INTT_LOG; n_cols_intt] ++ [WP_LOG; WP_N_COLS].
+    let intt_n_cols = intt_n_cols_for(n_polys);
+    let mut tree1_sizes: Vec<u32> = vec![INTT_LOG; intt_n_cols];
+    tree1_sizes.extend(vec![WP_LOG; WP_N_COLS]);
+
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &[], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &tree1_sizes, verifier_channel);
+
+    // Replay transcript: per-input INTT fingerprints, shared IO fingerprint, WPrime output.
+    let mut all_inputs: Vec<[i64; mldsa::N]> = az_hat.to_vec();
+    all_inputs.extend_from_slice(ct1_hat);
+    for poly in all_inputs.iter() {
+        verifier_channel.mix_u32s(&output_fingerprint(poly));
+    }
+    verifier_channel.mix_u32s(&intt_out_fp);
+    verifier_channel.mix_u32s(&wp_out_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(
+        &[&intt_comp, &wp_comp], verifier_channel, commitment_scheme, proof,
+    ).is_ok())
+}
+
 // ─── Batch INTT STARK — arbitrary M polynomials (MVP-3+) ────────────────────
 
 /// Prove M inverse NTTs in one batch STARK (1 + M×54 columns, 1024 rows).
@@ -3686,6 +3907,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v4_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v5_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v5_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v18_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v18_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v17_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v17_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v16_py, m)?)?;
@@ -4589,6 +4812,61 @@ fn verify_mldsa_witness_v10_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v10(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v18_py — INTT+WPrime merged multi-component STARK (4 sub-proofs).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None))]
+fn prove_mldsa_witness_v18_py(
+    a_hat:   Vec<Vec<i64>>,
+    z:       Vec<Vec<i64>>,
+    c:       Vec<i64>,
+    t1:      Vec<Vec<i64>>,
+    hints:   Vec<Vec<bool>>,
+    k:       usize,
+    l:       usize,
+    c_tilde: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v18(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.norm_use_hint_proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.norm_use_hint_proof.output.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.norm_use_hint_proof.hint_weight_total;
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+    Ok((bundle, max_norms, w1_prime, hint_weight_total))
+}
+
+/// verify_mldsa_witness_v18_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v18_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV18, _
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v18(&proof).unwrap_or(false)
 }
 
 /// prove_mldsa_witness_v17_py — NormCheck+UseHintBatchV2 merged (5 sub-proofs).

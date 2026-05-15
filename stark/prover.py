@@ -928,6 +928,46 @@ def verify_mldsa_witness_stark_v17(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v17_py(result.proof_bundle))
 
 
+def prove_mldsa_witness_stark_v18(
+    a_hat:   list[list[int]],
+    z:       list[list[int]],
+    c:       list[int],
+    t1:      list[list[int]],
+    hints:   list[list[bool]],
+    k:       int,
+    l:       int,
+    c_tilde: bytes | None = None,
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness (V18 pipeline, 4 sub-proofs):
+      AllNttProof + AzCt1ProofV16 + InttWPrimeProofV18 (merged) + NormUseHintProofV17
+
+    Merges INTT-batch (LOG=10) and WPrime (LOG=8) into a single multi-component
+    STARK with a mixed-size commitment tree, saving 1 sub-proof vs V17 (total: 4).
+
+    Raises RuntimeError if the extension is not installed or any sub-proof fails.
+    """
+    _require_ext("prove_mldsa_witness_v18_py")
+    try:
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v18_py(
+            a_hat, z, c, t1, hints, k, l, c_tilde
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_v18_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
+    )
+
+
+def verify_mldsa_witness_stark_v18(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V18 pipeline)."""
+    _require_ext("verify_mldsa_witness_v18_py")
+    return bool(_ext.verify_mldsa_witness_v18_py(result.proof_bundle))
+
+
 def verify_mldsa_hash_check(
     pk:     bytes,
     msg:    bytes,
