@@ -763,6 +763,48 @@ def verify_mldsa_witness_stark_v13(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v13_py(result.proof_bundle))
 
 
+def prove_mldsa_witness_stark_v14(
+    a_hat:   list[list[int]],
+    z:       list[list[int]],
+    c:       list[int],
+    t1:      list[list[int]],
+    hints:   list[list[bool]],
+    k:       int,
+    l:       int,
+    c_tilde: bytes | None = None,
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness (V14 pipeline, 8 sub-proofs):
+      AllNttProof (12-poly NTT) + AzProofV8 (Az-full) + Ct1ProofV5 (Ct1-full)
+      + CombinedInttWPrimeBatch (2K=12-poly INTT + WPrime with input-output binding)
+      + NormBatch + UseHintBatch + HintWeight
+
+    Merges the INTT and WPrime steps into one CombinedInttWPrimeBatch,
+    removing the separate range-Q proof, saving 1 sub-proof vs V13 (total: 8).
+
+    Raises RuntimeError if the extension is not installed or any sub-proof fails.
+    """
+    _require_ext("prove_mldsa_witness_v14_py")
+    try:
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v14_py(
+            a_hat, z, c, t1, hints, k, l, c_tilde
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_v14_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
+    )
+
+
+def verify_mldsa_witness_stark_v14(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V14 pipeline)."""
+    _require_ext("verify_mldsa_witness_v14_py")
+    return bool(_ext.verify_mldsa_witness_v14_py(result.proof_bundle))
+
+
 def verify_mldsa_hash_check(
     pk:     bytes,
     msg:    bytes,
