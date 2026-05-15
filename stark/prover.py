@@ -1048,6 +1048,46 @@ def verify_mldsa_witness_stark_v20(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v20_py(result.proof_bundle))
 
 
+def prove_mldsa_witness_stark_v21(
+    a_hat:   list[list[int]],
+    z:       list[list[int]],
+    c:       list[int],
+    t1:      list[list[int]],
+    hints:   list[list[bool]],
+    k:       int,
+    l:       int,
+    c_tilde: bytes | None = None,
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness (V21 pipeline, 1 sub-proof):
+      Single 7-component STARK: NTT+Az+Ct1+INTT+WPrime+NormCheck+UseHint
+
+    All 7 circuits share one FRI polynomial commitment (3216 main trace columns),
+    achieving the theoretical minimum of 1 STARK proof for ML-DSA.Verify.
+
+    Raises RuntimeError if the extension is not installed or proving fails.
+    """
+    _require_ext("prove_mldsa_witness_v21_py")
+    try:
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v21_py(
+            a_hat, z, c, t1, hints, k, l, c_tilde
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_v21_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
+    )
+
+
+def verify_mldsa_witness_stark_v21(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V21 pipeline)."""
+    _require_ext("verify_mldsa_witness_v21_py")
+    return bool(_ext.verify_mldsa_witness_v21_py(result.proof_bundle))
+
+
 def verify_mldsa_hash_check(
     pk:     bytes,
     msg:    bytes,
