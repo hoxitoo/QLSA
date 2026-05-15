@@ -1944,6 +1944,131 @@ pub fn prove_use_hint_batch(
     Ok((proof_bytes, commitment_hex, w1_out))
 }
 
+/// UseHint-batch V2: proves UseHint AND hint weight in one STARK.
+///
+/// Returns `(proof_bytes, commitment_hex, w1_out, hint_weight_total)`.
+/// `commitment_hex` = fingerprint of `flatten(w1_prime) ++ [hint_weight_total]`.
+pub fn prove_use_hint_batch_v2(
+    w_prime: &[[i64; mldsa::N]; mldsa::params::K],
+    hints:   &[[bool; mldsa::N]; mldsa::params::K],
+) -> Result<(Vec<u8>, String, [[i64; mldsa::N]; mldsa::params::K], usize), String> {
+    use mldsa_use_hint_batch_air::{
+        UseHintBatchV2Eval, UseHintBatchV2Component, LOG_N_ROWS,
+        new_component_v2, build_trace_v2,
+    };
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+
+    for (i, row) in w_prime.iter().enumerate() {
+        for (p, &v) in row.iter().enumerate() {
+            if v < 0 || v >= mldsa::Q {
+                return Err(format!("w_prime[{i}][{p}] = {v} out of [0, Q)"));
+            }
+        }
+    }
+
+    let log_size = LOG_N_ROWS;
+    let (main_cols, preproc_cols, w1_out, hint_weight_total) = build_trace_v2(w_prime, hints);
+
+    // Combined fingerprint: w1_prime ++ [hint_weight_total].
+    let mut combined_flat: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    combined_flat.push(hint_weight_total as i64);
+    let output_fp      = output_fingerprint(&combined_flat);
+    let commitment_hex = build_poly_commitment(&output_fp);
+
+    let config  = make_config(log_size);
+    let lifting = log_size + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: preprocessed (is_init_uh).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preproc_cols);
+    tree_builder.commit(channel);
+
+    // Tree 1: main trace (61 columns).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(main_cols);
+    tree_builder.commit(channel);
+
+    channel.mix_u32s(&output_fp);
+
+    let component = new_component_v2(log_size);
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
+        .map_err(|e| format!("prove_use_hint_batch_v2 error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("prove_use_hint_batch_v2 serialize error: {e:?}"))?;
+
+    Ok((proof_bytes, commitment_hex, w1_out, hint_weight_total))
+}
+
+/// Verify a UseHint-batch V2 proof produced by [`prove_use_hint_batch_v2`].
+///
+/// `w1_out` and `hint_weight_total` must match what was returned from the prover.
+pub fn verify_use_hint_batch_v2(
+    proof_bytes:        &[u8],
+    commitment_hex:     &str,
+    w1_out:             &[[i64; mldsa::N]; mldsa::params::K],
+    hint_weight_total:  usize,
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_use_hint_batch_air::{UseHintBatchV2Eval, UseHintBatchV2Component, LOG_N_ROWS, new_component_v2};
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::verifier::verify;
+    use stwo::core::air::Component;
+
+    let log_size = LOG_N_ROWS;
+
+    // Rebuild the combined fingerprint and verify it matches commitment_hex.
+    let mut combined_flat: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    combined_flat.push(hint_weight_total as i64);
+    let expected_fp = output_fingerprint(&combined_flat);
+    let expected_cm = build_poly_commitment(&expected_fp);
+    if expected_cm != commitment_hex {
+        return Ok(false);
+    }
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("verify_use_hint_batch_v2 deserialize error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+
+    let component = new_component_v2(log_size);
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("verify_use_hint_batch_v2: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    verifier_channel.mix_u32s(&expected_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof).is_ok())
+}
+
 /// Verify a UseHint-batch proof produced by [`prove_use_hint_batch`].
 pub fn verify_use_hint_batch(
     proof_bytes:    &[u8],
@@ -3174,6 +3299,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v4_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v5_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v5_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v15_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v15_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v14_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v14_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v13_py, m)?)?;
@@ -4071,6 +4198,61 @@ fn verify_mldsa_witness_v10_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v10(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v15_py — UseHintBatchV2+HintWeight merged (7 sub-proofs).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None))]
+fn prove_mldsa_witness_v15_py(
+    a_hat:   Vec<Vec<i64>>,
+    z:       Vec<Vec<i64>>,
+    c:       Vec<i64>,
+    t1:      Vec<Vec<i64>>,
+    hints:   Vec<Vec<bool>>,
+    k:       usize,
+    l:       usize,
+    c_tilde: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr  = to_poly_vec(t1, "t1")?;
+    let seed = c_tilde.as_deref().unwrap_or(&[]);
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v15(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.norm_proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.use_hint_proof.output.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.use_hint_proof.hint_weight_total;
+
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+    Ok((bundle, max_norms, w1_prime, hint_weight_total))
+}
+
+/// verify_mldsa_witness_v15_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v15_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV15, _
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v15(&proof).unwrap_or(false)
 }
 
 /// prove_mldsa_witness_v14_py — merged INTT+WPrime (8 sub-proofs, saves 1 vs V13).

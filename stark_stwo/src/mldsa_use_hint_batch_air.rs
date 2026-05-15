@@ -231,6 +231,232 @@ pub fn build_trace(
     (columns, w1_out)
 }
 
+// ── UseHintBatchV2: UseHint + hint-weight running sum ─────────────────────────
+//
+// Extends UseHintBatch with one extra column `hw_sum` that accumulates the
+// total hint weight across all 256 rows.  A preprocessed `is_init_uh` column
+// resets the running sum at row 0.
+//
+// New trace layout: K×10 + 1 = 61 columns, same 256 rows.
+//   col K*10 = hw_sum[p]   running sum of Σ_i h[i][p] over p=0..current
+//
+// Preprocessed: is_init_uh — 1 at row 0, 0 elsewhere (Circle wrap-around).
+//
+// Added constraint (degree 2):
+//   hw_sum − (Σ_i h[i]) − hw_sum_prev + is_init_uh · hw_sum_prev = 0
+//
+// At row 255: hw_sum = total hint weight (committed alongside w1_prime).
+// The combined commitment: fingerprint(flatten(w1_prime) ++ [hint_weight_total]).
+// This eliminates the separate HintWeight STARK, saving 1 sub-proof.
+
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+
+pub fn pc_is_init_uh() -> PreProcessedColumnId {
+    PreProcessedColumnId { id: "uh_is_init".into() }
+}
+
+/// Total columns for V2: K×10 UseHint + 1 hw_sum.
+pub const N_COLS_V2: usize = N_COLS + 1; // 61
+
+pub struct UseHintBatchV2Eval {
+    pub log_n_rows: u32,
+}
+
+pub type UseHintBatchV2Component = FrameworkComponent<UseHintBatchV2Eval>;
+
+impl FrameworkEval for UseHintBatchV2Eval {
+    fn log_size(&self) -> u32 { self.log_n_rows }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_n_rows + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let q_bf     = BaseField::from_u32_unchecked(Q as u32);
+        let alpha_bf = BaseField::from_u32_unchecked(ALPHA as u32);
+        let m_bf     = BaseField::from_u32_unchecked(M as u32);
+        let m_minus1 = BaseField::from_u32_unchecked((M - 1) as u32);
+
+        // Preprocessed: is_init_uh (1 at row 0 only).
+        let is_init = eval.get_preprocessed_column(pc_is_init_uh());
+
+        // K UseHint blocks — same constraints as V1, but save each h for running sum.
+        let mut h_row_sum: Option<E::F> = None;
+        for _i in 0..K {
+            let r         = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let h         = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let r1        = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let r0_red    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let sel_neg   = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let sel_sp    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let sel_r0pos = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let carry_up  = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let carry_dn  = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+            let w1        = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone();
+
+            // Accumulate h into row sum.
+            h_row_sum = Some(match h_row_sum.take() {
+                None      => h.clone(),
+                Some(acc) => acc + h.clone(),
+            });
+
+            eval.add_constraint(h.clone() * h.clone() - h.clone());
+            eval.add_constraint(sel_neg.clone() * sel_neg.clone() - sel_neg.clone());
+            eval.add_constraint(sel_sp.clone() * sel_sp.clone() - sel_sp.clone());
+            eval.add_constraint(sel_r0pos.clone() * sel_r0pos.clone() - sel_r0pos.clone());
+            eval.add_constraint(carry_up.clone() * carry_up.clone() - carry_up.clone());
+            eval.add_constraint(carry_dn.clone() * carry_dn.clone() - carry_dn.clone());
+
+            let decomp = r1.clone() * alpha_bf + r0_red.clone() - sel_neg.clone() * q_bf - r.clone();
+            eval.add_constraint(decomp.clone() - sel_sp.clone() * decomp);
+            eval.add_constraint(sel_sp.clone() * r1.clone());
+            eval.add_constraint(
+                sel_sp.clone() * r0_red.clone()
+                    - sel_sp.clone() * r.clone()
+                    - sel_sp.clone() * sel_neg.clone() * q_bf
+                    + sel_sp.clone() * q_bf,
+            );
+            eval.add_constraint(carry_up.clone() * r1.clone() - carry_up.clone() * m_minus1);
+            eval.add_constraint(carry_dn.clone() * r1.clone());
+            eval.add_constraint(
+                w1 - r1.clone()
+                    - h.clone() * sel_r0pos.clone()
+                    - h.clone() * sel_r0pos
+                    + h
+                    + carry_up * m_bf
+                    - carry_dn * m_bf,
+            );
+        }
+
+        // Running-sum column: hw_sum at [current, previous].
+        let [hw_sum_curr, hw_sum_prev] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize, -1_isize]);
+
+        // Constraint: hw_sum_curr − row_sum − hw_sum_prev + is_init · hw_sum_prev = 0
+        let row_sum = h_row_sum.unwrap(); // K ≥ 1
+        eval.add_constraint(
+            hw_sum_curr - row_sum - hw_sum_prev.clone() + is_init * hw_sum_prev
+        );
+
+        eval
+    }
+}
+
+pub fn new_component_v2(log_n_rows: u32) -> UseHintBatchV2Component {
+    let ids = vec![pc_is_init_uh()];
+    UseHintBatchV2Component::new(
+        &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids),
+        UseHintBatchV2Eval { log_n_rows },
+        SecureField::from(0u32),
+    )
+}
+
+/// Build the V2 trace: UseHint (60 cols) + hw_sum (1 col) + is_init_uh preproc.
+///
+/// Returns `(main_columns, preproc_columns, w1_out, hint_weight_total)`.
+pub fn build_trace_v2(
+    w_prime: &[[i64; N]; K],
+    hints:   &[[bool; N]; K],
+) -> (TraceColumns, TraceColumns, [[i64; N]; K], usize) {
+    let n      = N;
+    let n_rows = 1_usize << LOG_N_ROWS;
+    let domain = CanonicCoset::new(LOG_N_ROWS).circle_domain();
+    let bf     = |v: i64| BaseField::from_u32_unchecked(v.rem_euclid(Q) as u32);
+    let bfu    = |v: u32| BaseField::from_u32_unchecked(v);
+    let bf0    = BaseField::from_u32_unchecked(0);
+
+    let new_buf = || vec![bf0; n_rows];
+
+    // K × 10 UseHint columns (same as V1).
+    let mut col_r:         Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_h:         Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_r1:        Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_r0_red:    Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_sel_neg:   Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_sel_sp:    Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_sel_r0pos: Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_carry_up:  Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_carry_dn:  Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_w1:        Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
+    let mut col_hw_sum:    Vec<BaseField>       = new_buf();
+    let mut col_is_init:   Vec<BaseField>       = new_buf();
+
+    let mut w1_out: [[i64; N]; K] = [[0i64; N]; K];
+
+    let mut running_sum: i64 = 0;
+    for p in 0..n {
+        let mut row_h_sum: i64 = 0;
+        for i in 0..K {
+            let ri = w_prime[i][p];
+            let hi = hints[i][p];
+            let w1_i = crate::mldsa::polyvec::use_hint_val(hi, ri);
+            w1_out[i][p] = w1_i;
+            let (r1_i, r0_i) = crate::mldsa_use_hint_air::decompose_val_signed(ri);
+            let sel_neg_i: i64  = if r0_i < 0 { 1 } else { 0 };
+            let r0_red_i: i64   = if r0_i < 0 { r0_i + Q } else { r0_i };
+            let r0_adj = if ri % ALPHA > GAMMA2 { ri % ALPHA - ALPHA } else { ri % ALPHA };
+            let sel_sp_i: i64   = if ri - r0_adj == Q - 1 { 1 } else { 0 };
+            let sel_r0pos_i: i64 = if hi && r0_i > 0 { 1 } else { 0 };
+            let carry_up_i: i64  = if hi && r0_i > 0 && r1_i == M - 1 { 1 } else { 0 };
+            let carry_dn_i: i64  = if hi && r0_i <= 0 && r1_i == 0 { 1 } else { 0 };
+
+            col_r[i][p]         = bf(ri);
+            col_h[i][p]         = bfu(hi as u32);
+            col_r1[i][p]        = bfu(r1_i as u32);
+            col_r0_red[i][p]    = bfu(r0_red_i as u32);
+            col_sel_neg[i][p]   = bfu(sel_neg_i as u32);
+            col_sel_sp[i][p]    = bfu(sel_sp_i as u32);
+            col_sel_r0pos[i][p] = bfu(sel_r0pos_i as u32);
+            col_carry_up[i][p]  = bfu(carry_up_i as u32);
+            col_carry_dn[i][p]  = bfu(carry_dn_i as u32);
+            col_w1[i][p]        = bfu(w1_i as u32);
+
+            row_h_sum += hi as i64;
+        }
+        running_sum += row_h_sum;
+        col_hw_sum[p] = bfu(running_sum as u32);
+    }
+    let hint_weight_total = running_sum as usize;
+
+    // is_init_uh: 1 at row 0, 0 elsewhere.
+    col_is_init[0] = bfu(1);
+
+    // Apply bit-reversal for Circle domain ordering.
+    use stwo::core::utils::bit_reverse_coset_to_circle_domain_order;
+    for i in 0..K {
+        for col in [
+            &mut col_r[i], &mut col_h[i], &mut col_r1[i], &mut col_r0_red[i],
+            &mut col_sel_neg[i], &mut col_sel_sp[i], &mut col_sel_r0pos[i],
+            &mut col_carry_up[i], &mut col_carry_dn[i], &mut col_w1[i],
+        ] {
+            bit_reverse_coset_to_circle_domain_order(col);
+        }
+    }
+    bit_reverse_coset_to_circle_domain_order(&mut col_hw_sum);
+    bit_reverse_coset_to_circle_domain_order(&mut col_is_init);
+
+    let mut main_columns: TraceColumns = Vec::with_capacity(N_COLS_V2);
+    for i in 0..K {
+        main_columns.push(CircleEvaluation::new(domain, col_r[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_h[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_r1[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_r0_red[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_sel_neg[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_sel_sp[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_sel_r0pos[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_carry_up[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_carry_dn[i].clone()));
+        main_columns.push(CircleEvaluation::new(domain, col_w1[i].clone()));
+    }
+    main_columns.push(CircleEvaluation::new(domain, col_hw_sum));
+    debug_assert_eq!(main_columns.len(), N_COLS_V2);
+
+    let preproc_columns: TraceColumns =
+        vec![CircleEvaluation::new(domain, col_is_init)];
+
+    (main_columns, preproc_columns, w1_out, hint_weight_total)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -3478,6 +3478,148 @@ pub fn verify_mldsa_witness_v14(proof: &VerifyMldsaProofV14) -> Result<bool, Str
     Ok(true)
 }
 
+// ── VerifyMldsaProofV15 — UseHint+HintWeight merged (MVP-3+) ─────────────────
+//
+// Same as V14 but replaces UseHintBatchProof + HintWeight proof with a single
+// UseHintBatchV2Proof that proves UseHint AND hint-weight running sum in one STARK.
+//
+// Sub-proof breakdown:
+//   AllNttProof:               1
+//   AzProofV8:                 1
+//   Ct1ProofV5:                1
+//   CombinedInttWPrimeBatch:   2 (2K INTT + WPrime)
+//   NormCheck batch:           1
+//   UseHintBatchV2:            1 (UseHint + hint_weight running sum)
+// Total: 1+1+1+2+1+1 = 7 sub-proofs (vs 8 in V14)
+
+/// UseHintV2 proof: proves UseHint AND hint weight in one STARK.
+#[derive(Encode, Decode)]
+pub struct UseHintV2Proof {
+    /// UseHintBatchV2 STARK: combined commitment = fingerprint(w1_prime ++ [hw_total]).
+    pub proof_use_hint_v2: (Vec<u8>, String),
+    /// w1_prime outputs.
+    pub output: Vec<[i64; N]>,
+    /// Hint weight total (committed inside proof_use_hint_v2 transcript).
+    pub hint_weight_total: usize,
+}
+
+/// Prove UseHint + hint weight in one V2 STARK.
+pub fn prove_use_hint_v2(
+    w_prime: &[[i64; N]],
+    hints:   &[Vec<bool>],
+) -> Result<UseHintV2Proof, String> {
+    use crate::mldsa::params::K as K_PARAM;
+    if w_prime.len() != K_PARAM {
+        return Err(format!("w_prime must have K={K_PARAM} entries, got {}", w_prime.len()));
+    }
+    if hints.len() != K_PARAM {
+        return Err(format!("hints must have K={K_PARAM} entries, got {}", hints.len()));
+    }
+    for (i, hrow) in hints.iter().enumerate() {
+        if hrow.len() != N { return Err(format!("hints[{i}] must have N={N} bits")); }
+    }
+
+    let wp_arr: [[i64; N]; K_PARAM] = std::array::from_fn(|i| w_prime[i]);
+    let h_arr:  [[bool; N]; K_PARAM] = std::array::from_fn(|i| {
+        let s: &[bool] = &hints[i];
+        std::array::from_fn(|p| s[p])
+    });
+
+    let (proof_bytes, commitment, w1_arr, hint_weight_total) =
+        crate::prove_use_hint_batch_v2(&wp_arr, &h_arr)
+            .map_err(|e| format!("prove_use_hint_batch_v2 failed: {e}"))?;
+
+    Ok(UseHintV2Proof {
+        proof_use_hint_v2: (proof_bytes, commitment),
+        output: w1_arr.to_vec(),
+        hint_weight_total,
+    })
+}
+
+/// Verify a UseHintV2Proof (UseHint + hint weight in one STARK).
+pub fn verify_use_hint_v2(proof: &UseHintV2Proof) -> Result<bool, String> {
+    use crate::mldsa::params::K as K_PARAM;
+    let w1_arr: [[i64; N]; K_PARAM] = proof.output.as_slice().try_into()
+        .map_err(|_| format!("output must have K={K_PARAM} entries"))?;
+    crate::verify_use_hint_batch_v2(
+        &proof.proof_use_hint_v2.0,
+        &proof.proof_use_hint_v2.1,
+        &w1_arr,
+        proof.hint_weight_total,
+    ).map_err(|e| format!("verify_use_hint_batch_v2 failed: {e}"))
+}
+
+/// Combined proof using all V14 structures but UseHintBatchV2 — 7 sub-proofs.
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV15 {
+    pub ntt_proof:         AllNttProof,
+    pub az_proof:          AzProofV8,
+    pub ct1_proof:         Ct1ProofV5,
+    pub intt_wprime_proof: CombinedInttWPrimeBatch,
+    pub norm_proof:        NormCheckBatchProof,
+    pub use_hint_proof:    UseHintV2Proof,
+    pub c_tilde:           Vec<u8>,
+}
+
+/// Prove the full ML-DSA.Verify arithmetic witness (V15).
+///
+/// 7 sub-proofs (vs 8 in V14) — UseHintBatchV2 proves UseHint+HintWeight in one STARK.
+pub fn prove_verify_mldsa_v15(
+    a_hat:   &[[i64; N]],
+    z:       &[[i64; N]],
+    c:       &[i64; N],
+    t1:      &[[i64; N]],
+    hints:   &[Vec<bool>],
+    k:       usize,
+    l:       usize,
+    c_tilde: &[u8],
+) -> Result<VerifyMldsaProofV15, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V15 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("V15 requires l=L={L_PARAM}, got {l}")); }
+
+    let ntt_proof         = prove_all_ntt(z, c, t1, l, k)?;
+    let az_proof          = prove_az_v8(a_hat, &ntt_proof.z_hat, k, l, c_tilde)?;
+    let ct1_proof         = prove_ct1_v5(&ntt_proof.c_hat, &ntt_proof.t1_hat, k, c_tilde)?;
+    let intt_wprime_proof = prove_intt_wprime_batch(&az_proof.az_hat, &ct1_proof.ct1_hat_out, k)?;
+    let norm_proof        = prove_norm_batch(z)?;
+    let use_hint_proof    = prove_use_hint_v2(&intt_wprime_proof.w_prime, hints)?;
+
+    Ok(VerifyMldsaProofV15 {
+        ntt_proof,
+        az_proof,
+        ct1_proof,
+        intt_wprime_proof,
+        norm_proof,
+        use_hint_proof,
+        c_tilde: c_tilde.to_vec(),
+    })
+}
+
+/// Verify all STARK sub-proofs in a `VerifyMldsaProofV15`.
+pub fn verify_mldsa_witness_v15(proof: &VerifyMldsaProofV15) -> Result<bool, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    use crate::mldsa::params::OMEGA;
+
+    if !verify_all_ntt(&proof.ntt_proof, L_PARAM, K_PARAM)? { return Ok(false); }
+    if !verify_az_v8(&proof.az_proof, &proof.ntt_proof.z_hat, &proof.c_tilde)? { return Ok(false); }
+    if !verify_ct1_v5(&proof.ct1_proof, &proof.ntt_proof.c_hat, &proof.ntt_proof.t1_hat, &proof.c_tilde)? {
+        return Ok(false);
+    }
+    if !verify_intt_wprime_batch(
+        &proof.intt_wprime_proof,
+        &proof.az_proof.az_hat,
+        &proof.ct1_proof.ct1_hat_out,
+    )? { return Ok(false); }
+    if !verify_norm_batch(&proof.norm_proof)? { return Ok(false); }
+    if !verify_use_hint_v2(&proof.use_hint_proof)? { return Ok(false); }
+    // Hint weight bound check (arithmetic, no STARK needed — bound by V2 commitment).
+    if proof.use_hint_proof.hint_weight_total > OMEGA {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
 //
 // Az[i] = Σ_{j=0}^{L-1} A[i][j] × z[j]   in R_q = Z_q[X]/(X^{256}+1)
@@ -5402,5 +5544,82 @@ mod tests {
         proof.c_tilde = c_tilde_b;
         assert!(!verify_mldsa_witness_v14(&proof).expect("verify should not error after tamper"),
             "tampered c_tilde must cause V14 verification failure");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v15_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 24400); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 24500)).collect();
+        let c:  [i64; N]       = random_poly(24600);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 24700)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (106u8..154).collect();
+
+        let proof = prove_verify_mldsa_v15(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v15 failed");
+        assert!(verify_mldsa_witness_v15(&proof).expect("verify_mldsa_witness_v15 error"),
+            "V15 proof must verify");
+        assert_eq!(proof.use_hint_proof.hint_weight_total, 0, "all-false hints must have weight 0");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v15_matches_v14() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 24800); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 24900)).collect();
+        let c:  [i64; N]       = random_poly(25000);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 25100)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8> = (107u8..155).collect();
+
+        let v14 = prove_verify_mldsa_v14(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v14 failed");
+        let v15 = prove_verify_mldsa_v15(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v15 failed");
+
+        for i in 0..k {
+            assert_eq!(v14.use_hint_proof.output[i], v15.use_hint_proof.output[i],
+                "w1_prime[{i}] mismatch v14 vs v15");
+        }
+        assert_eq!(v14.norm_proof.max_norms, v15.norm_proof.max_norms,
+            "max_norms mismatch v14 vs v15");
+        assert_eq!(v14.hint_weight_total, v15.use_hint_proof.hint_weight_total,
+            "hint_weight_total mismatch v14 vs v15");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~2-4 min per test)"]
+    fn test_prove_verify_mldsa_v15_c_tilde_binding() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 25200); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 25300)).collect();
+        let c:  [i64; N]       = random_poly(25400);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 25500)).collect();
+        let h  = all_false_hints(k);
+
+        let c_tilde_a: Vec<u8> = (108u8..156).collect();
+        let c_tilde_b: Vec<u8> = (109u8..157).collect();
+
+        let mut proof = prove_verify_mldsa_v15(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde_a)
+            .expect("prove_verify_mldsa_v15 failed");
+
+        assert!(verify_mldsa_witness_v15(&proof).expect("verify should not error"),
+            "V15 must verify with original c_tilde");
+
+        proof.c_tilde = c_tilde_b;
+        assert!(!verify_mldsa_witness_v15(&proof).expect("verify should not error after tamper"),
+            "tampered c_tilde must cause V15 verification failure");
     }
 }
