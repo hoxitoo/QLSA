@@ -29,3 +29,6 @@ target/
 # Env / secrets
 .env
 *.local
+
+# Private / confidential
+.private/
