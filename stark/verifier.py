@@ -22,7 +22,7 @@ def verify_batch_proof(
     merkle_root: bytes | None = None,
 ) -> bool:
     """
-    Verify a Circle STARK proof (Stwo 2.2.0) for the given batch.
+    Verify a Poseidon2 STARK proof for the given batch.
 
     Args:
         proof:       Raw proof bytes (from ProofResult.proof).
@@ -36,10 +36,10 @@ def verify_batch_proof(
     """
     if not _HAVE_EXT:
         raise RuntimeError(
-            "qlsa_stark_stwo extension required for verify. "
+            "qlsa_stark_stwo extension required for verify_p2. "
             "Install with: cd stark_stwo && maturin develop --features python --release"
         )
-    return bool(_ext.verify(proof, commitment, log_size, merkle_root=merkle_root))
+    return bool(_ext.verify_p2(proof, commitment, log_size, merkle_root))
 
 
 def verify_batch_poseidon2_proof(
@@ -48,17 +48,8 @@ def verify_batch_poseidon2_proof(
     log_size: int,
     seed: bytes | None = None,
 ) -> bool:
-    """Verify a Poseidon2 hash-chain STARK proof (prove_batch_poseidon2 output).
-
-    `seed` must match the batch Merkle root passed to prove_batch_poseidon2 —
-    it was mixed into the Fiat-Shamir transcript and must be replayed here.
-    """
-    if not _HAVE_EXT:
-        raise RuntimeError(
-            "qlsa_stark_stwo extension required for verify_p2. "
-            "Install with: cd stark_stwo && maturin develop --features python --release"
-        )
-    return bool(_ext.verify_p2(proof, commitment, log_size, seed))
+    """Alias for verify_batch_proof — both now use Poseidon2-over-M31 internally."""
+    return verify_batch_proof(proof, commitment, log_size, merkle_root=seed)
 
 
 def verify_batch_merkle_proof(

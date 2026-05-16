@@ -4,23 +4,17 @@ use stwo_constraint_framework::{
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Hash-chain AIR over M31 (Circle STARK — Stwo 2.2.0)
+// LEGACY Hash-chain AIR — H(a,b) = a³+b  (NOT cryptographic, kept for reference)
+//
+// prove_hash_chain / verify_hash_chain now delegate to poseidon2_air.rs.
+// Do NOT use HashChainEval / HashChainComponent in new code.
 //
 // Trace layout (2 columns, 2^log_n_rows rows):
 //   col 0  h     : running hash accumulator
 //   col 1  leaf  : leaf values (private witness)
 //
-// Initialisation (row 0, boundary claim enforced externally):
-//   h[0] = leaf[0]
-//
-// Transition constraint (degree 3, every row):
-//   h[i+1] = h[i]^3 + leaf[i+1]
-//   ⟺  h[i+1] − h[i]^3 − leaf[i+1] = 0
-//
-// Public output: h[last_row]  (the "commitment")
-//
-// NOTE: H(a,b) = a³+b is a prototype algebraic hash — NOT cryptographically
-// secure. Production upgrade: replace with Poseidon2 over M31 (Stwo built-in).
+// Transition constraint (degree 3):
+//   h[i+1] − (h[i]^3 + leaf[i+1]) = 0
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub struct HashChainEval {

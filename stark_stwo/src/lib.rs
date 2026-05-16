@@ -35,7 +35,6 @@ use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::{prove, CommitmentSchemeProver};
 use stwo_constraint_framework::TraceLocationAllocator;
 
-use air::{HashChainComponent, HashChainEval};
 
 // ─── Commitment helpers ────────────────────────────────────────────────────────
 //
@@ -173,77 +172,16 @@ fn make_config(log_size: u32) -> PcsConfig {
 ///
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
 /// `commitment_hex` is the 8-char little-endian hex of `h[last_row]` (4 bytes, M31).
-/// Prove a hash-chain over `leaves`.
+/// Prove a Poseidon2 hash-chain over `leaves`.
 ///
-/// `merkle_root_seed` — if non-empty, its bytes are mixed into the Fiat-Shamir
-/// channel **before** the first trace commitment.  This binds the proof to a
-/// specific Merkle root: a proof for root R₁ will not verify with root R₂.
-/// Pass `&[]` (or the Python default `None`) for backward-compatible behaviour.
+/// Delegates to [`prove_hash_chain_poseidon2`] — the hash AIR was upgraded
+/// from the prototype `H(a,b) = a³+b` to Poseidon2-over-M31 (8 full rounds,
+/// t=2, α=5, MDS [[3,1],[1,3]]).  The external API is unchanged.
+///
+/// `merkle_root_seed` — if non-empty, mixed into the Fiat-Shamir transcript
+/// before the first trace commitment (batch-binding).
 pub fn prove_hash_chain(leaves: &[u64], merkle_root_seed: &[u8]) -> Result<(Vec<u8>, String, u32), String> {
-    if leaves.is_empty() {
-        return Err("leaves must not be empty".into());
-    }
-    let log_size = trace::compute_log_size(leaves.len());
-    if log_size > MAX_LOG_SIZE {
-        return Err(format!("input too large: log_size {log_size} exceeds MAX_LOG_SIZE {MAX_LOG_SIZE}"));
-    }
-
-    let (columns, commitment) = trace::build_trace(leaves);
-
-    // lifting_log_size = log_size + LOG_BLOWUP so that max_log_degree_bound = log_size.
-    // This keeps the OODS mask step (CanonicCoset::new(log_size).step()) and the vanishing
-    // denominator consistent between the domain evaluator and the OODS point evaluator.
-    let config = make_config(log_size);
-    let lifting = log_size + LOG_BLOWUP;
-    let twiddles = CpuBackend::precompute_twiddles(
-        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
-    );
-
-    let channel = &mut Blake2sM31Channel::default();
-
-    // Bind the Merkle root to the Fiat-Shamir transcript BEFORE the first trace commitment.
-    // This makes FRI query positions depend on the root: a proof for root R₁ cannot
-    // verify for root R₂ even though the trace columns are identical.
-    if !merkle_root_seed.is_empty() {
-        channel.mix_u32s(&seed_to_u32_words(merkle_root_seed));
-    }
-
-    let mut commitment_scheme =
-        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
-    commitment_scheme.set_store_polynomials_coefficients();
-
-    // Preprocessed trace (none for this circuit)
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(vec![]);
-    tree_builder.commit(channel);
-
-    // Main trace
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(columns);
-    tree_builder.commit(channel);
-
-    // Bind commitment to Fiat-Shamir transcript (C-2 fix).
-    channel.mix_u32s(&[commitment.0]);
-
-    let component = HashChainComponent::new(
-        &mut TraceLocationAllocator::default(),
-        HashChainEval { log_n_rows: log_size },
-        stwo::core::fields::qm31::SecureField::from(0u32),
-    );
-
-    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
-        &[&component],
-        channel,
-        commitment_scheme,
-    )
-    .map_err(|e| format!("proving error: {e:?}"))?;
-
-    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
-        .map_err(|e| format!("serialization error: {e:?}"))?;
-
-    let commitment_hex = build_commitment_128(commitment.0, &proof_bytes);
-
-    Ok((proof_bytes, commitment_hex, log_size))
+    prove_hash_chain_poseidon2(leaves, merkle_root_seed)
 }
 
 /// Maximum log2 trace size accepted by the verifier (2^28 rows ≈ 268 M rows).
@@ -261,71 +199,15 @@ const MAX_PROOF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Verify a proof previously produced by `prove_hash_chain`.
 ///
-/// `merkle_root_seed` must match the value passed to `prove_hash_chain`
-/// (same bytes → same FRI queries → valid; any difference → invalid).
-/// Pass `&[]` for proofs produced without a root seed.
+/// Delegates to [`verify_hash_chain_poseidon2`] — the hash AIR is now Poseidon2.
+/// `merkle_root_seed` must match the value passed to `prove_hash_chain`.
 pub fn verify_hash_chain(
     proof_bytes: &[u8],
     commitment_hex: &str,
     log_size: u32,
     merkle_root_seed: &[u8],
 ) -> Result<bool, String> {
-    use stwo::core::proof::StarkProof;
-
-    if log_size < trace::MIN_LOG_SIZE || log_size > MAX_LOG_SIZE {
-        return Err(format!(
-            "log_size {log_size} out of valid range [{}, {MAX_LOG_SIZE}]",
-            trace::MIN_LOG_SIZE
-        ));
-    }
-
-    // Parse and validate 128-bit commitment; extracts M31 for Fiat-Shamir.
-    let commitment_val = parse_commitment_128(commitment_hex, proof_bytes)?;
-
-    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
-        bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>())
-            .map_err(|e| format!("deserialization error: {e:?}"))?;
-
-    let mut config = PcsConfig::default();
-    config.fri_config.log_blowup_factor = LOG_BLOWUP;
-
-    let component = HashChainComponent::new(
-        &mut TraceLocationAllocator::default(),
-        HashChainEval { log_n_rows: log_size },
-        stwo::core::fields::qm31::SecureField::from(0u32),
-    );
-
-    let verifier_channel = &mut Blake2sM31Channel::default();
-
-    // Mirror the prover's root mixing (must happen BEFORE any commit).
-    if !merkle_root_seed.is_empty() {
-        verifier_channel.mix_u32s(&seed_to_u32_words(merkle_root_seed));
-    }
-
-    let commitment_scheme =
-        &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
-
-    let sizes = component.trace_log_degree_bounds();
-    if proof.commitments.len() < 2 {
-        return Err(format!(
-            "malformed proof: expected 2 commitments, got {}",
-            proof.commitments.len()
-        ));
-    }
-    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
-    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
-
-    // Mirror the prover's channel.mix_u32s (Fiat-Shamir binding, C-2 fix).
-    verifier_channel.mix_u32s(&[commitment_val]);
-
-    let result = verify::<Blake2sM31MerkleChannel>(
-        &[&component],
-        verifier_channel,
-        commitment_scheme,
-        proof,
-    );
-
-    Ok(result.is_ok())
+    verify_hash_chain_poseidon2(proof_bytes, commitment_hex, log_size, merkle_root_seed)
 }
 
 // ─── Poseidon2-over-M31 hash chain (MVP-3+) ──────────────────────────────────

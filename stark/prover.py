@@ -51,17 +51,17 @@ class ProofResult:
     # The Merkle root binding ensures the proof cannot be replayed against a different batch.
 
 
-def prove_batch(batch: Batch) -> ProofResult:
+def prove_batch(batch: Batch) -> "Poseidon2ProofResult":
     """
-    Generate a hash-chain STARK proof for the batch.
+    Generate a Poseidon2 STARK proof for the batch.
 
     Converts the SHA3-512 Merkle root to 8 × u64 leaves (little-endian),
-    then calls the Rust prover.
+    then calls the Poseidon2 Rust prover (prove_p2).
 
     Raises RuntimeError if the extension is not installed or the prover fails.
     """
     leaves = _txs_to_leaves(batch)
-    result = _call_prover(leaves, merkle_root=batch.merkle_root)
+    result = _call_prover_p2(leaves, merkle_root=batch.merkle_root)
     batch.stark_commitment = result.commitment
     batch.stark_log_size = result.log_size
     return result
@@ -74,22 +74,20 @@ def _txs_to_leaves(batch: Batch) -> list[int]:
 
 
 def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofResult:
-    _require_ext("prove")
+    _require_ext("prove_p2")
     try:
-        # Pass the Merkle root as a Fiat-Shamir seed so the STARK proof is
-        # cryptographically bound to this specific batch root.
-        proof_bytes, commitment, log_size = _ext.prove(leaves, merkle_root=merkle_root)
+        proof_bytes, commitment, log_size = _ext.prove_p2(leaves, merkle_root)
     except Exception as exc:
-        raise RuntimeError(f"qlsa-stark-stwo prove failed: {exc}") from exc
+        raise RuntimeError(f"qlsa-stark-stwo prove_p2 failed: {exc}") from exc
 
     if len(commitment) != 32:
         raise RuntimeError(
-            f"qlsa-stark-stwo prove returned unexpected commitment length "
+            f"qlsa-stark-stwo prove_p2 returned unexpected commitment length "
             f"({len(commitment)} chars, expected 32)"
         )
     if len(proof_bytes) < 32:
         raise RuntimeError(
-            f"qlsa-stark-stwo prove returned proof shorter than 32 bytes "
+            f"qlsa-stark-stwo prove_p2 returned proof shorter than 32 bytes "
             f"({len(proof_bytes)} bytes) — cannot compute on-chain commitment"
         )
 
@@ -114,19 +112,8 @@ class Poseidon2ProofResult(ProofResult):
 
 
 def prove_batch_poseidon2(batch: Batch) -> Poseidon2ProofResult:
-    """
-    Generate a Poseidon2-over-M31 STARK proof for the batch.
-
-    The `onchain_commitment` binding formula is unchanged:
-      Blake2s(proof[0:32] ∥ merkle_root[:32])[:16]
-
-    Raises RuntimeError if the extension is not installed or the prover fails.
-    """
-    leaves = _txs_to_leaves(batch)
-    result = _call_prover_p2(leaves, merkle_root=batch.merkle_root)
-    batch.stark_commitment = result.commitment
-    batch.stark_log_size = result.log_size
-    return result
+    """Alias for prove_batch — both now use Poseidon2-over-M31 internally."""
+    return prove_batch(batch)
 
 
 def _call_prover_p2(
