@@ -34,9 +34,19 @@ def derive_address(public_key: bytes) -> str:
 
 
 def wipe_key(private_key: bytearray) -> None:
-    """Overwrite private key bytes with zeros."""
-    for i in range(len(private_key)):
-        private_key[i] = 0
+    """Overwrite private key bytes with zeros using volatile writes when possible.
+
+    Tries the Rust `wipe_bytes` (zeroize crate, volatile_set — compiler-safe)
+    first; falls back to a pure-Python loop if the extension is not installed.
+    Either way, the *primary* key buffer is zeroed.  Python-side copies made
+    by liboqs during signing cannot be guaranteed to be erased.
+    """
+    try:
+        import qlsa_stark_stwo as _ext  # noqa: PLC0415
+        _ext.wipe_bytes(private_key)
+    except (ImportError, AttributeError):
+        for i in range(len(private_key)):
+            private_key[i] = 0
 
 
 def serialize_public_key(public_key: bytes) -> str:

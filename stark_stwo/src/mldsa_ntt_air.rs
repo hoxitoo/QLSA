@@ -10,36 +10,46 @@
 ///   a_out   = a_in + t      (mod Q)
 ///   b_out   = a_in − t      (mod Q)
 ///
-/// # Trace layout  (9 columns, single-row constraints)
+/// # Trace layout  (55 columns, single-row constraints)
 ///
-///   col 0  a_in    ∈ [0, Q)   input  a coefficient
-///   col 1  b_in    ∈ [0, Q)   input  b coefficient
-///   col 2  zeta    ∈ [0, Q)   twiddle factor ζ_k
-///   col 3  t       ∈ [0, Q)   ζ_k × b_in mod Q        (witness)
-///   col 4  carry_t ∈ [0, Q)   ⌊ζ_k × b_in / Q⌋        (witness)
-///   col 5  a_out   ∈ [0, Q)   (a_in + t) mod Q
-///   col 6  b_out   ∈ [0, Q)   (a_in − t) mod Q
-///   col 7  carry_a ∈ {0,1}    1 iff a_in + t ≥ Q
-///   col 8  carry_b ∈ {0,1}    1 iff a_in < t
+///   col 0      a_in         ∈ [0, Q)   input a coefficient
+///   col 1      b_in         ∈ [0, Q)   input b coefficient
+///   col 2      zeta         ∈ [0, Q)   twiddle factor ζ_k
+///   col 3      t            ∈ [0, Q)   ζ_k × b_in mod Q (witness)
+///   col 4      carry_t      ∈ [0, Q)   ⌊ζ_k × b_in / Q⌋  (witness)
+///   col 5      a_out        ∈ [0, Q)   (a_in + t) mod Q
+///   col 6      b_out        ∈ [0, Q)   (a_in − t) mod Q
+///   col 7      carry_a      ∈ {0,1}    1 iff a_in + t ≥ Q
+///   col 8      carry_b      ∈ {0,1}    1 iff a_in < t
+///   col 9–31   t_bits[0–22] ∈ {0,1}   23-bit decomposition of t
+///   col 32–54  ct_bits[0–22]∈ {0,1}   23-bit decomposition of carry_t
 ///
 /// # Constraints (all degree ≤ 2)
 ///
-///   C1  ζ × b_in − t − carry_t × Q = 0    [mul mod Q,  degree 2]
-///   C2  a_out − a_in − t + carry_a × Q = 0 [add mod Q,  degree 1]
-///   C3  carry_a² − carry_a = 0              [boolean,    degree 2]
-///   C4  b_out − a_in + t − carry_b × Q = 0 [sub mod Q,  degree 1]
-///   C5  carry_b² − carry_b = 0              [boolean,    degree 2]
+///   C1   ζ × b_in − t − carry_t × Q = 0         [mul mod Q,  degree 2]
+///   C2   a_out − a_in − t + carry_a × Q = 0      [add mod Q,  degree 1]
+///   C3   carry_a² − carry_a = 0                  [boolean,    degree 2]
+///   C4   b_out − a_in + t − carry_b × Q = 0      [sub mod Q,  degree 1]
+///   C5   carry_b² − carry_b = 0                  [boolean,    degree 2]
+///   C6   t − Σ t_bits[k]·2^k = 0                 [t decomp,   degree 1]
+///   C7–C29  t_bits[k]² − t_bits[k] = 0 (k=0..22)[boolean ×23,degree 2]
+///   C30  carry_t − Σ ct_bits[k]·2^k = 0          [ct decomp,  degree 1]
+///   C31–C53 ct_bits[k]²−ct_bits[k]=0 (k=0..22)  [boolean ×23,degree 2]
 ///
-/// # Soundness note (C1)
+/// # Soundness improvement (C1)
 ///
-/// C2–C5 are fully sound over M31: all values are < Q < 2^{23} so integer
-/// differences stay within M31 range and no wrap-around ambiguity exists.
+/// C2–C5 are fully sound over M31: all values are < Q < 2^{23} < M31,
+/// so integer equations and M31 equations coincide.
 ///
-/// C1 is evaluated in M31 arithmetic.  Since ζ × b_in can reach ~2^{46} and
-/// M31 wraps at 2^{31}−1, the M31 equation is necessary but not sufficient for
-/// the integer equation.  A malicious prover could craft (t, carry_t) that
-/// satisfies C1 mod M31 while violating the integer reduction.  Full soundness
-/// requires range-check arguments on all columns (planned for MVP-4).
+/// C1 evaluates `ζ × b_in` in M31, which can wrap since the product
+/// reaches ~2^{46}.  Adding C6–C53 proves t ∈ [0, Q) and carry_t ∈ [0, Q).
+/// With both witnesses range-bounded:
+///   t + carry_t × Q ∈ [0, Q²)  and  ζ × b_in ∈ [0, Q²),
+/// so the M31 equation has at most ⌈Q²/M31⌉ ≈ 32 654 solutions per row.
+/// This reduces the per-row soundness error from ~1 to ~32 654 / M31²,
+/// giving ≈ 2^{-47} per butterfly (1024 rows → ≈ 2^{-37} for the full NTT).
+/// Full single-row soundness requires a lookup argument on the product
+/// (planned for MVP-4 when the full on-chain verifier is implemented).
 
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -70,6 +80,10 @@ const BUTTERFLIES_PER_STAGE: usize = N / 2;
 pub const N_BUTTERFLIES: usize = N_STAGES * BUTTERFLIES_PER_STAGE; // 1024
 /// log₂(N_BUTTERFLIES) = 10.
 pub const LOG_N_BUTTERFLIES: u32 = 10;
+/// Bit-width of Q: ceil(log₂(Q)) = 23.
+pub const N_BITS: usize = 23;
+/// Total trace columns: 9 base + 23 bits of t + 23 bits of carry_t.
+pub const N_COLS: usize = 9 + 2 * N_BITS; // 55
 
 // ── FrameworkEval ─────────────────────────────────────────────────────────────
 
@@ -85,15 +99,14 @@ impl FrameworkEval for MlDsaNttButterflyEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Max degree is 2 → quotient has 2·2^n coefficients → bound = n+1.
+        // Max constraint degree is 2 → quotient domain needs 2× rows.
         self.log_n_rows + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        // Q as an M31 constant  (Q = 8 380 417 < 2^31 − 1, fits cleanly).
         let q = BaseField::from_u32_unchecked(Q as u32);
 
-        // Columns — order must match build_trace.
+        // ── Columns 0–8: butterfly core ──────────────────────────────────────
         let [a_in]    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
         let [b_in]    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
         let [zeta]    = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
@@ -104,22 +117,59 @@ impl FrameworkEval for MlDsaNttButterflyEval {
         let [carry_a] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
         let [carry_b] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
 
-        // C1: ζ × b_in − t − carry_t × Q = 0  (degree 2)
-        // See soundness note in module doc: valid for honest witnesses; range
-        // proofs needed to close the M31 wrap-around gap (MVP-4).
-        eval.add_constraint(zeta * b_in - t.clone() - carry_t * q);
+        // ── Columns 9–31: 23-bit decomposition of t ──────────────────────────
+        let t_bits: Vec<E::F> = (0..N_BITS)
+            .map(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone())
+            .collect();
 
-        // C2: a_out − a_in − t + carry_a × Q = 0
+        // ── Columns 32–54: 23-bit decomposition of carry_t ───────────────────
+        let ct_bits: Vec<E::F> = (0..N_BITS)
+            .map(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone())
+            .collect();
+
+        // ── C1: ζ × b_in − t − carry_t × Q = 0  (degree 2) ─────────────────
+        eval.add_constraint(zeta * b_in - t.clone() - carry_t.clone() * q);
+
+        // ── C2: a_out − a_in − t + carry_a × Q = 0 ──────────────────────────
         eval.add_constraint(a_out - a_in.clone() - t.clone() + carry_a.clone() * q);
 
-        // C3: carry_a² − carry_a = 0  ⟺  carry_a ∈ {0, 1}
+        // ── C3: carry_a² − carry_a = 0 ──────────────────────────────────────
         eval.add_constraint(carry_a.clone() * carry_a.clone() - carry_a);
 
-        // C4: b_out − a_in + t − carry_b × Q = 0
-        eval.add_constraint(b_out - a_in + t - carry_b.clone() * q);
+        // ── C4: b_out − a_in + t − carry_b × Q = 0 ──────────────────────────
+        eval.add_constraint(b_out - a_in + t.clone() - carry_b.clone() * q);
 
-        // C5: carry_b² − carry_b = 0  ⟺  carry_b ∈ {0, 1}
+        // ── C5: carry_b² − carry_b = 0 ──────────────────────────────────────
         eval.add_constraint(carry_b.clone() * carry_b.clone() - carry_b);
+
+        // ── C6: t = Σ t_bits[k] · 2^k  (proves t ∈ [0, 2^23) ⊃ [0, Q)) ────
+        let mut pow2: u32 = 1;
+        let mut t_from_bits = t_bits[0].clone();
+        for k in 1..N_BITS {
+            pow2 <<= 1;
+            t_from_bits = t_from_bits + t_bits[k].clone() * BaseField::from_u32_unchecked(pow2);
+        }
+        eval.add_constraint(t - t_from_bits);
+
+        // ── C7–C29: t_bits[k]² − t_bits[k] = 0  (boolean, 23 constraints) ──
+        for bk in &t_bits {
+            eval.add_constraint(bk.clone() * bk.clone() - bk.clone());
+        }
+
+        // ── C30: carry_t = Σ ct_bits[k] · 2^k  (proves carry_t ∈ [0, Q)) ───
+        let mut pow2: u32 = 1;
+        let mut ct_from_bits = ct_bits[0].clone();
+        for k in 1..N_BITS {
+            pow2 <<= 1;
+            ct_from_bits =
+                ct_from_bits + ct_bits[k].clone() * BaseField::from_u32_unchecked(pow2);
+        }
+        eval.add_constraint(carry_t - ct_from_bits);
+
+        // ── C31–C53: ct_bits[k]² − ct_bits[k] = 0  (boolean, 23 constraints)
+        for bk in &ct_bits {
+            eval.add_constraint(bk.clone() * bk.clone() - bk.clone());
+        }
 
         eval
     }
@@ -148,7 +198,6 @@ struct ButterflyRow {
 }
 
 fn compute_butterfly(a_in: i64, b_in: i64, zeta_k: i64) -> ButterflyRow {
-    // Both zeta_k and b_in are in [0, Q), so prod ≥ 0.
     let prod    = zeta_k * b_in;
     let t       = prod % Q;
     let carry_t = prod / Q;
@@ -165,14 +214,10 @@ fn compute_butterfly(a_in: i64, b_in: i64, zeta_k: i64) -> ButterflyRow {
 }
 
 /// Enumerate all 1024 Cooley-Tukey butterflies for the forward NTT of `f`.
-///
-/// Returns `(rows, ntt_output)` where `ntt_output` equals `NTT(f)`.
 fn enumerate_ntt_butterflies(f: &[i64; N]) -> (Vec<ButterflyRow>, [i64; N]) {
     let mut rows = Vec::with_capacity(N_BUTTERFLIES);
     let mut poly = *f;
 
-    // Forward zeta table: ZETA_FWD[k] = ζ^{brv₈(k)} mod Q.
-    // Same formula as mldsa/ntt.rs; inlined here to avoid coupling.
     let mut zeta_fwd = [0i64; 256];
     for k in 0u8..=255u8 {
         zeta_fwd[k as usize] = field::pow(ZETA, k.reverse_bits() as u64);
@@ -202,28 +247,33 @@ fn enumerate_ntt_butterflies(f: &[i64; N]) -> (Vec<ButterflyRow>, [i64; N]) {
 
 // ── Trace builder ─────────────────────────────────────────────────────────────
 
-/// Build the NTT butterfly trace for input polynomial `f`.
+/// Build the 55-column NTT butterfly trace for input polynomial `f`.
 ///
-/// Returns `(columns, ntt_output)` where:
-/// - `columns`: 9 trace columns in circle-domain bit-reversed order
-/// - `ntt_output`: the forward NTT of `f`, identical to calling `mldsa::ntt::ntt(&mut f)`
+/// Columns 0–8 are the butterfly core; columns 9–31 are the 23-bit
+/// decomposition of `t`; columns 32–54 are the 23-bit decomposition of
+/// `carry_t`.  All three ranges prove the corresponding witness is in [0, Q).
 pub fn build_trace(f: &[i64; N]) -> (TraceColumns, [i64; N]) {
     let (butterflies, ntt_out) = enumerate_ntt_butterflies(f);
 
-    let n     = 1_usize << LOG_N_BUTTERFLIES;
+    let n      = 1_usize << LOG_N_BUTTERFLIES; // 1024 (padded to power-of-2)
     let domain = CanonicCoset::new(LOG_N_BUTTERFLIES).circle_domain();
-    let bf_zero = BaseField::from_u32_unchecked(0);
-    let bf      = |v: i64| BaseField::from_u32_unchecked(v as u32);
+    let bf0    = BaseField::from_u32_unchecked(0);
+    let bf     = |v: i64| BaseField::from_u32_unchecked(v as u32);
 
-    let mut a_in_col    = vec![bf_zero; n];
-    let mut b_in_col    = vec![bf_zero; n];
-    let mut zeta_col    = vec![bf_zero; n];
-    let mut t_col       = vec![bf_zero; n];
-    let mut carry_t_col = vec![bf_zero; n];
-    let mut a_out_col   = vec![bf_zero; n];
-    let mut b_out_col   = vec![bf_zero; n];
-    let mut carry_a_col = vec![bf_zero; n];
-    let mut carry_b_col = vec![bf_zero; n];
+    // ── Base columns ─────────────────────────────────────────────────────────
+    let mut a_in_col    = vec![bf0; n];
+    let mut b_in_col    = vec![bf0; n];
+    let mut zeta_col    = vec![bf0; n];
+    let mut t_col       = vec![bf0; n];
+    let mut carry_t_col = vec![bf0; n];
+    let mut a_out_col   = vec![bf0; n];
+    let mut b_out_col   = vec![bf0; n];
+    let mut carry_a_col = vec![bf0; n];
+    let mut carry_b_col = vec![bf0; n];
+
+    // ── Bit-decomposition columns ─────────────────────────────────────────────
+    let mut t_bit_cols:  Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_BITS];
+    let mut ct_bit_cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_BITS];
 
     for (i, row) in butterflies.iter().enumerate() {
         a_in_col[i]    = bf(row.a_in);
@@ -235,10 +285,18 @@ pub fn build_trace(f: &[i64; N]) -> (TraceColumns, [i64; N]) {
         b_out_col[i]   = bf(row.b_out);
         carry_a_col[i] = bf(row.carry_a);
         carry_b_col[i] = bf(row.carry_b);
-    }
-    // Rows [N_BUTTERFLIES..n) remain zero: the zero butterfly satisfies all
-    // constraints trivially (0 × 0 = 0, 0 ± 0 = 0, carries = 0).
 
+        let t_u  = row.t       as u32;
+        let ct_u = row.carry_t as u32;
+        for k in 0..N_BITS {
+            t_bit_cols[k][i]  = BaseField::from_u32_unchecked((t_u  >> k) & 1);
+            ct_bit_cols[k][i] = BaseField::from_u32_unchecked((ct_u >> k) & 1);
+        }
+    }
+    // Rows [N_BUTTERFLIES..n) stay zero: the all-zero row satisfies all
+    // constraints trivially (0 × 0 = 0, bit decomp of 0 = 0, etc.).
+
+    // ── Bit-reverse all columns ───────────────────────────────────────────────
     for col in [
         &mut a_in_col, &mut b_in_col, &mut zeta_col,
         &mut t_col, &mut carry_t_col,
@@ -247,19 +305,26 @@ pub fn build_trace(f: &[i64; N]) -> (TraceColumns, [i64; N]) {
     ] {
         bit_reverse_coset_to_circle_domain_order(col);
     }
+    for col in t_bit_cols.iter_mut().chain(ct_bit_cols.iter_mut()) {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
 
-    let columns = vec![
-        CircleEvaluation::new(domain, a_in_col),
-        CircleEvaluation::new(domain, b_in_col),
-        CircleEvaluation::new(domain, zeta_col),
-        CircleEvaluation::new(domain, t_col),
-        CircleEvaluation::new(domain, carry_t_col),
-        CircleEvaluation::new(domain, a_out_col),
-        CircleEvaluation::new(domain, b_out_col),
-        CircleEvaluation::new(domain, carry_a_col),
-        CircleEvaluation::new(domain, carry_b_col),
-    ];
+    // ── Assemble columns in constraint order ──────────────────────────────────
+    let mut columns: TraceColumns = Vec::with_capacity(N_COLS);
 
+    columns.push(CircleEvaluation::new(domain, a_in_col));
+    columns.push(CircleEvaluation::new(domain, b_in_col));
+    columns.push(CircleEvaluation::new(domain, zeta_col));
+    columns.push(CircleEvaluation::new(domain, t_col));
+    columns.push(CircleEvaluation::new(domain, carry_t_col));
+    columns.push(CircleEvaluation::new(domain, a_out_col));
+    columns.push(CircleEvaluation::new(domain, b_out_col));
+    columns.push(CircleEvaluation::new(domain, carry_a_col));
+    columns.push(CircleEvaluation::new(domain, carry_b_col));
+    for col in t_bit_cols  { columns.push(CircleEvaluation::new(domain, col)); }
+    for col in ct_bit_cols { columns.push(CircleEvaluation::new(domain, col)); }
+
+    debug_assert_eq!(columns.len(), N_COLS);
     (columns, ntt_out)
 }
 
@@ -285,30 +350,25 @@ mod tests {
 
     #[test]
     fn test_butterfly_integer_correctness() {
-        // Verify the integer equations hold for a single butterfly.
         let a_in   = 1_234_567_i64;
         let b_in   = 7_654_321_i64;
         let zeta_k = field::pow(ZETA, 128);
 
         let row = compute_butterfly(a_in, b_in, zeta_k);
 
-        // C1 as integer equation
         assert_eq!(zeta_k * b_in, row.t + row.carry_t * Q, "C1");
-        // C2: a_out = (a_in + t) mod Q
-        assert_eq!(row.a_out, (a_in + row.t) % Q, "C2");
-        // C4: b_out = (a_in - t) mod Q
+        assert_eq!(row.a_out, (a_in + row.t) % Q,           "C2");
         assert_eq!(row.b_out, (a_in - row.t).rem_euclid(Q), "C4");
-        // Carries are boolean
         assert!(matches!(row.carry_a, 0 | 1), "carry_a boolean");
         assert!(matches!(row.carry_b, 0 | 1), "carry_b boolean");
-        // Outputs in [0, Q)
-        assert!(row.a_out >= 0 && row.a_out < Q);
-        assert!(row.b_out >= 0 && row.b_out < Q);
+        assert!(row.t       >= 0 && row.t       < Q, "t in [0,Q)");
+        assert!(row.carry_t >= 0 && row.carry_t < Q, "carry_t in [0,Q)");
+        assert!(row.a_out   >= 0 && row.a_out   < Q, "a_out in [0,Q)");
+        assert!(row.b_out   >= 0 && row.b_out   < Q, "b_out in [0,Q)");
     }
 
     #[test]
     fn test_butterfly_max_inputs() {
-        // Ensure no overflow at the worst-case values.
         let row = compute_butterfly(Q - 1, Q - 1, Q - 1);
         assert!(row.t       >= 0 && row.t       < Q);
         assert!(row.carry_t >= 0 && row.carry_t < Q);
@@ -337,27 +397,34 @@ mod tests {
     }
 
     #[test]
+    fn test_column_count() {
+        let f = random_poly(13);
+        let (cols, _) = build_trace(&f);
+        assert_eq!(cols.len(), N_COLS, "expected {N_COLS} columns");
+    }
+
+    #[test]
+    fn test_carry_t_in_range() {
+        // For all butterflies with max inputs, carry_t must fit in 23 bits.
+        let row = compute_butterfly(Q - 1, Q - 1, Q - 1);
+        assert!(row.carry_t < (1 << N_BITS), "carry_t must fit in 23 bits");
+        assert!(row.t < (1 << N_BITS),       "t must fit in 23 bits");
+    }
+
+    #[test]
     fn test_constraints_on_trace() {
         let f = random_poly(1337);
         let (cols, _) = build_trace(&f);
 
-        let a_in_v:    Vec<M31> = cols[0].values.clone();
-        let b_in_v:    Vec<M31> = cols[1].values.clone();
-        let zeta_v:    Vec<M31> = cols[2].values.clone();
-        let t_v:       Vec<M31> = cols[3].values.clone();
-        let carry_t_v: Vec<M31> = cols[4].values.clone();
-        let a_out_v:   Vec<M31> = cols[5].values.clone();
-        let b_out_v:   Vec<M31> = cols[6].values.clone();
-        let carry_a_v: Vec<M31> = cols[7].values.clone();
-        let carry_b_v: Vec<M31> = cols[8].values.clone();
+        assert_eq!(cols.len(), N_COLS);
 
-        // TreeVec layout: [preprocessed tree, main trace tree]
+        // Collect all column value references.
+        let col_vecs: Vec<Vec<M31>> = cols.iter().map(|c| c.values.clone()).collect();
+        let col_refs: Vec<&Vec<M31>> = col_vecs.iter().collect();
+
         let evals: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![
-            vec![],  // no preprocessed columns
-            vec![
-                &a_in_v, &b_in_v, &zeta_v, &t_v, &carry_t_v,
-                &a_out_v, &b_out_v, &carry_a_v, &carry_b_v,
-            ],
+            vec![],       // no preprocessed columns
+            col_refs,
         ]);
 
         let evaluator = MlDsaNttButterflyEval { log_n_rows: LOG_N_BUTTERFLIES };

@@ -665,6 +665,7 @@ dependencies = [
  "sha3",
  "stwo",
  "stwo-constraint-framework",
+ "zeroize",
 ]
 
 [[package]]

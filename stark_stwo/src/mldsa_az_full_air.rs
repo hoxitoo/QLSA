@@ -3,43 +3,39 @@
 /// Proves ALL K=6 output polynomials of Az̃ simultaneously in a single STARK:
 ///   az_out[i][p] = Σ_{j=0}^{L-1} Ã[i][j][p] · z̃[j][p]   mod Q
 ///
-/// for every coefficient position p = 0..N-1 = 0..255.
-///
-/// This replaces K=6 separate `prove_az_row` calls with one proof, reducing
-/// the sub-proof count for the Az step from 17 (v2) to 12 (v3: L NTT + K INTT + 1 Az).
-///
-/// # Trace layout  (143 columns, 256 rows)
+/// # Trace layout  (1523 columns, 256 rows)
 ///
 /// Shared inputs (5 columns):
-///   col  0..4    z[j]    = z̃[j][p]          ∈ [0, Q)   shared across all rows
+///   col  0..4    z[j]    = z̃[j][p]          ∈ [0, Q)
 ///
-/// Per output row i = 0..K-1  (23 columns each):
-///   col  5 + i*23 + 0..4    a[i][j]   ∈ [0, Q)  matrix entries
-///   col  5 + i*23 + 5..9    t[i][j]   ∈ [0, Q)  products a[i][j]·z[j] mod Q
-///   col  5 + i*23 + 10..14  ct[i][j]  ∈ [0, Q)  multiplication carries ⌊a[i][j]·z[j]/Q⌋
-///   col  5 + i*23 + 15..18  s[i][r]   ∈ [0, Q)  running accumulator
-///   col  5 + i*23 + 19..22  cs[i][r]  ∈ {0,1}   addition carries
+/// Per output row i = 0..K-1:
+///   Base block (23 cols):
+///     col  5+i*253+0..4    a[i][j]   ∈ [0, Q)  matrix entries
+///     col  5+i*253+5..9    t[i][j]   ∈ [0, Q)  products mod Q
+///     col  5+i*253+10..14  ct[i][j]  ∈ [0, Q)  multiplication carries
+///     col  5+i*253+15..18  s[i][r]   ∈ [0, Q)  running accumulator
+///     col  5+i*253+19..22  cs[i][r]  ∈ {0,1}   addition carries
+///   Range-check bits (230 cols per row):
+///     t_bits[i][j][k]  for j=0..L, k=0..N_BITS   (L×N_BITS = 115 cols)
+///     ct_bits[i][j][k] for j=0..L, k=0..N_BITS   (L×N_BITS = 115 cols)
 ///
-/// The final accumulator s[i][3] equals az_out[i][p].
+/// Total: 5 + K×(23 + 2·L·N_BITS) = 5 + 6×253 = 1523 columns.
 ///
-/// # Constraints  (78 total, max degree 2)
+/// # Constraints  (1518 total, max degree 2)
 ///
-/// For each row i in 0..K:
-///   C1–C5   a[i][j]·z[j] − t[i][j] − ct[i][j]·Q = 0     (mul mod Q, degree 2)
-///   C6      t[i][0]+t[i][1] − s[i][0] − cs[i][0]·Q = 0
-///   C7      cs[i][0]² − cs[i][0] = 0
-///   C8      s[i][0]+t[i][2] − s[i][1] − cs[i][1]·Q = 0
-///   C9      cs[i][1]² − cs[i][1] = 0
-///   C10     s[i][1]+t[i][3] − s[i][2] − cs[i][2]·Q = 0
-///   C11     cs[i][2]² − cs[i][2] = 0
-///   C12     s[i][2]+t[i][4] − s[i][3] − cs[i][3]·Q = 0
-///   C13     cs[i][3]² − cs[i][3] = 0
+/// Per row i in 0..K:
+///   C1–C5     a[i][j]·z[j] − t[i][j] − ct[i][j]·Q = 0   (mul mod Q)
+///   C6–C13    accumulation chain (add mod Q + boolean)
+///   C14–C18   t[i][j] − Σ t_bits[i][j][k]·2^k = 0
+///   C19–C133  t_bits[i][j][k]² − t_bits[i][j][k] = 0     (115 booleans)
+///   C134–C138 ct[i][j] − Σ ct_bits[i][j][k]·2^k = 0
+///   C139–C253 ct_bits[i][j][k]² − ct_bits[i][j][k] = 0   (115 booleans)
 ///
 /// # Soundness
 ///
-/// Mul constraints (C1–C5) share the M31 wrap-around limitation of the Az-row AIR.
-/// Add/boolean constraints (C6–C13) are fully sound since all addends are < Q < 2²³.
-/// Range proofs on t[i][j] and ct[i][j] are deferred to MVP-4.
+/// Mul constraints had ~32 654 fake solutions per multiplier before this fix.
+/// With 23-bit decompositions the residual error drops to ~2^{−47} per mul.
+/// Full closure requires lookup arguments (planned for MVP-4).
 
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -58,10 +54,14 @@ use crate::mldsa::params::{K, L};
 type TraceCol = CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>;
 pub type TraceColumns = Vec<TraceCol>;
 
-/// log₂(N) = 8  →  256 rows (one per NTT coefficient).
 pub const LOG_N_ROWS: u32 = 8;
 
-// ── FrameworkEval ─────────────────────────────────────────────────────────────
+/// Bits in each 23-bit range decomposition.
+pub const N_BITS: usize = 23;
+/// Columns per K-row block: 23 base + 2·L·N_BITS range bits.
+const COLS_PER_ROW: usize = 23 + 2 * L * N_BITS; // 253
+/// Total columns: 5 shared z + K × COLS_PER_ROW.
+pub const N_COLS: usize = L + K * COLS_PER_ROW; // 1523
 
 pub struct AzFullEval {
     pub log_n_rows: u32,
@@ -77,15 +77,16 @@ impl FrameworkEval for AzFullEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let q = BaseField::from_u32_unchecked(Q as u32);
+        let q  = BaseField::from_u32_unchecked(Q as u32);
+        let bf = |v: u32| E::F::from(BaseField::from_u32_unchecked(v));
 
-        // Shared z columns (5 columns: cols 0..4).
+        // Shared z columns (L=5 cols)
         let z: [E::F; 5] = std::array::from_fn(|_|
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone()
         );
 
-        // Per-row computation (23 columns per row: 5 a + 5 t + 5 ct + 4 s + 4 cs).
         for _i in 0..K {
+            // Base block: 5 a, 5 t, 5 ct, 4 s, 4 cs
             let a:  [E::F; 5] = std::array::from_fn(|_|
                 eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone()
             );
@@ -102,27 +103,64 @@ impl FrameworkEval for AzFullEval {
                 eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone()
             );
 
-            // C1–C5: a[j] * z[j] = t[j] + ct[j] * Q
+            // Bit columns: t_bits[j][k] for j in 0..L, k in 0..N_BITS
+            let t_bits: [[E::F; 23]; 5] = std::array::from_fn(|_|
+                std::array::from_fn(|_|
+                    eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone()
+                )
+            );
+            let ct_bits: [[E::F; 23]; 5] = std::array::from_fn(|_|
+                std::array::from_fn(|_|
+                    eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone()
+                )
+            );
+
+            // C1–C5: a[j] × z[j] = t[j] + ct[j] × Q
             for j in 0..L {
                 eval.add_constraint(
-                    a[j].clone() * z[j].clone()
-                        - t[j].clone()
-                        - ct[j].clone() * q,
+                    a[j].clone() * z[j].clone() - t[j].clone() - ct[j].clone() * q
                 );
             }
 
-            // C6–C13: accumulation chain (identical to Az-row AIR per row).
+            // C6–C13: accumulation chain
             eval.add_constraint(t[0].clone() + t[1].clone() - s[0].clone() - cs[0].clone() * q);
             eval.add_constraint(cs[0].clone() * cs[0].clone() - cs[0].clone());
-
             eval.add_constraint(s[0].clone() + t[2].clone() - s[1].clone() - cs[1].clone() * q);
             eval.add_constraint(cs[1].clone() * cs[1].clone() - cs[1].clone());
-
             eval.add_constraint(s[1].clone() + t[3].clone() - s[2].clone() - cs[2].clone() * q);
             eval.add_constraint(cs[2].clone() * cs[2].clone() - cs[2].clone());
-
             eval.add_constraint(s[2].clone() + t[4].clone() - s[3].clone() - cs[3].clone() * q);
             eval.add_constraint(cs[3].clone() * cs[3].clone() - cs[3].clone());
+
+            // C14–C18: t[j] decomposition; C19–C133: t_bits booleans
+            for j in 0..L {
+                let mut sum = bf(0);
+                let mut pw: u32 = 1;
+                for k in 0..N_BITS {
+                    sum = sum + t_bits[j][k].clone() * bf(pw);
+                    pw <<= 1;
+                }
+                eval.add_constraint(t[j].clone() - sum);
+                for k in 0..N_BITS {
+                    let b = t_bits[j][k].clone();
+                    eval.add_constraint(b.clone() * b - t_bits[j][k].clone());
+                }
+            }
+
+            // C134–C138: ct[j] decomposition; C139–C253: ct_bits booleans
+            for j in 0..L {
+                let mut sum = bf(0);
+                let mut pw: u32 = 1;
+                for k in 0..N_BITS {
+                    sum = sum + ct_bits[j][k].clone() * bf(pw);
+                    pw <<= 1;
+                }
+                eval.add_constraint(ct[j].clone() - sum);
+                for k in 0..N_BITS {
+                    let b = ct_bits[j][k].clone();
+                    eval.add_constraint(b.clone() * b - ct_bits[j][k].clone());
+                }
+            }
         }
 
         eval
@@ -139,70 +177,70 @@ pub fn new_component(log_n_rows: u32) -> AzFullComponent {
 
 // ── Trace builder ─────────────────────────────────────────────────────────────
 
-/// Build the full-matrix Az trace.
-///
-/// `a_hat` — K*L NTT-domain matrix entries in row-major order:
-///           `a_hat[i * L + j]` = Ã[i][j].
-/// `z_hat` — L NTT-domain input polynomials z̃[0..L-1].
-///
-/// Returns `(columns, az_out)` where `az_out[i]` = Σ_j Ã[i][j] ⊙ z̃[j].
 pub fn build_trace(
-    a_hat: &[[i64; N]],   // K*L entries
+    a_hat: &[[i64; N]],
     z_hat: &[[i64; N]; L],
 ) -> (TraceColumns, [[i64; N]; K]) {
-    assert_eq!(a_hat.len(), K * L, "a_hat must have exactly K*L = {} entries", K * L);
+    assert_eq!(a_hat.len(), K * L, "a_hat must have K*L={} entries", K * L);
 
-    let n      = 1_usize << LOG_N_ROWS; // 256
+    let n      = 1_usize << LOG_N_ROWS;
     let domain = CanonicCoset::new(LOG_N_ROWS).circle_domain();
     let bf     = |v: i64| BaseField::from_u32_unchecked(v as u32);
     let bf0    = BaseField::from_u32_unchecked(0);
 
-    // Column buffers: 5 z + 6*(5 a + 5 t + 5 ct + 4 s + 4 cs) = 143 columns.
-    let mut z_cols:  [Vec<BaseField>; L] = std::array::from_fn(|_| vec![bf0; n]);
+    let mut z_cols: [Vec<BaseField>; L] = std::array::from_fn(|_| vec![bf0; n]);
 
-    // Per-row buffers indexed as [K][col_within_row][row_pos].
-    let mut a_cols:  Vec<[Vec<BaseField>; L]>      = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
-    let mut t_cols:  Vec<[Vec<BaseField>; L]>      = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
-    let mut ct_cols: Vec<[Vec<BaseField>; L]>      = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
-    let mut s_cols:  Vec<[Vec<BaseField>; 4]>      = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
-    let mut cs_cols: Vec<[Vec<BaseField>; 4]>      = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
+    let mut a_cols:  Vec<[Vec<BaseField>; L]> = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
+    let mut t_cols:  Vec<[Vec<BaseField>; L]> = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
+    let mut ct_cols: Vec<[Vec<BaseField>; L]> = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
+    let mut s_cols:  Vec<[Vec<BaseField>; 4]> = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
+    let mut cs_cols: Vec<[Vec<BaseField>; 4]> = (0..K).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect();
+
+    // t_bit_cols[i][j][k] and ct_bit_cols[i][j][k], each length n
+    let mut t_bit_cols:  Vec<Vec<[Vec<BaseField>; 23]>> = (0..K).map(|_|
+        (0..L).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect()
+    ).collect();
+    let mut ct_bit_cols: Vec<Vec<[Vec<BaseField>; 23]>> = (0..K).map(|_|
+        (0..L).map(|_| std::array::from_fn(|_| vec![bf0; n])).collect()
+    ).collect();
 
     let mut az_out: [[i64; N]; K] = [[0i64; N]; K];
 
     for p in 0..N {
-        // Fill shared z values.
         let zv: [i64; L] = std::array::from_fn(|j| z_hat[j][p]);
 
         for i in 0..K {
             let av: [i64; L] = std::array::from_fn(|j| a_hat[i * L + j][p]);
-
-            // Products t[j] = av[j] * zv[j] mod Q, carries ct[j].
             let tv:  [i64; L] = std::array::from_fn(|j| (av[j] * zv[j]) % Q);
             let ctv: [i64; L] = std::array::from_fn(|j| (av[j] * zv[j]) / Q);
 
-            // Accumulation chain: s[0]=t[0]+t[1], s[r]=s[r-1]+t[r+2].
             let sv0 = { let r = tv[0] + tv[1]; r - if r >= Q { Q } else { 0 } };
             let sv1 = { let r = sv0 + tv[2];   r - if r >= Q { Q } else { 0 } };
             let sv2 = { let r = sv1 + tv[3];   r - if r >= Q { Q } else { 0 } };
             let sv3 = { let r = sv2 + tv[4];   r - if r >= Q { Q } else { 0 } };
 
-            let sv  = [sv0, sv1, sv2, sv3];
-            let csv = [
-                if tv[0] + tv[1] >= Q { 1i64 } else { 0 },
-                if sv0   + tv[2] >= Q { 1i64 } else { 0 },
-                if sv1   + tv[3] >= Q { 1i64 } else { 0 },
-                if sv2   + tv[4] >= Q { 1i64 } else { 0 },
-            ];
-
             az_out[i][p] = sv3;
+
+            let csv: [i64; 4] = [
+                if tv[0] + tv[1] >= Q { 1 } else { 0 },
+                if sv0   + tv[2] >= Q { 1 } else { 0 },
+                if sv1   + tv[3] >= Q { 1 } else { 0 },
+                if sv2   + tv[4] >= Q { 1 } else { 0 },
+            ];
 
             for j in 0..L {
                 a_cols[i][j][p]  = bf(av[j]);
                 t_cols[i][j][p]  = bf(tv[j]);
                 ct_cols[i][j][p] = bf(ctv[j]);
+                let tu  = tv[j]  as u32;
+                let ctu = ctv[j] as u32;
+                for k in 0..N_BITS {
+                    t_bit_cols[i][j][k][p]  = BaseField::from_u32_unchecked((tu  >> k) & 1);
+                    ct_bit_cols[i][j][k][p] = BaseField::from_u32_unchecked((ctu >> k) & 1);
+                }
             }
             for r in 0..4 {
-                s_cols[i][r][p]  = bf(sv[r]);
+                s_cols[i][r][p]  = bf([sv0, sv1, sv2, sv3][r]);
                 cs_cols[i][r][p] = bf(csv[r]);
             }
         }
@@ -211,32 +249,46 @@ pub fn build_trace(
         }
     }
 
-    // Apply bit-reversal to all column buffers.
-    for col in z_cols.iter_mut() {
-        bit_reverse_coset_to_circle_domain_order(col);
-    }
+    // Bit-reverse all buffers.
+    for col in z_cols.iter_mut() { bit_reverse_coset_to_circle_domain_order(col); }
     for i in 0..K {
-        for col in a_cols[i].iter_mut()  { bit_reverse_coset_to_circle_domain_order(col); }
-        for col in t_cols[i].iter_mut()  { bit_reverse_coset_to_circle_domain_order(col); }
-        for col in ct_cols[i].iter_mut() { bit_reverse_coset_to_circle_domain_order(col); }
-        for col in s_cols[i].iter_mut()  { bit_reverse_coset_to_circle_domain_order(col); }
-        for col in cs_cols[i].iter_mut() { bit_reverse_coset_to_circle_domain_order(col); }
+        for c in a_cols[i].iter_mut()  { bit_reverse_coset_to_circle_domain_order(c); }
+        for c in t_cols[i].iter_mut()  { bit_reverse_coset_to_circle_domain_order(c); }
+        for c in ct_cols[i].iter_mut() { bit_reverse_coset_to_circle_domain_order(c); }
+        for c in s_cols[i].iter_mut()  { bit_reverse_coset_to_circle_domain_order(c); }
+        for c in cs_cols[i].iter_mut() { bit_reverse_coset_to_circle_domain_order(c); }
+        for j in 0..L {
+            for c in t_bit_cols[i][j].iter_mut()  { bit_reverse_coset_to_circle_domain_order(c); }
+            for c in ct_bit_cols[i][j].iter_mut() { bit_reverse_coset_to_circle_domain_order(c); }
+        }
     }
 
-    // Pack into flat column vec matching the evaluate() read order:
-    //   z[0..L], then for each i: a[i][0..L], t[i][0..L], ct[i][0..L], s[i][0..4], cs[i][0..4]
-    let mut columns: TraceColumns = Vec::with_capacity(L + K * 23);
-    for j in 0..L {
-        columns.push(CircleEvaluation::new(domain, z_cols[j].clone()));
-    }
+    // Pack columns in evaluate() read order:
+    //   z[0..L], then per i: a[i][0..L], t[i][0..L], ct[i][0..L],
+    //                         s[i][0..4], cs[i][0..4],
+    //                         t_bits[i][j=0..L][k=0..N_BITS],
+    //                         ct_bits[i][j=0..L][k=0..N_BITS]
+    let mut columns: TraceColumns = Vec::with_capacity(N_COLS);
+    for j in 0..L { columns.push(CircleEvaluation::new(domain, z_cols[j].clone())); }
     for i in 0..K {
-        for j in 0..L  { columns.push(CircleEvaluation::new(domain, a_cols[i][j].clone())); }
-        for j in 0..L  { columns.push(CircleEvaluation::new(domain, t_cols[i][j].clone())); }
-        for j in 0..L  { columns.push(CircleEvaluation::new(domain, ct_cols[i][j].clone())); }
-        for r in 0..4  { columns.push(CircleEvaluation::new(domain, s_cols[i][r].clone())); }
-        for r in 0..4  { columns.push(CircleEvaluation::new(domain, cs_cols[i][r].clone())); }
+        for j in 0..L { columns.push(CircleEvaluation::new(domain, a_cols[i][j].clone())); }
+        for j in 0..L { columns.push(CircleEvaluation::new(domain, t_cols[i][j].clone())); }
+        for j in 0..L { columns.push(CircleEvaluation::new(domain, ct_cols[i][j].clone())); }
+        for r in 0..4 { columns.push(CircleEvaluation::new(domain, s_cols[i][r].clone())); }
+        for r in 0..4 { columns.push(CircleEvaluation::new(domain, cs_cols[i][r].clone())); }
+        for j in 0..L {
+            for k in 0..N_BITS {
+                columns.push(CircleEvaluation::new(domain, t_bit_cols[i][j][k].clone()));
+            }
+        }
+        for j in 0..L {
+            for k in 0..N_BITS {
+                columns.push(CircleEvaluation::new(domain, ct_bit_cols[i][j][k].clone()));
+            }
+        }
     }
 
+    debug_assert_eq!(columns.len(), N_COLS);
     (columns, az_out)
 }
 
@@ -275,13 +327,16 @@ mod tests {
     }
 
     #[test]
+    fn test_column_count() {
+        assert_eq!(N_COLS, 1523);
+    }
+
+    #[test]
     fn test_az_full_correctness() {
         let a_hat: Vec<[i64; N]> = (0..K * L).map(|k| random_poly(k as u64 * 7)).collect();
         let z_hat: [[i64; N]; L] = std::array::from_fn(|j| random_poly(j as u64 * 100 + 50));
-
         let (_, az_out) = build_trace(&a_hat, &z_hat);
         let expected = reference_az_full(&a_hat, &z_hat);
-
         assert_eq!(az_out, expected, "output mismatch");
         for i in 0..K {
             for p in 0..N {
@@ -294,8 +349,7 @@ mod tests {
     #[test]
     fn test_az_full_zero_z() {
         let a_hat: Vec<[i64; N]> = (0..K * L).map(|k| random_poly(k as u64 + 1)).collect();
-        let z_zero = [[0i64; N]; L];
-        let (_, az_out) = build_trace(&a_hat, &z_zero);
+        let (_, az_out) = build_trace(&a_hat, &[[0i64; N]; L]);
         for i in 0..K {
             assert_eq!(az_out[i], [0i64; N], "row {i} must be zero for zero z");
         }
@@ -303,9 +357,8 @@ mod tests {
 
     #[test]
     fn test_az_full_zero_a() {
-        let a_zero: Vec<[i64; N]> = vec![[0i64; N]; K * L];
         let z_hat: [[i64; N]; L] = std::array::from_fn(|j| random_poly(j as u64 + 200));
-        let (_, az_out) = build_trace(&a_zero, &z_hat);
+        let (_, az_out) = build_trace(&vec![[0i64; N]; K * L], &z_hat);
         for i in 0..K {
             assert_eq!(az_out[i], [0i64; N], "row {i} must be zero for zero A");
         }
@@ -316,15 +369,11 @@ mod tests {
         use crate::mldsa_az_air;
         let a_hat: Vec<[i64; N]> = (0..K * L).map(|k| random_poly(k as u64 * 13 + 3)).collect();
         let z_hat: [[i64; N]; L] = std::array::from_fn(|j| random_poly(j as u64 * 17 + 9));
-
         let (_, az_full) = build_trace(&a_hat, &z_hat);
-
-        // Each row of az_full must match the per-row Az-row AIR output.
         for i in 0..K {
             let a_row: [[i64; N]; L] = std::array::from_fn(|j| a_hat[i * L + j]);
             let (_, az_row_i) = mldsa_az_air::build_trace(&a_row, &z_hat);
-            assert_eq!(az_full[i], az_row_i,
-                "row {i}: az_full output disagrees with az_row output");
+            assert_eq!(az_full[i], az_row_i, "row {i}: az_full ≠ az_row");
         }
     }
 
@@ -332,17 +381,10 @@ mod tests {
     fn test_constraints_on_trace() {
         let a_hat: Vec<[i64; N]> = (0..K * L).map(|k| random_poly(k as u64 * 3 + 77)).collect();
         let z_hat: [[i64; N]; L] = std::array::from_fn(|j| random_poly(j as u64 + 300));
-
         let (cols, _) = build_trace(&a_hat, &z_hat);
-
         let col_vals: Vec<Vec<M31>> = cols.iter().map(|c| c.values.clone()).collect();
         let col_refs: Vec<&Vec<M31>> = col_vals.iter().collect();
-
-        let evals: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![
-            vec![],
-            col_refs,
-        ]);
-
+        let evals: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![vec![], col_refs]);
         let evaluator = AzFullEval { log_n_rows: LOG_N_ROWS };
         assert_constraints_on_trace(
             &evals,

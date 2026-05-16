@@ -116,6 +116,67 @@ def test_different_leaves_give_different_commitments():
     assert out_a["commitment"] != out_b["commitment"]
 
 
+# ─── Merkle root as Fiat-Shamir public input ────────────────────────────────
+
+@needs_ext
+def test_prove_verify_with_merkle_root_roundtrip():
+    """prove(leaves, merkle_root=root) + verify(..., merkle_root=root) must pass."""
+    leaves = [1, 2, 3, 4, 5, 6, 7, 8]
+    root = b"sha3-512-merkle-root-64-bytes-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    proof, commitment, log_size = _ext.prove(leaves, merkle_root=root)
+    assert _ext.verify(proof, commitment, log_size, merkle_root=root)
+
+
+@needs_ext
+def test_prove_with_merkle_root_wrong_root_fails():
+    """Proof generated for root_A must NOT verify with root_B."""
+    leaves = [1, 2, 3, 4, 5, 6, 7, 8]
+    root_a = b"batch-root-A-64b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    root_b = b"batch-root-B-64b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    proof, commitment, log_size = _ext.prove(leaves, merkle_root=root_a)
+    assert not _ext.verify(proof, commitment, log_size, merkle_root=root_b)
+
+
+@needs_ext
+def test_prove_with_merkle_root_no_root_verify_fails():
+    """Proof generated with a root must NOT verify without a root (different FS state)."""
+    leaves = [1, 2, 3, 4, 5, 6, 7, 8]
+    root = b"some-real-merkle-root-64b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    proof, commitment, log_size = _ext.prove(leaves, merkle_root=root)
+    assert not _ext.verify(proof, commitment, log_size)
+
+
+@needs_ext
+def test_prove_without_root_verify_with_root_fails():
+    """Proof generated without a root must NOT verify if a root is supplied."""
+    leaves = [1, 2, 3, 4, 5, 6, 7, 8]
+    root = b"some-real-merkle-root-64b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    proof, commitment, log_size = _ext.prove(leaves)
+    assert not _ext.verify(proof, commitment, log_size, merkle_root=root)
+
+
+@needs_ext
+def test_prove_batch_root_binding_via_prover_module():
+    """prove_batch passes batch.merkle_root as Fiat-Shamir seed end-to-end."""
+    import hashlib
+    from core.batch import Batch
+    from stark.prover import prove_batch
+    from stark.verifier import verify_batch_proof
+
+    # Build a minimal batch with a real SHA3-512 Merkle root.
+    root = hashlib.sha3_512(b"dummy-batch").digest()  # 64 bytes
+
+    batch = Batch.__new__(Batch)
+    batch.merkle_root = root
+    result = prove_batch(batch)
+
+    # Verify with correct root → must pass.
+    assert verify_batch_proof(result.proof, result.commitment, result.log_size, merkle_root=root)
+    # Verify with wrong root → must fail.
+    wrong_root = bytes([b ^ 0xFF for b in root])
+    assert not verify_batch_proof(result.proof, result.commitment, result.log_size, merkle_root=wrong_root)
+
+
 # ─── prove_p2 / verify_p2 (Poseidon2 sponge hash chain) ─────────────────────
 
 @needs_ext
@@ -934,3 +995,38 @@ def test_prove_hint_weight_bounds_check():
         within_bound = total <= OMEGA
         # This is the off-circuit check the verifier would perform.
         assert within_bound == (count <= OMEGA)
+
+
+# ─── wipe_bytes ───────────────────────────────────────────────────────────────
+
+@needs_ext
+def test_wipe_bytes_zeros_buffer():
+    """wipe_bytes(bytearray) must overwrite every byte with 0."""
+    buf = bytearray(b"\xDE\xAD\xBE\xEF" * 32)
+    assert any(b != 0 for b in buf)
+    _ext.wipe_bytes(buf)
+    assert all(b == 0 for b in buf)
+
+
+@needs_ext
+def test_wipe_bytes_empty_buffer_is_noop():
+    """wipe_bytes on an empty bytearray must not raise."""
+    buf = bytearray()
+    _ext.wipe_bytes(buf)
+    assert len(buf) == 0
+
+
+@needs_ext
+def test_wipe_bytes_single_byte():
+    buf = bytearray(b"\xFF")
+    _ext.wipe_bytes(buf)
+    assert buf[0] == 0
+
+
+@needs_ext
+def test_wipe_key_uses_rust_wipe_when_ext_available():
+    """core.keys.wipe_key must produce all-zero buffer (via Rust wipe_bytes)."""
+    from core.keys import wipe_key
+    buf = bytearray(b"\xAB\xCD\xEF" * 100)
+    wipe_key(buf)
+    assert all(b == 0 for b in buf)

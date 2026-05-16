@@ -159,7 +159,7 @@ class Batcher:
         """Run the STARK prover; optionally add an ML-DSA witness proof for tx[0]."""
         result = BatchResult(batch=batch)
         try:
-            from stark.prover import prove_batch
+            from stark.prover import prove_batch_poseidon2 as prove_batch
             pr = prove_batch(batch)
             result.proof = pr.proof
             result.commitment = pr.commitment

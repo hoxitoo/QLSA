@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 
 from core.transaction import Transaction
@@ -55,13 +56,15 @@ class AggregatorNode:
         )
         self._stats = NodeStats()
         self._history: list[BatchResult] = []
+        self._lock = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def submit(self, tx: Transaction) -> None:
         """Accept a signed transaction into the mempool."""
         self.mempool.add(tx)
-        self._stats.transactions_received += 1
+        with self._lock:
+            self._stats.transactions_received += 1
         logger.debug("tx accepted: %s (mempool=%d)", tx.tx_hash().hex()[:16], self.mempool.size())
 
     def run_cycle(self, prove_witnesses: bool = False) -> BatchResult | None:
@@ -90,26 +93,29 @@ class AggregatorNode:
         return self.mempool.size()
 
     def stats(self) -> NodeStats:
-        return NodeStats(
-            transactions_received=self._stats.transactions_received,
-            transactions_batched=self._stats.transactions_batched,
-            batches_created=self._stats.batches_created,
-            proofs_generated=self._stats.proofs_generated,
-        )
+        with self._lock:
+            return NodeStats(
+                transactions_received=self._stats.transactions_received,
+                transactions_batched=self._stats.transactions_batched,
+                batches_created=self._stats.batches_created,
+                proofs_generated=self._stats.proofs_generated,
+            )
 
     def history(self) -> list[BatchResult]:
         """Return a snapshot of all BatchResults produced so far."""
-        return list(self._history)
+        with self._lock:
+            return list(self._history)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _record(self, result: BatchResult) -> None:
         n = len(result.batch.transactions)
-        self._stats.batches_created += 1
-        self._stats.transactions_batched += n
-        if result.is_proven:
-            self._stats.proofs_generated += 1
-        self._history.append(result)
+        with self._lock:
+            self._stats.batches_created += 1
+            self._stats.transactions_batched += n
+            if result.is_proven:
+                self._stats.proofs_generated += 1
+            self._history.append(result)
         logger.info(
             "batch created: id=%s txs=%d proven=%s",
             result.batch.batch_id[:8],
