@@ -1088,6 +1088,48 @@ def verify_mldsa_witness_stark_v21(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v21_py(result.proof_bundle))
 
 
+def prove_mldsa_witness_stark_v22(
+    a_hat:       list[list[int]],
+    z:           list[list[int]],
+    c:           list[int],
+    t1:          list[list[int]],
+    hints:       list[list[bool]],
+    k:           int,
+    l:           int,
+    c_tilde:     bytes | None = None,
+    merkle_root: bytes | None = None,
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness (V22 pipeline, 1 sub-proof):
+      Single 7-component STARK with Merkle root bound into the Fiat-Shamir transcript.
+
+    The proof is cryptographically tied to both the ML-DSA signature (c_tilde)
+    and the aggregation batch (merkle_root).  Tampered merkle_root causes FRI
+    transcript divergence and verification failure.
+
+    Raises RuntimeError if the extension is not installed or proving fails.
+    """
+    _require_ext("prove_mldsa_witness_v22_py")
+    try:
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v22_py(
+            a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_v22_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
+    )
+
+
+def verify_mldsa_witness_stark_v22(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V22 pipeline)."""
+    _require_ext("verify_mldsa_witness_v22_py")
+    return bool(_ext.verify_mldsa_witness_v22_py(result.proof_bundle))
+
+
 def verify_mldsa_hash_check(
     pk:     bytes,
     msg:    bytes,

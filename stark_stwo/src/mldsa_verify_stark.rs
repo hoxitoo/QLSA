@@ -4515,7 +4515,7 @@ pub fn prove_verify_mldsa_v21(
          w_prime, max_norms, w1_arr,
          hint_weight_total,
     ) = crate::prove_full_mldsa_witness_combined(
-        &z_arr, c, &t1_arr, a_hat, &h_arr, c_tilde,
+        &z_arr, c, &t1_arr, a_hat, &h_arr, c_tilde, &[],
     ).map_err(|e| format!("prove_full_mldsa_witness_combined failed: {e}"))?;
 
     Ok(VerifyMldsaProofV21 {
@@ -4606,7 +4606,175 @@ pub fn verify_mldsa_witness_v21(proof: &VerifyMldsaProofV21) -> Result<bool, Str
         &w1_arr,
         proof.hint_weight_total,
         &proof.c_tilde,
+        &[],  // no extra binding for V21
     ).map_err(|e| format!("verify_full_mldsa_witness_combined failed: {e}"))
+}
+
+// ── VerifyMldsaProofV22 — V21 + Merkle root as STARK public input ─────────────
+//
+// Extends V21 (1 sub-proof) by mixing the batch Merkle root into the
+// Fiat-Shamir transcript before Tree0, binding the proof cryptographically
+// to a specific set of signers.  The STARK proof is now specific to both
+// the ML-DSA signature (c_tilde) AND the aggregation batch (merkle_root).
+//
+// Sub-proof breakdown: same 7-component STARK as V21 (1 FRI commitment)
+// Security improvement: proof is no longer reusable across different batches.
+
+/// Single combined proof for all 7 ML-DSA.Verify components + Merkle root (V22).
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV22 {
+    pub proof_combined:       Vec<u8>,
+    pub ntt_commitment:       String,
+    pub az_commitment:        String,
+    pub ct1_commitment:       String,
+    pub intt_commitment:      String,
+    pub wp_commitment:        String,
+    pub norm_commitment:      String,
+    pub use_hint_commitment:  String,
+    pub z_hat:                Vec<[i64; N]>,
+    pub c_hat:                [i64; N],
+    pub t1_hat:               Vec<[i64; N]>,
+    pub az_hat:               Vec<[i64; N]>,
+    pub ct1_hat:              Vec<[i64; N]>,
+    pub az_out:               Vec<[i64; N]>,
+    pub ct1_out:              Vec<[i64; N]>,
+    pub w_prime:              Vec<[i64; N]>,
+    pub max_norms:            Vec<i64>,
+    pub output:               Vec<[i64; N]>,
+    pub hint_weight_total:    usize,
+    pub merkle_root:          Vec<u8>,
+    pub c_tilde:              Vec<u8>,
+}
+
+/// Prove all 7 ML-DSA.Verify components in ONE STARK, bound to a Merkle root (V22).
+pub fn prove_verify_mldsa_v22(
+    a_hat:       &[[i64; N]],
+    z:           &[[i64; N]],
+    c:           &[i64; N],
+    t1:          &[[i64; N]],
+    hints:       &[Vec<bool>],
+    k:           usize,
+    l:           usize,
+    c_tilde:     &[u8],
+    merkle_root: &[u8],
+) -> Result<VerifyMldsaProofV22, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V22 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("V22 requires l=L={L_PARAM}, got {l}")); }
+
+    let z_arr:  [[i64; N]; L_PARAM] = z.try_into()
+        .map_err(|_| format!("z must have L={L_PARAM} entries"))?;
+    let t1_arr: [[i64; N]; K_PARAM] = t1.try_into()
+        .map_err(|_| format!("t1 must have K={K_PARAM} entries"))?;
+    if hints.len() != K_PARAM {
+        return Err(format!("hints must have K={K_PARAM} entries, got {}", hints.len()));
+    }
+    let h_arr: [[bool; N]; K_PARAM] = std::array::from_fn(|i| {
+        let s: &[bool] = &hints[i];
+        std::array::from_fn(|p| s[p])
+    });
+
+    let (proof_bytes,
+         ntt_cm, az_cm, ct1_cm, intt_cm, wp_cm, norm_cm, uh_cm,
+         z_hat, c_hat, t1_hat,
+         az_hat, ct1_hat,
+         az_out, ct1_out,
+         w_prime, max_norms, w1_arr,
+         hint_weight_total,
+    ) = crate::prove_full_mldsa_witness_combined(
+        &z_arr, c, &t1_arr, a_hat, &h_arr, c_tilde, merkle_root,
+    ).map_err(|e| format!("prove_full_mldsa_witness_combined (V22) failed: {e}"))?;
+
+    Ok(VerifyMldsaProofV22 {
+        proof_combined:      proof_bytes,
+        ntt_commitment:      ntt_cm,
+        az_commitment:       az_cm,
+        ct1_commitment:      ct1_cm,
+        intt_commitment:     intt_cm,
+        wp_commitment:       wp_cm,
+        norm_commitment:     norm_cm,
+        use_hint_commitment: uh_cm,
+        z_hat:               z_hat.to_vec(),
+        c_hat,
+        t1_hat:              t1_hat.to_vec(),
+        az_hat:              az_hat.to_vec(),
+        ct1_hat:             ct1_hat.to_vec(),
+        az_out:              az_out.to_vec(),
+        ct1_out:             ct1_out.to_vec(),
+        w_prime:             w_prime.to_vec(),
+        max_norms:           max_norms.to_vec(),
+        output:              w1_arr.to_vec(),
+        hint_weight_total,
+        merkle_root:         merkle_root.to_vec(),
+        c_tilde:             c_tilde.to_vec(),
+    })
+}
+
+/// Verify a `VerifyMldsaProofV22`.
+pub fn verify_mldsa_witness_v22(proof: &VerifyMldsaProofV22) -> Result<bool, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM, OMEGA};
+
+    let z_hat_arr:  [[i64; N]; L_PARAM] = proof.z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have L entries".to_string())?;
+    let t1_hat_arr: [[i64; N]; K_PARAM] = proof.t1_hat.as_slice().try_into()
+        .map_err(|_| "t1_hat must have K entries".to_string())?;
+    let az_hat_arr: [[i64; N]; K_PARAM] = proof.az_hat.as_slice().try_into()
+        .map_err(|_| "az_hat must have K entries".to_string())?;
+    let ct1_hat_arr:[[i64; N]; K_PARAM] = proof.ct1_hat.as_slice().try_into()
+        .map_err(|_| "ct1_hat must have K entries".to_string())?;
+    let az_out_arr: [[i64; N]; K_PARAM] = proof.az_out.as_slice().try_into()
+        .map_err(|_| "az_out must have K entries".to_string())?;
+    let ct1_out_arr:[[i64; N]; K_PARAM] = proof.ct1_out.as_slice().try_into()
+        .map_err(|_| "ct1_out must have K entries".to_string())?;
+    let w_prime_arr:[[i64; N]; K_PARAM] = proof.w_prime.as_slice().try_into()
+        .map_err(|_| "w_prime must have K entries".to_string())?;
+    let w1_arr:     [[i64; N]; K_PARAM] = proof.output.as_slice().try_into()
+        .map_err(|_| "output must have K entries".to_string())?;
+
+    // Recover polynomial-domain z, t1, c from NTT-domain outputs via INTT.
+    let z_arr: [[i64; N]; L_PARAM] = {
+        let mut tmp = z_hat_arr;
+        for p in &mut tmp { ntt_inv(p); }
+        tmp
+    };
+    let t1_arr: [[i64; N]; K_PARAM] = {
+        let mut tmp = t1_hat_arr;
+        for p in &mut tmp { ntt_inv(p); }
+        tmp
+    };
+    let c_arr: [i64; N] = {
+        let mut tmp = proof.c_hat;
+        ntt_inv(&mut tmp);
+        tmp
+    };
+
+    if proof.hint_weight_total > OMEGA { return Ok(false); }
+
+    crate::verify_full_mldsa_witness_combined(
+        &proof.proof_combined,
+        &proof.ntt_commitment,
+        &proof.az_commitment,
+        &proof.ct1_commitment,
+        &proof.intt_commitment,
+        &proof.wp_commitment,
+        &proof.norm_commitment,
+        &proof.use_hint_commitment,
+        &z_arr,
+        &c_arr,
+        &t1_arr,
+        &proof.z_hat,
+        &proof.c_hat,
+        &proof.t1_hat,
+        &az_hat_arr,
+        &ct1_hat_arr,
+        &az_out_arr,
+        &ct1_out_arr,
+        &w_prime_arr,
+        &w1_arr,
+        proof.hint_weight_total,
+        &proof.c_tilde,
+        &proof.merkle_root,
+    ).map_err(|e| format!("verify_full_mldsa_witness_combined (V22) failed: {e}"))
 }
 
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
@@ -7137,5 +7305,92 @@ mod tests {
         proof.c_tilde = c_tilde_b;
         assert!(!verify_mldsa_witness_v21(&proof).expect("verify should not error after tamper"),
             "tampered c_tilde must cause V21 verification failure");
+    }
+
+    // ── V22 tests (1 sub-proof + Merkle root public input) ────────────────────
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~3-5 min per test)"]
+    fn test_prove_verify_mldsa_v22_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 33200); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 33300)).collect();
+        let c:  [i64; N]       = random_poly(33400);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 33500)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde:     Vec<u8> = (150u8..198).collect();
+        let merkle_root: Vec<u8> = (200u8..232).collect();  // 32-byte root
+
+        let proof = prove_verify_mldsa_v22(&a_hat, &z, &c, &t1, &h, k, l,
+            &c_tilde, &merkle_root)
+            .expect("prove_verify_mldsa_v22 failed");
+
+        assert!(verify_mldsa_witness_v22(&proof).expect("V22 verify error"), "V22 must verify");
+        assert_eq!(proof.hint_weight_total, 0, "all-false hints → weight 0");
+        assert_eq!(proof.merkle_root, merkle_root, "merkle_root stored in proof");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~3-5 min per test)"]
+    fn test_prove_verify_mldsa_v22_merkle_root_binding() {
+        // Prove with root_a; tamper with root_b → must not verify.
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 33600); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 33700)).collect();
+        let c:  [i64; N]       = random_poly(33800);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 33900)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde:     Vec<u8> = (151u8..199).collect();
+        let merkle_root_a: Vec<u8> = (201u8..233).collect();
+        let merkle_root_b: Vec<u8> = (202u8..234).collect();
+
+        let mut proof = prove_verify_mldsa_v22(
+            &a_hat, &z, &c, &t1, &h, k, l, &c_tilde, &merkle_root_a)
+            .expect("prove_verify_mldsa_v22 failed");
+
+        assert!(verify_mldsa_witness_v22(&proof).expect("verify should not error"),
+            "V22 must verify with original merkle_root");
+
+        // Tamper with the stored merkle_root → FRI transcript diverges → fails.
+        proof.merkle_root = merkle_root_b;
+        assert!(!verify_mldsa_witness_v22(&proof).expect("verify should not error after tamper"),
+            "tampered merkle_root must cause V22 verification failure");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~3-5 min per test)"]
+    fn test_prove_verify_mldsa_v22_matches_v21() {
+        // V22 with empty merkle_root should produce same arithmetic outputs as V21.
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 34000); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 34100)).collect();
+        let c:  [i64; N]       = random_poly(34200);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 34300)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde: Vec<u8>   = (152u8..200).collect();
+
+        let proof_v21 = prove_verify_mldsa_v21(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde)
+            .expect("prove_verify_mldsa_v21 failed");
+        // V22 with empty merkle_root — transcript identical to V21.
+        let proof_v22 = prove_verify_mldsa_v22(&a_hat, &z, &c, &t1, &h, k, l, &c_tilde, &[])
+            .expect("prove_verify_mldsa_v22 failed");
+
+        assert!(verify_mldsa_witness_v21(&proof_v21).expect("V21 verify"), "V21 must verify");
+        assert!(verify_mldsa_witness_v22(&proof_v22).expect("V22 verify"), "V22 must verify");
+
+        // Arithmetic outputs must be identical (same inputs, same circuits).
+        assert_eq!(proof_v21.w_prime, proof_v22.w_prime, "w_prime must match");
+        assert_eq!(proof_v21.max_norms, proof_v22.max_norms, "max_norms must match");
+        assert_eq!(proof_v21.output, proof_v22.output, "UseHint output must match");
+        assert_eq!(proof_v21.az_hat, proof_v22.az_hat, "az_hat must match");
     }
 }

@@ -3055,12 +3055,13 @@ pub fn verify_ntt_az_ct1_combined(
 ///           w_prime, max_norms, w1_out, hint_weight_total)`.
 #[allow(clippy::too_many_arguments)]
 pub fn prove_full_mldsa_witness_combined(
-    z:            &[[i64; mldsa::N]; mldsa::params::L],
-    c:            &[i64; mldsa::N],
-    t1:           &[[i64; mldsa::N]; mldsa::params::K],
-    a_hat:        &[[i64; mldsa::N]],
-    hints:        &[[bool; mldsa::N]; mldsa::params::K],
-    c_tilde_seed: &[u8],
+    z:             &[[i64; mldsa::N]; mldsa::params::L],
+    c:             &[i64; mldsa::N],
+    t1:            &[[i64; mldsa::N]; mldsa::params::K],
+    a_hat:         &[[i64; mldsa::N]],
+    hints:         &[[bool; mldsa::N]; mldsa::params::K],
+    c_tilde_seed:  &[u8],
+    extra_binding: &[u8],
 ) -> Result<(
     Vec<u8>,
     String, String, String, String, String, String, String,
@@ -3208,13 +3209,15 @@ pub fn prove_full_mldsa_witness_combined(
     );
 
     let channel = &mut Blake2sM31Channel::default();
-    if !c_tilde_seed.is_empty() {
-        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
-            let mut arr = [0u8; 4];
-            arr[..b.len()].copy_from_slice(b);
-            u32::from_le_bytes(arr)
-        }).collect();
-        channel.mix_u32s(&words);
+    for seed in [c_tilde_seed, extra_binding] {
+        if !seed.is_empty() {
+            let words: Vec<u32> = seed.chunks(4).map(|b| {
+                let mut arr = [0u8; 4];
+                arr[..b.len()].copy_from_slice(b);
+                u32::from_le_bytes(arr)
+            }).collect();
+            channel.mix_u32s(&words);
+        }
     }
 
     let mut commitment_scheme =
@@ -3338,6 +3341,7 @@ pub fn verify_full_mldsa_witness_combined(
     w1_out:            &[[i64; mldsa::N]; mldsa::params::K],
     hint_weight_total: usize,
     c_tilde_seed:      &[u8],
+    extra_binding:     &[u8],
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
     use mldsa_ntt_batch_air::{NttBatchEval, LOG_N_ROWS as NTT_LOG, n_cols_for as ntt_n_cols_for};
@@ -3468,13 +3472,15 @@ pub fn verify_full_mldsa_witness_combined(
     }
 
     // Replay transcript (must match prover exactly).
-    if !c_tilde_seed.is_empty() {
-        let words: Vec<u32> = c_tilde_seed.chunks(4).map(|b| {
-            let mut arr = [0u8; 4];
-            arr[..b.len()].copy_from_slice(b);
-            u32::from_le_bytes(arr)
-        }).collect();
-        verifier_channel.mix_u32s(&words);
+    for seed in [c_tilde_seed, extra_binding] {
+        if !seed.is_empty() {
+            let words: Vec<u32> = seed.chunks(4).map(|b| {
+                let mut arr = [0u8; 4];
+                arr[..b.len()].copy_from_slice(b);
+                u32::from_le_bytes(arr)
+            }).collect();
+            verifier_channel.mix_u32s(&words);
+        }
     }
 
     commitment_scheme.commit(proof.commitments[0], &[NORM_LOG; 1], verifier_channel);
@@ -5247,6 +5253,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v4_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v5_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v5_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v22_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v22_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v21_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v21_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v20_py, m)?)?;
@@ -6268,6 +6276,62 @@ fn verify_mldsa_witness_v21_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v21(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v22_py — V21 + Merkle root bound into Fiat-Shamir transcript.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None, merkle_root=None))]
+fn prove_mldsa_witness_v22_py(
+    a_hat:       Vec<Vec<i64>>,
+    z:           Vec<Vec<i64>>,
+    c:           Vec<i64>,
+    t1:          Vec<Vec<i64>>,
+    hints:       Vec<Vec<bool>>,
+    k:           usize,
+    l:           usize,
+    c_tilde:     Option<Vec<u8>>,
+    merkle_root: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr   = to_poly_vec(t1, "t1")?;
+    let seed     = c_tilde.as_deref().unwrap_or(&[]);
+    let root     = merkle_root.as_deref().unwrap_or(&[]);
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v22(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed, root,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.output.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.hint_weight_total;
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+    Ok((bundle, max_norms, w1_prime, hint_weight_total))
+}
+
+/// verify_mldsa_witness_v22_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v22_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV22, _
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v22(&proof).unwrap_or(false)
 }
 
 /// prove_mldsa_witness_v20_py — 4-component INTT+WPrime+Norm+UseHint STARK (2 sub-proofs total).
