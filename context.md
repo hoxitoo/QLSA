@@ -1,10 +1,10 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-05-14)
+## Статус (обновлено 2026-05-16)
 
-- Фаза: **Phase 6 завершена** (Sepolia, 2026-05-05) + **MVP-3+ в процессе** (7 из ~10 AIR circuits)
-- Все Phase 1–6, MVP-3 — завершены полностью
-- Следующий приоритет: MVP-3+ — замкнуть оставшиеся circuits, интегрировать в единый STARK proof
+- Фаза: **Phase 6 завершена** (Sepolia, 2026-05-05) + **MVP-3+ завершена** (V22)
+- Все Phase 1–6, MVP-3, MVP-3+ — завершены полностью
+- Следующий приоритет: MVP-4 — полный on-chain FRI верификатор + blowup≥8
 
 ### Что готово
 
@@ -26,32 +26,60 @@
   - `params.rs` — k=6, l=5, η=4, τ=49, β=196, γ₁=2¹⁹, d=13, λ=192, ω=55
   - `field.rs` / `ntt.rs` / `poly.rs` / `polyvec.rs` / `encoding.rs` / `xof.rs` / `verify.rs`
 - `stark_stwo/src/lib.rs` — все PyO3 биндинги + Rust-уровневые prove/verify функции
-- `stark_stwo/src/mldsa_verify_stark.rs` — ML-DSA arithmetic STARK pipeline:
-  - `AzProofV3` — 18 sub-proofs: L NTT + 1 Az-full + K INTT + K Q-range check
-  - `VerifyMldsaProofV3` — 55 sub-proofs: AzProofV3 + poly_sub + norm_check + use_hint + hint_weight
-  - `prove_verify_mldsa_v3(a_hat, z, c, t1, hints, k, l, c_tilde)` → `VerifyMldsaProofV3`
-  - `verify_mldsa_witness_v3(proof)` → верификация всех sub-proofs
-- `stark_stwo/src/range_check_air.rs` — **новый** Q-range check AIR (256 строк × 48 колонок)
-- `stark/prover.py` — Python обёртки: `prove_mldsa_batch`, `prove_mldsa_sig_witness_stark`, `verify_mldsa_witness_stark`, `verify_mldsa_hash_check`
+- `stark_stwo/src/mldsa_verify_stark.rs` — полная ML-DSA arithmetic STARK pipeline:
 
-#### AIR Circuits (MVP-3+)
+#### Эволюция witness pipeline (MVP-3+)
+
+Sub-proof reduction roadmap — каждая версия уменьшает число FRI commitments:
+
+| Версия | Sub-proofs | Описание |
+|--------|-----------|----------|
+| V17 | 5 | AllNtt + AzCt1 + CombinedInttWPrime + NormUseHint |
+| V18 | 4 | AllNtt + AzCt1 + InttWPrime(merged) + NormUseHint |
+| V19 | 3 | NttAzCt1(merged) + InttWPrime + NormUseHint |
+| V20 | 2 | NttAzCt1 + INTT+WPrime+Norm+UH(merged) |
+| **V21** | **1** | **Все 7 компонентов в одном STARK** — теоретический минимум |
+| **V22** | **1** | **V21 + Merkle root как public input** — security upgrade |
+
+**V22 — текущая production версия:**
+- `VerifyMldsaProofV22` — единый proof (7-компонентный STARK, 3216 main columns + 1 preproc)
+- `prove_verify_mldsa_v22(a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root)`
+- `verify_mldsa_witness_v22(proof)` — верификация всего пайплайна
+- Proof криптографически привязан к: ML-DSA challenge (c_tilde) + Merkle root батча
+
+Column layout V22 STARK (Tree 1, 3216 cols + 1 preproc):
+```
+NttBatch    LOG=10  649  cols  — NTT(z,c,t1) → z_hat, c_hat, t1_hat
+AzFull      LOG=8  1523  cols  — A×z в NTT domain → az_hat
+Ct1Full     LOG=8   295  cols  — c·t1 в NTT domain → ct1_hat
+InttBatch   LOG=10  649  cols  — INTT(az_hat, ct1_hat) → az_out, ct1_out
+WPrimeFull  LOG=8    24  cols  — w' = az - ct1
+NormCheck   LOG=8    15  cols  — ‖z‖∞ per coefficient
+UseHintV2   LOG=8    61  cols  — UseHint(w', hints) → w1_prime  [+1 preproc]
+```
+
+`stark/prover.py` — Python обёртки V4..V22: `prove_mldsa_witness_stark_vN`, `verify_mldsa_witness_stark_vN`, `verify_mldsa_hash_check`
+
+#### AIR Circuits (MVP-3+ — полностью завершены)
 
 | Circuit | Файл | Статус | Что доказывает |
 |---------|------|--------|----------------|
-| NTT | `mldsa_verify_stark.rs` | ✅ Done | Forward NTT над Zq корректен |
-| INTT | `mldsa_verify_stark.rs` | ✅ Done | Inverse NTT + fingerprint binding |
-| PolyMul | `mldsa_verify_stark.rs` | ✅ Done | Coefficient-wise mul mod Q |
-| PolyAdd | `mldsa_verify_stark.rs` | ✅ Done | Coefficient-wise add mod Q |
-| NormCheck | `mldsa_verify_stark.rs` | ✅ Done | norm[i] = min(z[i], Q−z[i]) |
-| UseHint | `mldsa_verify_stark.rs` | ✅ Done | UseHint(h, r) = w1 |
-| Q-range check | `range_check_air.rs` | ✅ Done (2026-05-14) | v ∈ [0, Q) — 23-bit decomp + complement |
-| Az-full (AzProofV3) | `mldsa_verify_stark.rs` | ✅ Done | Полное A·z matrix-vector product |
-| c_tilde binding | `lib.rs` | ✅ Done (2026-05-14) | c̃ mixed в Fiat-Shamir до первого commitment |
+| NTT-batch | `mldsa_verify_stark.rs` | ✅ Done | NTT(z,c,t1) в NTT domain корректен |
+| INTT-batch | `mldsa_verify_stark.rs` | ✅ Done | Inverse NTT + fingerprint binding |
+| Az-full | `mldsa_az_full_air.rs` | ✅ Done | A·z matrix-vector product в NTT domain |
+| Ct1-full | `mldsa_ct1_full_air.rs` | ✅ Done | c·t1 в NTT domain |
+| WPrime-full | `mldsa_wprime_full_air.rs` | ✅ Done | w' = az_out - ct1_out |
+| NormCheck-batch | `mldsa_norm_check_batch_air.rs` | ✅ Done | ‖z[i]‖∞ = min(z[i], Q−z[i]) |
+| UseHintBatchV2 | `mldsa_use_hint_batch_air.rs` | ✅ Done | UseHint(h, r) = w1 (с preproc) |
+| Q-range check | `range_check_air.rs` | ✅ Done | v ∈ [0, Q) via 23-bit decomp |
+| c_tilde binding | `lib.rs` | ✅ Done | c̃ mixed в Fiat-Shamir до Tree0 commit |
+| **Merkle root binding** | `lib.rs` | ✅ Done | merkle_root mixed в Fiat-Shamir (V22) |
+| **Единый STARK (V21/V22)** | `mldsa_verify_stark.rs` | ✅ Done | Все 7 компонентов → 1 FRI commitment |
 
 #### Contracts
 - `BatchRegistry.sol` — v1, `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
 - `BatchRegistryV2.sol` — `submitBatchWithNonces()`: строгий порядок nonce per sender
-- `QLSAVerifier.sol` — **заглушка** (всегда true)
+- `QLSAVerifier.sol` — заглушка (всегда true)
 - `QLSAVerifierV2.sol` — M31 структурный верификатор
 - `QLSAVerifierV3.sol` — MIN_PROOF_LENGTH=700, Blake2s imported
 - `QLSAVerifierFull.sol` — onchain_commitment = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
@@ -59,8 +87,8 @@
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
 #### Тесты
-- Python: **243 тестов** (pytest), все зелёные
-- Rust: **181 тест** (cargo test), все зелёные
+- Python: ~243 тестов (pytest)
+- Rust: **208 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests)
 - TypeScript SDK: 31 тест (jest)
 - Solidity: 155 тестов (hardhat)
 - mypy --strict: все 16 файлов `core/ + aggregator/ + sdk/python/` чистые
@@ -83,7 +111,7 @@
 ### Фаза 2 (STARK circuit)
 - **Stwo 2.2.0** (Circle STARK, Rust nightly-2025-07-01, Apache 2.0) — **активно**
 - AIR constraints: hash chain `H(a,b) = a³ + b` над M31 (прото, не крипто-стойкий)
-- ML-DSA arithmetic circuits: 7 из ~10 реализованы
+- ML-DSA arithmetic circuits: **10/10 реализованы** (V22 — 1 sub-proof)
 - **ВНИМАНИЕ: FRI blowup=4 → ~60-бит soundness** (для mainnet нужен ≥8)
 - Winterfell v0.13.1 — архив, не используется активно
 
@@ -115,10 +143,11 @@
 
 ### Слой 2 — Агрегация
 1. Collect txs (Mempool → Batcher)
-2. Verify ML-DSA-65 (Rust FIPS 204, вне AIR)
+2. Verify ML-DSA-65 (Rust FIPS 204, вне AIR — cross-checked off-circuit)
 3. Build SHA3-512 Merkle tree → `merkle_root`
-4. Generate STARK proof → `onchain_commitment` = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
-5. Optional witness pipeline (MVP-3+): AzProofV3 (18 sub-proofs) + VerifyMldsaProofV3 (55 total)
+4. Generate STARK proof (V22) — все 7 arithmetic circuits в одном FRI commitment
+   - Transcript: `c_tilde` → `merkle_root` → Tree0(preproc) → Tree1(3216 cols) → fingerprints
+5. `onchain_commitment` = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
 
 ### Слой 3 — Верификация
 - BatchRegistryV2.sol: `submitBatchWithNonces()` + nonce registry (replay protection)
@@ -136,7 +165,7 @@
 | SDK | ✅ Done | Python + JS + HTTP API |
 | MVP-3 | ✅ Done | ML-DSA batch verifier (Rust FIPS 204) + STARK bridge |
 | Phase 6 | ✅ Done | Sepolia testnet, первый батч финализирован 2026-05-05 |
-| MVP-3+ | 🔄 50% | 7 AIR circuits готовы; интеграция + оставшиеся circuits в процессе |
+| **MVP-3+** | **✅ Done** | **Все 7 AIR circuits → 1 STARK proof (V22) + Merkle root binding** |
 | MVP-4 | ⏳ Future | Полный on-chain FRI верификатор (~5K строк Solidity), blowup≥8, RPO256 |
 
 ---
@@ -144,15 +173,16 @@
 ## Открытые вопросы
 
 ### Архитектурные (критично)
-- **ML-DSA верификация в AIR** — 7 circuits готово, нужна финальная интеграция в один proof
-- **Merkle-root не публичный вход STARK** — root не внутри proof; открыт вопрос о включении root chunks в public inputs AIR
-- **M31 wrap-around soundness** — ✅ **Закрыт**: Q-range check AIR (23-bit decomp + complement d=Q-1-v) доказывает v ∈ [0, Q) для каждого Az[i]; реализован 2026-05-14
-- **c_tilde не привязан к STARK** — ✅ **Закрыт**: c̃ mixed в Fiat-Shamir channel до первого trace commitment; разные c̃ → разные query positions → FRI fail; реализован 2026-05-14
-- **Replay-защита on-chain** — ✅ **Закрыто**: `submitBatchWithNonces()` в BatchRegistryV2.sol; строго возрастающий nonce per sender
+- **ML-DSA верификация в AIR** — ✅ **Закрыт** (V21: все 7 circuits в 1 STARK, 2026-05-16)
+- **Merkle-root не публичный вход STARK** — ✅ **Закрыт** (V22: mixed в Fiat-Shamir, 2026-05-16)
+- **M31 wrap-around soundness** — ✅ **Закрыт** (Q-range check AIR, 2026-05-14)
+- **c_tilde не привязан к STARK** — ✅ **Закрыт** (Fiat-Shamir mixing, 2026-05-14)
+- **Replay-защита on-chain** — ✅ **Закрыто** (`submitBatchWithNonces()` BatchRegistryV2.sol)
 
 ### Реализационные
 - Замена `H(a,b) = a³ + b` на RPO256 или Poseidon2 — отложено до MVP-4
 - FRI blowup=4 (~60-бит soundness) — для mainnet нужен blowup≥8 (MVP-4)
+- Полный on-chain FRI верификатор (~5K строк Solidity) — MVP-4
 - `wipe_key()` в Python: `bytes(private_key)` создаёт иммутабельную копию — для production нужна Rust-обёртка с SecureZeroingMemory
 - tx_hash усекается до 31 бита для M31 коммитмента
 
@@ -172,16 +202,17 @@
 - CI: bandit + pip-audit на каждый пуш
 - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min)
 - Nonce registry: `BatchRegistryV2.submitBatchWithNonces()` — строго возрастающий nonce per sender
-- c_tilde binding: Az-full Fiat-Shamir смешивает c̃ до первого commitment
+- c_tilde binding: mixed в Fiat-Shamir channel до Tree0 commitment (V19+)
+- Merkle root binding: mixed в Fiat-Shamir после c_tilde (V22) — proof специфичен для конкретного батча
 - Q-range check AIR: закрывает soundness gap умножения в M31
 
-### Таблица рисков (обновлено 2026-05-14)
+### Таблица рисков (обновлено 2026-05-16)
 
 | Риск | Уровень | Статус |
 |------|---------|--------|
-| ML-DSA верификация вне AIR circuit | Критично | 🔄 Partial (7 circuits, MVP-3+) |
+| ML-DSA верификация вне AIR circuit | Критично | ✅ Закрыт (V21: 1 STARK, 2026-05-16) |
+| Merkle-root не публичный вход STARK | Критично | ✅ Закрыт (V22: Fiat-Shamir, 2026-05-16) |
 | QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (MVP-4) |
-| Merkle-root не публичный вход STARK | Критично | Open (MVP-3+) |
 | FRI blowup=4 → ~60-бит soundness | Высокий | Partial (нужен blowup≥8, MVP-4) |
 | M31 wrap-around soundness gap (mul constraints) | Высокий | ✅ Закрыт (Q-range check AIR, 2026-05-14) |
 | c_tilde не привязан к STARK proof | Высокий | ✅ Закрыт (Fiat-Shamir mixing, 2026-05-14) |
@@ -200,11 +231,16 @@
 - STARK prover: Stwo 2.2.0 (Circle STARK, M31 field)
 - Адрес: SHA3-256(pubkey)
 - onchain_commitment: Blake2s(proof[:32] ∥ c_tilde[:32])[:16] — 128-bit binding
-- c_tilde как публичный вход: mixed в Fiat-Shamir channel до trace commitment
+- c_tilde как публичный вход: mixed в Fiat-Shamir channel до Tree0 commit
+- Merkle root как публичный вход: mixed в Fiat-Shamir после c_tilde (V22, 2026-05-16)
+- Multi-component STARK: все компоненты в одном `prove(&[comp1, ..., comp7], channel, cs)`
+- Mixed-size STARK: компоненты с разным LOG_N_ROWS в одном FRI — twiddles на max level
+- extra_binding параметр: `prove_full_mldsa_witness_combined(…, c_tilde, extra_binding)` — V21 передаёт `&[]`, V22 передаёт `merkle_root`
 - Q-range check: 48-column AIR (v, 23 bits of v, d=Q-1-v, 23 bits of d); C0 + 23 boolean + C24 + 23 boolean = 48 constraints
 - Сериализация: bincode (Encode/Decode) для `[i64; 256]` — serde не поддерживает такие массивы
 - Батч: до 3000 транзакций по умолчанию
-- Deплой: Ethereum Sepolia (testnet)
+- Деплой: Ethereum Sepolia (testnet)
+- TraceLocationAllocator: `default()` для компонентов без preproc; `new_with_preprocessed_columns(&[pc_is_init_uh()])` когда UseHintBatchV2 включён
 
 ---
 
@@ -229,7 +265,7 @@ Rust: `nightly-2025-07-01` (зафиксирован в `stark_stwo/rust-toolcha
 - `proof_size` vs N (100, 500, 1000, 3000 tx)
 - `merkle_build_time` vs N
 - `sign_time`, `verify_time` vs N
-- `witness_prove_time` (MVP-3+, sub-proof latency)
+- `witness_prove_time` (V22 full witness latency)
 - `gas_cost` (on-chain verification per batch)
 
 Benchmarks: `benchmarks/bench_core.py`, `bench_stark.py`, `bench_poly_circuits.py`, `bench_witnesses.py`

@@ -11,9 +11,9 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > This codebase is a **research prototype / testnet demonstrator**.
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
-> - ML-DSA signature verification partially inside the STARK circuit (MVP-3+, in progress)
 > - FRI blowup=4 targets ~60-bit soundness; production requires ≥8 (128-bit)
 > - No full on-chain FRI verifier — Blake2s commitment binding only (MVP-4)
+> - Hash AIR `H(a,b) = a³+b` is not cryptographic (MVP-4: replace with RPO256)
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
 
@@ -58,20 +58,21 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**Phase 6 complete** (Sepolia testnet live since 2026-05-05). **MVP-3+ in progress** (7 of ~10 AIR circuits implemented).
+**Phase 6 complete** (Sepolia testnet live since 2026-05-05). **MVP-3+ complete** (V22 — single STARK proof with Merkle root binding).
 
 | Component | Status |
 |-----------|--------|
-| `core/` — ML-DSA keys, signing, Merkle tree, batch | Done |
-| `stark_stwo/src/mldsa/` — Pure Rust ML-DSA-65 verifier (FIPS 204) | Done |
-| `stark_stwo/` — Stwo Circle STARK prover (Rust) | Done |
-| `stark_stwo/src/` — ML-DSA arithmetic AIR circuits (NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint, Q-range check) | 7/~10 Done |
-| `stark/` — Python prover/verifier wrappers, witness pipeline | Done |
-| `contracts/` — BatchRegistry, BatchRegistryV2 (nonce registry), QLSAVerifier, V2, V3, QLSAVerifierFull | Done |
-| `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | Done |
-| `tests/` — **243 Python tests + 181 Rust tests**, all passing | Done |
-| `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | Done |
-| Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | Done |
+| `core/` — ML-DSA keys, signing, Merkle tree, batch | ✅ Done |
+| `stark_stwo/src/mldsa/` — Pure Rust ML-DSA-65 verifier (FIPS 204) | ✅ Done |
+| `stark_stwo/` — Stwo Circle STARK prover (Rust) | ✅ Done |
+| ML-DSA arithmetic AIR circuits (7 components → 1 STARK, V21/V22) | ✅ Done |
+| `stark/` — Python prover/verifier wrappers V4–V22, witness pipeline | ✅ Done |
+| `contracts/` — BatchRegistry, BatchRegistryV2, QLSAVerifier, V2/V3/Full | ✅ Done |
+| `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
+| Tests — **208 Rust** (non-ignored) + **~243 Python** + **31 TS** + **155 Solidity** | ✅ Done |
+| `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
+| Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
+| **MVP-3+** — All 7 ML-DSA circuits in 1 STARK (V21) + Merkle root bound (V22) | ✅ Done |
 
 ---
 
@@ -85,10 +86,11 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 ### Layer 2 — Aggregation (off-chain)
 
 - Collect transactions (mempool → batcher)
-- Verify ML-DSA-65 signatures (pure Rust FIPS 204 verifier)
+- Verify ML-DSA-65 signatures (pure Rust FIPS 204 verifier, off-circuit)
 - Build Merkle tree with SHA3-512 → `merkle_root`
-- Generate Stwo Circle STARK proof → `stark_proof` + `onchain_commitment`
-- Optional: prove ML-DSA arithmetic witness (MVP-3+ pipeline)
+- Generate Stwo Circle STARK proof (V22) — all 7 arithmetic circuits in **1 FRI commitment**
+  - Fiat-Shamir transcript binds both `c_tilde` (ML-DSA challenge) and `merkle_root` (batch)
+- `onchain_commitment` = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
 
 ### Layer 3 — Verification (on-chain)
 
@@ -114,20 +116,29 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | Active | Stwo 2.2.0 (Circle STARK, Rust nightly-2025-07-01) | Active |
 | Legacy | Winterfell v0.13.1 | Archived |
 
-**Active AIR circuits (MVP-3+):**
+**ML-DSA arithmetic circuits (V22 — all 7 in one STARK proof):**
 
-| Circuit | Columns | Rows | Proves |
-|---------|--------:|-----:|--------|
-| NTT | 512+ | 256 | Forward NTT is correct |
-| INTT | 512+ | 256 | Inverse NTT + fingerprint binding |
-| PolyMul | — | 256 | Coefficient-wise multiply mod Q |
-| PolyAdd | — | 256 | Coefficient-wise add mod Q |
-| NormCheck | 3 | 256 | norm[i] = min(z[i], Q−z[i]) |
-| UseHint | — | 256 | UseHint(h, r) = w1 |
-| Q-range check | 48 | 256 | v ∈ [0, Q) via 23-bit decomposition |
-| Az-full (AzProofV3) | — | 256×K | Full matrix-vector product A·z |
+| Circuit | LOG | Columns | Proves |
+|---------|----:|--------:|--------|
+| NttBatch | 10 | 649 | NTT(z, c, t1) → z_hat, c_hat, t1_hat |
+| AzFull | 8 | 1523 | A·z matrix-vector product (NTT domain) |
+| Ct1Full | 8 | 295 | c·t1 polynomial product (NTT domain) |
+| InttBatch | 10 | 649 | INTT(az_hat, ct1_hat) → az_out, ct1_out |
+| WPrimeFull | 8 | 24 | w′ = az_out − ct1_out |
+| NormCheckBatch | 8 | 15 | ‖z‖∞ ≤ γ₁ − β per coefficient |
+| UseHintBatchV2 | 8 | 61+1 | UseHint(w′, hints) → w1_prime |
+| **Total** | | **3217** | **Full ML-DSA.Verify arithmetic witness** |
 
-**c_tilde binding:** The FIPS 204 challenge c̃ is mixed into the Az-full Fiat-Shamir channel before the first trace commitment. This makes FRI query positions depend on c̃ — tampered challenge bytes cause verification to fail.
+**Sub-proof reduction (MVP-3+ history):**
+
+| Version | Sub-proofs | Key merge |
+|---------|:----------:|-----------|
+| V17 | 5 | NormCheck+UseHint merged |
+| V18 | 4 | INTT+WPrime merged |
+| V19 | 3 | NTT+Az+Ct1 merged |
+| V20 | 2 | INTT+WPrime+Norm+UseHint merged |
+| **V21** | **1** | **All 7 components — theoretical minimum** |
+| **V22** | **1** | **+ Merkle root as public input** |
 
 ### Infrastructure
 
@@ -142,10 +153,10 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 | Issue | Severity | Status |
 |-------|----------|--------|
-| ML-DSA verification partially inside AIR circuit | Critical | 🔄 In progress (MVP-3+, 7 circuits) |
 | `QLSAVerifierFull` — Blake2s binding, not full FRI verifier | Critical | Partial (MVP-4 for full FRI) |
-| Merkle root is not a public input of the STARK proof | Critical | Open (MVP-3+) |
 | FRI blowup=4 → ~60-bit soundness (needs ≥8 for mainnet) | High | Partial |
+| ML-DSA verification inside AIR circuit | Critical | ✅ Done (V21: 1 STARK proof, 2026-05-16) |
+| Merkle root not a public input of the STARK proof | Critical | ✅ Done (V22: Fiat-Shamir binding, 2026-05-16) |
 | M31 wrap-around soundness gap in multiplication | High | ✅ Closed (Q-range check AIR, 2026-05-14) |
 | c_tilde not bound to STARK proof | High | ✅ Done (Fiat-Shamir mixing, 2026-05-14) |
 | No replay protection on-chain | High | ✅ Done (`submitBatchWithNonces()`, BatchRegistryV2) |
@@ -165,8 +176,8 @@ For the full cryptography and security analysis, see `context.md`.
 | Proof size (hash chain STARK) | ~90–200 KB |
 | On-chain verification | O(1) |
 | Sepolia first batch (4 tx) | 3,234-byte proof, 9.16 s |
-| ML-DSA batch verify (Rust FIPS 204, 4 sigs) | ~seconds |
-| Prover time (MVP-3+ full witness, 49 sub-proofs) | ~53 s (dev build) |
+| V22 STARK columns | 3,217 (7 components, 1 FRI commitment) |
+| V22 slow test (full witness) | ~3–5 min (dev build, `#[ignore]`) |
 
 Benchmarks: `/benchmarks/bench_core.py`, `bench_stark.py`, `bench_poly_circuits.py`, `bench_witnesses.py`.
 
@@ -177,7 +188,7 @@ Benchmarks: `/benchmarks/bench_core.py`, `bench_stark.py`, `bench_poly_circuits.
 ```text
 QLSA/
 ├── core/               # ML-DSA keys, signing, Merkle tree, batch
-├── stark/              # Python prover/verifier wrappers, witness pipeline
+├── stark/              # Python prover/verifier wrappers V4–V22, witness pipeline
 ├── stark_stwo/         # Stwo Circle STARK prover (Rust), ML-DSA arithmetic circuits
 ├── aggregator/         # Mempool, Batcher, AggregatorNode, HTTP API
 ├── contracts/          # Solidity: BatchRegistry(V2), QLSAVerifier(V2/V3/Full), Blake2s.sol
@@ -185,8 +196,8 @@ QLSA/
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
 ├── testnet/            # e2e.py, deploy.sh, submit.py, monitor.py (Sepolia)
-├── tests/              # 243 Python tests (pytest)
-├── context.md          # Technical decisions and architecture log
+├── tests/              # ~243 Python tests (pytest)
+├── context.md          # Technical decisions, architecture log, security risk table
 └── README.md
 ```
 
@@ -205,8 +216,8 @@ QLSA/
 | Phase 5 | SDK: Python + JavaScript + HTTP API | ✅ Done |
 | MVP-3 | ML-DSA batch verifier (Rust FIPS 204) + STARK bridge | ✅ Done |
 | **Phase 6** | **Testnet deployment — Sepolia, first batch 2026-05-05** | ✅ Done |
-| **MVP-3+** | ML-DSA verification natively inside AIR circuit | 🔄 In progress (7/~10 circuits) |
-| MVP-4 | Full on-chain FRI verifier, blowup≥8, RPO256 | ⏳ Future |
+| **MVP-3+** | **All 7 ML-DSA circuits → 1 STARK proof (V21) + Merkle root binding (V22)** | ✅ Done |
+| MVP-4 | Full on-chain FRI verifier, blowup≥8, RPO256 | ⏳ Next |
 
 ---
 
@@ -214,17 +225,15 @@ QLSA/
 
 ### 1. ML-DSA inside STARK (main research challenge)
 
-ML-DSA operations (NTT, rejection sampling, modular arithmetic) are expensive in AIR.
-Proof size grows with the number of sub-proofs.
+**Status: Solved (V21/V22).**
 
-**Mitigation:**
-- 7 circuits already proven (NTT, INTT, PolyMul, PolyAdd, NormCheck, UseHint, Q-range check)
-- Full witness pipeline operational: `prove_mldsa_sig_witness_py` → `WitnessStatus`
-- Remaining: UseHint integration, Merkle root as public input, full circuit composition
+All 7 ML-DSA.Verify arithmetic components (NTT, Az, Ct1, INTT, WPrime, NormCheck, UseHint) now run inside a single Circle STARK FRI proof (3,217 trace columns). The proof is cryptographically bound to both the ML-DSA challenge (`c_tilde`) and the batch Merkle root via Fiat-Shamir transcript mixing.
+
+Remaining for production: full on-chain FRI verifier (MVP-4).
 
 ### 2. Aggregator trust model
 
-Off-chain signature verification introduces trust in the aggregator until MVP-3+ is complete.
+Off-chain signature verification runs outside the STARK proof (pre-proof cross-check).
 
 **Planned mitigation:**
 - Fraud proofs
@@ -251,6 +260,7 @@ PQ adoption is inevitable, but gradual.
 - Threshold signatures (`t-of-n`)
 - Multi-party aggregation
 - Full on-chain FRI verifier (MVP-4, ~5K lines of Solidity)
+- FRI blowup ≥ 8 (128-bit soundness)
 - Native PQ rollup chain
 
 ---
