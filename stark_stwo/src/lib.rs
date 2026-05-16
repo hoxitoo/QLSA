@@ -1180,7 +1180,6 @@ pub fn prove_az_full(
 ) -> Result<(Vec<u8>, String, [[i64; mldsa::N]; mldsa::params::K]), String> {
     use mldsa_az_full_air::{AzFullEval, AzFullComponent, LOG_N_ROWS, build_trace};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::PcsConfig;
     use stwo::core::poly::circle::CanonicCoset;
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
     use stwo::prover::backend::CpuBackend;
@@ -2155,7 +2154,7 @@ pub fn prove_use_hint_batch_v2(
     hints:   &[[bool; mldsa::N]; mldsa::params::K],
 ) -> Result<(Vec<u8>, String, [[i64; mldsa::N]; mldsa::params::K], usize), String> {
     use mldsa_use_hint_batch_air::{
-        UseHintBatchV2Eval, UseHintBatchV2Component, LOG_N_ROWS,
+        LOG_N_ROWS,
         new_component_v2, build_trace_v2,
     };
     use stwo::core::channel::{Blake2sM31Channel, Channel};
@@ -2226,7 +2225,7 @@ pub fn verify_use_hint_batch_v2(
     hint_weight_total:  usize,
 ) -> Result<bool, String> {
     use stwo::core::proof::StarkProof;
-    use mldsa_use_hint_batch_air::{UseHintBatchV2Eval, UseHintBatchV2Component, LOG_N_ROWS, new_component_v2};
+    use mldsa_use_hint_batch_air::{LOG_N_ROWS, new_component_v2};
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
     use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
@@ -3322,9 +3321,9 @@ pub fn verify_full_mldsa_witness_combined(
     norm_cm:           &str,
     uh_cm:             &str,
     // NTT inputs
-    z:                 &[[i64; mldsa::N]; mldsa::params::L],
-    c:                 &[i64; mldsa::N],
-    t1:                &[[i64; mldsa::N]; mldsa::params::K],
+    _z:                &[[i64; mldsa::N]; mldsa::params::L],
+    _c:                &[i64; mldsa::N],
+    _t1:               &[[i64; mldsa::N]; mldsa::params::K],
     // NTT outputs
     z_hat:             &[[i64; mldsa::N]],
     c_hat:             &[i64; mldsa::N],
@@ -3857,15 +3856,13 @@ pub fn verify_use_hint_batch(
 /// Returns `(proof_bytes, commitment_hex)`.  The verifier does not need the input
 /// polynomial — the proof is self-contained.
 pub fn prove_range_q(poly: &[i64; mldsa::N]) -> Result<(Vec<u8>, String), String> {
-    use range_check_air::{RangeCheckEval, LOG_N_ROWS, build_trace};
+    use range_check_air::{LOG_N_ROWS, build_trace};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::PcsConfig;
     use stwo::core::poly::circle::CanonicCoset;
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
     use stwo::prover::backend::CpuBackend;
     use stwo::prover::poly::circle::PolyOps;
     use stwo::prover::{prove, CommitmentSchemeProver};
-    use stwo_constraint_framework::TraceLocationAllocator;
 
     let (columns, valid) = build_trace(poly);
     if !valid {
@@ -3911,14 +3908,13 @@ pub fn prove_range_q(poly: &[i64; mldsa::N]) -> Result<(Vec<u8>, String), String
 ///
 /// The `commitment_hex` must match the one returned by the prover.
 pub fn verify_range_q(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
-    use range_check_air::{RangeCheckEval, LOG_N_ROWS};
+    use range_check_air::LOG_N_ROWS;
     use stwo::core::proof::StarkProof;
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
     use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
     use stwo::core::verifier::verify;
     use stwo::core::air::Component;
-    use stwo_constraint_framework::TraceLocationAllocator;
 
     let log_size = LOG_N_ROWS;
     let fp = parse_poly_commitment(commitment_hex)?;
@@ -3955,14 +3951,13 @@ pub fn verify_range_q(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, 
 /// Replaces K individual `prove_range_q` calls with one 288-column proof.
 /// Returns `(proof_bytes, commitment_hex)`.
 pub fn prove_range_q_batch(polys: &[[i64; mldsa::N]; mldsa::params::K]) -> Result<(Vec<u8>, String), String> {
-    use mldsa_range_q_batch_air::{RangeQBatchEval, LOG_N_ROWS, build_trace};
+    use mldsa_range_q_batch_air::{LOG_N_ROWS, build_trace};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
     use stwo::core::poly::circle::CanonicCoset;
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
     use stwo::prover::backend::CpuBackend;
     use stwo::prover::poly::circle::PolyOps;
     use stwo::prover::{prove, CommitmentSchemeProver};
-    use stwo_constraint_framework::TraceLocationAllocator;
 
     let (columns, valid) = build_trace(polys);
     if !valid {
@@ -4009,14 +4004,13 @@ pub fn prove_range_q_batch(polys: &[[i64; mldsa::N]; mldsa::params::K]) -> Resul
 
 /// Verify a batch range-Q proof produced by [`prove_range_q_batch`].
 pub fn verify_range_q_batch(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, String> {
-    use mldsa_range_q_batch_air::{RangeQBatchEval, LOG_N_ROWS};
+    use mldsa_range_q_batch_air::LOG_N_ROWS;
     use stwo::core::proof::StarkProof;
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
     use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
     use stwo::core::verifier::verify;
     use stwo::core::air::Component;
-    use stwo_constraint_framework::TraceLocationAllocator;
 
     let log_size = LOG_N_ROWS;
     let fp = parse_poly_commitment(commitment_hex)?;

@@ -118,12 +118,12 @@ impl FrameworkEval for MlDsaNttButterflyEval {
         let [carry_b] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
 
         // ── Columns 9–31: 23-bit decomposition of t ──────────────────────────
-        let mut t_bits: Vec<E::F> = (0..N_BITS)
+        let t_bits: Vec<E::F> = (0..N_BITS)
             .map(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone())
             .collect();
 
         // ── Columns 32–54: 23-bit decomposition of carry_t ───────────────────
-        let mut ct_bits: Vec<E::F> = (0..N_BITS)
+        let ct_bits: Vec<E::F> = (0..N_BITS)
             .map(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize])[0].clone())
             .collect();
 
