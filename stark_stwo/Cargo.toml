@@ -27,6 +27,7 @@ blake2                    = "0.10"
 bincode                   = { version = "2", features = ["serde", "derive"] }
 sha3                      = "0.10"
 pyo3                      = { version = "0.24", optional = true }
+zeroize                   = "1"
 
 [profile.release]
 opt-level     = 3

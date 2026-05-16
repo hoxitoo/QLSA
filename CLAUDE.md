@@ -145,9 +145,9 @@ Development: `claude/review-repo-structure-E4kPW`
 
 1. On-chain verifier: Blake2s commitment binding only — no full FRI verifier (MVP-4)
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
-3. Hash AIR: `H(a,b) = a³+b` — not cryptographic (replace with RPO256 in MVP-4)
+3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI blowup=4: ~60-bit soundness (production needs ≥128-bit, blowup≥8)
-5. `wipe_key()` in Python: not guaranteed to zero memory due to GC
+5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
 
 ## Security Hardening (implemented)
 
@@ -155,7 +155,7 @@ Development: `claude/review-repo-structure-E4kPW`
 - **API rate limiting**: per-IP sliding-window (100 tx/min, 20 batch ops/min)
 - **On-chain nonce registry**: `submitBatchWithNonces()` in `BatchRegistryV2` enforces strictly
   increasing per-sender nonces — prevents replay of any previously finalized transaction
-- **Key wipe**: `wipe_key()` used consistently in all production paths (`testnet/e2e.py`, SDK)
+- **Key wipe**: `wipe_key()` backed by Rust `wipe_bytes` (zeroize crate, volatile_set) — primary key buffer is securely zeroed; Python-side copies from liboqs signing remain best-effort
 - **c_tilde Fiat-Shamir binding**: ML-DSA challenge bytes mixed into channel before Tree0 commit (V19+)
 - **Merkle root Fiat-Shamir binding**: batch Merkle root mixed into channel after c_tilde (V22) — proof is cryptographically specific to one batch
 

@@ -5089,6 +5089,24 @@ fn prove_mldsa(
     prove_mldsa_batch(&entries).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
+/// wipe_bytes(buf) — zero a Python bytearray in-place using volatile writes.
+///
+/// Unlike a pure-Python loop, `volatile_set` prevents the compiler from
+/// optimising away the writes.  Call this instead of `for i in range(...): buf[i]=0`
+/// when zeroing cryptographic key material.
+///
+/// Safety contract: the caller must hold the only Rust-side reference to `buf`
+/// at the time of the call (Python-side references are fine; we hold the GIL).
+#[cfg(feature = "python")]
+#[pyfunction]
+fn wipe_bytes(buf: pyo3::Bound<'_, pyo3::types::PyByteArray>) -> PyResult<()> {
+    use zeroize::Zeroize;
+    // SAFETY: we hold the GIL and this is the only Rust reference to the buffer.
+    let slice = unsafe { buf.as_bytes_mut() };
+    slice.zeroize();
+    Ok(())
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -5167,6 +5185,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_hash_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_range_q_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_range_q_py, m)?)?;
+    m.add_function(wrap_pyfunction!(wipe_bytes, m)?)?;
     Ok(())
 }
 

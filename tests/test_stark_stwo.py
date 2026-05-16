@@ -995,3 +995,38 @@ def test_prove_hint_weight_bounds_check():
         within_bound = total <= OMEGA
         # This is the off-circuit check the verifier would perform.
         assert within_bound == (count <= OMEGA)
+
+
+# ─── wipe_bytes ───────────────────────────────────────────────────────────────
+
+@needs_ext
+def test_wipe_bytes_zeros_buffer():
+    """wipe_bytes(bytearray) must overwrite every byte with 0."""
+    buf = bytearray(b"\xDE\xAD\xBE\xEF" * 32)
+    assert any(b != 0 for b in buf)
+    _ext.wipe_bytes(buf)
+    assert all(b == 0 for b in buf)
+
+
+@needs_ext
+def test_wipe_bytes_empty_buffer_is_noop():
+    """wipe_bytes on an empty bytearray must not raise."""
+    buf = bytearray()
+    _ext.wipe_bytes(buf)
+    assert len(buf) == 0
+
+
+@needs_ext
+def test_wipe_bytes_single_byte():
+    buf = bytearray(b"\xFF")
+    _ext.wipe_bytes(buf)
+    assert buf[0] == 0
+
+
+@needs_ext
+def test_wipe_key_uses_rust_wipe_when_ext_available():
+    """core.keys.wipe_key must produce all-zero buffer (via Rust wipe_bytes)."""
+    from core.keys import wipe_key
+    buf = bytearray(b"\xAB\xCD\xEF" * 100)
+    wipe_key(buf)
+    assert all(b == 0 for b in buf)

@@ -161,8 +161,8 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | c_tilde not bound to STARK proof | High | ✅ Done (Fiat-Shamir mixing, 2026-05-14) |
 | No replay protection on-chain | High | ✅ Done (`submitBatchWithNonces()`, BatchRegistryV2) |
 | API rate limiting | Medium | ✅ Done (100 tx/min, 20 batch ops/min per IP) |
-| Private key zeroing in Python is best-effort | Medium | Open (needs Rust wrapper, MVP-4) |
-| Hash AIR `H(a,b) = a³+b` not cryptographic | Low | Accepted for prototype |
+| Private key zeroing in Python is best-effort | Medium | ✅ Done (Rust `wipe_bytes` via `zeroize`, 2026-05-16) |
+| Hash AIR `H(a,b) = a³+b` not cryptographic | Low | ✅ Done (Poseidon2-over-M31, 2026-05-16) |
 
 For the full cryptography and security analysis, see `context.md`.
 
