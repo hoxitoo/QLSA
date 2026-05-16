@@ -37,7 +37,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (208 passing, 85 ignored slow STARK integration tests)
+# Run Rust tests (210 passing, 85 ignored slow STARK integration tests)
 cargo +nightly-2025-07-01 test --manifest-path stark_stwo/Cargo.toml
 
 # Run Rust tests including slow STARK integration tests

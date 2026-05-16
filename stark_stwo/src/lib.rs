@@ -7114,6 +7114,30 @@ mod tests {
     }
 
     #[test]
+    fn test_poseidon2_one_leaf() {
+        // log_size=3 is the minimum; exercises the smallest valid Poseidon2 trace.
+        let leaves = vec![999u64];
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_hash_chain_poseidon2(&leaves, &[]).expect("proving failed");
+        assert_eq!(log_size, 3);
+        let valid = verify_hash_chain_poseidon2(&proof_bytes, &commitment_hex, log_size, &[])
+            .expect("verification failed");
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_poseidon2_two_leaves() {
+        // log_size=4; exercises the 2-leaf case used by prove_mldsa_batch.
+        let leaves = vec![1u64, 2];
+        let (proof_bytes, commitment_hex, log_size) =
+            prove_hash_chain_poseidon2(&leaves, &[]).expect("proving failed");
+        assert_eq!(log_size, 4);
+        let valid = verify_hash_chain_poseidon2(&proof_bytes, &commitment_hex, log_size, &[])
+            .expect("verification failed");
+        assert!(valid);
+    }
+
+    #[test]
     fn test_wrong_commitment_fails_merkle() {
         let leaves = vec![1u64, 2, 3, 4];
         let (proof_bytes, commitment_hex, log_size) =
