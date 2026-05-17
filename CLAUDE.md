@@ -162,11 +162,33 @@ Stwo's `Blake2sM31Channel` replicated in Solidity — the Fiat-Shamir transcript
   - `drawSecureFelt(state) → uint128` — words [w0,w1,w2,w3] → QM31 `c0=(w0<<32|w1), c1=(w2<<32|w3)`
   - `drawQueries(state, logDomainSize, n) → uint256[]` — FRI query indices in `[0, 2^logDomainSize)`
 
+### `contracts/src/verifier/CirclePoint.sol`
+Circle group arithmetic over M31 for Stwo FRI domain verification.
+- Generator G = (2, 1268011823), group order 2^31
+- `isOnCircle(x, y)` — checks x²+y² = 1 mod P
+- `pointAdd(x1,y1, x2,y2)` — circle group law: `(x1x2−y1y2, x1y2+x2y1)`
+- `pointDouble(x, y)` — doubling: `(2x²−1, 2xy)`
+- `genMul(scalar)` — double-and-add scalar multiplication of G
+- `cosetAt(logN, idx)` — CanonicCoset domain point; `initial_index = 2^(30-logN)`, `step = 2^(31-logN)`
+- `circleFold(fPlus, fMinus, alpha, yInv) → uint128` — circle→line fold: `(f+ + f−) + α·(f+ − f−)·yInv`
+- `lineFold(fPlus, fMinus, alpha, xInv) → uint128` — line→point fold (same formula, uses x⁻¹)
+- Cross-checked against Stwo 2.2.0 Rust test vectors (3 tests in `stark_stwo/src/lib.rs`)
+
 ### `contracts/src/QLSAVerifierV4.sol`
-First verifier with on-chain STARK proof structure verification.
-- Accepts: `(proof, commitment, merkleRoot, queryHints)` where queryHints is ABI-encoded
-- Checks: commitment binding → trace root consistency (proof[8:40]) → Merkle inclusion → FRI fold
-- `queryHints`: `abi.encode(traceRoot, queryValues, queryIndex, treeDepth, merkleSiblings, friAlpha, foldedValue, mirrorValue)`
+Verifier with on-chain Merkle query + correct circle FRI fold check.
+- Accepts: `(proof, commitment, merkleRoot, queryHints)` where queryHints is ABI-encoded (11 fields)
+- Checks: commitment binding → trace root consistency (proof[8:40]) → Merkle inclusion → circle fold
+- `queryHints` 11-field format:
+  ```solidity
+  abi.encode(
+      bytes32 traceRoot, uint32[] queryValues, uint256 queryIndex, uint256 treeDepth,
+      bytes32[] merkleSiblings, uint128 friAlpha,
+      uint128 fPlus, uint128 fMinus, uint128 foldedValue,
+      uint256 queryPointX, uint256 queryPointY
+  )
+  ```
+- Circle fold check: (a) point on circle, (b) point == cosetAt(treeDepth, queryIndex), (c) circleFold matches
+- Requires `viaIR: true` in hardhat.config.js (11-field ABI decode exceeds stack depth without it)
 
 ## Multi-Component STARK Pattern
 
