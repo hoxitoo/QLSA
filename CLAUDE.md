@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2, QLSAVerifierFull, Blake2s.sol
+contracts/      Solidity: BatchRegistryV2, QLSAVerifierV4, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -128,6 +128,32 @@ All `VerifyMldsaProof*` structs in `stark_stwo/src/mldsa_verify_stark.rs` use
 `bincode::Encode`/`Decode` (NOT serde) because serde does not support `[i64; 256]` arrays.
 Always use `bincode::encode_to_vec` / `bincode::decode_from_slice` with these types.
 
+## On-Chain Verifier Components (MVP-4)
+
+### `contracts/src/verifier/CM31.sol`
+Complex extension of M31: `GF(2^31-1)[i] / (i²+1)`.
+- Encoding: `uint64` packed as `(a << 32) | b` where `a = re`, `b = im`
+- Operations: `pack/re/im`, `add/sub/mul/neg/inv/conj/scale`, `fromBytes8LE`
+
+### `contracts/src/verifier/QM31.sol`
+Quartic extension: `CM31[u] / (u² - R)` where `R = CM31(2, 1) = 2 + i` (matches Stwo).
+- Encoding: `uint128` packed as `(c0 << 64) | c1` where each component is CM31 (`uint64`)
+- Operations: `pack/c0/c1`, `add/sub/mul/neg/inv`, `fromCM31/fromM31`, `fromBytes16LE`
+- FRI: `friLinearFold(fPlus, fMinus, alpha)` — linear combination fold step for real M31 inputs
+
+### `contracts/src/verifier/MerkleVerifier.sol`
+Blake2s binary Merkle inclusion proofs matching Stwo's trace tree structure.
+- `hashLeaf(uint32[] colValues)` — hash M31 column values as LE uint32 words
+- `hashPair(left, right)` — Blake2s(left ‖ right) for internal nodes
+- `verify(root, leafHash, index, depth, siblings)` — calldata variant
+- `verifyMem / verifyColumns / verifyColumnsMem` — memory variants for internal use
+
+### `contracts/src/QLSAVerifierV4.sol`
+First verifier with on-chain STARK proof structure verification.
+- Accepts: `(proof, commitment, merkleRoot, queryHints)` where queryHints is ABI-encoded
+- Checks: commitment binding → trace root consistency (proof[8:40]) → Merkle inclusion → FRI fold
+- `queryHints`: `abi.encode(traceRoot, queryValues, queryIndex, treeDepth, merkleSiblings, friAlpha, foldedValue, mirrorValue)`
+
 ## Multi-Component STARK Pattern
 
 When adding a new combined STARK (mixed-size components):
@@ -143,7 +169,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: Blake2s commitment binding only — no full FRI verifier (MVP-4)
+1. On-chain verifier: QLSAVerifierV4 verifies Merkle inclusion + first FRI fold; full FRI verifier is MVP-4 final
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)

@@ -12,7 +12,7 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
 > - `LOG_BLOWUP=4` → blowup=16 → ~120-bit soundness; full 128-bit needs blowup≥64
-> - No full on-chain FRI verifier — Blake2s commitment binding only (MVP-4)
+> - On-chain FRI verifier: QLSAVerifierV4 adds Merkle query + FRI fold check; full multi-round FRI is MVP-4 final
 > - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 is MVP-4
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
@@ -67,7 +67,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark_stwo/` — Stwo Circle STARK prover (Rust) | ✅ Done |
 | ML-DSA arithmetic AIR circuits (7 components → 1 STARK, V21/V22) | ✅ Done |
 | `stark/` — Python prover/verifier wrappers V4–V22, witness pipeline | ✅ Done |
-| `contracts/` — BatchRegistry, BatchRegistryV2, QLSAVerifier, V2/V3/Full | ✅ Done |
+| `contracts/` — BatchRegistry(V2), QLSAVerifier(V2/V3/Full/V4), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
 | Tests — **210 Rust** (non-ignored) + **~243 Python** + **31 TS** + **155 Solidity** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
@@ -153,7 +153,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 | Issue | Severity | Status |
 |-------|----------|--------|
-| `QLSAVerifierFull` — Blake2s binding, not full FRI verifier | Critical | Partial (MVP-4 for full FRI) |
+| On-chain FRI verifier — multi-round FRI + OODS not yet verified | Critical | Partial — QLSAVerifierV4 adds Merkle+fold check |
 | FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit: blowup≥64) | High | Partial |
 | ML-DSA verification inside AIR circuit | Critical | ✅ Done (V21: 1 STARK proof, 2026-05-16) |
 | Merkle root not a public input of the STARK proof | Critical | ✅ Done (V22: Fiat-Shamir binding, 2026-05-16) |
@@ -191,7 +191,7 @@ QLSA/
 ├── stark/              # Python prover/verifier wrappers V4–V22, witness pipeline
 ├── stark_stwo/         # Stwo Circle STARK prover (Rust), ML-DSA arithmetic circuits
 ├── aggregator/         # Mempool, Batcher, AggregatorNode, HTTP API
-├── contracts/          # Solidity: BatchRegistry(V2), QLSAVerifier(V2/V3/Full), Blake2s.sol
+├── contracts/          # Solidity: BatchRegistry(V2), QLSAVerifier(V2/V3/Full/V4), CM31/QM31/MerkleVerifier
 ├── sdk/python/         # Python SDK: Wallet, LocalClient, HttpClient, WitnessStatus
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
@@ -212,12 +212,13 @@ QLSA/
 | Phase 3 | Solidity contracts (BatchRegistry + verifier) | ✅ Done |
 | Phase 3+ | M31 library + QLSAVerifierV2 + FRI blowup 16× (LOG_BLOWUP=4) | ✅ Done |
 | Phase 3++ | Blake2s.sol + QLSAVerifierV3 + QLSAVerifierFull | ✅ Done |
+| MVP-4 (partial) | CM31/QM31 field libs + MerkleVerifier + QLSAVerifierV4 | ✅ Done |
 | Phase 4 | Aggregator: Mempool, Batcher, AggregatorNode | ✅ Done |
 | Phase 5 | SDK: Python + JavaScript + HTTP API | ✅ Done |
 | MVP-3 | ML-DSA batch verifier (Rust FIPS 204) + STARK bridge | ✅ Done |
 | **Phase 6** | **Testnet deployment — Sepolia, first batch 2026-05-05** | ✅ Done |
 | **MVP-3+** | **All 7 ML-DSA circuits → 1 STARK proof (V21) + Merkle root binding (V22)** | ✅ Done |
-| MVP-4 | Full on-chain FRI verifier, CM31/QM31 field libs, RPO256 | ⏳ Next |
+| MVP-4 final | Full multi-round FRI verifier + OODS check + RPO256 | ⏳ Next |
 
 ---
 
@@ -229,7 +230,7 @@ QLSA/
 
 All 7 ML-DSA.Verify arithmetic components (NTT, Az, Ct1, INTT, WPrime, NormCheck, UseHint) now run inside a single Circle STARK FRI proof (3,217 trace columns). The proof is cryptographically bound to both the ML-DSA challenge (`c_tilde`) and the batch Merkle root via Fiat-Shamir transcript mixing.
 
-Remaining for production: full on-chain FRI verifier (MVP-4).
+Remaining for production: full multi-round FRI verifier with OODS check (MVP-4 final).
 
 ### 2. Aggregator trust model
 
@@ -259,7 +260,7 @@ PQ adoption is inevitable, but gradual.
 
 - Threshold signatures (`t-of-n`)
 - Multi-party aggregation
-- Full on-chain FRI verifier (MVP-4, ~5K lines of Solidity)
+- Full multi-round on-chain FRI verifier with OODS (MVP-4 final, ~5K lines of Solidity)
 - FRI blowup ≥ 64 (full 128-bit soundness at LOG_BLOWUP=6)
 - Native PQ rollup chain
 
