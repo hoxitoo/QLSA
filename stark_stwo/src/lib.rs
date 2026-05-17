@@ -7474,4 +7474,103 @@ mod tests {
         bad[20] ^= 0xFF;
         assert!(!verify_use_hint(&bad, &commitment_hex).unwrap_or(false));
     }
+
+    // ── TwoChannel cross-verification ────────────────────────────────────────
+    // These tests produce the reference vectors that must match TwoChannel.sol.
+    // Run with: cargo +nightly-2025-07-01 test test_two_channel -- --nocapture
+
+    #[test]
+    fn test_two_channel_init_mix_root() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel, MerkleChannel};
+        use stwo::core::vcs::blake2_hash::Blake2sHash;
+        use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+
+        // Vector 1: mix_root(zero_digest, zero_root)
+        let mut ch = Blake2sM31Channel::default();
+        let zero_root = Blake2sHash([0u8; 32]);
+        Blake2sM31MerkleChannel::mix_root(&mut ch, zero_root);
+        let digest_hex = hex::encode(ch.digest().0);
+        println!("mixRoot(zero,zero) digest = 0x{digest_hex}");
+
+        // Vector 2: mix_root(0x01..01 digest, 0xab..ab root)
+        let init_digest = Blake2sHash([0x01u8; 32]);
+        let ab_root     = Blake2sHash([0xabu8; 32]);
+        let mut ch2 = Blake2sM31Channel::default();
+        ch2.update_digest(init_digest);
+        Blake2sM31MerkleChannel::mix_root(&mut ch2, ab_root);
+        let digest2_hex = hex::encode(ch2.digest().0);
+        println!("mixRoot(0x01..01, 0xab..ab) digest = 0x{digest2_hex}");
+    }
+
+    #[test]
+    fn test_two_channel_draw_u32s() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel};
+
+        // Vector: drawU32sRaw from zero state (nDraws=0)
+        let mut ch = Blake2sM31Channel::default();
+        let raw = ch.draw_u32s();
+        let raw_hex: String = raw.iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("drawU32sRaw(zero, nDraws=0) = 0x{raw_hex}");
+        assert_eq!(raw.len(), 8, "draw_u32s must return 8 words");
+        // All values must be < P (M31 output)
+        let p = 2_147_483_647u32;
+        for &w in &raw {
+            assert!(w < p, "word {w} must be < P");
+        }
+
+        // nDraws should now be 1
+        let raw2 = ch.draw_u32s();
+        let raw2_hex: String = raw2.iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("drawU32sRaw(zero, nDraws=1) = 0x{raw2_hex}");
+        assert_ne!(raw, raw2, "consecutive draws must differ");
+    }
+
+    #[test]
+    fn test_two_channel_draw_queries() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel};
+        use stwo::core::queries::draw_queries;
+
+        let mut ch = Blake2sM31Channel::default();
+        let log_domain_size = 3u32;
+        let n_queries = 5usize;
+        let positions = draw_queries(&mut ch, log_domain_size, n_queries);
+        let positions_u32: Vec<u32> = positions.iter().map(|&x| x as u32).collect();
+        println!("drawQueries(zero, logSize=3, n=5) = {positions_u32:?}");
+        assert_eq!(positions.len(), n_queries);
+        for &q in &positions {
+            assert!(q < (1 << log_domain_size), "query {q} must be < 2^3");
+        }
+    }
+
+    #[test]
+    fn test_two_channel_sequence() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel, MerkleChannel};
+        use stwo::core::vcs::blake2_hash::Blake2sHash;
+        use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+
+        // Two-step: mixRoot(root1), drawU32s, mixRoot(root2), drawU32s
+        let root1 = Blake2sHash([0x01u8; 32]);
+        let root2 = Blake2sHash([0x02u8; 32]);
+
+        let mut ch = Blake2sM31Channel::default();
+        Blake2sM31MerkleChannel::mix_root(&mut ch, root1);
+        let draw1: String = ch.draw_u32s().iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Blake2sM31MerkleChannel::mix_root(&mut ch, root2);
+        let draw2: String = ch.draw_u32s().iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("sequence draw1 = 0x{draw1}");
+        println!("sequence draw2 = 0x{draw2}");
+        assert_ne!(draw1, draw2);
+    }
 }

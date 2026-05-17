@@ -148,6 +148,20 @@ Blake2s binary Merkle inclusion proofs matching Stwo's trace tree structure.
 - `verify(root, leafHash, index, depth, siblings)` — calldata variant
 - `verifyMem / verifyColumns / verifyColumnsMem` — memory variants for internal use
 
+### `contracts/src/verifier/TwoChannel.sol`
+Stwo's `Blake2sM31Channel` replicated in Solidity — the Fiat-Shamir transcript engine.
+- Matches `Blake2sM31Channel` from `stwo/src/core/channel/blake2s.rs` exactly (verified by Rust cross-check vectors from Stwo 2.2.0).
+- State: `struct State { bytes32 digest; uint32 nDraws; }` — digest is 32 bytes of 8 LE M31 words.
+- `Blake2sM31Hash(data)`: `Blake2s-256(data)` then `reduce_to_m31` on each 4-byte LE chunk.
+  - `reduce_to_m31(w)`: `r = (w & 0x7FFFFFFF) + (w >> 31); if r >= P: r -= P`
+- Operations:
+  - `init()` → zero-state
+  - `mixRoot(state, root)` — `digest = Blake2sM31Hash(digest ‖ root); nDraws = 0`
+  - `mixU32s(state, uint32[])` — `digest = Blake2sM31Hash(digest ‖ words_le); nDraws = 0`
+  - `drawU32sRaw(state) → bytes32` — `input = digest ‖ nDraws_le4 ‖ 0x00; nDraws++`
+  - `drawSecureFelt(state) → uint128` — words [w0,w1,w2,w3] → QM31 `c0=(w0<<32|w1), c1=(w2<<32|w3)`
+  - `drawQueries(state, logDomainSize, n) → uint256[]` — FRI query indices in `[0, 2^logDomainSize)`
+
 ### `contracts/src/QLSAVerifierV4.sol`
 First verifier with on-chain STARK proof structure verification.
 - Accepts: `(proof, commitment, merkleRoot, queryHints)` where queryHints is ABI-encoded
