@@ -54,6 +54,7 @@ library MerkleVerifier {
     ///                    siblings[0] is the leaf-level sibling, siblings[depth-1]
     ///                    is the child of the root.
     /// @return True iff the reconstructed root matches `root`.
+    /// @notice Verify a Merkle inclusion proof (calldata siblings — for direct external use).
     function verify(
         bytes32 root,
         bytes32 leafHash,
@@ -61,6 +62,51 @@ library MerkleVerifier {
         uint256 depth,
         bytes32[] calldata siblings
     ) internal pure returns (bool) {
+        return _verify(root, leafHash, index, depth, siblings);
+    }
+
+    /// @notice Verify a Merkle inclusion proof (memory siblings — for internal/decoded use).
+    function verifyMem(
+        bytes32 root,
+        bytes32 leafHash,
+        uint256 index,
+        uint256 depth,
+        bytes32[] memory siblings
+    ) internal pure returns (bool) {
+        return _verify(root, leafHash, index, depth, siblings);
+    }
+
+    /// @notice Verify a Merkle proof where the leaf is a set of column values (calldata).
+    function verifyColumns(
+        bytes32 root,
+        uint32[] memory colValues,
+        uint256 index,
+        uint256 depth,
+        bytes32[] calldata siblings
+    ) internal pure returns (bool) {
+        return _verify(root, hashLeaf(colValues), index, depth, siblings);
+    }
+
+    /// @notice Verify a Merkle proof where the leaf is a set of column values (memory).
+    function verifyColumnsMem(
+        bytes32 root,
+        uint32[] memory colValues,
+        uint256 index,
+        uint256 depth,
+        bytes32[] memory siblings
+    ) internal pure returns (bool) {
+        return _verify(root, hashLeaf(colValues), index, depth, siblings);
+    }
+
+    // ── Internal ──────────────────────────────────────────────────────────────
+
+    function _verify(
+        bytes32 root,
+        bytes32 leafHash,
+        uint256 index,
+        uint256 depth,
+        bytes32[] memory siblings
+    ) private pure returns (bool) {
         require(siblings.length == depth, "MerkleVerifier: wrong sibling count");
 
         bytes32 current = leafHash;
@@ -69,28 +115,13 @@ library MerkleVerifier {
         for (uint256 d = 0; d < depth; d++) {
             bytes32 sibling = siblings[d];
             if (idx & 1 == 0) {
-                // current is left child
                 current = hashPair(current, sibling);
             } else {
-                // current is right child
                 current = hashPair(sibling, current);
             }
             idx >>= 1;
         }
 
         return current == root;
-    }
-
-    /// @notice Verify a Merkle proof where the leaf is a set of column values.
-    /// Hashes the column values to a leaf, then delegates to verify().
-    function verifyColumns(
-        bytes32 root,
-        uint32[] memory colValues,
-        uint256 index,
-        uint256 depth,
-        bytes32[] calldata siblings
-    ) internal pure returns (bool) {
-        bytes32 leafHash = hashLeaf(colValues);
-        return verify(root, leafHash, index, depth, siblings);
     }
 }
