@@ -11,9 +11,9 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > This codebase is a **research prototype / testnet demonstrator**.
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
-> - FRI blowup=4 targets ~60-bit soundness; production requires ≥8 (128-bit)
+> - `LOG_BLOWUP=4` → blowup=16 → ~120-bit soundness; full 128-bit needs blowup≥64
 > - No full on-chain FRI verifier — Blake2s commitment binding only (MVP-4)
-> - Hash AIR `H(a,b) = a³+b` is not cryptographic (MVP-4: replace with RPO256)
+> - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 is MVP-4
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
 
@@ -154,7 +154,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | Issue | Severity | Status |
 |-------|----------|--------|
 | `QLSAVerifierFull` — Blake2s binding, not full FRI verifier | Critical | Partial (MVP-4 for full FRI) |
-| FRI blowup=4 → ~60-bit soundness (needs ≥8 for mainnet) | High | Partial |
+| FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit: blowup≥64) | High | Partial |
 | ML-DSA verification inside AIR circuit | Critical | ✅ Done (V21: 1 STARK proof, 2026-05-16) |
 | Merkle root not a public input of the STARK proof | Critical | ✅ Done (V22: Fiat-Shamir binding, 2026-05-16) |
 | M31 wrap-around soundness gap in multiplication | High | ✅ Closed (Q-range check AIR, 2026-05-14) |
@@ -210,14 +210,14 @@ QLSA/
 | Phase 1 | ML-DSA keys, signing, Merkle tree, batch | ✅ Done |
 | Phase 2 | Stwo Circle STARK prover (hash chain AIR) | ✅ Done |
 | Phase 3 | Solidity contracts (BatchRegistry + verifier) | ✅ Done |
-| Phase 3+ | M31 library + QLSAVerifierV2 + FRI blowup 4x | ✅ Done |
+| Phase 3+ | M31 library + QLSAVerifierV2 + FRI blowup 16× (LOG_BLOWUP=4) | ✅ Done |
 | Phase 3++ | Blake2s.sol + QLSAVerifierV3 + QLSAVerifierFull | ✅ Done |
 | Phase 4 | Aggregator: Mempool, Batcher, AggregatorNode | ✅ Done |
 | Phase 5 | SDK: Python + JavaScript + HTTP API | ✅ Done |
 | MVP-3 | ML-DSA batch verifier (Rust FIPS 204) + STARK bridge | ✅ Done |
 | **Phase 6** | **Testnet deployment — Sepolia, first batch 2026-05-05** | ✅ Done |
 | **MVP-3+** | **All 7 ML-DSA circuits → 1 STARK proof (V21) + Merkle root binding (V22)** | ✅ Done |
-| MVP-4 | Full on-chain FRI verifier, blowup≥8, RPO256 | ⏳ Next |
+| MVP-4 | Full on-chain FRI verifier, CM31/QM31 field libs, RPO256 | ⏳ Next |
 
 ---
 
@@ -260,7 +260,7 @@ PQ adoption is inevitable, but gradual.
 - Threshold signatures (`t-of-n`)
 - Multi-party aggregation
 - Full on-chain FRI verifier (MVP-4, ~5K lines of Solidity)
-- FRI blowup ≥ 8 (128-bit soundness)
+- FRI blowup ≥ 64 (full 128-bit soundness at LOG_BLOWUP=6)
 - Native PQ rollup chain
 
 ---

@@ -146,7 +146,7 @@ Development: `claude/review-repo-structure-E4kPW`
 1. On-chain verifier: Blake2s commitment binding only — no full FRI verifier (MVP-4)
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
-4. FRI blowup=4: ~60-bit soundness (production needs ≥128-bit, blowup≥8)
+4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
 
 ## Security Hardening (implemented)
