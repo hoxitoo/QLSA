@@ -375,7 +375,7 @@ def test_mldsa_witness_wrong_input_size_raises():
 
 try:
     import oqs as _oqs
-    _HAVE_OQS = True
+    _HAVE_OQS = hasattr(_oqs, "Signature")
 except ImportError:
     _HAVE_OQS = False
 

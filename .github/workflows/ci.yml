@@ -78,12 +78,20 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Verify oqs import
-        run: python -c "import oqs; print('liboqs OK')"
+        run: |
+          python -c "
+          import oqs
+          if not hasattr(oqs, 'Signature'):
+              print('ERROR: oqs.Signature missing — wrong oqs package installed')
+              import sys; sys.exit(1)
+          print('liboqs OK — oqs.Signature available')
+          "
 
       - name: Build and install PyO3 extension
         working-directory: stark_stwo
         timeout-minutes: 20
         run: |
+          rm -rf target/wheels/
           maturin build --features python --release
           pip install --force-reinstall target/wheels/*.whl
 

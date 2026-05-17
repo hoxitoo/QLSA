@@ -29,6 +29,17 @@ needs_ext = pytest.mark.skipif(
     reason="qlsa_stark_stwo not installed — run: cd stark_stwo && maturin develop --features python",
 )
 
+try:
+    import oqs as _oqs_check
+    _HAVE_OQS = hasattr(_oqs_check, "Signature")
+except ImportError:
+    _HAVE_OQS = False
+
+needs_oqs = pytest.mark.skipif(
+    not _HAVE_OQS,
+    reason="liboqs not available — install liboqs-python with liboqs C library",
+)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
@@ -57,30 +68,37 @@ def _make_signed_batch(n: int):
     return create_batch(txs)
 
 
+def _make_synthetic_batch():
+    """Batch with a deterministic 64-byte Merkle root — no oqs required."""
+    import hashlib
+    from core.batch import Batch
+    root = hashlib.sha3_512(b"synthetic-test-batch").digest()  # always 64 bytes
+    return Batch(transactions=[], merkle_root=root)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Tests that do NOT require the extension
+# Tests that do NOT require the extension or oqs
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_txs_to_leaves_always_8():
-    # Merkle root is always 64 bytes → 8 × u64 chunks regardless of batch size.
-    for n in (1, 4, 16):
-        leaves = _txs_to_leaves(_make_signed_batch(n))
-        assert len(leaves) == 8
+    # Merkle root is always 64 bytes → always 8 × u64 leaves, regardless of batch content.
+    leaves = _txs_to_leaves(_make_synthetic_batch())
+    assert len(leaves) == 8
 
 
 def test_txs_to_leaves_are_u64():
-    leaves = _txs_to_leaves(_make_signed_batch(3))
+    leaves = _txs_to_leaves(_make_synthetic_batch())
     for leaf in leaves:
         assert 0 <= leaf < 2**64
 
 
 def test_txs_to_leaves_are_deterministic():
-    batch = _make_signed_batch(2)
+    batch = _make_synthetic_batch()
     assert _txs_to_leaves(batch) == _txs_to_leaves(batch)
 
 
 def test_txs_to_leaves_encodes_merkle_root():
-    batch = _make_signed_batch(4)
+    batch = _make_synthetic_batch()
     leaves = _txs_to_leaves(batch)
     root = batch.merkle_root  # 64 bytes
     expected = [int.from_bytes(root[i : i + 8], "little") for i in range(0, 64, 8)]
@@ -92,6 +110,7 @@ def test_txs_to_leaves_encodes_merkle_root():
 # ──────────────────────────────────────────────────────────────────────────────
 
 @needs_ext
+@needs_oqs
 def test_prove_returns_proof_result():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -104,6 +123,7 @@ def test_prove_returns_proof_result():
 
 
 @needs_ext
+@needs_oqs
 def test_onchain_commitment_bound_to_merkle_root():
     """onchain_commitment = Blake2s(proof[:32] || merkle_root[:32])[:16]
     matches QLSAVerifierBound / BatchRegistryV2 commitment scheme."""
@@ -119,6 +139,7 @@ def test_onchain_commitment_bound_to_merkle_root():
 
 
 @needs_ext
+@needs_oqs
 def test_onchain_commitment_differs_for_different_batches():
     """Each batch has a unique onchain_commitment — no replay possible."""
     from stark.prover import prove_batch
@@ -130,6 +151,7 @@ def test_onchain_commitment_differs_for_different_batches():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_sets_batch_stark_fields():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -143,6 +165,7 @@ def test_prove_sets_batch_stark_fields():
 
 
 @needs_ext
+@needs_oqs
 def test_verify_valid_proof():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -153,6 +176,7 @@ def test_verify_valid_proof():
 
 
 @needs_ext
+@needs_oqs
 def test_verify_wrong_merkle_root_fails():
     """Proof generated for one batch must not verify with a different Merkle root."""
     from stark.prover import prove_batch
@@ -164,6 +188,7 @@ def test_verify_wrong_merkle_root_fails():
 
 
 @needs_ext
+@needs_oqs
 def test_verify_tampered_proof_fails():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -175,6 +200,7 @@ def test_verify_tampered_proof_fails():
 
 
 @needs_ext
+@needs_oqs
 def test_commitment_is_deterministic():
     from stark.prover import prove_batch
     batch = _make_signed_batch(4)
@@ -184,6 +210,7 @@ def test_commitment_is_deterministic():
 
 
 @needs_ext
+@needs_oqs
 def test_different_batches_have_different_commitments():
     from stark.prover import prove_batch
     b1 = _make_signed_batch(4)
@@ -209,6 +236,7 @@ def _mldsa_entries(n: int) -> list[tuple[bytes, bytes, bytes]]:
 
 
 @needs_ext
+@needs_oqs
 def test_prove_mldsa_batch_returns_result():
     from stark.prover import prove_mldsa_batch, MldsaBatchResult
     entries = _mldsa_entries(2)
@@ -220,6 +248,7 @@ def test_prove_mldsa_batch_returns_result():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_mldsa_batch_rejects_invalid_sig():
     from stark.prover import prove_mldsa_batch
     entries = _mldsa_entries(2)
@@ -232,6 +261,7 @@ def test_prove_mldsa_batch_rejects_invalid_sig():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_mldsa_batch_verify_proof():
     from stark.prover import prove_mldsa_batch
     entries = _mldsa_entries(2)
@@ -242,6 +272,7 @@ def test_prove_mldsa_batch_verify_proof():
 # ─── prove_batch_poseidon2 ────────────────────────────────────────────────────
 
 @needs_ext
+@needs_oqs
 def test_prove_batch_poseidon2_returns_result():
     from stark.prover import prove_batch_poseidon2, Poseidon2ProofResult
     batch = _make_signed_batch(4)
@@ -254,6 +285,7 @@ def test_prove_batch_poseidon2_returns_result():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_batch_poseidon2_verify_roundtrip():
     from stark.prover import prove_batch_poseidon2
     batch = _make_signed_batch(4)
@@ -265,6 +297,7 @@ def test_prove_batch_poseidon2_verify_roundtrip():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_batch_poseidon2_onchain_commitment_binding():
     """onchain_commitment = Blake2s(proof[:32] ‖ merkle_root[:32])[:16]."""
     import hashlib
@@ -278,6 +311,7 @@ def test_prove_batch_poseidon2_onchain_commitment_binding():
 # ─── prove_batch_merkle ───────────────────────────────────────────────────────
 
 @needs_ext
+@needs_oqs
 def test_prove_batch_merkle_returns_result():
     from stark.prover import prove_batch_merkle, MerkleProofResult
     batch = _make_signed_batch(4)
@@ -290,6 +324,7 @@ def test_prove_batch_merkle_returns_result():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_batch_merkle_verify_roundtrip():
     from stark.prover import prove_batch_merkle
     batch = _make_signed_batch(4)
@@ -301,6 +336,7 @@ def test_prove_batch_merkle_verify_roundtrip():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_batch_merkle_onchain_commitment_binding():
     """onchain_commitment = Blake2s(proof[:32] ‖ merkle_root[:32])[:16]."""
     import hashlib
@@ -312,6 +348,7 @@ def test_prove_batch_merkle_onchain_commitment_binding():
 
 
 @needs_ext
+@needs_oqs
 def test_prove_batch_merkle_different_batches_different_commitments():
     from stark.prover import prove_batch_merkle
     b1 = _make_signed_batch(4)
