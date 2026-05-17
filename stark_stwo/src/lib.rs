@@ -7573,4 +7573,110 @@ mod tests {
         println!("sequence draw2 = 0x{draw2}");
         assert_ne!(draw1, draw2);
     }
+
+    // ── CirclePoint cross-verification ──────────────────────────────────────
+    // Reference vectors for CirclePoint.sol and the FRI fold formulas.
+    // Run: cargo +nightly-2025-07-01 test test_circle_point -- --nocapture
+
+    #[test]
+    fn test_circle_point_generator() {
+        use stwo::core::circle::{CirclePoint, M31_CIRCLE_GEN, M31_CIRCLE_LOG_ORDER};
+        use stwo::core::fields::m31::M31;
+
+        println!("GEN_X = {}", M31_CIRCLE_GEN.x.0);
+        println!("GEN_Y = {}", M31_CIRCLE_GEN.y.0);
+        println!("LOG_ORDER = {M31_CIRCLE_LOG_ORDER}");
+
+        // Verify G is on the circle: x² + y² = 1 (mod P)
+        let p = 2_147_483_647u64;
+        let x = M31_CIRCLE_GEN.x.0 as u64;
+        let y = M31_CIRCLE_GEN.y.0 as u64;
+        assert_eq!((x * x % p + y * y % p) % p, 1, "G must be on the circle");
+
+        // Identity: G^0 = (1, 0)
+        let id = M31_CIRCLE_GEN.mul(0);
+        assert_eq!(id.x.0, 1);
+        assert_eq!(id.y.0, 0);
+
+        // G^1 = G
+        let g1 = M31_CIRCLE_GEN.mul(1);
+        assert_eq!(g1.x.0, M31_CIRCLE_GEN.x.0);
+        assert_eq!(g1.y.0, M31_CIRCLE_GEN.y.0);
+
+        // Some test vectors for genMul
+        let v17 = M31_CIRCLE_GEN.mul(17);
+        println!("genMul(17) = ({}, {})", v17.x.0, v17.y.0);
+
+        let v1000 = M31_CIRCLE_GEN.mul(1000);
+        println!("genMul(1000) = ({}, {})", v1000.x.0, v1000.y.0);
+
+        // pointDouble(G) = 2*G
+        let doubled = M31_CIRCLE_GEN.double();
+        let g2      = M31_CIRCLE_GEN.mul(2);
+        assert_eq!(doubled.x, g2.x);
+        assert_eq!(doubled.y, g2.y);
+        println!("genMul(2) = ({}, {})", g2.x.0, g2.y.0);
+
+        // pointAdd(G, G) = 2*G
+        let added = M31_CIRCLE_GEN + M31_CIRCLE_GEN;
+        assert_eq!(added.x, g2.x);
+        assert_eq!(added.y, g2.y);
+    }
+
+    #[test]
+    fn test_circle_point_coset_at() {
+        use stwo::core::poly::circle::CanonicCoset;
+
+        // CanonicCoset::new(3).at(0..3) — small coset for easy verification
+        let c3 = CanonicCoset::new(3);
+        for i in 0..4 {
+            let p = c3.at(i);
+            println!("cosetAt(3, {i}) = ({}, {})", p.x.0, p.y.0);
+            // Verify all points are on the circle
+            let px = p.x.0 as u64;
+            let py = p.y.0 as u64;
+            let modp = 2_147_483_647u64;
+            assert_eq!((px*px % modp + py*py % modp) % modp, 1,
+                "coset point must be on circle");
+        }
+
+        // CanonicCoset::new(14).at(0) — typical FRI domain (LOG_N=10, LOG_BLOWUP=4)
+        let c14 = CanonicCoset::new(14);
+        let p0 = c14.at(0);
+        let p1 = c14.at(1);
+        let p2 = c14.at(7);
+        println!("cosetAt(14, 0) = ({}, {})", p0.x.0, p0.y.0);
+        println!("cosetAt(14, 1) = ({}, {})", p1.x.0, p1.y.0);
+        println!("cosetAt(14, 7) = ({}, {})", p2.x.0, p2.y.0);
+    }
+
+    #[test]
+    fn test_circle_fold_formula() {
+        use stwo::core::circle::M31_CIRCLE_GEN;
+        use stwo::core::fields::m31::M31;
+        use stwo::core::fields::qm31::QM31;
+        use stwo::core::poly::circle::CanonicCoset;
+        use stwo::core::fri::fold_circle_into_line;
+        use stwo::core::fields::{Field, FieldExpOps};
+
+        // Use cosetAt(3, 0) as the query point
+        let p = CanonicCoset::new(3).at(0);
+        println!("fold test p = ({}, {})", p.x.0, p.y.0);
+
+        // Arbitrary f(p) and f(conjugate(p)) = f(-p)
+        let f_p     = QM31::from_u32_unchecked(100, 200, 300, 400);
+        let f_neg_p = QM31::from_u32_unchecked(50, 60, 70, 80);
+        let alpha   = QM31::from_u32_unchecked(7, 11, 13, 17);
+
+        // Circle fold formula: f_new = (f_p + f_neg_p) + alpha * (f_p - f_neg_p) / p.y
+        let sum  = f_p + f_neg_p;
+        let diff = f_p - f_neg_p;
+        let y_inv = p.y.inverse();
+        let f_new = sum + alpha * diff * y_inv;
+        println!("f_p     QM31 = {:?}", f_p.to_m31_array().map(|x| x.0));
+        println!("f_neg_p QM31 = {:?}", f_neg_p.to_m31_array().map(|x| x.0));
+        println!("alpha   QM31 = {:?}", alpha.to_m31_array().map(|x| x.0));
+        println!("p.y = {}, p.y_inv = {}", p.y.0, y_inv.0);
+        println!("f_new   QM31 = {:?}", f_new.to_m31_array().map(|x| x.0));
+    }
 }

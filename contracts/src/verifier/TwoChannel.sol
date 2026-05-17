@@ -145,7 +145,7 @@ library TwoChannel {
 
     /// @dev Copy a bytes32 value into a bytes buffer at byte offset `off`.
     function _put32(bytes memory buf, uint256 off, bytes32 val) private pure {
-        assembly { mstore(add(add(buf, 32), off), val) }
+        assembly ("memory-safe") { mstore(add(add(buf, 32), off), val) }
     }
 
     /// @dev Write a uint32 into a bytes buffer at offset `off` as 4 LE bytes.

@@ -54,7 +54,7 @@ contract QLSAVerifierFull is IQLSAVerifier {
         //    Hash proof[0:32] with Blake2s; commitment must equal the first 8 bytes.
         //    proof.length >= 700 so proof[0:32] is always in bounds.
         bytes memory proofHead = new bytes(32);
-        assembly {
+        assembly ("memory-safe") {
             // proofHead data starts at (proofHead + 32), skipping the length word.
             // proof.offset is the calldata offset of proof[0].
             calldatacopy(add(proofHead, 32), proof.offset, 32)
