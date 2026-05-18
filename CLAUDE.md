@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -244,6 +244,18 @@ Composition binding: `fPlus`/`fMinus` proved to be the correct QM31 linear combi
 - Antipodal position independently Merkle-verified in same trace commitment tree
 - 26 tests: constants, valid 1/2-query, fPlus/fMinus binding, antipodal Merkle, Fiat-Shamir, proof-level/per-query rejections
 
+### `contracts/src/QLSAVerifierV9.sol`
+OODS quotient check: `fPlus`/`fMinus` linked to polynomial evaluations at the OODS point z.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding changed to `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, QueryHints[])` — OODS evals are global (shared across all queries), not per-query
+- Channel transcript: `mixRoot → drawSecureFelt [z_x] → mixU32s(oodsEvalsPos) → mixU32s(oodsEvalsNeg) → drawSecureFelt [compAlpha] → drawSecureFelt [friAlpha] → drawQueries`
+- OODS quotient check (multiplication form — avoids QM31.inv):
+  - `fPlus  · (p.x − z_x) == Σ_j[α^j · col_j(p)]  − Σ_j[α^j · oodsEvalPos_j]`
+  - `fMinus · (−p.x − z_x) == Σ_j[α^j · col_j(−p)] − Σ_j[α^j · oodsEvalNeg_j]`
+- Denominator zero-check: rejects if `p.x == ±z_x` (degenerate OODS point)
+- `QueryHints` struct: identical 13 fields as V8; meaning of `fPlus`/`fMinus` changes to OODS quotient values
+- 27 tests: constants, valid 1/2-query, OODS eval tampering, fPlus/fMinus quotient binding, queryValues tampering, empty/mismatched eval arrays, inherited Fiat-Shamir/Merkle/fold rejections
+
 ## Multi-Component STARK Pattern
 
 When adding a new combined STARK (mixed-size components):
@@ -259,7 +271,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierV8 verifies N×(Merkle inclusion at both p and −p + composition binding + circle fold) with full Fiat-Shamir (compAlpha, friAlpha, query indices derived from trace root); OODS quotient denominator (division by p−z in QM31) + line fold chain + full decommitment is MVP-4 final
+1. On-chain verifier: QLSAVerifierV9 verifies N×(Merkle inclusion at both p and −p + composition binding + OODS quotient check + circle fold) with full Fiat-Shamir (z_x, oodsEvals, compAlpha, friAlpha, query indices derived from trace root); line fold chain + full FRI decommitment is MVP-4 final
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
