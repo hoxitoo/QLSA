@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -222,6 +222,17 @@ Multi-query FRI verifier with Fiat-Shamir query derivation — closes the cherry
 - 24 tests: constants, valid 1/2-query, Fiat-Shamir enforcement (wrong/swapped/zero index), treeDepth mismatch,
   proof-level rejections, per-query rejections, wrong embedded root
 
+### `contracts/src/QLSAVerifierV7.sol`
+Full Fiat-Shamir binding: derived `friAlpha` + derived query indices — closes the remaining cherry-pick vulnerability in V6.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding: identical to V5/V6 (`QueryHints[]` struct array)
+- Channel transcript order: `init() → mixRoot(embeddedRoot) → drawSecureFelt() → drawQueries(treeDepth, N)`
+- Each hint's `friAlpha` must equal the channel-derived QM31 folding challenge
+- Each hint's `queryIndex` must equal the channel-derived index for that slot
+- 25 tests: constants, valid 1/2-query, friAlpha enforcement (wrong alpha, correct alpha + wrong fold,
+  second-query wrong alpha), query index enforcement, treeDepth mismatch, proof-level rejections,
+  per-query rejections, wrong embedded root
+
 ## Multi-Component STARK Pattern
 
 When adding a new combined STARK (mixed-size components):
@@ -237,7 +248,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierV6 verifies N×(Merkle inclusion + circle fold) with Fiat-Shamir query derivation; OODS + line fold chain + full decommitment is MVP-4 final
+1. On-chain verifier: QLSAVerifierV7 verifies N×(Merkle inclusion + circle fold) with full Fiat-Shamir binding (friAlpha + query indices derived from trace root); OODS + line fold chain + full decommitment is MVP-4 final
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
