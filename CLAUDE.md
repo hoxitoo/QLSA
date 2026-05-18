@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2, QLSAVerifierV4, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2, QLSAVerifierV4/V5, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -175,10 +175,10 @@ Circle group arithmetic over M31 for Stwo FRI domain verification.
 - Cross-checked against Stwo 2.2.0 Rust test vectors (3 tests in `stark_stwo/src/lib.rs`)
 
 ### `contracts/src/QLSAVerifierV4.sol`
-Verifier with on-chain Merkle query + correct circle FRI fold check.
-- Accepts: `(proof, commitment, merkleRoot, queryHints)` where queryHints is ABI-encoded (11 fields)
+Verifier with on-chain Merkle query + correct circle FRI fold check (single query).
+- Accepts: `(proof, commitment, merkleRoot, queryHints)` where queryHints is ABI-encoded (11 fields flat)
 - Checks: commitment binding → trace root consistency (proof[8:40]) → Merkle inclusion → circle fold
-- `queryHints` 11-field format:
+- `queryHints` 11-field flat encoding:
   ```solidity
   abi.encode(
       bytes32 traceRoot, uint32[] queryValues, uint256 queryIndex, uint256 treeDepth,
@@ -189,6 +189,21 @@ Verifier with on-chain Merkle query + correct circle FRI fold check.
   ```
 - Circle fold check: (a) point on circle, (b) point == cosetAt(treeDepth, queryIndex), (c) circleFold matches
 - Requires `viaIR: true` in hardhat.config.js (11-field ABI decode exceeds stack depth without it)
+
+### `contracts/src/QLSAVerifierV5.sol`
+Multi-query verifier — extends V4 by verifying N independent FRI queries per call.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature as V4)
+- `queryHints` is ABI-encoded `QueryHints[]` (array of structs, not flat fields):
+  ```solidity
+  abi.encode(
+      tuple(bytes32,uint32[],uint256,uint256,bytes32[],uint128,uint128,uint128,uint128,uint256,uint256)[]
+  )
+  ```
+- All queries share the same trace root (proof[8:40]); each query independently verified.
+- Constants: `MIN_QUERIES = 1`, `MAX_QUERIES = 64`.
+- Security note: N queries with blowup=16 → ~N×4 bits soundness (e.g. 8 queries ≈ 32 bits).
+  For mainnet-grade 128-bit security: N=32 queries (or fewer with higher blowup).
+- 26 tests: single-query backward compat, 2/3/4-query acceptance, per-query rejection.
 
 ## Multi-Component STARK Pattern
 
@@ -205,7 +220,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierV4 verifies Merkle inclusion + first FRI fold; full FRI verifier is MVP-4 final
+1. On-chain verifier: QLSAVerifierV5 verifies N×(Merkle inclusion + circle fold); OODS + line fold chain + full decommitment is MVP-4 final
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
