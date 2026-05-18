@@ -146,6 +146,7 @@ contract QLSAVerifierV4 {
         // b) Circle point must match CanonicCoset(treeDepth).at(queryIndex).
         //    This binds the fold to the correct FRI domain position.
         if (h.treeDepth < 1 || h.treeDepth > 30) return false;
+        if (h.queryIndex >= (1 << h.treeDepth)) return false; // idx must be in [0, 2^treeDepth)
         (uint256 cx, uint256 cy) = CirclePoint.cosetAt(h.treeDepth, h.queryIndex);
         if (cx != h.queryPointX || cy != h.queryPointY) return false;
 

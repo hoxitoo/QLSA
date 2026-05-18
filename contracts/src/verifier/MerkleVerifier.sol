@@ -35,9 +35,9 @@ library MerkleVerifier {
     /// @notice Hash two child hashes to form a parent node.
     function hashPair(bytes32 left, bytes32 right) internal pure returns (bytes32) {
         bytes memory buf = new bytes(64);
-        for (uint256 i = 0; i < 32; i++) {
-            buf[i]      = left[i];
-            buf[32 + i] = right[i];
+        assembly ("memory-safe") {
+            mstore(add(buf, 32), left)
+            mstore(add(buf, 64), right)
         }
         return Blake2s.hash(buf);
     }
@@ -107,7 +107,8 @@ library MerkleVerifier {
         uint256 depth,
         bytes32[] memory siblings
     ) private pure returns (bool) {
-        require(siblings.length == depth, "MerkleVerifier: wrong sibling count");
+        if (siblings.length != depth) return false;
+        if (depth > 0 && index >= (1 << depth)) return false;
 
         bytes32 current = leafHash;
         uint256 idx = index;

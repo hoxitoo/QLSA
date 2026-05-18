@@ -46,6 +46,32 @@ class Mempool:
             count = min(n, len(self._txs))
             return [self._txs.popleft() for _ in range(count)]
 
+    def drain_if_ready(self, min_n: int, max_n: int) -> list[Transaction]:
+        """Atomically drain up to *max_n* txs only if at least *min_n* are present.
+
+        Returns an empty list (without draining) when fewer than *min_n* are pending.
+        Eliminates the TOCTOU race between size() + drain() across two lock acquisitions.
+        """
+        if min_n < 1:
+            raise ValueError("min_n must be at least 1")
+        with self._lock:
+            if len(self._txs) < min_n:
+                return []
+            count = min(max_n, len(self._txs))
+            return [self._txs.popleft() for _ in range(count)]
+
+    def prepend_batch(self, txs: list[Transaction]) -> None:
+        """Re-insert transactions at the front of the queue (LIFO recovery).
+
+        Used by the batcher to return valid transactions that could not be batched
+        (e.g. batch creation failed) so they are included in the next cycle.
+        Silently drops transactions if the mempool is at capacity.
+        """
+        with self._lock:
+            for tx in reversed(txs):
+                if len(self._txs) < self.max_size:
+                    self._txs.appendleft(tx)
+
     def peek(self, n: int) -> list[Transaction]:
         """Return up to *n* transactions without removing them."""
         if n < 1:

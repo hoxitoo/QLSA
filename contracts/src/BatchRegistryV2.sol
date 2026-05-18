@@ -145,10 +145,20 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
         if (senders.length != newNonces.length) revert NoncesLengthMismatch();
 
         // Validate all nonces before touching state (fail-fast).
+        // Also detect duplicate senders in the same call to prevent nonce bypass.
         for (uint256 i = 0; i < senders.length; ++i) {
             uint64 current = senderNonces[senders[i]];
             if (newNonces[i] <= current) {
                 revert SenderNonceTooLow(senders[i], newNonces[i], current + 1);
+            }
+            // Detect duplicates: within this call, treat the largest seen nonce as current.
+            for (uint256 j = i + 1; j < senders.length; ++j) {
+                if (senders[i] == senders[j]) {
+                    // Require strictly increasing nonces for the same sender.
+                    if (newNonces[j] <= newNonces[i]) {
+                        revert SenderNonceTooLow(senders[j], newNonces[j], newNonces[i] + 1);
+                    }
+                }
             }
         }
 

@@ -88,10 +88,11 @@ library CirclePoint {
     /// @param idx   Query index in [0, 2^logN).
     function cosetAt(uint256 logN, uint256 idx) internal pure returns (uint256 x, uint256 y) {
         require(logN >= 1 && logN <= 30, "CirclePoint: logN out of range");
-        uint256 logMask = (1 << LOG_ORDER) - 1;
-        uint256 initialIndex = (1 << (30 - logN)) & logMask;
-        uint256 stepSize     = (1 << (31 - logN)) & logMask;
-        uint256 pointIndex   = (initialIndex + idx * stepSize) & logMask;
+        require(idx < (1 << logN), "CirclePoint: idx out of coset range");
+        uint256 mod = 1 << LOG_ORDER; // 2^31 — circle group order
+        uint256 initialIndex = (1 << (30 - logN)) % mod;
+        uint256 stepSize     = (1 << (31 - logN)) % mod;
+        uint256 pointIndex   = (initialIndex + (idx * stepSize) % mod) % mod;
         (x, y) = genMul(pointIndex);
     }
 

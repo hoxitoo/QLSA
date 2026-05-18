@@ -97,10 +97,7 @@ class Batcher:
         If prove_witnesses=True, also generates an ML-DSA arithmetic witness
         proof for the first transaction (MVP-3+, requires PyO3 extension).
         """
-        if self.mempool.size() < self.min_batch_size:
-            return None
-
-        txs = self.mempool.drain(self.max_batch_size)
+        txs = self.mempool.drain_if_ready(self.min_batch_size, self.max_batch_size)
         if not txs:
             return None
 
@@ -151,6 +148,8 @@ class Batcher:
             batch = create_batch(valid_txs, algorithm=self.algorithm)
         except (InvalidSignatureError, BatchSizeError) as exc:
             logging.error("batcher: create_batch failed after pre-filter: %s", exc)
+            # Return valid transactions to front of mempool so they are not lost.
+            self.mempool.prepend_batch(valid_txs)
             return None
 
         return self._try_prove(batch, prove_witnesses=prove_witnesses)
