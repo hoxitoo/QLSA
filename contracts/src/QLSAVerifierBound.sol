@@ -53,7 +53,7 @@ contract QLSAVerifierBound is IQLSAVerifierV2 {
         //    commitment must equal the first 16 bytes of that Blake2s hash (128-bit).
         //    proof.length >= 700 so proof[0:32] is always in bounds.
         bytes memory input = new bytes(64);
-        assembly {
+        assembly ("memory-safe") {
             // Copy proof[0:32] into input[0:32].
             calldatacopy(add(input, 32), proof.offset, 32)
             // Copy merkleRoot (bytes32, right-aligned) into input[32:64].

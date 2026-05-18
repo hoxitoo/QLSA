@@ -7474,4 +7474,209 @@ mod tests {
         bad[20] ^= 0xFF;
         assert!(!verify_use_hint(&bad, &commitment_hex).unwrap_or(false));
     }
+
+    // ── TwoChannel cross-verification ────────────────────────────────────────
+    // These tests produce the reference vectors that must match TwoChannel.sol.
+    // Run with: cargo +nightly-2025-07-01 test test_two_channel -- --nocapture
+
+    #[test]
+    fn test_two_channel_init_mix_root() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel, MerkleChannel};
+        use stwo::core::vcs::blake2_hash::Blake2sHash;
+        use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+
+        // Vector 1: mix_root(zero_digest, zero_root)
+        let mut ch = Blake2sM31Channel::default();
+        let zero_root = Blake2sHash([0u8; 32]);
+        Blake2sM31MerkleChannel::mix_root(&mut ch, zero_root);
+        let digest_hex = hex::encode(ch.digest().0);
+        println!("mixRoot(zero,zero) digest = 0x{digest_hex}");
+
+        // Vector 2: mix_root(0x01..01 digest, 0xab..ab root)
+        let init_digest = Blake2sHash([0x01u8; 32]);
+        let ab_root     = Blake2sHash([0xabu8; 32]);
+        let mut ch2 = Blake2sM31Channel::default();
+        ch2.update_digest(init_digest);
+        Blake2sM31MerkleChannel::mix_root(&mut ch2, ab_root);
+        let digest2_hex = hex::encode(ch2.digest().0);
+        println!("mixRoot(0x01..01, 0xab..ab) digest = 0x{digest2_hex}");
+    }
+
+    #[test]
+    fn test_two_channel_draw_u32s() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel};
+
+        // Vector: drawU32sRaw from zero state (nDraws=0)
+        let mut ch = Blake2sM31Channel::default();
+        let raw = ch.draw_u32s();
+        let raw_hex: String = raw.iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("drawU32sRaw(zero, nDraws=0) = 0x{raw_hex}");
+        assert_eq!(raw.len(), 8, "draw_u32s must return 8 words");
+        // All values must be < P (M31 output)
+        let p = 2_147_483_647u32;
+        for &w in &raw {
+            assert!(w < p, "word {w} must be < P");
+        }
+
+        // nDraws should now be 1
+        let raw2 = ch.draw_u32s();
+        let raw2_hex: String = raw2.iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("drawU32sRaw(zero, nDraws=1) = 0x{raw2_hex}");
+        assert_ne!(raw, raw2, "consecutive draws must differ");
+    }
+
+    #[test]
+    fn test_two_channel_draw_queries() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel};
+        use stwo::core::queries::draw_queries;
+
+        let mut ch = Blake2sM31Channel::default();
+        let log_domain_size = 3u32;
+        let n_queries = 5usize;
+        let positions = draw_queries(&mut ch, log_domain_size, n_queries);
+        let positions_u32: Vec<u32> = positions.iter().map(|&x| x as u32).collect();
+        println!("drawQueries(zero, logSize=3, n=5) = {positions_u32:?}");
+        assert_eq!(positions.len(), n_queries);
+        for &q in &positions {
+            assert!(q < (1 << log_domain_size), "query {q} must be < 2^3");
+        }
+    }
+
+    #[test]
+    fn test_two_channel_sequence() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel, MerkleChannel};
+        use stwo::core::vcs::blake2_hash::Blake2sHash;
+        use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+
+        // Two-step: mixRoot(root1), drawU32s, mixRoot(root2), drawU32s
+        let root1 = Blake2sHash([0x01u8; 32]);
+        let root2 = Blake2sHash([0x02u8; 32]);
+
+        let mut ch = Blake2sM31Channel::default();
+        Blake2sM31MerkleChannel::mix_root(&mut ch, root1);
+        let draw1: String = ch.draw_u32s().iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Blake2sM31MerkleChannel::mix_root(&mut ch, root2);
+        let draw2: String = ch.draw_u32s().iter()
+            .flat_map(|w| w.to_le_bytes())
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!("sequence draw1 = 0x{draw1}");
+        println!("sequence draw2 = 0x{draw2}");
+        assert_ne!(draw1, draw2);
+    }
+
+    // ── CirclePoint cross-verification ──────────────────────────────────────
+    // Reference vectors for CirclePoint.sol and the FRI fold formulas.
+    // Run: cargo +nightly-2025-07-01 test test_circle_point -- --nocapture
+
+    #[test]
+    fn test_circle_point_generator() {
+        use stwo::core::circle::{CirclePoint, M31_CIRCLE_GEN, M31_CIRCLE_LOG_ORDER};
+        use stwo::core::fields::m31::M31;
+
+        println!("GEN_X = {}", M31_CIRCLE_GEN.x.0);
+        println!("GEN_Y = {}", M31_CIRCLE_GEN.y.0);
+        println!("LOG_ORDER = {M31_CIRCLE_LOG_ORDER}");
+
+        // Verify G is on the circle: x² + y² = 1 (mod P)
+        let p = 2_147_483_647u64;
+        let x = M31_CIRCLE_GEN.x.0 as u64;
+        let y = M31_CIRCLE_GEN.y.0 as u64;
+        assert_eq!((x * x % p + y * y % p) % p, 1, "G must be on the circle");
+
+        // Identity: G^0 = (1, 0)
+        let id = M31_CIRCLE_GEN.mul(0);
+        assert_eq!(id.x.0, 1);
+        assert_eq!(id.y.0, 0);
+
+        // G^1 = G
+        let g1 = M31_CIRCLE_GEN.mul(1);
+        assert_eq!(g1.x.0, M31_CIRCLE_GEN.x.0);
+        assert_eq!(g1.y.0, M31_CIRCLE_GEN.y.0);
+
+        // Some test vectors for genMul
+        let v17 = M31_CIRCLE_GEN.mul(17);
+        println!("genMul(17) = ({}, {})", v17.x.0, v17.y.0);
+
+        let v1000 = M31_CIRCLE_GEN.mul(1000);
+        println!("genMul(1000) = ({}, {})", v1000.x.0, v1000.y.0);
+
+        // pointDouble(G) = 2*G
+        let doubled = M31_CIRCLE_GEN.double();
+        let g2      = M31_CIRCLE_GEN.mul(2);
+        assert_eq!(doubled.x, g2.x);
+        assert_eq!(doubled.y, g2.y);
+        println!("genMul(2) = ({}, {})", g2.x.0, g2.y.0);
+
+        // pointAdd(G, G) = 2*G
+        let added = M31_CIRCLE_GEN + M31_CIRCLE_GEN;
+        assert_eq!(added.x, g2.x);
+        assert_eq!(added.y, g2.y);
+    }
+
+    #[test]
+    fn test_circle_point_coset_at() {
+        use stwo::core::poly::circle::CanonicCoset;
+
+        // CanonicCoset::new(3).at(0..3) — small coset for easy verification
+        let c3 = CanonicCoset::new(3);
+        for i in 0..4 {
+            let p = c3.at(i);
+            println!("cosetAt(3, {i}) = ({}, {})", p.x.0, p.y.0);
+            // Verify all points are on the circle
+            let px = p.x.0 as u64;
+            let py = p.y.0 as u64;
+            let modp = 2_147_483_647u64;
+            assert_eq!((px*px % modp + py*py % modp) % modp, 1,
+                "coset point must be on circle");
+        }
+
+        // CanonicCoset::new(14).at(0) — typical FRI domain (LOG_N=10, LOG_BLOWUP=4)
+        let c14 = CanonicCoset::new(14);
+        let p0 = c14.at(0);
+        let p1 = c14.at(1);
+        let p2 = c14.at(7);
+        println!("cosetAt(14, 0) = ({}, {})", p0.x.0, p0.y.0);
+        println!("cosetAt(14, 1) = ({}, {})", p1.x.0, p1.y.0);
+        println!("cosetAt(14, 7) = ({}, {})", p2.x.0, p2.y.0);
+    }
+
+    #[test]
+    fn test_circle_fold_formula() {
+        use stwo::core::circle::M31_CIRCLE_GEN;
+        use stwo::core::fields::m31::M31;
+        use stwo::core::fields::qm31::QM31;
+        use stwo::core::poly::circle::CanonicCoset;
+        use stwo::core::fri::fold_circle_into_line;
+        use stwo::core::fields::{Field, FieldExpOps};
+
+        // Use cosetAt(3, 0) as the query point
+        let p = CanonicCoset::new(3).at(0);
+        println!("fold test p = ({}, {})", p.x.0, p.y.0);
+
+        // Arbitrary f(p) and f(conjugate(p)) = f(-p)
+        let f_p     = QM31::from_u32_unchecked(100, 200, 300, 400);
+        let f_neg_p = QM31::from_u32_unchecked(50, 60, 70, 80);
+        let alpha   = QM31::from_u32_unchecked(7, 11, 13, 17);
+
+        // Circle fold formula: f_new = (f_p + f_neg_p) + alpha * (f_p - f_neg_p) / p.y
+        let sum  = f_p + f_neg_p;
+        let diff = f_p - f_neg_p;
+        let y_inv = p.y.inverse();
+        let f_new = sum + alpha * diff * y_inv;
+        println!("f_p     QM31 = {:?}", f_p.to_m31_array().map(|x| x.0));
+        println!("f_neg_p QM31 = {:?}", f_neg_p.to_m31_array().map(|x| x.0));
+        println!("alpha   QM31 = {:?}", alpha.to_m31_array().map(|x| x.0));
+        println!("p.y = {}, p.y_inv = {}", p.y.0, y_inv.0);
+        println!("f_new   QM31 = {:?}", f_new.to_m31_array().map(|x| x.0));
+    }
 }

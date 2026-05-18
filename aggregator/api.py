@@ -25,18 +25,45 @@ from core.transaction import Transaction
 _TX_LIMIT = 100          # max POST /transactions per IP per minute
 _BATCH_LIMIT = 20        # max POST /batch/* per IP per minute
 _WINDOW_SECS = 60.0
+_EVICT_EVERY = 500       # evict stale entries every N calls to avoid unbounded growth
 
 # {ip: deque[timestamp]}  — one deque per IP per bucket
 _tx_windows: dict[str, deque[float]] = {}
 _batch_windows: dict[str, deque[float]] = {}
 _rate_lock = threading.Lock()
+_rate_call_count = 0
+
+# IPs that route through trusted reverse proxies (read X-Forwarded-For).
+_TRUSTED_PROXIES: frozenset[str] = frozenset({"127.0.0.1", "::1"})
+
+
+def _get_client_ip(request: Request) -> str:
+    """Return the real client IP, honouring X-Forwarded-For behind trusted proxies."""
+    host = request.client.host if request.client else "unknown"
+    if host in _TRUSTED_PROXIES:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return host
+
+
+def _evict_stale(windows: dict[str, deque[float]], cutoff: float) -> None:
+    """Remove entries whose last timestamp is older than *cutoff*."""
+    stale = [ip for ip, dq in windows.items() if not dq or dq[-1] < cutoff]
+    for ip in stale:
+        del windows[ip]
 
 
 def _check_rate(windows: dict[str, deque[float]], ip: str, limit: int) -> bool:
     """Return True if the request is allowed, False if the limit is exceeded."""
+    global _rate_call_count
     now = time.monotonic()
     cutoff = now - _WINDOW_SECS
     with _rate_lock:
+        _rate_call_count += 1
+        if _rate_call_count >= _EVICT_EVERY:
+            _evict_stale(windows, cutoff)
+            _rate_call_count = 0
         dq = windows.setdefault(ip, deque())
         while dq and dq[0] < cutoff:
             dq.popleft()
@@ -47,8 +74,8 @@ def _check_rate(windows: dict[str, deque[float]], ip: str, limit: int) -> bool:
 
 
 class _RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
-        ip = request.client.host if request.client else "unknown"
+    async def dispatch(self, request: Request, call_next: Any) -> Any:
+        ip = _get_client_ip(request)
         path = request.url.path
         method = request.method
 
@@ -99,13 +126,34 @@ class TxPayload(BaseModel):
             raise ValueError("must be a valid hex string") from exc
         return v.lower()
 
-    @field_validator("public_key", "signature")
+    @field_validator("public_key")
     @classmethod
-    def must_be_hex(cls, v: str) -> str:
+    def must_be_valid_pubkey(cls, v: str) -> str:
         try:
-            bytes.fromhex(v)
+            b = bytes.fromhex(v)
         except ValueError as exc:
             raise ValueError("must be a valid hex string") from exc
+        # FIPS 204 ML-DSA public key sizes: 44→1312, 65→1952, 87→2592 bytes
+        if len(b) not in {1312, 1952, 2592}:
+            raise ValueError(
+                f"public_key length {len(b)} B is not a valid ML-DSA key size "
+                "(expected 1312, 1952, or 2592 bytes)"
+            )
+        return v
+
+    @field_validator("signature")
+    @classmethod
+    def must_be_valid_signature(cls, v: str) -> str:
+        try:
+            b = bytes.fromhex(v)
+        except ValueError as exc:
+            raise ValueError("must be a valid hex string") from exc
+        # FIPS 204 ML-DSA signature sizes: 44→2420, 65→3309, 87→4627 bytes
+        if len(b) not in {2420, 3309, 4627}:
+            raise ValueError(
+                f"signature length {len(b)} B is not a valid ML-DSA signature size "
+                "(expected 2420, 3309, or 4627 bytes)"
+            )
         return v
 
     @field_validator("amount", "nonce")
@@ -115,6 +163,13 @@ class TxPayload(BaseModel):
             raise ValueError("must be non-negative")
         if v > (1 << 64) - 1:
             raise ValueError("must fit in uint64")
+        return v
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("amount must be positive (non-zero)")
         return v
 
 
