@@ -112,13 +112,21 @@ class TestSubmitTransaction:
         assert r2.json()["mempool_size"] == 2
 
     def test_invalid_signature_rejected(self, client, signed_payload):
+        # Correct ML-DSA-65 signature length (3309 bytes) but wrong content —
+        # passes pydantic length validator, rejected by cryptographic verification.
         bad = dict(signed_payload)
-        bad["signature"] = "deadbeef" * 100   # wrong bytes
+        bad["signature"] = "ab" * 3309
         resp = client.post("/transactions", json=bad)
         assert resp.status_code == 200
         data = resp.json()
         assert data["accepted"] is False
         assert data["error"] is not None
+
+    def test_wrong_length_signature_rejected(self, client, signed_payload):
+        # Wrong length — rejected by pydantic length validator with HTTP 422.
+        bad = dict(signed_payload, signature="deadbeef" * 100)  # 400 bytes
+        resp = client.post("/transactions", json=bad)
+        assert resp.status_code == 422
 
     def test_sender_wrong_length_rejected(self, client, signed_payload):
         bad = dict(signed_payload, sender="abc")
