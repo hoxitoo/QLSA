@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2, QLSAVerifierV4/V5, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -204,6 +204,13 @@ Multi-query verifier — extends V4 by verifying N independent FRI queries per c
 - Security note: N queries with blowup=16 → ~N×4 bits soundness (e.g. 8 queries ≈ 32 bits).
   For mainnet-grade 128-bit security: N=32 queries (or fewer with higher blowup).
 - 26 tests: single-query backward compat, 2/3/4-query acceptance, per-query rejection.
+
+### `contracts/src/BatchRegistryV3.sol`
+On-chain batch registry that uses `IQLSAVerifierV4` (4-param verify with queryHints).
+- `submitBatch(merkleRoot, commitment, starkProof, queryHints)` — passes hints to verifier
+- `submitBatchWithNonces(merkleRoot, commitment, proof, queryHints, senders, newNonces)` — with replay protection
+- All nonce/ownership/event logic identical to BatchRegistryV2
+- 24 tests: deployment, finalization, replay protection, nonces, end-to-end with QLSAVerifierV5 + real hints
 
 ## Multi-Component STARK Pattern
 
