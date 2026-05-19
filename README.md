@@ -69,13 +69,14 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V22, witness pipeline | ✅ Done |
 | `contracts/` — BatchRegistry(V2/V3), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **229 Rust** (non-ignored) + **~178 Python** + **31 TS** + **680 Solidity** | ✅ Done |
+| Tests — **229 Rust** (non-ignored) + **~281 Python** + **31 TS** + **685 Solidity** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **MVP-3+** — All 7 ML-DSA circuits in 1 STARK (V21) + Merkle root bound (V22) | ✅ Done |
 | **QLSAVerifierVFRI2** — K-round FRI + constant last-layer check (on-chain FRI complete) | ✅ Done |
 | **QLSAVerifierVFRI3** — Non-constant last-layer polynomial check (MVP-4 bounded-degree) | ✅ Done |
 | **VFRI2 bridge** — `gen_poseidon2_vfri2_hints()` Rust+Python; generates VFRI2-compatible hints | ✅ Done |
+| **VFRI3 real bridge** — `gen_poseidon2_vfri3_real()` real Poseidon2 OODS; end-to-end Solidity test | ✅ Done |
 
 ---
 
