@@ -12,7 +12,7 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
 > - `LOG_BLOWUP=6` → blowup=64, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit FRI soundness
-> - On-chain FRI verifier: QLSAVerifierVFRI2 completes K-round FRI + constant last-layer check; non-constant last layer (MVP-4) pending
+> - On-chain FRI verifier: QLSAVerifierVFRI3 completes K-round FRI + non-constant last-layer polynomial check (bounded-degree); RPO256 hash AIR pending
 > - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 is MVP-4
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
@@ -67,13 +67,15 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark_stwo/` — Stwo Circle STARK prover (Rust), 130-bit FRI security | ✅ Done |
 | ML-DSA arithmetic AIR circuits (7 components → 1 STARK, V21/V22) | ✅ Done |
 | `stark/` — Python prover/verifier wrappers V4–V22, witness pipeline | ✅ Done |
-| `contracts/` — BatchRegistry(V2/V3), QLSAVerifier(V4–V13/VFRI/VFRI2), CM31/QM31/MerkleVerifier | ✅ Done |
+| `contracts/` — BatchRegistry(V2/V3), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **217 Rust** (non-ignored) + **~243 Python** + **31 TS** + **637 Solidity** | ✅ Done |
+| Tests — **229 Rust** (non-ignored) + **~178 Python** + **31 TS** + **680 Solidity** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **MVP-3+** — All 7 ML-DSA circuits in 1 STARK (V21) + Merkle root bound (V22) | ✅ Done |
 | **QLSAVerifierVFRI2** — K-round FRI + constant last-layer check (on-chain FRI complete) | ✅ Done |
+| **QLSAVerifierVFRI3** — Non-constant last-layer polynomial check (MVP-4 bounded-degree) | ✅ Done |
+| **VFRI2 bridge** — `gen_poseidon2_vfri2_hints()` Rust+Python; generates VFRI2-compatible hints | ✅ Done |
 
 ---
 
@@ -164,7 +166,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | API rate limiting | Medium | ✅ Done (100 tx/min, 20 batch ops/min per IP) |
 | Private key zeroing in Python is best-effort | Medium | ✅ Done (Rust `wipe_bytes` via `zeroize`, 2026-05-16) |
 | Hash AIR `H(a,b) = a³+b` not cryptographic | Low | ✅ Done (Poseidon2-over-M31, 2026-05-16) |
-| Non-constant last FRI layer (bounded-degree check) | High | ⏳ MVP-4 (on-chain polynomial degree bound) |
+| Non-constant last FRI layer (bounded-degree check) | High | ✅ Done (QLSAVerifierVFRI3: full last-layer polynomial Merkle check, 2026-05-19) |
 
 For the full cryptography and security analysis, see `context.md`.
 
@@ -222,7 +224,8 @@ QLSA/
 | **MVP-3+** | **All 7 ML-DSA circuits → 1 STARK proof (V21) + Merkle root binding (V22)** | ✅ Done |
 | **QLSAVerifierVFRI2** | **K-round parametric FRI + constant last-layer check (full on-chain FRI protocol)** | ✅ Done |
 | **Security fix** | **LOG_BLOWUP=6, N_FRI_QUERIES=20, POW_BITS=10 → 130-bit FRI soundness** | ✅ Done |
-| MVP-4 final | Non-constant last FRI layer + OODS + RPO256 + wipe_key Rust wrapper | ⏳ Next |
+| **QLSAVerifierVFRI3** | **Non-constant last-layer polynomial bounded-degree check (MVP-4 complete)** | ✅ Done |
+| MVP-4 final | RPO256 hash AIR + OODS full wiring to real STARK proof | ⏳ Next |
 
 ---
 
