@@ -22,6 +22,7 @@ pub mod poseidon2;
 pub mod poseidon2_air;
 pub mod poseidon2_merkle_air;
 pub mod trace;
+pub mod vfri2_bridge;
 
 use blake2::{Blake2s256, Digest};
 use stwo::core::air::Component;
@@ -5173,6 +5174,22 @@ fn wipe_bytes(buf: pyo3::Bound<'_, pyo3::types::PyByteArray>) -> PyResult<()> {
     Ok(())
 }
 
+/// gen_poseidon2_vfri2_hints(leaves, batch_merkle_root, n_queries) -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// Generates a VFRI2-compatible proof and ABI-encoded queryHints for the
+/// Poseidon2 hash-chain circuit.  `batch_merkle_root` is 32 bytes.
+/// Returns `(proof_bytes, commitment_hex, abi_encoded_hints)`.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn gen_poseidon2_vfri2_hints_py(
+    leaves: Vec<u64>,
+    batch_merkle_root: Vec<u8>,
+    n_queries: usize,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    vfri2_bridge::gen_poseidon2_vfri2_hints(&leaves, &batch_merkle_root, n_queries)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -5252,6 +5269,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prove_range_q_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_range_q_py, m)?)?;
     m.add_function(wrap_pyfunction!(wipe_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_poseidon2_vfri2_hints_py, m)?)?;
     Ok(())
 }
 
