@@ -1,4 +1,4 @@
-import oqs
+import oqs.oqs as oqs  # liboqs-python; oqs top-level is shadowed by the unrelated OQS package
 
 from core.keys import DEFAULT_ALGORITHM, SUPPORTED_ALGORITHMS
 
