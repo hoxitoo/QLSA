@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -321,6 +321,16 @@ Parametric multi-round FRI verifier — generalises V11/V12/V13 with K = `friLay
 - Constants: `MAX_FOLD_ROUNDS = 28`
 - 46 tests: 5 configurations (numFolds=1/2/3/4 + input validation + Fiat-Shamir + trace-Merkle enforcement); tests across treeDepth=2/3/4/5
 
+### `contracts/src/QLSAVerifierVFRI2.sol`
+VFRI + last-layer constant-polynomial check — closes the final FRI soundness gap.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128 lastLayerValue, uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32[] friLayerRoots, QueryHints[])`
+- Last-layer check: verifier reconstructs the expected Merkle root of a constant tree of depth `treeDepth − K` where every leaf = `hashLeaf(qm31Words(lastLayerValue))`, then asserts it equals `friLayerRoots[K]`
+  - `node = hashLeaf(qm31ToWords(c)); for i in 0..lastDepth: node = hashPair(node, node)`
+  - Because per-query Merkle proofs already bind each final fold value into `friLayerRoots[K]`, and the constant-tree check proves all leaves equal `c`, every query's final fold is cryptographically fixed to `c`
+- All other structures (FoldHint, QueryHints, VerifyCtx, transcript) identical to VFRI
+- 41 tests: 4 treeDepth/numFolds configurations + input validation + Fiat-Shamir + constant-polynomial specifics (constant tree root verification, non-constant tree rejection, consistent-but-wrong value rejection)
+
 ## Multi-Component STARK Pattern
 
 When adding a new combined STARK (mixed-size components):
@@ -336,7 +346,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierVFRI supports K parametric line-fold rounds (V11/V12/V13 generalised); each query verifies: trace Merkle (p + −p), composition binding, OODS quotient, circle fold, FRI L1, and K×(sibling Merkle + Chebyshev-twiddle line fold + FRI layer Merkle) with full Fiat-Shamir (z_x, oodsEvals, compAlpha, friAlpha, all K friAlphas, all K+1 friLayerRoots, query indices all bound to transcript); last layer check (constant polynomial) is MVP-4 final
+1. On-chain verifier: QLSAVerifierVFRI2 completes the on-chain FRI protocol — K parametric line-fold rounds (V11/V12/V13 generalised) + last-layer constant-polynomial check (reconstructs expected constant-tree Merkle root on-chain and asserts it equals `friLayerRoots[K]`); each query verifies: trace Merkle (p + −p), composition binding, OODS quotient, circle fold, FRI L1, K×(sibling Merkle + Chebyshev-twiddle line fold + FRI layer Merkle), all with full Fiat-Shamir; remaining MVP-4 items: non-constant last layer (bounded-degree check), FRI blowup ≥ 6
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
