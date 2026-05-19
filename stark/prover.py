@@ -1266,3 +1266,49 @@ def _call_prover_merkle(
         log_size=log_size,
         onchain_commitment=onchain_commitment,
     )
+
+
+@dataclass
+class VFRI2HintResult:
+    """Result of gen_poseidon2_vfri2_hints — ready for QLSAVerifierVFRI2.verify()."""
+    proof:       bytes  # ≥700 bytes; [0:8]=nonce LE u64, [8:40]=traceRoot
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI2.verify(queryHints)
+
+
+def gen_poseidon2_vfri2_hints(
+    leaves: list[int],
+    batch_merkle_root: bytes,
+    n_queries: int = 20,
+) -> VFRI2HintResult:
+    """Generate VFRI2-compatible proof and ABI-encoded queryHints.
+
+    Uses the zero-polynomial Poseidon2 trace (all-zero columns) to produce
+    a provably valid VFRI2 proof while exercising the full Fiat-Shamir transcript,
+    Merkle tree construction, and ABI encoding pipeline.
+
+    Args:
+        leaves: Poseidon2 hash-chain input values (non-empty list of u64 integers).
+        batch_merkle_root: 32-byte batch Merkle root mixed into the Blake2s
+            commitment binding (Blake2s(proof[:32]‖root)[:16]).
+        n_queries: Number of FRI queries (default 20 → 130-bit security with
+            LOG_BLOWUP=6, POW_BITS=10).
+
+    Returns:
+        VFRI2HintResult with proof, commitment, and ABI-encoded query_hints.
+    """
+    _require_ext("gen_poseidon2_vfri2_hints")
+    if not leaves:
+        raise ValueError("leaves must not be empty")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_poseidon2_vfri2_hints_py(
+            leaves, list(batch_merkle_root), n_queries
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_poseidon2_vfri2_hints failed: {exc}") from exc
+    return VFRI2HintResult(proof=proof, commitment=commitment, query_hints=query_hints)
+

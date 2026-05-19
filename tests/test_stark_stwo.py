@@ -1030,3 +1030,143 @@ def test_wipe_key_uses_rust_wipe_when_ext_available():
     buf = bytearray(b"\xAB\xCD\xEF" * 100)
     wipe_key(buf)
     assert all(b == 0 for b in buf)
+
+
+# ─── gen_poseidon2_vfri2_hints — VFRI2 bridge ────────────────────────────────
+
+_FAKE_BATCH_ROOT = bytes(range(32))  # 32 deterministic bytes for tests
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_output_schema():
+    """gen_poseidon2_vfri2_hints_py returns (bytes, str, bytes)."""
+    proof, commitment, hints = _ext.gen_poseidon2_vfri2_hints_py(
+        [1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2
+    )
+    assert isinstance(proof, bytes)
+    assert isinstance(commitment, str)
+    assert isinstance(hints, bytes)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_proof_length():
+    """Proof must be ≥ 700 bytes (QLSAVerifierVFRI2.MIN_PROOF_LENGTH)."""
+    proof, _, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(proof) >= 700
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_nonce_in_proof():
+    """proof[0:8] must be nonce=2 as LE u64."""
+    import struct
+    proof, _, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    nonce = struct.unpack_from("<Q", proof, 0)[0]
+    assert nonce == 2
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_commitment_is_32_hex_chars():
+    """commitment must be a 32-character lowercase hex string (16 bytes)."""
+    _, commitment, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(commitment) == 32
+    assert all(c in "0123456789abcdef" for c in commitment)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_commitment_binding():
+    """commitment == Blake2s(proof[:32] ‖ batch_merkle_root)[:16] as hex."""
+    import hashlib
+    batch_root = bytes(range(32))
+    proof, commitment, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(batch_root), 2)
+    expected = hashlib.blake2s(proof[:32] + batch_root).digest()[:16].hex()
+    assert commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_trace_root_in_proof():
+    """proof[8:40] must be non-zero (trace Merkle root)."""
+    proof, _, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert proof[8:40] != b"\x00" * 32
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_deterministic():
+    """Same inputs produce identical outputs."""
+    leaves = [10, 20, 30, 40]
+    root = bytes(range(32))
+    r1 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 2)
+    r2 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 2)
+    assert r1[0] == r2[0]  # proof bytes
+    assert r1[1] == r2[1]  # commitment
+    assert r1[2] == r2[2]  # hints
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_different_roots_different_commitments():
+    """Different batch Merkle roots produce different commitments."""
+    leaves = [1, 2, 3, 4]
+    root_a = bytes(range(32))
+    root_b = bytes([i ^ 0xFF for i in range(32)])
+    _, c_a, _ = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root_a), 2)
+    _, c_b, _ = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root_b), 2)
+    assert c_a != c_b
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_different_queries_different_hints():
+    """Different n_queries values produce different (sized) hint encodings."""
+    leaves = [1, 2, 3, 4]
+    root = bytes(range(32))
+    _, _, h1 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 1)
+    _, _, h2 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 2)
+    assert len(h2) > len(h1)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_query_hints_non_empty():
+    """ABI-encoded query hints must be non-empty."""
+    _, _, hints = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(hints) > 0
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_empty_leaves_error():
+    """Empty leaves list must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri2_hints_py([], list(_FAKE_BATCH_ROOT), 2)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_bad_root_length_error():
+    """batch_merkle_root of wrong length must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(b"\x00" * 16), 2)  # 16 bytes, not 32
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_prover_module_wrapper():
+    """stark.prover.gen_poseidon2_vfri2_hints wraps the Rust function correctly."""
+    from stark.prover import gen_poseidon2_vfri2_hints, VFRI2HintResult
+    import hashlib
+    root = bytes(range(32))
+    result = gen_poseidon2_vfri2_hints([1, 2, 3, 4], root, n_queries=2)
+    assert isinstance(result, VFRI2HintResult)
+    assert len(result.proof) >= 700
+    assert len(result.commitment) == 32
+    assert len(result.query_hints) > 0
+    # Verify commitment binding
+    expected = hashlib.blake2s(result.proof[:32] + root).digest()[:16].hex()
+    assert result.commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_prover_module_validates_inputs():
+    """stark.prover.gen_poseidon2_vfri2_hints raises ValueError for bad inputs."""
+    from stark.prover import gen_poseidon2_vfri2_hints
+    with pytest.raises(ValueError, match="empty"):
+        gen_poseidon2_vfri2_hints([], bytes(32))
+    with pytest.raises(ValueError, match="32 bytes"):
+        gen_poseidon2_vfri2_hints([1, 2], bytes(16))  # wrong root length
+    with pytest.raises(ValueError, match="n_queries"):
+        gen_poseidon2_vfri2_hints([1, 2], bytes(32), n_queries=0)
+
