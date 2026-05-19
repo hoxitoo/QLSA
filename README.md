@@ -77,6 +77,8 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **QLSAVerifierVFRI3** — Non-constant last-layer polynomial check (MVP-4 bounded-degree) | ✅ Done |
 | **VFRI2 bridge** — `gen_poseidon2_vfri2_hints()` Rust+Python; generates VFRI2-compatible hints | ✅ Done |
 | **VFRI3 real bridge** — `gen_poseidon2_vfri3_real()` real Poseidon2 OODS; end-to-end Solidity test | ✅ Done |
+| **NttBatch VFRI3 bridge** — `gen_ntt_batch_vfri3_hints()` ML-DSA NTT arithmetic → VFRI3; generic `gen_vfri3_hints_from_cols()` | ✅ Done |
+| **E2E contract stack** — BatchRegistryV3 + QLSAVerifierVFRI3 full on-chain flow test | ✅ Done |
 
 ---
 
@@ -226,7 +228,8 @@ QLSA/
 | **QLSAVerifierVFRI2** | **K-round parametric FRI + constant last-layer check (full on-chain FRI protocol)** | ✅ Done |
 | **Security fix** | **LOG_BLOWUP=6, N_FRI_QUERIES=20, POW_BITS=10 → 130-bit FRI soundness** | ✅ Done |
 | **QLSAVerifierVFRI3** | **Non-constant last-layer polynomial bounded-degree check (MVP-4 complete)** | ✅ Done |
-| MVP-4 final | RPO256 hash AIR + OODS full wiring to real STARK proof | ⏳ Next |
+| **VFRI3 bridges** | **Generic `gen_vfri3_hints_from_cols` + Poseidon2 + ML-DSA NttBatch VFRI3 bridges; E2E contract stack** | ✅ Done |
+| MVP-4 final | RPO256 hash AIR + Yul-optimised Blake2s + full V22 OODS wiring | ⏳ Next |
 
 ---
 
