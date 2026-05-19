@@ -1296,3 +1296,78 @@ def test_gen_poseidon2_vfri3_real_prover_module_validates_inputs():
         gen_poseidon2_vfri3_real([1, 2], bytes(16))
     with pytest.raises(ValueError, match="n_queries"):
         gen_poseidon2_vfri3_real([1, 2], bytes(32), n_queries=0)
+
+
+# ── gen_ntt_batch_vfri3_hints tests ──────────────────────────────────────────
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_output_schema():
+    """Returns (bytes, str, bytes) triple."""
+    polys = [[0]*256 for _ in range(2)]
+    proof, commitment, hints = _ext.gen_ntt_batch_vfri3_hints_py(polys, list(_FAKE_BATCH_ROOT), 2)
+    assert isinstance(proof, bytes)
+    assert isinstance(commitment, str) and len(commitment) == 32
+    assert isinstance(hints, bytes) and len(hints) > 0
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_commitment_binding():
+    """Commitment = Blake2s(proof[:32] ‖ batch_merkle_root)[:16]."""
+    import hashlib
+    polys = [[i % 100 for _ in range(256)] for i in range(2)]
+    root = bytes(range(32))
+    proof, commitment, _ = _ext.gen_ntt_batch_vfri3_hints_py(polys, list(root), 2)
+    expected = hashlib.blake2s(proof[:32] + root).digest()[:16].hex()
+    assert commitment == expected
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_deterministic():
+    """Same inputs produce identical outputs."""
+    polys = [[1]*256 for _ in range(3)]
+    root = list(_FAKE_BATCH_ROOT)
+    r1 = _ext.gen_ntt_batch_vfri3_hints_py(polys, root, 1)
+    r2 = _ext.gen_ntt_batch_vfri3_hints_py(polys, root, 1)
+    assert r1[1] == r2[1] and r1[2] == r2[2]
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_nfolds_reduces_size():
+    """Fewer fold rounds produce smaller last-layer (larger hints for more coeffs)."""
+    polys = [[0]*256 for _ in range(2)]
+    root = list(_FAKE_BATCH_ROOT)
+    _, _, h_full = _ext.gen_ntt_batch_vfri3_hints_py(polys, root, 1)      # 9 folds
+    _, _, h_few  = _ext.gen_ntt_batch_vfri3_hints_nfolds_py(polys, root, 1, 3)  # 3 folds
+    # fewer folds → more last-layer coeffs → larger hints
+    assert len(h_few) > len(h_full)
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_wrong_poly_len_error():
+    """Polynomial with wrong length must raise an error."""
+    polys = [[0]*255]  # 255 instead of 256
+    with pytest.raises(Exception):
+        _ext.gen_ntt_batch_vfri3_hints_py(polys, list(_FAKE_BATCH_ROOT), 1)
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_empty_polys_error():
+    """Empty polys list must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_ntt_batch_vfri3_hints_py([], list(_FAKE_BATCH_ROOT), 1)
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_prover_module_wrapper():
+    """stark.prover.gen_ntt_batch_vfri3_hints wraps the Rust function correctly."""
+    from stark.prover import gen_ntt_batch_vfri3_hints, NttBatchVFRI3HintResult
+    import hashlib
+    polys = [[i for i in range(256)] for _ in range(2)]
+    root = bytes(range(32))
+    result = gen_ntt_batch_vfri3_hints(polys, root, n_queries=2)
+    assert isinstance(result, NttBatchVFRI3HintResult)
+    assert len(result.proof) >= 700
+    assert len(result.commitment) == 32
+    assert len(result.query_hints) > 0
+    expected = hashlib.blake2s(result.proof[:32] + root).digest()[:16].hex()
+    assert result.commitment == expected

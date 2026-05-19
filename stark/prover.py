@@ -1359,3 +1359,49 @@ def gen_poseidon2_vfri3_real(
     except Exception as exc:
         raise RuntimeError(f"gen_poseidon2_vfri3_real failed: {exc}") from exc
     return VFRI3RealHintResult(proof=proof, commitment=commitment, query_hints=query_hints)
+
+
+@dataclass
+class NttBatchVFRI3HintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI3.verify(queryHints)
+
+
+def gen_ntt_batch_vfri3_hints(
+    polys: list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries: int = 20,
+) -> NttBatchVFRI3HintResult:
+    """Generate VFRI3-compatible hints from ML-DSA NttBatch AIR trace.
+
+    Runs the 649-column NttBatch ML-DSA AIR (LOG=10, 1024 rows) on ``polys``
+    (z×5 + c×1 + t1×6 = 12 polynomials for ML-DSA-65), computes OODS evaluations
+    via barycentric Lagrange interpolation, and produces hints for
+    QLSAVerifierVFRI3 — the first on-chain verification of ML-DSA NTT arithmetic.
+
+    Args:
+        polys: List of polynomials, each with exactly 256 i64 coefficients.
+               For ML-DSA-65: 12 polys (5 z + 1 c + 6 t1).
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries: Number of FRI queries (default 20 → 130-bit security).
+
+    Returns:
+        NttBatchVFRI3HintResult with proof, commitment, and ABI-encoded query_hints.
+    """
+    _require_ext("gen_ntt_batch_vfri3_hints")
+    if not polys:
+        raise ValueError("polys must not be empty")
+    if any(len(p) != 256 for p in polys):
+        raise ValueError("each polynomial must have exactly 256 coefficients")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_ntt_batch_vfri3_hints_py(
+            polys, list(batch_merkle_root), n_queries
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_ntt_batch_vfri3_hints failed: {exc}") from exc
+    return NttBatchVFRI3HintResult(proof=proof, commitment=commitment, query_hints=query_hints)
