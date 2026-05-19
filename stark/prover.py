@@ -1312,3 +1312,50 @@ def gen_poseidon2_vfri2_hints(
         raise RuntimeError(f"gen_poseidon2_vfri2_hints failed: {exc}") from exc
     return VFRI2HintResult(proof=proof, commitment=commitment, query_hints=query_hints)
 
+
+
+@dataclass
+class VFRI3RealHintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI3.verify(queryHints)
+
+
+def gen_poseidon2_vfri3_real(
+    leaves: list[int],
+    batch_merkle_root: bytes,
+    n_queries: int = 20,
+) -> VFRI3RealHintResult:
+    """Generate VFRI3-compatible proof and ABI-encoded queryHints from real Poseidon2 trace.
+
+    Unlike gen_poseidon2_vfri2_hints (zero-polynomial), this function uses the actual
+    Poseidon2 trace built from ``leaves``, computes OODS evaluations via barycentric
+    Lagrange interpolation over QM31, and produces a non-constant FRI last layer suitable
+    for QLSAVerifierVFRI3 (bounded-degree last-layer check).
+
+    Args:
+        leaves: Poseidon2 hash-chain input values (non-empty list of u64 integers).
+        batch_merkle_root: 32-byte batch Merkle root mixed into the Blake2s
+            commitment binding (Blake2s(proof[:32]‖root)[:16]).
+        n_queries: Number of FRI queries (default 20 → 130-bit security with
+            LOG_BLOWUP=6, POW_BITS=10).
+
+    Returns:
+        VFRI3RealHintResult with proof, commitment, and ABI-encoded query_hints
+        (uint128[] lastLayerCoeffs, uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg,
+        bytes32[] friLayerRoots, QueryHints[]).
+    """
+    _require_ext("gen_poseidon2_vfri3_real")
+    if not leaves:
+        raise ValueError("leaves must not be empty")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_poseidon2_vfri3_real_py(
+            leaves, list(batch_merkle_root), n_queries
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_poseidon2_vfri3_real failed: {exc}") from exc
+    return VFRI3RealHintResult(proof=proof, commitment=commitment, query_hints=query_hints)

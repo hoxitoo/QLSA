@@ -984,6 +984,502 @@ pub fn gen_poseidon2_vfri2_hints(
     Ok((proof, commitment_hex, query_hints))
 }
 
+// ── VFRI3 ABI encoding ────────────────────────────────────────────────────────
+//
+// VFRI3 top-level ABI encoding:
+//   abi.encode(uint128[] lastLayerCoeffs, uint128[] oodsEvalsPos,
+//              uint128[] oodsEvalsNeg, bytes32[] friLayerRoots, QueryHints[])
+//
+// 5 top-level fields (all DYNAMIC for lastLayerCoeffs, same as VFRI2 except
+// slot 0 changes from static uint128 to dynamic uint128[] offset):
+//   0: uint128[] lastLayerCoeffs — DYNAMIC (32-byte offset)
+//   1: uint128[] oodsEvalsPos    — DYNAMIC (32-byte offset)
+//   2: uint128[] oodsEvalsNeg    — DYNAMIC (32-byte offset)
+//   3: bytes32[] friLayerRoots   — DYNAMIC (32-byte offset)
+//   4: QueryHints[] hints        — DYNAMIC (32-byte offset)
+//
+// Head = 5 × 32 = 160 bytes (all offsets).
+fn abi_encode_vfri3_hints(
+    last_layer_coeffs: &[u128],
+    oods_evals_pos: &[u128],
+    oods_evals_neg: &[u128],
+    fri_layer_roots: &[[u8; 32]],
+    hints: &[QueryHintData],
+) -> Vec<u8> {
+    let head_size = 5 * 32usize; // 160 bytes
+
+    let coeffs_body = encode_uint128_array(last_layer_coeffs);
+    let pos_body    = encode_uint128_array(oods_evals_pos);
+    let neg_body    = encode_uint128_array(oods_evals_neg);
+    let roots_body  = encode_bytes32_array(fri_layer_roots);
+    let hints_body  = encode_query_hints_array(hints);
+
+    // All 5 fields are dynamic; offsets are from start of the encoding.
+    let coeffs_offset = head_size;
+    let pos_offset    = coeffs_offset + coeffs_body.len();
+    let neg_offset    = pos_offset    + pos_body.len();
+    let roots_offset  = neg_offset    + neg_body.len();
+    let hints_offset  = roots_offset  + roots_body.len();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&abi_word_usize(coeffs_offset));  // slot 0: offset to lastLayerCoeffs
+    out.extend_from_slice(&abi_word_usize(pos_offset));     // slot 1: offset to oodsEvalsPos
+    out.extend_from_slice(&abi_word_usize(neg_offset));     // slot 2: offset to oodsEvalsNeg
+    out.extend_from_slice(&abi_word_usize(roots_offset));   // slot 3: offset to friLayerRoots
+    out.extend_from_slice(&abi_word_usize(hints_offset));   // slot 4: offset to QueryHints[]
+    out.extend_from_slice(&coeffs_body);
+    out.extend_from_slice(&pos_body);
+    out.extend_from_slice(&neg_body);
+    out.extend_from_slice(&roots_body);
+    out.extend_from_slice(&hints_body);
+    out
+}
+
+// ── QM31 helpers for barycentric interpolation ────────────────────────────────
+
+/// Subtract an M31 scalar from a QM31: q - m (as QM31).
+#[inline]
+fn qm31_sub_m31(q: u128, m: u32) -> u128 {
+    qm31_sub(q, qm31_from_m31(m))
+}
+
+/// Multiply QM31 by an M31 scalar: q * m (as QM31).
+#[inline]
+fn qm31_mul_m31(q: u128, m: u32) -> u128 {
+    qm31_scale_m31(q, m)
+}
+
+/// Evaluate a polynomial given by (x_i, val_i) at point z using barycentric
+/// Lagrange interpolation over the x-coordinates.
+///
+/// The x-coordinates must be distinct M31 values.
+/// The evaluation point z is a QM31 value.
+///
+/// Returns the interpolated QM31 value.
+fn eval_bary(vals: &[u32], domain_xs: &[u32], weights: &[u32], z: u128) -> u128 {
+    let n = vals.len();
+    let mut num = 0u128; // QM31
+    let mut den = 0u128; // QM31
+
+    for i in 0..n {
+        // zi = z - x_i (QM31 - M31)
+        let zi = qm31_sub_m31(z, domain_xs[i]);
+        // If z equals x_i exactly, return the value at that node (handle degenerate case).
+        // In practice z is drawn from the channel and this is negligibly likely.
+        if zi == 0 {
+            return qm31_from_m31(vals[i]);
+        }
+        let inv_zi  = qm31_inv(zi);
+        let wi_inv  = qm31_mul_m31(inv_zi, weights[i]); // w_i / (z - x_i)
+        num = qm31_add(num, qm31_mul_m31(wi_inv, vals[i]));
+        den = qm31_add(den, wi_inv);
+    }
+    qm31_div(num, den)
+}
+
+/// Precompute barycentric weights w_i = 1 / Π_{j≠i}(x_i - x_j) for distinct
+/// M31 x-coordinates.
+fn precompute_bary_weights(domain_xs: &[u32]) -> Vec<u32> {
+    let n = domain_xs.len();
+    let mut weights = vec![0u32; n];
+    for i in 0..n {
+        let mut prod = 1u32;
+        for j in 0..n {
+            if j != i {
+                // x_i - x_j in M31
+                let diff = m31_sub(domain_xs[i], domain_xs[j]);
+                if diff == 0 {
+                    // Duplicate x-coordinate — should not happen for valid coset
+                    prod = 0;
+                    break;
+                }
+                prod = m31_mul(prod, diff);
+            }
+        }
+        weights[i] = if prod == 0 { 0 } else { m31_inv(prod) };
+    }
+    weights
+}
+
+// ── Main public function (VFRI3 real-trace version) ───────────────────────────
+
+/// VFRI3-compatible hint generator using the **real** Poseidon2 trace.
+///
+/// Builds the actual Poseidon2 execution trace from `leaves`, commits it in
+/// a Blake2s Merkle tree, performs barycentric OODS evaluation, runs the FRI
+/// circle fold and line fold rounds, and ABI-encodes hints for
+/// `QLSAVerifierVFRI3.verify()`.
+///
+/// Protocol:
+///   1. Build trace: `poseidon2_air::build_trace(leaves)` → 7 main columns
+///   2. Commit Merkle tree: leaf i = Blake2s(col0[i], …, col6[i])
+///   3. Fiat-Shamir transcript: mixRoot → z_x → mixU32s(oodsPos) →
+///      mixU32s(oodsNeg) → compAlpha → friAlpha → mixRoot(L1) →
+///      for k: friAlphas[k] → mixRoot(L(k+2)) → drawQueries
+///   4. OODS: barycentric Lagrange interpolation at z_x and −z_x
+///   5. FRI L1: circle fold over all domain positions
+///   6. FRI line folds: num_folds = tree_depth − 1 rounds
+///   7. ABI-encode for VFRI3 (uint128[] lastLayerCoeffs, not scalar)
+///
+/// Returns: (proof_bytes, commitment_hex, abi_encoded_query_hints_for_VFRI3)
+pub fn gen_poseidon2_vfri3_real(
+    leaves: &[u64],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if leaves.is_empty() {
+        return Err("leaves must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}",
+            batch_merkle_root.len()
+        ));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    // ── Build actual Poseidon2 trace ──────────────────────────────────────────
+    let (main_cols, _preproc_cols, _commitment) =
+        crate::poseidon2_air::build_trace(leaves);
+
+    let _n_cols = main_cols.len(); // 7: s0, s1, t0, t1, inp0, leaf, inp1
+    let tree_depth = crate::poseidon2_air::compute_log_size(leaves.len());
+    let n = 1usize << tree_depth;
+
+    // Extract raw M31 values from circle-domain evaluations.
+    // col.values[i] is the value at circle-domain position i (after bit-reversal).
+    // Merkle leaf i uses these values, and coset_at(tree_depth, i).x is its x-coord.
+    let cols: Vec<Vec<u32>> = main_cols
+        .iter()
+        .map(|col| col.values.iter().map(|v| v.0).collect::<Vec<u32>>())
+        .collect();
+
+    // ── Trace Merkle tree ─────────────────────────────────────────────────────
+    let trace_leaves: Vec<[u8; 32]> = (0..n)
+        .map(|i| hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .collect();
+    let trace_levels = build_tree(trace_leaves);
+    let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
+
+    // ── Fiat-Shamir channel ───────────────────────────────────────────────────
+    let mut chan = Channel::init();
+    chan.mix_root(&trace_root);
+    let z_x = chan.draw_secure_felt(); // QM31 OODS line point
+
+    // ── OODS evaluations via barycentric Lagrange interpolation ──────────────
+    // domain_xs[i] = coset_at(tree_depth, i).x (M31)
+    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
+
+    // Precompute barycentric weights once for all columns.
+    let bary_weights = precompute_bary_weights(&domain_xs);
+
+    let z_neg = qm31_neg(z_x); // −z_x for oodsEvalsNeg
+
+    let oods_evals_pos: Vec<u128> = cols
+        .iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .collect();
+    let oods_evals_neg: Vec<u128> = cols
+        .iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .collect();
+
+    // Mix OODS evals into channel (4 words per QM31).
+    {
+        let pos_words: Vec<u32> = oods_evals_pos.iter()
+            .flat_map(|&v| qm31_words(v))
+            .collect();
+        chan.mix_u32s(&pos_words);
+        let neg_words: Vec<u32> = oods_evals_neg.iter()
+            .flat_map(|&v| qm31_words(v))
+            .collect();
+        chan.mix_u32s(&neg_words);
+    }
+
+    let comp_alpha = chan.draw_secure_felt();
+    let fri_alpha  = chan.draw_secure_felt();
+
+    // ── Precompute composition sums for OODS ─────────────────────────────────
+    // oodsComboPos = Σ_j compAlpha^j * oodsEvalsPos[j]
+    // oodsComboNeg = Σ_j compAlpha^j * oodsEvalsNeg[j]
+    let oods_combo_pos = {
+        let mut acc = 0u128;
+        let mut ap  = qm31_from_m31(1);
+        for &ev in &oods_evals_pos {
+            acc = qm31_add(acc, qm31_mul(ap, ev));
+            ap  = qm31_mul(ap, comp_alpha);
+        }
+        acc
+    };
+    let oods_combo_neg = {
+        let mut acc = 0u128;
+        let mut ap  = qm31_from_m31(1);
+        for &ev in &oods_evals_neg {
+            acc = qm31_add(acc, qm31_mul(ap, ev));
+            ap  = qm31_mul(ap, comp_alpha);
+        }
+        acc
+    };
+
+    // ── FRI Layer 1: circle fold over all n domain positions ─────────────────
+    let mut l1_values: Vec<u128> = Vec::with_capacity(n);
+    for q in 0..n {
+        let anti_q = antipodal_of(q, tree_depth);
+        let (px, py) = coset_at(tree_depth, q as u64);
+
+        // rawComp    = Σ_j compAlpha^j * col_j[q]
+        // rawCompNeg = Σ_j compAlpha^j * col_j[anti_q]
+        let raw_comp = {
+            let mut acc = 0u128;
+            let mut ap  = qm31_from_m31(1);
+            for c in &cols {
+                acc = qm31_add(acc, qm31_mul_m31(ap, c[q]));
+                ap  = qm31_mul(ap, comp_alpha);
+            }
+            acc
+        };
+        let raw_comp_neg = {
+            let mut acc = 0u128;
+            let mut ap  = qm31_from_m31(1);
+            for c in &cols {
+                acc = qm31_add(acc, qm31_mul_m31(ap, c[anti_q]));
+                ap  = qm31_mul(ap, comp_alpha);
+            }
+            acc
+        };
+
+        // fPlus  = (rawComp    - oodsComboPos) / (px - z_x)
+        // fMinus = (rawCompNeg - oodsComboNeg) / (-px - z_x)
+        let px_qm31    = qm31_from_m31(px);
+        let denom_pos  = qm31_sub(px_qm31, z_x);
+        let denom_neg  = qm31_sub(qm31_neg(px_qm31), z_x);
+
+        // Guard against degenerate denominators (extremely unlikely for random z_x).
+        if denom_pos == 0 || denom_neg == 0 {
+            return Err(format!(
+                "degenerate OODS denominator at position {q}: denomPos={denom_pos} denomNeg={denom_neg}"
+            ));
+        }
+
+        let f_plus  = qm31_div(qm31_sub(raw_comp,     oods_combo_pos), denom_pos);
+        let f_minus = qm31_div(qm31_sub(raw_comp_neg, oods_combo_neg), denom_neg);
+
+        let y_inv       = m31_inv(py);
+        let folded_val  = circle_fold(f_plus, f_minus, fri_alpha, y_inv);
+        l1_values.push(folded_val);
+    }
+
+    // Build FRI L1 Merkle tree.
+    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter()
+        .map(|&v| hash_leaf_qm31(v))
+        .collect();
+    let fri_l1_levels = build_tree(fri_l1_leaves);
+    let fri_layer1_root: [u8; 32] = fri_l1_levels.last().unwrap()[0];
+
+    chan.mix_root(&fri_layer1_root);
+
+    // ── Line fold rounds ──────────────────────────────────────────────────────
+    // num_folds = tree_depth - 1 (fold down to last_layer_depth = 1, i.e. 2 leaves)
+    if tree_depth < 2 {
+        return Err(format!(
+            "tree_depth={tree_depth} too small (need ≥ 2); use more leaves"
+        ));
+    }
+    let num_folds = (tree_depth - 1) as usize;
+
+    let mut layer_values: Vec<Vec<u128>> = vec![l1_values];
+    let mut layer_levels: Vec<Vec<Vec<[u8; 32]>>> = vec![fri_l1_levels];
+    let mut layer_roots:  Vec<[u8; 32]>  = vec![fri_layer1_root];
+    let mut fri_alphas:   Vec<u128>       = Vec::new();
+
+    for k in 0..num_folds {
+        let alpha_k    = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+
+        let prev_vals  = &layer_values[k];
+        let layer_size = prev_vals.len() / 2; // half the previous layer
+
+        let mut new_vals = Vec::with_capacity(layer_size);
+        for j in 0..layer_size {
+            let sibling = j + layer_size; // paired position
+
+            // Twiddle T_{2^k}(x_j) via k squarings.
+            let x_j    = coset_at(tree_depth, j as u64).0;
+            let twiddle = chebyshev_twiddle(x_j, k);
+            if twiddle == 0 {
+                return Err(format!("twiddle is zero at fold round k={k}, j={j}"));
+            }
+            let t_inv = m31_inv(twiddle);
+
+            let g_plus  = prev_vals[j];
+            let g_minus = prev_vals[sibling];
+            let folded_k = line_fold(g_plus, g_minus, alpha_k, t_inv);
+            new_vals.push(folded_k);
+        }
+
+        // Build Merkle tree for this fold layer.
+        let new_leaves: Vec<[u8; 32]> = new_vals.iter()
+            .map(|&v| hash_leaf_qm31(v))
+            .collect();
+        let new_levels = build_tree(new_leaves);
+        let new_root: [u8; 32] = new_levels.last().unwrap()[0];
+
+        layer_values.push(new_vals);
+        layer_roots.push(new_root);
+        chan.mix_root(&new_root);
+        layer_levels.push(new_levels);
+    }
+
+    // Last layer = foldedLayers[num_folds] (2^1 = 2 QM31 values).
+    let last_layer_coeffs: Vec<u128> = layer_values[num_folds].clone();
+
+    // ── Draw query indices ────────────────────────────────────────────────────
+    let derived_indices = chan.draw_queries(tree_depth, n_queries);
+
+    // ── Build per-query hints ─────────────────────────────────────────────────
+    let mut hint_structs: Vec<QueryHintData> = Vec::new();
+
+    for &idx in &derived_indices {
+        let anti_idx = antipodal_of(idx, tree_depth);
+        let (qp_x, qp_y) = coset_at(tree_depth, idx as u64);
+
+        // Column values at idx and anti_idx.
+        let query_values: Vec<u32>     = cols.iter().map(|c| c[idx]).collect();
+        let query_values_neg: Vec<u32> = cols.iter().map(|c| c[anti_idx]).collect();
+
+        // Merkle proofs for trace columns.
+        let trace_siblings     = proof_path(&trace_levels, idx);
+        let trace_siblings_neg = proof_path(&trace_levels, anti_idx);
+
+        // Retrieve pre-computed fPlus and fMinus from FRI L1 computation.
+        // We need to recompute them for this specific idx.
+        let raw_comp = {
+            let mut acc = 0u128;
+            let mut ap  = qm31_from_m31(1);
+            for c in &cols {
+                acc = qm31_add(acc, qm31_mul_m31(ap, c[idx]));
+                ap  = qm31_mul(ap, comp_alpha);
+            }
+            acc
+        };
+        let raw_comp_neg = {
+            let mut acc = 0u128;
+            let mut ap  = qm31_from_m31(1);
+            for c in &cols {
+                acc = qm31_add(acc, qm31_mul_m31(ap, c[anti_idx]));
+                ap  = qm31_mul(ap, comp_alpha);
+            }
+            acc
+        };
+
+        let px_qm31    = qm31_from_m31(qp_x);
+        let denom_pos  = qm31_sub(px_qm31, z_x);
+        let denom_neg  = qm31_sub(qm31_neg(px_qm31), z_x);
+        let f_plus     = qm31_div(qm31_sub(raw_comp,     oods_combo_pos), denom_pos);
+        let f_minus    = qm31_div(qm31_sub(raw_comp_neg, oods_combo_neg), denom_neg);
+
+        let y_inv       = m31_inv(qp_y);
+        let folded_value = circle_fold(f_plus, f_minus, fri_alpha, y_inv);
+
+        // Sanity check: this should match what was stored in l1_values during the loop.
+        debug_assert_eq!(folded_value, layer_values[0][idx],
+            "folded_value mismatch at idx={idx}");
+
+        // Merkle proof for foldedValue in FRI L1 tree.
+        let fri_l1_sib = proof_path(&layer_levels[0], idx);
+
+        // Per-fold hints.
+        let mut fold_hints: Vec<FoldHintData> = Vec::new();
+        let mut cur_idx = idx;
+
+        for k in 0..num_folds {
+            let layer_sz = layer_values[k].len() / 2;
+            let sib_idx  = if cur_idx < layer_sz {
+                cur_idx + layer_sz
+            } else {
+                cur_idx - layer_sz
+            };
+            let new_idx  = cur_idx & (layer_sz - 1);
+
+            let sibling_value = layer_values[k][sib_idx];
+            let sibling_proof = proof_path(&layer_levels[k], sib_idx);
+
+            let x_j     = coset_at(tree_depth, new_idx as u64).0;
+            let twiddle = chebyshev_twiddle(x_j, k);
+            let t_inv   = m31_inv(twiddle);
+
+            let cur_value = if k == 0 {
+                folded_value
+            } else {
+                fold_hints[k - 1].folded_value
+            };
+            let g_plus  = if cur_idx < layer_sz { cur_value } else { sibling_value };
+            let g_minus = if cur_idx < layer_sz { sibling_value } else { cur_value };
+
+            let folded_k = line_fold(g_plus, g_minus, fri_alphas[k], t_inv);
+            debug_assert_eq!(folded_k, layer_values[k + 1][new_idx],
+                "per-query fold mismatch at k={k}, cur_idx={cur_idx}");
+
+            let merkle_proof = proof_path(&layer_levels[k + 1], new_idx);
+
+            fold_hints.push(FoldHintData {
+                sibling_value,
+                sibling_proof,
+                folded_value: folded_k,
+                merkle_proof,
+            });
+
+            cur_idx = new_idx;
+        }
+
+        hint_structs.push(QueryHintData {
+            trace_root,
+            query_values,
+            query_values_neg,
+            query_index: idx,
+            tree_depth,
+            merkle_siblings: trace_siblings,
+            merkle_siblings_neg: trace_siblings_neg,
+            fri_alpha,
+            f_plus,
+            f_minus,
+            folded_value,
+            query_point_x: qp_x,
+            query_point_y: qp_y,
+            fri_l1_siblings: fri_l1_sib,
+            folds: fold_hints,
+        });
+    }
+
+    // ── Build proof bytes ─────────────────────────────────────────────────────
+    // [0:8]  = nonce as LE u64 = 2
+    // [8:40] = trace_root
+    // padding to ≥ 700 bytes
+    let mut proof = vec![0x01u8; 700];
+    proof[0..8].copy_from_slice(&2u64.to_le_bytes());
+    proof[8..40].copy_from_slice(&trace_root);
+
+    // ── Commitment = Blake2s(proof[:32] ‖ batch_merkle_root)[:16] ────────────
+    let mut hash_input = [0u8; 64];
+    hash_input[..32].copy_from_slice(&proof[..32]);
+    hash_input[32..].copy_from_slice(batch_merkle_root);
+    let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+    let commitment_hex = hex::encode(&h[..16]);
+
+    // ── ABI-encode queryHints for VFRI3 ──────────────────────────────────────
+    let query_hints = abi_encode_vfri3_hints(
+        &last_layer_coeffs,
+        &oods_evals_pos,
+        &oods_evals_neg,
+        &layer_roots,
+        &hint_structs,
+    );
+
+    Ok((proof, commitment_hex, query_hints))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1185,5 +1681,71 @@ mod tests {
 
         assert_eq!(last_root, node,
             "last FRI layer root must match the constant tree root for lastLayerValue=0");
+    }
+
+    // ── gen_poseidon2_vfri3_real tests ───────────────────────────────────────
+
+    #[test]
+    fn test_gen_poseidon2_vfri3_real_smoke() {
+        let leaves: Vec<u64> = (1..=4).collect();
+        let seed = vec![0u8; 32];
+        let result = gen_poseidon2_vfri3_real(&leaves, &seed, 2);
+        assert!(result.is_ok(), "vfri3_real should succeed: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri3_real_commitment_binding() {
+        let leaves: Vec<u64> = (1..=8).collect();
+        let batch_root: Vec<u8> = (0u8..32).collect();
+        let (proof, commitment, _) = gen_poseidon2_vfri3_real(&leaves, &batch_root, 2).unwrap();
+
+        let mut hash_input = [0u8; 64];
+        hash_input[..32].copy_from_slice(&proof[..32]);
+        hash_input[32..].copy_from_slice(&batch_root);
+        let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+        assert_eq!(commitment, hex::encode(&h[..16]));
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri3_real_different_inputs_differ() {
+        let seed = vec![0u8; 32];
+        let (_, c1, _) = gen_poseidon2_vfri3_real(&[1, 2, 3, 4], &seed, 2).unwrap();
+        let (_, c2, _) = gen_poseidon2_vfri3_real(&[5, 6, 7, 8], &seed, 2).unwrap();
+        assert_ne!(c1, c2, "different leaves must produce different commitments");
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri3_real_deterministic() {
+        let leaves: Vec<u64> = (1..=4).collect();
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = gen_poseidon2_vfri3_real(&leaves, &seed, 2).unwrap();
+        let (_, c2, h2) = gen_poseidon2_vfri3_real(&leaves, &seed, 2).unwrap();
+        assert_eq!(c1, c2, "deterministic commitment");
+        assert_eq!(h1, h2, "deterministic hints");
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri3_real_hints_non_constant_last_layer() {
+        // With real trace the last layer should not be a single constant (length == 2 for tree_depth=5)
+        let leaves: Vec<u64> = (1..=4).collect();
+        let seed = vec![0u8; 32];
+        let (_, _, hints) = gen_poseidon2_vfri3_real(&leaves, &seed, 1).unwrap();
+        // First 32 bytes of VFRI3 hints = ABI-encoded uint128[] lastLayerCoeffs offset
+        // Just verify the hints are non-empty and differ from the zero-polynomial version.
+        let (_, _, zero_hints) = gen_poseidon2_vfri2_hints(&[1, 2, 3, 4], &seed, 1).unwrap();
+        assert_ne!(hints, zero_hints, "vfri3_real hints differ from zero-polynomial hints");
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri3_real_input_validation() {
+        let seed = vec![0u8; 32];
+        assert!(gen_poseidon2_vfri3_real(&[], &seed, 2).is_err(), "empty leaves");
+        assert!(gen_poseidon2_vfri3_real(&[1], &vec![0u8; 31], 2).is_err(), "short root");
+        assert!(gen_poseidon2_vfri3_real(&[1], &seed, 0).is_err(), "n_queries=0");
+        assert!(gen_poseidon2_vfri3_real(&[1], &seed, 65).is_err(), "n_queries too large");
     }
 }

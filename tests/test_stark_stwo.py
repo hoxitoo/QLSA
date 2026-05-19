@@ -1170,3 +1170,129 @@ def test_gen_poseidon2_vfri2_hints_prover_module_validates_inputs():
     with pytest.raises(ValueError, match="n_queries"):
         gen_poseidon2_vfri2_hints([1, 2], bytes(32), n_queries=0)
 
+
+
+# ── gen_poseidon2_vfri3_real tests ────────────────────────────────────────────
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_output_schema():
+    """Returns (bytes, str, bytes) triple."""
+    proof, commitment, hints = _ext.gen_poseidon2_vfri3_real_py(
+        [1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2
+    )
+    assert isinstance(proof, bytes)
+    assert isinstance(commitment, str)
+    assert isinstance(hints, bytes)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_proof_length():
+    """Proof must be at least 700 bytes."""
+    proof, _, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(proof) >= 700
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_commitment_format():
+    """Commitment is 32-char hex string (16 bytes)."""
+    _, commitment, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(commitment) == 32
+    assert bytes.fromhex(commitment)  # valid hex
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_commitment_binding():
+    """Commitment = Blake2s(proof[:32] ‖ batch_merkle_root)[:16]."""
+    import hashlib
+    root = bytes(range(32))
+    proof, commitment, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(root), 2)
+    expected = hashlib.blake2s(proof[:32] + root).digest()[:16].hex()
+    assert commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_deterministic():
+    """Same inputs produce identical outputs."""
+    leaves = [10, 20, 30, 40]
+    root = list(_FAKE_BATCH_ROOT)
+    r1 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    r2 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    assert r1[1] == r2[1]  # commitments equal
+    assert r1[2] == r2[2]  # hints equal
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_different_leaves_differ():
+    """Different leaves produce different commitments."""
+    root = list(_FAKE_BATCH_ROOT)
+    _, c1, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], root, 2)
+    _, c2, _ = _ext.gen_poseidon2_vfri3_real_py([5, 6, 7, 8], root, 2)
+    assert c1 != c2
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_hints_non_empty():
+    """ABI-encoded hints must be non-empty."""
+    _, _, hints = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(hints) > 0
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_hints_differ_from_zero_poly():
+    """Real-trace hints differ from the zero-polynomial (VFRI2) hints."""
+    leaves = [1, 2, 3, 4]
+    root = list(_FAKE_BATCH_ROOT)
+    _, _, h3 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    _, _, h2 = _ext.gen_poseidon2_vfri2_hints_py(leaves, root, 2)
+    assert h3 != h2
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_more_queries_larger_hints():
+    """More queries produce a larger hints blob."""
+    leaves = [1, 2, 3, 4]
+    root = list(_FAKE_BATCH_ROOT)
+    _, _, h1 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 1)
+    _, _, h2 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    assert len(h2) > len(h1)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_empty_leaves_error():
+    """Empty leaves list must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri3_real_py([], list(_FAKE_BATCH_ROOT), 2)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_bad_root_length_error():
+    """batch_merkle_root of wrong length must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(b"\x00" * 16), 2)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_prover_module_wrapper():
+    """stark.prover.gen_poseidon2_vfri3_real wraps the Rust function correctly."""
+    from stark.prover import gen_poseidon2_vfri3_real, VFRI3RealHintResult
+    import hashlib
+    root = bytes(range(32))
+    result = gen_poseidon2_vfri3_real([1, 2, 3, 4], root, n_queries=2)
+    assert isinstance(result, VFRI3RealHintResult)
+    assert len(result.proof) >= 700
+    assert len(result.commitment) == 32
+    assert len(result.query_hints) > 0
+    expected = hashlib.blake2s(result.proof[:32] + root).digest()[:16].hex()
+    assert result.commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_prover_module_validates_inputs():
+    """stark.prover.gen_poseidon2_vfri3_real raises ValueError for bad inputs."""
+    from stark.prover import gen_poseidon2_vfri3_real
+    with pytest.raises(ValueError, match="empty"):
+        gen_poseidon2_vfri3_real([], bytes(32))
+    with pytest.raises(ValueError, match="32 bytes"):
+        gen_poseidon2_vfri3_real([1, 2], bytes(16))
+    with pytest.raises(ValueError, match="n_queries"):
+        gen_poseidon2_vfri3_real([1, 2], bytes(32), n_queries=0)
