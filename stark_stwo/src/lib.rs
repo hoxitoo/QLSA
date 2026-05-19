@@ -155,13 +155,21 @@ pub(crate) fn parse_poly_commitment(commitment_hex: &str) -> Result<[u32; 4], St
     Ok(words)
 }
 
-/// log2 of the FRI blowup factor. 4 → blowup 16× (security margin ~120-bit at 30 FRI rounds).
+/// log2 of the FRI blowup factor.  6 → blowup 64× (polynomial proximity).
 /// Do NOT reduce below 4 for any network-facing deployment.
-const LOG_BLOWUP: u32 = 4;
+pub(crate) const LOG_BLOWUP: u32 = 6;
+
+/// FRI query count.  Security = LOG_BLOWUP × N_FRI_QUERIES + POW_BITS = 6×20+10 = 130 bits.
+pub(crate) const N_FRI_QUERIES: usize = 20;
+
+/// Proof-of-work bits mixed into Fiat-Shamir (adds POW_BITS to total security).
+pub(crate) const POW_BITS: u32 = 10;
 
 fn make_config(log_size: u32) -> PcsConfig {
     let mut c = PcsConfig::default();
     c.fri_config.log_blowup_factor = LOG_BLOWUP;
+    c.fri_config.n_queries = N_FRI_QUERIES;
+    c.pow_bits = POW_BITS;
     PcsConfig {
         lifting_log_size: Some(log_size + LOG_BLOWUP),
         ..c
@@ -307,6 +315,8 @@ pub fn verify_hash_chain_poseidon2(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let ids = preprocessed_column_ids();
     let component = poseidon2_air::Poseidon2Component::new(
@@ -447,6 +457,8 @@ pub fn verify_ntt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Stri
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = MlDsaNttButterflyComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -557,6 +569,8 @@ pub fn verify_poly_mul(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = PolyMulComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -659,6 +673,8 @@ pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = PolyAddComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -786,6 +802,8 @@ pub fn verify_use_hint(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = UseHintComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -887,6 +905,8 @@ pub fn verify_norm_check(proof_bytes: &[u8], commitment_hex: &str) -> Result<boo
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = NormCheckComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1019,6 +1039,8 @@ pub fn verify_az_row(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = AzRowComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1179,6 +1201,8 @@ pub fn verify_az_full(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = AzFullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1343,6 +1367,8 @@ pub fn verify_ct1_full(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = Ct1FullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1532,6 +1558,8 @@ pub fn verify_az_ct1_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let mut alloc = TraceLocationAllocator::default();
     let az_comp = AzFullComponent::new(
@@ -1684,6 +1712,8 @@ pub fn verify_wprime_full(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = WPrimeFullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1819,6 +1849,8 @@ pub fn verify_wprime_full_bound(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = WPrimeFullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1936,6 +1968,8 @@ pub fn verify_norm_check_batch(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = NormCheckBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -2134,6 +2168,8 @@ pub fn verify_use_hint_batch_v2(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = new_component_v2(log_size);
 
@@ -2303,6 +2339,8 @@ pub fn verify_norm_use_hint_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
     let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
@@ -2575,6 +2613,8 @@ pub fn verify_az_ct1_norm_use_hint_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
     let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
@@ -2854,6 +2894,8 @@ pub fn verify_ntt_az_ct1_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let mut alloc = TraceLocationAllocator::default();
     let ntt_comp = mldsa_ntt_batch_air::NttBatchComponent::new(
@@ -3291,6 +3333,8 @@ pub fn verify_full_mldsa_witness_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     // ── Build components (same allocator order as prover) ─────────────────────
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
@@ -3625,6 +3669,8 @@ pub fn verify_intt_wprime_norm_use_hint_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
     let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
@@ -3707,6 +3753,8 @@ pub fn verify_use_hint_batch(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = UseHintBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -3810,6 +3858,8 @@ pub fn verify_range_q(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, 
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = range_check_air::new_component(log_size);
     let verifier_channel = &mut Blake2sM31Channel::default();
@@ -3906,6 +3956,8 @@ pub fn verify_range_q_batch(proof_bytes: &[u8], commitment_hex: &str) -> Result<
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = mldsa_range_q_batch_air::new_component(log_size);
     let verifier_channel = &mut Blake2sM31Channel::default();
@@ -4039,6 +4091,8 @@ pub fn verify_intt_batch(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_intt_batch_air::InttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4246,6 +4300,8 @@ pub fn verify_intt_wprime_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let mut alloc = TraceLocationAllocator::default();
     let intt_comp = mldsa_intt_batch_air::InttBatchComponent::new(
@@ -4403,6 +4459,8 @@ pub fn verify_intt_batch_m(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_intt_batch_air::InttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4537,6 +4595,8 @@ pub fn verify_ntt_batch(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_ntt_batch_air::NttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4672,6 +4732,8 @@ pub fn verify_ntt_batch_m(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_ntt_batch_air::NttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4790,6 +4852,8 @@ pub fn verify_hint_weight(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = new_component(log_size);
 
@@ -4937,6 +5001,8 @@ pub fn verify_merkle_root(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = poseidon2_merkle_air::new_component(log_size);
 

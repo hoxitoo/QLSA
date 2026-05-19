@@ -201,8 +201,8 @@ Multi-query verifier — extends V4 by verifying N independent FRI queries per c
   ```
 - All queries share the same trace root (proof[8:40]); each query independently verified.
 - Constants: `MIN_QUERIES = 1`, `MAX_QUERIES = 64`.
-- Security note: N queries with blowup=16 → ~N×4 bits soundness (e.g. 8 queries ≈ 32 bits).
-  For mainnet-grade 128-bit security: N=32 queries (or fewer with higher blowup).
+- Security note: security = log_blowup × n_queries + pow_bits (Stwo PcsConfig formula).
+  Current STARK config: LOG_BLOWUP=6 (blowup=64), N_FRI_QUERIES=20, POW_BITS=10 → 130-bit security.
 - 26 tests: single-query backward compat, 2/3/4-query acceptance, per-query rejection.
 
 ### `contracts/src/BatchRegistryV3.sol`
@@ -346,10 +346,10 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierVFRI2 completes the on-chain FRI protocol — K parametric line-fold rounds (V11/V12/V13 generalised) + last-layer constant-polynomial check (reconstructs expected constant-tree Merkle root on-chain and asserts it equals `friLayerRoots[K]`); each query verifies: trace Merkle (p + −p), composition binding, OODS quotient, circle fold, FRI L1, K×(sibling Merkle + Chebyshev-twiddle line fold + FRI layer Merkle), all with full Fiat-Shamir; remaining MVP-4 items: non-constant last layer (bounded-degree check), FRI blowup ≥ 6
+1. On-chain verifier: QLSAVerifierVFRI2 completes the on-chain FRI protocol — K parametric line-fold rounds (V11/V12/V13 generalised) + last-layer constant-polynomial check (reconstructs expected constant-tree Merkle root on-chain and asserts it equals `friLayerRoots[K]`); each query verifies: trace Merkle (p + −p), composition binding, OODS quotient, circle fold, FRI L1, K×(sibling Merkle + Chebyshev-twiddle line fold + FRI layer Merkle), all with full Fiat-Shamir; remaining MVP-4 items: non-constant last layer (bounded-degree check)
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
-4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
+4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
 
 ## Security Hardening (implemented)

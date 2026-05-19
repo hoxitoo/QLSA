@@ -146,6 +146,8 @@ pub fn prove_intt(f: &[i64; N]) -> Result<(Vec<u8>, String, [i64; N]), String> {
     let log_blowup = crate::LOG_BLOWUP;
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = log_blowup;
+    config.fri_config.n_queries = crate::N_FRI_QUERIES;
+    config.pow_bits = crate::POW_BITS;
     let config = PcsConfig {
         lifting_log_size: Some(log_size + log_blowup),
         ..config
@@ -217,6 +219,8 @@ pub fn verify_intt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Str
     let log_blowup = crate::LOG_BLOWUP;
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = log_blowup;
+    config.fri_config.n_queries = crate::N_FRI_QUERIES;
+    config.pow_bits = crate::POW_BITS;
 
     let component = MlDsaInttButterflyComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -280,6 +284,8 @@ pub fn prove_intt_with_binding(f: &[i64; N]) -> Result<(Vec<u8>, String, [i64; N
     let log_blowup = crate::LOG_BLOWUP;
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = log_blowup;
+    config.fri_config.n_queries = crate::N_FRI_QUERIES;
+    config.pow_bits = crate::POW_BITS;
     let config = PcsConfig { lifting_log_size: Some(log_size + log_blowup), ..config };
 
     let lifting = log_size + log_blowup;
@@ -356,6 +362,8 @@ pub fn verify_intt_with_binding(
     let log_blowup = crate::LOG_BLOWUP;
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = log_blowup;
+    config.fri_config.n_queries = crate::N_FRI_QUERIES;
+    config.pow_bits = crate::POW_BITS;
 
     let component = MlDsaInttButterflyComponent::new(
         &mut TraceLocationAllocator::default(),
