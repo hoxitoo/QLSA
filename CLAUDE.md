@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -282,6 +282,21 @@ FRI layer 2: line fold step reducing circle-fold outputs from N→N/2, with a se
 - Requires `treeDepth ≥ 2` (FRI layer 2 tree must have at least 2 leaves)
 - 31 tests: constants, valid 1/2-query, FRI L2 tampering, sibling enforcement, channel binding, inherited OODS/Fiat-Shamir/trace-Merkle
 
+### `contracts/src/QLSAVerifierV12.sol`
+FRI layer 3: second line fold with doubled-x twiddle, reducing N/2 → N/4 values.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32 friLayer1Root, bytes32 friLayer2Root, bytes32 friLayer3Root, QueryHints[])`
+- Second line fold pairs FRI layer 2 positions j and j+N/4 using **doubled-x twiddle**:
+  - `doubleX = 2·cosetAt(treeDepth, lineIdx2).x² − 1` (x-coord of doubled circle point)
+  - Mathematical proof: `doubleX(j) + doubleX(j+N/4) = 2(x_j²+y_j²)−2 = 0` in M31, so they are negatives
+  - `lineFolded2 = lineFold(gPlus2, gMinus2, friAlpha3, M31.inv(doubleX))`
+- FRI layer 3 tree: `2^(treeDepth−2)` leaves; depth = `treeDepth−2`
+- Channel transcript: `... → mixRoot(friLayer2Root) → friAlpha3 → mixRoot(friLayer3Root) → drawQueries`
+- Per-query: sibling in FRI L2 Merkle-verified, second fold computed on-chain, lineFoldedValue2 Merkle-verified in friLayer3Root
+- `QueryHints` struct: 22 fields (adds `l2SiblingValue`, `l2SiblingProof`, `lineFoldedValue2`, `friL3Siblings` over V11's 18)
+- Requires `treeDepth ≥ 3` (FRI layer 3 tree must have at least 2 leaves)
+- 36 tests: constants, valid 1/2-query, FRI L3 tampering, L2-sibling enforcement, channel binding, inherited OODS/Fiat-Shamir/trace-Merkle
+
 ## Multi-Component STARK Pattern
 
 When adding a new combined STARK (mixed-size components):
@@ -297,7 +312,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierV11 verifies N×(Merkle inclusion at both p and −p + composition binding + OODS quotient check + circle fold + FRI layer 1 Merkle decommitment + line fold + FRI layer 2 Merkle decommitment) with full Fiat-Shamir (z_x, oodsEvals, compAlpha, friAlpha, friLayer1Root, friAlpha2, friLayer2Root, query indices all bound to transcript); additional line fold rounds + last layer check is MVP-4 final
+1. On-chain verifier: QLSAVerifierV12 verifies N×(Merkle inclusion at both p and −p + composition binding + OODS quotient check + circle fold + FRI L1 Merkle decommitment + line fold + FRI L2 Merkle decommitment + second line fold with doubled-x twiddle + FRI L3 Merkle decommitment) with full Fiat-Shamir (z_x, oodsEvals, compAlpha, friAlpha, friLayer1Root, friAlpha2, friLayer2Root, friAlpha3, friLayer3Root, query indices all bound to transcript); additional line fold rounds + last layer check is MVP-4 final
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
