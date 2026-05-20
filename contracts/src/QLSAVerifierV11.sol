@@ -128,7 +128,7 @@ contract QLSAVerifierV11 is IQLSAVerifierV4 {
         // 9. All queries must share the same treeDepth and it must be ≥ 2
         //    (needed for FRI layer 2 tree of depth treeDepth−1 ≥ 1).
         uint256 logDomainSize = hints[0].treeDepth;
-        if (logDomainSize < 2) return false;
+        if (logDomainSize < 2 || logDomainSize > 30) return false;
         for (uint256 i = 1; i < hints.length; i++) {
             if (hints[i].treeDepth != logDomainSize) return false;
         }

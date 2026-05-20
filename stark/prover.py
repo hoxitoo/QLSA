@@ -1075,6 +1075,42 @@ def verify_mldsa_witness_stark_v21(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v21_py(result.proof_bundle))
 
 
+def _validate_mldsa65_inputs(
+    a_hat: list[list[int]],
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    hints: list[list[bool]],
+    k: int,
+    l: int,
+) -> None:
+    """Validate that all combined-STARK inputs match ML-DSA-65 requirements."""
+    if k != 6 or l != 5:
+        raise ValueError(f"Combined STARK requires k=6, l=5 (ML-DSA-65); got k={k}, l={l}")
+    if len(a_hat) != k * l:
+        raise ValueError(f"a_hat must have k*l={k*l} polynomials; got {len(a_hat)}")
+    if len(z) != l:
+        raise ValueError(f"z must have l={l} polynomials; got {len(z)}")
+    if len(c) != 256:
+        raise ValueError(f"c must have 256 coefficients; got {len(c)}")
+    if len(t1) != k:
+        raise ValueError(f"t1 must have k={k} polynomials; got {len(t1)}")
+    if len(hints) != k:
+        raise ValueError(f"hints must have k={k} rows; got {len(hints)}")
+    for i, poly in enumerate(a_hat):
+        if len(poly) != 256:
+            raise ValueError(f"a_hat[{i}] must have 256 coefficients; got {len(poly)}")
+    for j, poly in enumerate(z):
+        if len(poly) != 256:
+            raise ValueError(f"z[{j}] must have 256 coefficients; got {len(poly)}")
+    for i, poly in enumerate(t1):
+        if len(poly) != 256:
+            raise ValueError(f"t1[{i}] must have 256 coefficients; got {len(poly)}")
+    for i, row in enumerate(hints):
+        if len(row) != 256:
+            raise ValueError(f"hints[{i}] must have 256 elements; got {len(row)}")
+
+
 def prove_mldsa_witness_stark_v22(
     a_hat:       list[list[int]],
     z:           list[list[int]],
@@ -1096,6 +1132,7 @@ def prove_mldsa_witness_stark_v22(
 
     Raises RuntimeError if the extension is not installed or proving fails.
     """
+    _validate_mldsa65_inputs(a_hat, z, c, t1, hints, k, l)
     _require_ext("prove_mldsa_witness_v22_py")
     try:
         bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v22_py(
@@ -1142,6 +1179,7 @@ def prove_mldsa_witness_stark_v23(
 
     Raises RuntimeError if the extension is not installed or proving fails.
     """
+    _validate_mldsa65_inputs(a_hat, z, c, t1, hints, k, l)
     _require_ext("prove_mldsa_witness_v23_py")
     try:
         bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v23_py(

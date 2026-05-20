@@ -108,6 +108,7 @@ library MerkleVerifier {
         bytes32[] memory siblings
     ) private pure returns (bool) {
         if (siblings.length != depth) return false;
+        if (depth > 32) return false;  // 1 << depth would overflow uint256 at depth >= 256
         if (depth > 0 && index >= (1 << depth)) return false;
 
         bytes32 current = leafHash;

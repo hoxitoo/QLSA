@@ -122,9 +122,9 @@ contract QLSAVerifierV12 is IQLSAVerifierV4 {
         bytes32 embeddedRoot;
         assembly ("memory-safe") { embeddedRoot := calldataload(add(proof.offset, 8)) }
 
-        // 9. treeDepth must be ≥ 3 (FRI L3 needs ≥ 2 leaves at depth treeDepth−2 ≥ 1).
+        // 9. treeDepth must be in [3, 30] (FRI L3 needs treeDepth−2 ≥ 1; > 30 risks overflow).
         uint256 logDomainSize = hints[0].treeDepth;
-        if (logDomainSize < 3) return false;
+        if (logDomainSize < 3 || logDomainSize > 30) return false;
         for (uint256 i = 1; i < hints.length; i++) {
             if (hints[i].treeDepth != logDomainSize) return false;
         }

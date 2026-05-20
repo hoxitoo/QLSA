@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 
 
 def _hash_leaf(data: bytes) -> bytes:
@@ -78,4 +79,4 @@ def verify_merkle_proof(
             current = _hash_node(current, sibling)
         else:
             current = _hash_node(sibling, current)
-    return current == root
+    return hmac.compare_digest(current, root)
