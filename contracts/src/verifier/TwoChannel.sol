@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.24;
 
-import "./Blake2s.sol";
+import "./Blake2sYul.sol";
 import "./M31.sol";
 
 /// @title TwoChannel — Stwo's Blake2sM31Channel replicated in Solidity
@@ -115,7 +115,7 @@ library TwoChannel {
     /// @dev Blake2s-256(data) followed by M31 reduction of each LE uint32 word.
     /// Matching Stwo's Blake2sM31Hash (blake2_hash.rs reduce_to_m31).
     function _blake2sM31(bytes memory data) private pure returns (bytes32) {
-        bytes32 h = Blake2s.hash(data);
+        bytes32 h = Blake2sYul.hash(data);
         uint256 acc;
         for (uint256 i = 0; i < 8; i++) {
             // Read word i as LE uint32 from the Blake2s output bytes32.

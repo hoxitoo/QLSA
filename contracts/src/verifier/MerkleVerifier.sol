@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.24;
 
-import "./Blake2s.sol";
+import "./Blake2sYul.sol";
 
 /// @title MerkleVerifier — Blake2s Merkle proof verification
 ///
@@ -29,7 +29,7 @@ library MerkleVerifier {
             buf[i * 4 + 2] = bytes1(uint8(v >> 16));
             buf[i * 4 + 3] = bytes1(uint8(v >> 24));
         }
-        return Blake2s.hash(buf);
+        return Blake2sYul.hash(buf);
     }
 
     /// @notice Hash two child hashes to form a parent node.
@@ -39,7 +39,7 @@ library MerkleVerifier {
             mstore(add(buf, 32), left)
             mstore(add(buf, 64), right)
         }
-        return Blake2s.hash(buf);
+        return Blake2sYul.hash(buf);
     }
 
     // ── Proof verification ────────────────────────────────────────────────────

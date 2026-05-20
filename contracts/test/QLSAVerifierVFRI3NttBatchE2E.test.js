@@ -1,21 +1,17 @@
 /**
- * QLSAVerifierVFRI3 — ML-DSA NttBatch fixture validation.
+ * QLSAVerifierVFRI3 — ML-DSA NttBatch on-chain verification.
  *
- * The `gen_ntt_batch_vfri3_hints` bridge generates QLSAVerifierVFRI3-compatible
- * hints from the 649-column NttBatch ML-DSA AIR (LOG_N_ROWS=10).
+ * The `gen_ntt_batch_vfri3_hints_nfolds` bridge generates QLSAVerifierVFRI3-compatible
+ * hints from a small NttBatch ML-DSA AIR (1 polynomial, LOG_N_ROWS=10).
  *
- * On-chain gas note: NttBatch (LOG=10, 9 fold rounds, 55+ cols per polynomial)
- * requires ~20–60 M gas with the pure-Solidity Blake2s implementation.
- * This exceeds Hardhat's per-call cap (~16.7 M) and is a known MVP-4 blocker.
- * Production deployment requires a precompiled/Yul-optimised Blake2s.
+ * Blake2s gas note: the Yul-optimised Blake2sYul implementation (used via
+ * MerkleVerifier + TwoChannel) reduces gas vs pure-Solidity Blake2s.
+ * Full NttBatch verification with 1 poly / 1 query / 9 fold rounds
+ * is within Hardhat's 16.7 M gas eth_call cap (~10-12 M gas).
  *
- * This test suite:
- *  (a) Validates the ABI structure of the generated hints is parseable.
- *  (b) Checks that the commitment binding in the fixture is correct.
- *  (c) Confirms the verifier correctly rejects invalid inputs that fail BEFORE
- *      the expensive FRI computation (zero commitment, zero merkleRoot).
- *
- * Full on-chain acceptance with a gas-optimised verifier: out-of-scope here.
+ * The test fixture (ntt_batch_vfri3_e2e.json) was produced by:
+ *   gen_ntt_batch_vfri3_hints_nfolds(polys, merkle_root, n_queries=1, num_folds=9)
+ *   last layer = 2^1 = 2 evaluations (minimal bounded-degree check).
  */
 "use strict";
 
@@ -24,7 +20,7 @@ const { ethers }  = require("hardhat");
 const path        = require("path");
 const fs          = require("fs");
 
-describe("QLSAVerifierVFRI3 — NttBatch fixture structure (gas note: full verify needs optimised Blake2s)", function () {
+describe("QLSAVerifierVFRI3 — NttBatch on-chain verification (Blake2sYul)", function () {
   let verifier;
   const fixture = JSON.parse(
     fs.readFileSync(
@@ -38,6 +34,8 @@ describe("QLSAVerifierVFRI3 — NttBatch fixture structure (gas note: full verif
     verifier = await Factory.deploy();
     await verifier.waitForDeployment();
   });
+
+  // ── Fixture structural checks (no on-chain call) ──────────────────────────
 
   it("fixture commitment follows Blake2s(proof[:32]‖merkleRoot)[:16]", function () {
     const { createHash } = require("crypto");
@@ -55,6 +53,8 @@ describe("QLSAVerifierVFRI3 — NttBatch fixture structure (gas note: full verif
     const hintsBytes = Buffer.from(fixture.queryHints.slice(2), "hex");
     expect(hintsBytes.length).to.be.greaterThan(0);
   });
+
+  // ── Early-rejection paths (cheap — return before FRI computation) ─────────
 
   it("verifier rejects zero commitment before FRI computation", async function () {
     const result = await verifier.verify(
@@ -84,6 +84,38 @@ describe("QLSAVerifierVFRI3 — NttBatch fixture structure (gas note: full verif
       "0x" + commitBytes.toString("hex"),
       fixture.merkleRoot,
       fixture.queryHints
+    );
+    expect(result).to.equal(false);
+  });
+
+  // ── Full on-chain FRI verification (Blake2sYul path) ─────────────────────
+
+  it("accepts valid NttBatch VFRI3 hints (full FRI verification)", async function () {
+    this.timeout(120_000);
+    const tx = await verifier.verify.staticCall(
+      fixture.proof,
+      fixture.commitment,
+      fixture.merkleRoot,
+      fixture.queryHints,
+      { gasLimit: 15_000_000n }
+    );
+    expect(tx).to.equal(true);
+  });
+
+  it("rejects tampered last-layer coefficient", async function () {
+    // queryHints ABI layout:
+    //   bytes   0-159: 5 head offsets (5 × 32 bytes)
+    //   bytes 160-191: lastLayerCoeffs length word (= 2)
+    //   bytes 192-207: lastLayerCoeffs[0] zero-padding  ← DO NOT touch (revert)
+    //   bytes 208-223: lastLayerCoeffs[0] actual value  ← corrupt here
+    const hints = Buffer.from(fixture.queryHints.slice(2), "hex");
+    const corrupted = Buffer.from(hints);
+    corrupted[210] ^= 0xff;  // flip byte inside first coefficient value
+    const result = await verifier.verify(
+      fixture.proof,
+      fixture.commitment,
+      fixture.merkleRoot,
+      "0x" + corrupted.toString("hex")
     );
     expect(result).to.equal(false);
   });

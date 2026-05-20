@@ -26,6 +26,7 @@ module.exports = {
     // Allow large calldata for MAX_PROOF_LENGTH guard tests (1 MiB proof)
     hardhat: {
       blockGasLimit: 100_000_000,
+      allowUnlimitedContractSize: true,
     },
 
     // Polygon zkEVM testnet
