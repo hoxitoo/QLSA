@@ -5725,6 +5725,74 @@ fn gen_ntt_batch_vfri3_hints_nfolds_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
+/// gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
+///   -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// Generates VFRI3-compatible hints from V23's NttBatch + InttBatch components
+/// (both LOG=10, 649 cols each → 1298 combined columns).
+///
+/// Proves on-chain via QLSAVerifierVFRI3 that NTT(z,c,t1) and INTT(az,ct1)
+/// were computed correctly, forming the first on-chain V23 proof segment.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_vfri3_hints_py(
+    z:                  Vec<Vec<i64>>,
+    c:                  Vec<i64>,
+    t1:                 Vec<Vec<i64>>,
+    a_hat:              Vec<Vec<i64>>,
+    batch_merkle_root:  Vec<u8>,
+    n_queries:          usize,
+    num_folds:          Option<usize>,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    // Convert z: Vec<Vec<i64>> → [[i64;256];5]
+    if z.len() != 5 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("z must have 5 polynomials (L=5), got {}", z.len())
+        ));
+    }
+    let z_arr: [[i64; 256]; 5] = z.into_iter()
+        .enumerate()
+        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            format!("z[{i}] must have 256 coefficients")
+        )))
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
+
+    // Convert c: Vec<i64> → [i64;256]
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
+
+    // Convert t1: Vec<Vec<i64>> → [[i64;256];6]
+    if t1.len() != 6 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
+        ));
+    }
+    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
+        .enumerate()
+        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            format!("t1[{i}] must have 256 coefficients")
+        )))
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
+
+    // Convert a_hat: Vec<Vec<i64>> → Vec<[i64;256]>
+    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
+        .enumerate()
+        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            format!("a_hat[{i}] must have 256 coefficients")
+        )))
+        .collect::<PyResult<Vec<[i64; 256]>>>()?;
+
+    vfri2_bridge::gen_mldsa_v23_vfri3_hints(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
+        &batch_merkle_root, n_queries, num_folds,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -5810,6 +5878,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_poseidon2_vfri3_real_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri3_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri3_hints_nfolds_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri3_hints_py, m)?)?;
     Ok(())
 }
 

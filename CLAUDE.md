@@ -12,7 +12,7 @@ Circle STARK proof (~90–200 KB) for O(1) on-chain verification.
 ```
 core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
-stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
+stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
 contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
@@ -360,6 +360,29 @@ VFRI + last-layer constant-polynomial check — closes the final FRI soundness g
 - All other structures (FoldHint, QueryHints, VerifyCtx, transcript) identical to VFRI
 - 41 tests: 4 treeDepth/numFolds configurations + input validation + Fiat-Shamir + constant-polynomial specifics (constant tree root verification, non-constant tree rejection, consistent-but-wrong value rejection)
 
+### `stark_stwo/src/vfri2_bridge.rs` — V23 VFRI3 hint bridge (MVP-4)
+
+**`gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)`**
+
+Combines V23's NttBatch (649 cols) + InttBatch (649 cols) = 1298 trace columns (both LOG=10)
+and generates VFRI3-compatible ABI-encoded hints. Returns `(proof_bytes, commitment_hex, abi_hints)`.
+
+Architecture:
+- Step 1: `build_trace(z,c,t1)` → NttBatch trace (649 cols)
+- Step 2: `build_trace(a_hat, z_hat)` → az_hat; `build_trace(c_hat, t1_hat)` → ct1_hat
+- Step 3: `build_trace(az_hat, ct1_hat)` → InttBatch trace (649 cols)
+- Step 4: combine → 1298 cols at LOG=10 (1024 rows each)
+- Step 5: `gen_vfri3_hints_from_cols_nfolds` → VFRI3 Fiat-Shamir + OODS + FRI fold chain
+
+**Gas scale finding:** 1298 cols require ~120M gas for on-chain OODS mixing (exceeds 16.7M cap).
+On-chain verification of full V23 components requires OODS batching (algebraic hash, e.g. RPO256).
+
+Python wrapper: `stark/prover.py::gen_mldsa_v23_vfri3_hints()` → `MldsaV23VFRI3HintResult`
+Tests: `tests/test_stark_stwo.py` — 6 Python tests (schema, deterministic, batch_root_binding,
+consistent_with_v23_ntt, validation_errors, multi_query)
+JS test: `contracts/test/QLSAVerifierVFRI3MldsaV23NttE2E.test.js` — 9 tests
+  (structural checks, rejection paths, gas-scale boundary documentation)
+
 ### `contracts/src/QLSAVerifierVFRI3.sol`
 VFRI3 — non-constant last-layer polynomial bounded-degree check (MVP-4).
 - Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
@@ -386,7 +409,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul now passes full NttBatch E2E verification on-chain (1 poly / 1 query / 9 folds, ~855 ms, within 16.7 M gas eth_call cap); remaining for MVP-4: RPO256 hash AIR, full OODS wiring to a real STARK proof with production query count (20 queries / blowup 64)
+1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)

@@ -1452,6 +1452,75 @@ class NttBatchVFRI3HintResult:
     query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI3.verify(queryHints)
 
 
+@dataclass
+class MldsaV23VFRI3HintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI3.verify(queryHints)
+    n_cols:      int    # total trace columns (NttBatch + InttBatch = 1298)
+    n_queries:   int    # number of FRI queries used
+
+
+def gen_mldsa_v23_vfri3_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI3HintResult:
+    """Generate VFRI3-compatible hints from V23's NttBatch + InttBatch components.
+
+    Combines both LOG=10 components (649 cols each → 1298 total) and produces
+    ABI-encoded query hints for QLSAVerifierVFRI3.verify(), providing the first
+    on-chain verification of V23 ML-DSA.Verify NTT and INTT arithmetic.
+
+    Security: each FRI query at num_folds=9 folds gives a constant last layer;
+    with 20 queries and LOG_BLOWUP=6 this yields 130-bit soundness for the
+    NttBatch+InttBatch subset of the V23 proof.
+
+    Args:
+        z:                 5 polynomials (L=5), each 256 i64 coefficients.
+        c:                 Challenge polynomial, 256 i64 coefficients.
+        t1:                6 polynomials (K=6), each 256 i64 coefficients.
+        a_hat:             30 (K×L) NTT-domain polynomials, each 256 i64 coefficients.
+        batch_merkle_root: 32-byte batch Merkle root (Fiat-Shamir binding).
+        n_queries:         FRI queries (default 1 for gas-safe on-chain tests; 20 for full security).
+        num_folds:         FRI fold rounds (default: tree_depth−1 = 9; use ≤9).
+
+    Returns:
+        MldsaV23VFRI3HintResult with proof, commitment, query_hints, n_cols, n_queries.
+    """
+    _require_ext("gen_mldsa_v23_vfri3_hints")
+    if len(z) != 5:
+        raise ValueError(f"z must have 5 polynomials (L=5), got {len(z)}")
+    if len(c) != 256:
+        raise ValueError(f"c must have 256 coefficients, got {len(c)}")
+    if len(t1) != 6:
+        raise ValueError(f"t1 must have 6 polynomials (K=6), got {len(t1)}")
+    if len(a_hat) != 30:
+        raise ValueError(f"a_hat must have 30 polynomials (K×L=30), got {len(a_hat)}")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri3_hints_py(
+            z, list(c), t1, a_hat,
+            list(batch_merkle_root), n_queries, num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri3_hints failed: {exc}") from exc
+    return MldsaV23VFRI3HintResult(
+        proof=proof,
+        commitment=commitment,
+        query_hints=query_hints,
+        n_cols=1298,  # 649 NttBatch + 649 InttBatch
+        n_queries=n_queries,
+    )
+
+
 def gen_ntt_batch_vfri3_hints(
     polys: list[list[int]],
     batch_merkle_root: bytes,

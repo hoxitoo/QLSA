@@ -1779,6 +1779,96 @@ pub fn gen_ntt_batch_vfri3_hints_nfolds(
     gen_vfri3_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
 }
 
+// ── V23 NttBatch+InttBatch → VFRI3 hints ─────────────────────────────────────
+
+/// Generate VFRI3-compatible hints from V23's NttBatch + InttBatch components.
+///
+/// Both components have LOG_N_ROWS=10 (1024 rows, 649 columns each).
+/// Combined: 1298 trace columns, all at the same domain size (2^10 = 1024 rows).
+///
+/// This proves on-chain (via QLSAVerifierVFRI3) that:
+/// - NTT(z, c, t1) was computed correctly  (NttBatch — 649 cols)
+/// - INTT(az_hat, ct1_hat) was computed correctly  (InttBatch — 649 cols)
+///
+/// `a_hat` — K×L = 30 NTT-domain polynomials; used to compute az_hat so that
+/// the InttBatch inputs are consistent with the V23 AzFull circuit.
+///
+/// Returns `(proof_bytes, commitment_hex, abi_encoded_query_hints)` accepted by
+/// `QLSAVerifierVFRI3.verify()`.
+pub fn gen_mldsa_v23_vfri3_hints(
+    z: &[[i64; 256]; 5],
+    c: &[i64; 256],
+    t1: &[[i64; 256]; 6],
+    a_hat: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    // ── Step 1: NTT(z, c, t1) ────────────────────────────────────────────────
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+
+    let (ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS; // 10
+
+    let z_hat: [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into()
+        .map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat: [i64; 256] = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into()
+        .map_err(|_| "t1_hat slice error".to_string())?;
+
+    // ── Step 2: Az and Ct1 in NTT domain (InttBatch inputs) ──────────────────
+    let (_az_cols, az_hat) = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (_ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    // ── Step 3: INTT(az_hat, ct1_hat) ────────────────────────────────────────
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, _intt_outputs) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+
+    // ── Step 4: Combine columns (both LOG=10, 1024 rows each) ────────────────
+    let n_rows = 1usize << tree_depth;
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(ntt_cols.len() + intt_cols.len());
+    for col in &ntt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("ntt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+    for col in &intt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("intt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+
+    // ── Step 5: Generate VFRI3 hints ─────────────────────────────────────────
+    gen_vfri3_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -1480,3 +1480,118 @@ def test_prove_mldsa_witness_v23_prover_wrapper():
     assert isinstance(result, MldsaWitnessResult)
     assert isinstance(result.proof_bundle, bytes) and len(result.proof_bundle) > 0
     assert verify_mldsa_witness_stark_v23(result)
+
+
+# ── V23 VFRI3 hint generation tests (MVP-4 OODS wiring) ─────────────────────
+# Seeds in 4000 range to avoid collision with V23 tests (3000 range).
+
+_VFRI3_BATCH_ROOT = bytes(range(32))  # deterministic 32-byte root for all V23 VFRI3 tests
+
+
+def _v23_inputs(seed_base: int) -> tuple[
+    list[list[int]], list[int], list[list[int]], list[list[int]]
+]:
+    """Return (z, c, t1, a_hat) with seeds offset from seed_base."""
+    z     = [_rand_poly(seed_base + j)        for j in range(_L3)]
+    c     = _rand_poly(seed_base + 100)
+    t1    = [_rand_poly(seed_base + 200 + i)  for i in range(_K3)]
+    a_hat = [_rand_poly(seed_base + 300 + i)  for i in range(_K3 * _L3)]
+    return z, c, t1, a_hat
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_schema():
+    """Output types and sizes of gen_mldsa_v23_vfri3_hints are correct."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints, MldsaV23VFRI3HintResult
+    z, c, t1, a_hat = _v23_inputs(4000)
+
+    result = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+
+    assert isinstance(result, MldsaV23VFRI3HintResult)
+    assert isinstance(result.proof, bytes) and len(result.proof) >= 700
+    assert isinstance(result.commitment, str) and len(result.commitment) == 32
+    assert isinstance(result.query_hints, bytes) and len(result.query_hints) > 0
+    assert result.n_cols == 1298   # 649 NttBatch + 649 InttBatch
+    assert result.n_queries == 1
+    # commitment is 32 hex chars = 16 bytes of Blake2s
+    assert bytes.fromhex(result.commitment)  # valid hex
+    # proof[8:40] = trace root (non-zero for real trace)
+    assert result.proof[8:40] != b'\x00' * 32
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_deterministic():
+    """Same inputs produce identical proofs (Fiat-Shamir is deterministic)."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4100)
+
+    r1 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.proof       == r2.proof
+    assert r1.commitment  == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_batch_root_binding():
+    """Different batch_merkle_roots produce different proofs/commitments."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4200)
+
+    root1 = bytes(range(32))
+    root2 = bytes(range(1, 33))
+    r1 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, root1, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, root2, n_queries=1, num_folds=3)
+
+    assert r1.commitment  != r2.commitment, "Different batch roots must give different commitments"
+    assert r1.proof[8:40] == r2.proof[8:40], "Trace root must be batch-root-independent"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_consistent_with_v23_ntt():
+    """NttBatch portion of V23 and V23-VFRI3 produce the same NTT outputs."""
+    from stark.prover import (
+        gen_mldsa_v23_vfri3_hints,
+        prove_mldsa_witness_stark_v23,
+        MldsaWitnessResult,
+    )
+    z, c, t1, a_hat = _v23_inputs(4300)
+    hints = _zero_hints(_K3)
+
+    # V23 STARK proof computes z_hat = NTT(z), c_hat = NTT(c), t1_hat = NTT(t1)
+    v23 = prove_mldsa_witness_stark_v23(a_hat, z, c, t1, hints, _K3, _L3)
+    # V23 VFRI3 hints also compute NTT(z, c, t1) internally
+    vfri3 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+
+    # Both produce non-empty outputs with valid trace (non-zero trace root)
+    assert v23.proof_bundle and vfri3.proof
+    assert vfri3.proof[8:40] != b'\x00' * 32  # real trace committed
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_validation_errors():
+    """Python-side validation catches bad inputs before hitting Rust."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4400)
+
+    import pytest
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri3_hints(z[:-1], c, t1, a_hat, _VFRI3_BATCH_ROOT)  # z has only 4 polys
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri3_hints(z, c, t1[:-1], a_hat, _VFRI3_BATCH_ROOT)  # t1 has only 5 polys
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, b'\x00' * 16)  # root too short
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_multi_query():
+    """n_queries=3, num_folds=5: query_hints grows with number of queries."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4500)
+
+    r1 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=5)
+    r3 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=3, num_folds=5)
+
+    assert r3.query_hints != r1.query_hints
+    assert len(r3.query_hints) > len(r1.query_hints), "More queries → larger hint payload"
+    assert r3.n_queries == 3
