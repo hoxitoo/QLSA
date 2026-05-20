@@ -141,8 +141,15 @@ Quartic extension: `CM31[u] / (u² - R)` where `R = CM31(2, 1) = 2 + i` (matches
 - Operations: `pack/c0/c1`, `add/sub/mul/neg/inv`, `fromCM31/fromM31`, `fromBytes16LE`
 - FRI: `friLinearFold(fPlus, fMinus, alpha)` — linear combination fold step for real M31 inputs
 
+### `contracts/src/verifier/Blake2sYul.sol`
+Yul-assembly optimised Blake2s-256 — same interface as `Blake2s.sol`, with `_compress()` fully in
+`assembly ("memory-safe")`.  Working state v0..v15 as Yul local variables; `G` as inline Yul
+function with multi-return `(ra,rb,rc,rd)`.  Active hash backend for MerkleVerifier and TwoChannel.
+9 RFC 7693 test vectors verified (Blake2sYul.test.js).
+
 ### `contracts/src/verifier/MerkleVerifier.sol`
 Blake2s binary Merkle inclusion proofs matching Stwo's trace tree structure.
+Uses Blake2sYul as the hash backend.
 - `hashLeaf(uint32[] colValues)` — hash M31 column values as LE uint32 words
 - `hashPair(left, right)` — Blake2s(left ‖ right) for internal nodes
 - `verify(root, leafHash, index, depth, siblings)` — calldata variant
@@ -150,6 +157,7 @@ Blake2s binary Merkle inclusion proofs matching Stwo's trace tree structure.
 
 ### `contracts/src/verifier/TwoChannel.sol`
 Stwo's `Blake2sM31Channel` replicated in Solidity — the Fiat-Shamir transcript engine.
+Uses Blake2sYul as the hash backend.
 - Matches `Blake2sM31Channel` from `stwo/src/core/channel/blake2s.rs` exactly (verified by Rust cross-check vectors from Stwo 2.2.0).
 - State: `struct State { bytes32 digest; uint32 nDraws; }` — digest is 32 bytes of 8 LE M31 words.
 - `Blake2sM31Hash(data)`: `Blake2s-256(data)` then `reduce_to_m31` on each 4-byte LE chunk.
@@ -357,7 +365,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierVFRI3 completes the on-chain FRI protocol — K parametric line-fold rounds + non-constant last-layer polynomial bounded-degree check (full evaluation array → Merkle root); each query verifies: trace Merkle (p + −p), composition binding, OODS quotient, circle fold, FRI L1, K×(sibling Merkle + Chebyshev-twiddle line fold + FRI layer Merkle), all with full Fiat-Shamir; remaining: RPO256 hash AIR, full OODS wiring to real STARK proof
+1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul now passes full NttBatch E2E verification on-chain (1 poly / 1 query / 9 folds, ~855 ms, within 16.7 M gas eth_call cap); remaining for MVP-4: RPO256 hash AIR, full OODS wiring to a real STARK proof with production query count (20 queries / blowup 64)
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
