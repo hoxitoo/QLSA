@@ -103,6 +103,7 @@ library CM31 {
         require(offset + 8 <= data.length, "CM31: out of bounds");
         uint256 a = _readLE32(data, offset);       // real part
         uint256 b = _readLE32(data, offset + 4);   // imag part
+        require(a < M31.P && b < M31.P, "CM31: value out of M31 range");
         return pack(a, b);
     }
 

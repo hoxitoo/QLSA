@@ -38,12 +38,20 @@ _TRUSTED_PROXIES: frozenset[str] = frozenset({"127.0.0.1", "::1"})
 
 
 def _get_client_ip(request: Request) -> str:
-    """Return the real client IP, honouring X-Forwarded-For behind trusted proxies."""
+    """Return the real client IP, honouring X-Forwarded-For behind trusted proxies.
+
+    When the immediate peer is a trusted proxy we read X-Forwarded-For and take
+    the *rightmost* (last) entry — that is the IP the trusted proxy itself appended
+    and therefore cannot be spoofed by the client.  Taking the first entry would
+    allow an attacker to inject an arbitrary IP before the proxy sees the request.
+    """
     host = request.client.host if request.client else "unknown"
     if host in _TRUSTED_PROXIES:
         forwarded = request.headers.get("X-Forwarded-For", "")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+            if parts:
+                return parts[-1]
     return host
 
 
@@ -51,7 +59,7 @@ def _evict_stale(windows: dict[str, deque[float]], cutoff: float) -> None:
     """Remove entries whose last timestamp is older than *cutoff*."""
     stale = [ip for ip, dq in windows.items() if not dq or dq[-1] < cutoff]
     for ip in stale:
-        del windows[ip]
+        windows.pop(ip, None)  # pop avoids KeyError on concurrent eviction
 
 
 def _check_rate(windows: dict[str, deque[float]], ip: str, limit: int) -> bool:
@@ -62,7 +70,9 @@ def _check_rate(windows: dict[str, deque[float]], ip: str, limit: int) -> bool:
     with _rate_lock:
         _rate_call_count += 1
         if _rate_call_count >= _EVICT_EVERY:
-            _evict_stale(windows, cutoff)
+            # Evict both window dicts so neither grows unboundedly.
+            _evict_stale(_tx_windows, cutoff)
+            _evict_stale(_batch_windows, cutoff)
             _rate_call_count = 0
         dq = windows.setdefault(ip, deque())
         while dq and dq[0] < cutoff:

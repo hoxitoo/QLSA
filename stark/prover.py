@@ -1075,6 +1075,42 @@ def verify_mldsa_witness_stark_v21(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v21_py(result.proof_bundle))
 
 
+def _validate_mldsa65_inputs(
+    a_hat: list[list[int]],
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    hints: list[list[bool]],
+    k: int,
+    l: int,
+) -> None:
+    """Validate that all combined-STARK inputs match ML-DSA-65 requirements."""
+    if k != 6 or l != 5:
+        raise ValueError(f"Combined STARK requires k=6, l=5 (ML-DSA-65); got k={k}, l={l}")
+    if len(a_hat) != k * l:
+        raise ValueError(f"a_hat must have k*l={k*l} polynomials; got {len(a_hat)}")
+    if len(z) != l:
+        raise ValueError(f"z must have l={l} polynomials; got {len(z)}")
+    if len(c) != 256:
+        raise ValueError(f"c must have 256 coefficients; got {len(c)}")
+    if len(t1) != k:
+        raise ValueError(f"t1 must have k={k} polynomials; got {len(t1)}")
+    if len(hints) != k:
+        raise ValueError(f"hints must have k={k} rows; got {len(hints)}")
+    for i, poly in enumerate(a_hat):
+        if len(poly) != 256:
+            raise ValueError(f"a_hat[{i}] must have 256 coefficients; got {len(poly)}")
+    for j, poly in enumerate(z):
+        if len(poly) != 256:
+            raise ValueError(f"z[{j}] must have 256 coefficients; got {len(poly)}")
+    for i, poly in enumerate(t1):
+        if len(poly) != 256:
+            raise ValueError(f"t1[{i}] must have 256 coefficients; got {len(poly)}")
+    for i, row in enumerate(hints):
+        if len(row) != 256:
+            raise ValueError(f"hints[{i}] must have 256 elements; got {len(row)}")
+
+
 def prove_mldsa_witness_stark_v22(
     a_hat:       list[list[int]],
     z:           list[list[int]],
@@ -1096,6 +1132,7 @@ def prove_mldsa_witness_stark_v22(
 
     Raises RuntimeError if the extension is not installed or proving fails.
     """
+    _validate_mldsa65_inputs(a_hat, z, c, t1, hints, k, l)
     _require_ext("prove_mldsa_witness_v22_py")
     try:
         bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v22_py(
@@ -1115,6 +1152,53 @@ def verify_mldsa_witness_stark_v22(result: MldsaWitnessResult) -> bool:
     """Verify all STARK sub-proofs in an MldsaWitnessResult (V22 pipeline)."""
     _require_ext("verify_mldsa_witness_v22_py")
     return bool(_ext.verify_mldsa_witness_v22_py(result.proof_bundle))
+
+
+def prove_mldsa_witness_stark_v23(
+    a_hat:       list[list[int]],
+    z:           list[list[int]],
+    c:           list[int],
+    t1:          list[list[int]],
+    hints:       list[list[bool]],
+    k:           int,
+    l:           int,
+    c_tilde:     bytes | None = None,
+    merkle_root: bytes | None = None,
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness (V23 pipeline, 1 sub-proof):
+      Single 8-component STARK — V22 + RangeQBatch AIR proving az_hat ∈ [0, Q).
+
+    Adds a RangeQBatch component (288 columns, LOG=8) as the 8th component in
+    Tree 1, closing the soundness gap in the AzFull multiplication constraints by
+    proving each output coefficient az_hat[j][p] ∈ [0, Q) for all j ∈ 0..K.
+
+    The proof is cryptographically tied to both the ML-DSA signature (c_tilde)
+    and the aggregation batch (merkle_root).  Tampered merkle_root causes FRI
+    transcript divergence and verification failure.
+
+    Raises RuntimeError if the extension is not installed or proving fails.
+    """
+    _validate_mldsa65_inputs(a_hat, z, c, t1, hints, k, l)
+    _require_ext("prove_mldsa_witness_v23_py")
+    try:
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v23_py(
+            a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_v23_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
+    )
+
+
+def verify_mldsa_witness_stark_v23(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V23 pipeline)."""
+    _require_ext("verify_mldsa_witness_v23_py")
+    return bool(_ext.verify_mldsa_witness_v23_py(result.proof_bundle))
 
 
 def verify_mldsa_hash_check(
@@ -1266,3 +1350,142 @@ def _call_prover_merkle(
         log_size=log_size,
         onchain_commitment=onchain_commitment,
     )
+
+
+@dataclass
+class VFRI2HintResult:
+    """Result of gen_poseidon2_vfri2_hints — ready for QLSAVerifierVFRI2.verify()."""
+    proof:       bytes  # ≥700 bytes; [0:8]=nonce LE u64, [8:40]=traceRoot
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI2.verify(queryHints)
+
+
+def gen_poseidon2_vfri2_hints(
+    leaves: list[int],
+    batch_merkle_root: bytes,
+    n_queries: int = 20,
+) -> VFRI2HintResult:
+    """Generate VFRI2-compatible proof and ABI-encoded queryHints.
+
+    Uses the zero-polynomial Poseidon2 trace (all-zero columns) to produce
+    a provably valid VFRI2 proof while exercising the full Fiat-Shamir transcript,
+    Merkle tree construction, and ABI encoding pipeline.
+
+    Args:
+        leaves: Poseidon2 hash-chain input values (non-empty list of u64 integers).
+        batch_merkle_root: 32-byte batch Merkle root mixed into the Blake2s
+            commitment binding (Blake2s(proof[:32]‖root)[:16]).
+        n_queries: Number of FRI queries (default 20 → 130-bit security with
+            LOG_BLOWUP=6, POW_BITS=10).
+
+    Returns:
+        VFRI2HintResult with proof, commitment, and ABI-encoded query_hints.
+    """
+    _require_ext("gen_poseidon2_vfri2_hints")
+    if not leaves:
+        raise ValueError("leaves must not be empty")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_poseidon2_vfri2_hints_py(
+            leaves, list(batch_merkle_root), n_queries
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_poseidon2_vfri2_hints failed: {exc}") from exc
+    return VFRI2HintResult(proof=proof, commitment=commitment, query_hints=query_hints)
+
+
+
+@dataclass
+class VFRI3RealHintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI3.verify(queryHints)
+
+
+def gen_poseidon2_vfri3_real(
+    leaves: list[int],
+    batch_merkle_root: bytes,
+    n_queries: int = 20,
+) -> VFRI3RealHintResult:
+    """Generate VFRI3-compatible proof and ABI-encoded queryHints from real Poseidon2 trace.
+
+    Unlike gen_poseidon2_vfri2_hints (zero-polynomial), this function uses the actual
+    Poseidon2 trace built from ``leaves``, computes OODS evaluations via barycentric
+    Lagrange interpolation over QM31, and produces a non-constant FRI last layer suitable
+    for QLSAVerifierVFRI3 (bounded-degree last-layer check).
+
+    Args:
+        leaves: Poseidon2 hash-chain input values (non-empty list of u64 integers).
+        batch_merkle_root: 32-byte batch Merkle root mixed into the Blake2s
+            commitment binding (Blake2s(proof[:32]‖root)[:16]).
+        n_queries: Number of FRI queries (default 20 → 130-bit security with
+            LOG_BLOWUP=6, POW_BITS=10).
+
+    Returns:
+        VFRI3RealHintResult with proof, commitment, and ABI-encoded query_hints
+        (uint128[] lastLayerCoeffs, uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg,
+        bytes32[] friLayerRoots, QueryHints[]).
+    """
+    _require_ext("gen_poseidon2_vfri3_real")
+    if not leaves:
+        raise ValueError("leaves must not be empty")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_poseidon2_vfri3_real_py(
+            leaves, list(batch_merkle_root), n_queries
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_poseidon2_vfri3_real failed: {exc}") from exc
+    return VFRI3RealHintResult(proof=proof, commitment=commitment, query_hints=query_hints)
+
+
+@dataclass
+class NttBatchVFRI3HintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI3.verify(queryHints)
+
+
+def gen_ntt_batch_vfri3_hints(
+    polys: list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries: int = 20,
+) -> NttBatchVFRI3HintResult:
+    """Generate VFRI3-compatible hints from ML-DSA NttBatch AIR trace.
+
+    Runs the 649-column NttBatch ML-DSA AIR (LOG=10, 1024 rows) on ``polys``
+    (z×5 + c×1 + t1×6 = 12 polynomials for ML-DSA-65), computes OODS evaluations
+    via barycentric Lagrange interpolation, and produces hints for
+    QLSAVerifierVFRI3 — the first on-chain verification of ML-DSA NTT arithmetic.
+
+    Args:
+        polys: List of polynomials, each with exactly 256 i64 coefficients.
+               For ML-DSA-65: 12 polys (5 z + 1 c + 6 t1).
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries: Number of FRI queries (default 20 → 130-bit security).
+
+    Returns:
+        NttBatchVFRI3HintResult with proof, commitment, and ABI-encoded query_hints.
+    """
+    _require_ext("gen_ntt_batch_vfri3_hints")
+    if not polys:
+        raise ValueError("polys must not be empty")
+    if any(len(p) != 256 for p in polys):
+        raise ValueError("each polynomial must have exactly 256 coefficients")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_ntt_batch_vfri3_hints_py(
+            polys, list(batch_merkle_root), n_queries
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_ntt_batch_vfri3_hints failed: {exc}") from exc
+    return NttBatchVFRI3HintResult(proof=proof, commitment=commitment, query_hints=query_hints)

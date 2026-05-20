@@ -30,7 +30,7 @@ needs_ext = pytest.mark.skipif(
 )
 
 try:
-    import oqs as _oqs_check
+    import oqs.oqs as _oqs_check
     _HAVE_OQS = hasattr(_oqs_check, "Signature")
 except ImportError:
     _HAVE_OQS = False
@@ -224,7 +224,7 @@ def test_different_batches_have_different_commitments():
 
 def _mldsa_entries(n: int) -> list[tuple[bytes, bytes, bytes]]:
     """Generate n real ML-DSA-65 (pk, msg, sig) triples via liboqs."""
-    import oqs
+    import oqs.oqs as oqs
     entries = []
     for i in range(n):
         alg = oqs.Signature("ML-DSA-65")

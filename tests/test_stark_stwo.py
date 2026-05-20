@@ -374,7 +374,7 @@ def test_mldsa_witness_wrong_input_size_raises():
 # ─── prove_mldsa_sig_witness — end-to-end with real oqs signature ─────────────
 
 try:
-    import oqs as _oqs
+    import oqs.oqs as _oqs
     _HAVE_OQS = hasattr(_oqs, "Signature")
 except ImportError:
     _HAVE_OQS = False
@@ -1030,3 +1030,453 @@ def test_wipe_key_uses_rust_wipe_when_ext_available():
     buf = bytearray(b"\xAB\xCD\xEF" * 100)
     wipe_key(buf)
     assert all(b == 0 for b in buf)
+
+
+# ─── gen_poseidon2_vfri2_hints — VFRI2 bridge ────────────────────────────────
+
+_FAKE_BATCH_ROOT = bytes(range(32))  # 32 deterministic bytes for tests
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_output_schema():
+    """gen_poseidon2_vfri2_hints_py returns (bytes, str, bytes)."""
+    proof, commitment, hints = _ext.gen_poseidon2_vfri2_hints_py(
+        [1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2
+    )
+    assert isinstance(proof, bytes)
+    assert isinstance(commitment, str)
+    assert isinstance(hints, bytes)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_proof_length():
+    """Proof must be ≥ 700 bytes (QLSAVerifierVFRI2.MIN_PROOF_LENGTH)."""
+    proof, _, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(proof) >= 700
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_nonce_in_proof():
+    """proof[0:8] must be nonce=2 as LE u64."""
+    import struct
+    proof, _, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    nonce = struct.unpack_from("<Q", proof, 0)[0]
+    assert nonce == 2
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_commitment_is_32_hex_chars():
+    """commitment must be a 32-character lowercase hex string (16 bytes)."""
+    _, commitment, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(commitment) == 32
+    assert all(c in "0123456789abcdef" for c in commitment)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_commitment_binding():
+    """commitment == Blake2s(proof[:32] ‖ batch_merkle_root)[:16] as hex."""
+    import hashlib
+    batch_root = bytes(range(32))
+    proof, commitment, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(batch_root), 2)
+    expected = hashlib.blake2s(proof[:32] + batch_root).digest()[:16].hex()
+    assert commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_trace_root_in_proof():
+    """proof[8:40] must be non-zero (trace Merkle root)."""
+    proof, _, _ = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert proof[8:40] != b"\x00" * 32
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_deterministic():
+    """Same inputs produce identical outputs."""
+    leaves = [10, 20, 30, 40]
+    root = bytes(range(32))
+    r1 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 2)
+    r2 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 2)
+    assert r1[0] == r2[0]  # proof bytes
+    assert r1[1] == r2[1]  # commitment
+    assert r1[2] == r2[2]  # hints
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_different_roots_different_commitments():
+    """Different batch Merkle roots produce different commitments."""
+    leaves = [1, 2, 3, 4]
+    root_a = bytes(range(32))
+    root_b = bytes([i ^ 0xFF for i in range(32)])
+    _, c_a, _ = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root_a), 2)
+    _, c_b, _ = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root_b), 2)
+    assert c_a != c_b
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_different_queries_different_hints():
+    """Different n_queries values produce different (sized) hint encodings."""
+    leaves = [1, 2, 3, 4]
+    root = bytes(range(32))
+    _, _, h1 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 1)
+    _, _, h2 = _ext.gen_poseidon2_vfri2_hints_py(leaves, list(root), 2)
+    assert len(h2) > len(h1)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_query_hints_non_empty():
+    """ABI-encoded query hints must be non-empty."""
+    _, _, hints = _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(hints) > 0
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_empty_leaves_error():
+    """Empty leaves list must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri2_hints_py([], list(_FAKE_BATCH_ROOT), 2)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_bad_root_length_error():
+    """batch_merkle_root of wrong length must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri2_hints_py([1, 2, 3, 4], list(b"\x00" * 16), 2)  # 16 bytes, not 32
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_prover_module_wrapper():
+    """stark.prover.gen_poseidon2_vfri2_hints wraps the Rust function correctly."""
+    from stark.prover import gen_poseidon2_vfri2_hints, VFRI2HintResult
+    import hashlib
+    root = bytes(range(32))
+    result = gen_poseidon2_vfri2_hints([1, 2, 3, 4], root, n_queries=2)
+    assert isinstance(result, VFRI2HintResult)
+    assert len(result.proof) >= 700
+    assert len(result.commitment) == 32
+    assert len(result.query_hints) > 0
+    # Verify commitment binding
+    expected = hashlib.blake2s(result.proof[:32] + root).digest()[:16].hex()
+    assert result.commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri2_hints_prover_module_validates_inputs():
+    """stark.prover.gen_poseidon2_vfri2_hints raises ValueError for bad inputs."""
+    from stark.prover import gen_poseidon2_vfri2_hints
+    with pytest.raises(ValueError, match="empty"):
+        gen_poseidon2_vfri2_hints([], bytes(32))
+    with pytest.raises(ValueError, match="32 bytes"):
+        gen_poseidon2_vfri2_hints([1, 2], bytes(16))  # wrong root length
+    with pytest.raises(ValueError, match="n_queries"):
+        gen_poseidon2_vfri2_hints([1, 2], bytes(32), n_queries=0)
+
+
+
+# ── gen_poseidon2_vfri3_real tests ────────────────────────────────────────────
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_output_schema():
+    """Returns (bytes, str, bytes) triple."""
+    proof, commitment, hints = _ext.gen_poseidon2_vfri3_real_py(
+        [1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2
+    )
+    assert isinstance(proof, bytes)
+    assert isinstance(commitment, str)
+    assert isinstance(hints, bytes)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_proof_length():
+    """Proof must be at least 700 bytes."""
+    proof, _, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(proof) >= 700
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_commitment_format():
+    """Commitment is 32-char hex string (16 bytes)."""
+    _, commitment, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(commitment) == 32
+    assert bytes.fromhex(commitment)  # valid hex
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_commitment_binding():
+    """Commitment = Blake2s(proof[:32] ‖ batch_merkle_root)[:16]."""
+    import hashlib
+    root = bytes(range(32))
+    proof, commitment, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(root), 2)
+    expected = hashlib.blake2s(proof[:32] + root).digest()[:16].hex()
+    assert commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_deterministic():
+    """Same inputs produce identical outputs."""
+    leaves = [10, 20, 30, 40]
+    root = list(_FAKE_BATCH_ROOT)
+    r1 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    r2 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    assert r1[1] == r2[1]  # commitments equal
+    assert r1[2] == r2[2]  # hints equal
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_different_leaves_differ():
+    """Different leaves produce different commitments."""
+    root = list(_FAKE_BATCH_ROOT)
+    _, c1, _ = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], root, 2)
+    _, c2, _ = _ext.gen_poseidon2_vfri3_real_py([5, 6, 7, 8], root, 2)
+    assert c1 != c2
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_hints_non_empty():
+    """ABI-encoded hints must be non-empty."""
+    _, _, hints = _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(_FAKE_BATCH_ROOT), 2)
+    assert len(hints) > 0
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_hints_differ_from_zero_poly():
+    """Real-trace hints differ from the zero-polynomial (VFRI2) hints."""
+    leaves = [1, 2, 3, 4]
+    root = list(_FAKE_BATCH_ROOT)
+    _, _, h3 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    _, _, h2 = _ext.gen_poseidon2_vfri2_hints_py(leaves, root, 2)
+    assert h3 != h2
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_more_queries_larger_hints():
+    """More queries produce a larger hints blob."""
+    leaves = [1, 2, 3, 4]
+    root = list(_FAKE_BATCH_ROOT)
+    _, _, h1 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 1)
+    _, _, h2 = _ext.gen_poseidon2_vfri3_real_py(leaves, root, 2)
+    assert len(h2) > len(h1)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_empty_leaves_error():
+    """Empty leaves list must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri3_real_py([], list(_FAKE_BATCH_ROOT), 2)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_bad_root_length_error():
+    """batch_merkle_root of wrong length must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_poseidon2_vfri3_real_py([1, 2, 3, 4], list(b"\x00" * 16), 2)
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_prover_module_wrapper():
+    """stark.prover.gen_poseidon2_vfri3_real wraps the Rust function correctly."""
+    from stark.prover import gen_poseidon2_vfri3_real, VFRI3RealHintResult
+    import hashlib
+    root = bytes(range(32))
+    result = gen_poseidon2_vfri3_real([1, 2, 3, 4], root, n_queries=2)
+    assert isinstance(result, VFRI3RealHintResult)
+    assert len(result.proof) >= 700
+    assert len(result.commitment) == 32
+    assert len(result.query_hints) > 0
+    expected = hashlib.blake2s(result.proof[:32] + root).digest()[:16].hex()
+    assert result.commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri3_real_prover_module_validates_inputs():
+    """stark.prover.gen_poseidon2_vfri3_real raises ValueError for bad inputs."""
+    from stark.prover import gen_poseidon2_vfri3_real
+    with pytest.raises(ValueError, match="empty"):
+        gen_poseidon2_vfri3_real([], bytes(32))
+    with pytest.raises(ValueError, match="32 bytes"):
+        gen_poseidon2_vfri3_real([1, 2], bytes(16))
+    with pytest.raises(ValueError, match="n_queries"):
+        gen_poseidon2_vfri3_real([1, 2], bytes(32), n_queries=0)
+
+
+# ── gen_ntt_batch_vfri3_hints tests ──────────────────────────────────────────
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_output_schema():
+    """Returns (bytes, str, bytes) triple."""
+    polys = [[0]*256 for _ in range(2)]
+    proof, commitment, hints = _ext.gen_ntt_batch_vfri3_hints_py(polys, list(_FAKE_BATCH_ROOT), 2)
+    assert isinstance(proof, bytes)
+    assert isinstance(commitment, str) and len(commitment) == 32
+    assert isinstance(hints, bytes) and len(hints) > 0
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_commitment_binding():
+    """Commitment = Blake2s(proof[:32] ‖ batch_merkle_root)[:16]."""
+    import hashlib
+    polys = [[i % 100 for _ in range(256)] for i in range(2)]
+    root = bytes(range(32))
+    proof, commitment, _ = _ext.gen_ntt_batch_vfri3_hints_py(polys, list(root), 2)
+    expected = hashlib.blake2s(proof[:32] + root).digest()[:16].hex()
+    assert commitment == expected
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_deterministic():
+    """Same inputs produce identical outputs."""
+    polys = [[1]*256 for _ in range(3)]
+    root = list(_FAKE_BATCH_ROOT)
+    r1 = _ext.gen_ntt_batch_vfri3_hints_py(polys, root, 1)
+    r2 = _ext.gen_ntt_batch_vfri3_hints_py(polys, root, 1)
+    assert r1[1] == r2[1] and r1[2] == r2[2]
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_nfolds_reduces_size():
+    """Fewer fold rounds produce smaller last-layer (larger hints for more coeffs)."""
+    polys = [[0]*256 for _ in range(2)]
+    root = list(_FAKE_BATCH_ROOT)
+    _, _, h_full = _ext.gen_ntt_batch_vfri3_hints_py(polys, root, 1)      # 9 folds
+    _, _, h_few  = _ext.gen_ntt_batch_vfri3_hints_nfolds_py(polys, root, 1, 3)  # 3 folds
+    # fewer folds → more last-layer coeffs → larger hints
+    assert len(h_few) > len(h_full)
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_wrong_poly_len_error():
+    """Polynomial with wrong length must raise an error."""
+    polys = [[0]*255]  # 255 instead of 256
+    with pytest.raises(Exception):
+        _ext.gen_ntt_batch_vfri3_hints_py(polys, list(_FAKE_BATCH_ROOT), 1)
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_empty_polys_error():
+    """Empty polys list must raise an error."""
+    with pytest.raises(Exception):
+        _ext.gen_ntt_batch_vfri3_hints_py([], list(_FAKE_BATCH_ROOT), 1)
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri3_hints_prover_module_wrapper():
+    """stark.prover.gen_ntt_batch_vfri3_hints wraps the Rust function correctly."""
+    from stark.prover import gen_ntt_batch_vfri3_hints, NttBatchVFRI3HintResult
+    import hashlib
+    polys = [[i for i in range(256)] for _ in range(2)]
+    root = bytes(range(32))
+    result = gen_ntt_batch_vfri3_hints(polys, root, n_queries=2)
+    assert isinstance(result, NttBatchVFRI3HintResult)
+    assert len(result.proof) >= 700
+    assert len(result.commitment) == 32
+    assert len(result.query_hints) > 0
+    expected = hashlib.blake2s(result.proof[:32] + root).digest()[:16].hex()
+    assert result.commitment == expected
+
+
+# ─── ML-DSA witness V23 pipeline (8-component STARK + RangeQBatch) ────────────
+# V23 extends V22 by adding RangeQBatch (288 cols, LOG=8) as 8th component,
+# proving az_hat[i][p] ∈ [0, Q) and closing the AzFull multiplication soundness gap.
+# Requires full ML-DSA-65 dimensions: K=6, L=5.
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_output_schema():
+    """prove_mldsa_witness_v23_py returns (bytes, list[int], list[list[int]], int)."""
+    a_hat = [_rand_poly(i + 3000) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3100 + j) for j in range(_L3)]
+    c     = _rand_poly(3200)
+    t1    = [_rand_poly(3300 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v23_py(
+        a_hat, z, c, t1, hints, _K3, _L3
+    )
+
+    assert isinstance(bundle, bytes) and len(bundle) > 0
+    assert len(max_norms) == _L3
+    assert len(w1_prime) == _K3
+    for row in w1_prime:
+        assert len(row) == N
+    assert isinstance(hw_total, int) and hw_total == 0
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_verify_roundtrip():
+    """prove_mldsa_witness_v23_py → verify_mldsa_witness_v23_py must succeed."""
+    a_hat = [_rand_poly(i + 3010) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3110 + j) for j in range(_L3)]
+    c     = _rand_poly(3210)
+    t1    = [_rand_poly(3310 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v23_py(a_hat, z, c, t1, hints, _K3, _L3)
+    assert _ext.verify_mldsa_witness_v23_py(bundle)
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_tampered_bundle_fails():
+    """Flipping a byte in the V23 bundle must cause verification to fail."""
+    a_hat = [_rand_poly(i + 3020) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3120 + j) for j in range(_L3)]
+    c     = _rand_poly(3220)
+    t1    = [_rand_poly(3320 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v23_py(a_hat, z, c, t1, hints, _K3, _L3)
+    tampered = bytearray(bundle)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_mldsa_witness_v23_py(bytes(tampered))
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_matches_v3_w1_prime():
+    """V23 and V3 pipelines must produce the same w1_prime for the same inputs."""
+    a_hat = [_rand_poly(i + 3030) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3130 + j) for j in range(_L3)]
+    c     = _rand_poly(3230)
+    t1    = [_rand_poly(3330 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    _, _, w1_v3, _  = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+    _, _, w1_v23, _ = _ext.prove_mldsa_witness_v23_py(a_hat, z, c, t1, hints, _K3, _L3)
+
+    assert w1_v3 == w1_v23, "V3 and V23 pipelines must agree on w1_prime"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_merkle_root_binding():
+    """V23 proof with one merkle root must not verify under a different root."""
+    a_hat = [_rand_poly(i + 3040) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3140 + j) for j in range(_L3)]
+    c     = _rand_poly(3240)
+    t1    = [_rand_poly(3340 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+    root1 = list(bytes(range(32)))
+    root2 = list(bytes(range(1, 33)))
+
+    bundle1, _, _, _ = _ext.prove_mldsa_witness_v23_py(
+        a_hat, z, c, t1, hints, _K3, _L3, merkle_root=root1
+    )
+    bundle2, _, _, _ = _ext.prove_mldsa_witness_v23_py(
+        a_hat, z, c, t1, hints, _K3, _L3, merkle_root=root2
+    )
+    assert _ext.verify_mldsa_witness_v23_py(bundle1)
+    assert _ext.verify_mldsa_witness_v23_py(bundle2)
+    assert bundle1 != bundle2, "Different merkle roots must produce different proofs"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_prover_wrapper():
+    """stark.prover.prove_mldsa_witness_stark_v23 wraps the Rust binding correctly."""
+    from stark.prover import prove_mldsa_witness_stark_v23, verify_mldsa_witness_stark_v23
+    from stark.prover import MldsaWitnessResult
+    a_hat = [_rand_poly(i + 3050) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3150 + j) for j in range(_L3)]
+    c     = _rand_poly(3250)
+    t1    = [_rand_poly(3350 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    result = prove_mldsa_witness_stark_v23(a_hat, z, c, t1, hints, _K3, _L3)
+    assert isinstance(result, MldsaWitnessResult)
+    assert isinstance(result.proof_bundle, bytes) and len(result.proof_bundle) > 0
+    assert verify_mldsa_witness_stark_v23(result)

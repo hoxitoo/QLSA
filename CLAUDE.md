@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -67,6 +67,7 @@ python -m testnet.e2e --txs 8 --dry-run
 | LAMBDA_BYTES (c̃) | 48 bytes | ML-DSA-65 |
 | onchain_commitment | 16 bytes | Blake2s(proof[:32] ∥ c_tilde[:32])[:16] |
 | V22 STARK columns | 3,217 | 649+1523+295+649+24+15+61 main + 1 preproc |
+| V23 STARK columns | 3,505 | V22 + 288 RangeQBatch + 1 preproc |
 
 ## Important Modules
 
@@ -78,13 +79,33 @@ python -m testnet.e2e --txs 8 --dry-run
 - `verify_mldsa_hash_check(pk, msg, result)` → `bool` — off-circuit FIPS 204 hash step
 - `NORM_BOUND: int = 524_092`
 
-**V22 pipeline (current production):**
+**V22 pipeline (7-component single STARK):**
 - `prove_mldsa_witness_stark_v22(a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root)` → `MldsaWitnessResult`
 - `verify_mldsa_witness_stark_v22(result)` → `bool`
 
-All prior versions (V4–V21) remain available for comparison and regression testing.
+**V23 pipeline (current production — 8-component single STARK + RangeQBatch):**
+- `prove_mldsa_witness_stark_v23(a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root)` → `MldsaWitnessResult`
+- `verify_mldsa_witness_stark_v23(result)` → `bool`
+- Adds `RangeQBatch(LOG=8, 288 cols)` proving `az_hat[i][p] ∈ [0, Q)` for all K output polynomials
+- Closes the primary soundness gap in AzFull multiplication constraints
+
+All prior versions (V4–V22) remain available for comparison and regression testing.
 
 ### `stark_stwo/src/mldsa_verify_stark.rs`
+
+**V23 proof struct and pipeline (8-component single STARK, current production):**
+```
+VerifyMldsaProofV23
+  prove_verify_mldsa_v23(a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root)
+  verify_mldsa_witness_v23(proof)
+```
+All 8 circuits in one FRI commitment (3504 main trace columns + 1 preproc):
+```
+NttBatch(LOG=10, 649) + AzFull(LOG=8, 1523) + Ct1Full(LOG=8, 295)
++ InttBatch(LOG=10, 649) + WPrimeFull(LOG=8, 24)
++ NormCheckBatch(LOG=8, 15) + UseHintBatchV2(LOG=8, 61 + 1 preproc)
++ RangeQBatch(LOG=8, 288)  ← NEW: az_hat ∈ [0, Q) range check
+```
 
 **V22 proof struct and pipeline (7-component single STARK):**
 ```
@@ -141,8 +162,15 @@ Quartic extension: `CM31[u] / (u² - R)` where `R = CM31(2, 1) = 2 + i` (matches
 - Operations: `pack/c0/c1`, `add/sub/mul/neg/inv`, `fromCM31/fromM31`, `fromBytes16LE`
 - FRI: `friLinearFold(fPlus, fMinus, alpha)` — linear combination fold step for real M31 inputs
 
+### `contracts/src/verifier/Blake2sYul.sol`
+Yul-assembly optimised Blake2s-256 — same interface as `Blake2s.sol`, with `_compress()` fully in
+`assembly ("memory-safe")`.  Working state v0..v15 as Yul local variables; `G` as inline Yul
+function with multi-return `(ra,rb,rc,rd)`.  Active hash backend for MerkleVerifier and TwoChannel.
+9 RFC 7693 test vectors verified (Blake2sYul.test.js).
+
 ### `contracts/src/verifier/MerkleVerifier.sol`
 Blake2s binary Merkle inclusion proofs matching Stwo's trace tree structure.
+Uses Blake2sYul as the hash backend.
 - `hashLeaf(uint32[] colValues)` — hash M31 column values as LE uint32 words
 - `hashPair(left, right)` — Blake2s(left ‖ right) for internal nodes
 - `verify(root, leafHash, index, depth, siblings)` — calldata variant
@@ -150,6 +178,7 @@ Blake2s binary Merkle inclusion proofs matching Stwo's trace tree structure.
 
 ### `contracts/src/verifier/TwoChannel.sol`
 Stwo's `Blake2sM31Channel` replicated in Solidity — the Fiat-Shamir transcript engine.
+Uses Blake2sYul as the hash backend.
 - Matches `Blake2sM31Channel` from `stwo/src/core/channel/blake2s.rs` exactly (verified by Rust cross-check vectors from Stwo 2.2.0).
 - State: `struct State { bytes32 digest; uint32 nDraws; }` — digest is 32 bytes of 8 LE M31 words.
 - `Blake2sM31Hash(data)`: `Blake2s-256(data)` then `reduce_to_m31` on each 4-byte LE chunk.
@@ -201,8 +230,8 @@ Multi-query verifier — extends V4 by verifying N independent FRI queries per c
   ```
 - All queries share the same trace root (proof[8:40]); each query independently verified.
 - Constants: `MIN_QUERIES = 1`, `MAX_QUERIES = 64`.
-- Security note: N queries with blowup=16 → ~N×4 bits soundness (e.g. 8 queries ≈ 32 bits).
-  For mainnet-grade 128-bit security: N=32 queries (or fewer with higher blowup).
+- Security note: security = log_blowup × n_queries + pow_bits (Stwo PcsConfig formula).
+  Current STARK config: LOG_BLOWUP=6 (blowup=64), N_FRI_QUERIES=20, POW_BITS=10 → 130-bit security.
 - 26 tests: single-query backward compat, 2/3/4-query acceptance, per-query rejection.
 
 ### `contracts/src/BatchRegistryV3.sol`
@@ -211,6 +240,136 @@ On-chain batch registry that uses `IQLSAVerifierV4` (4-param verify with queryHi
 - `submitBatchWithNonces(merkleRoot, commitment, proof, queryHints, senders, newNonces)` — with replay protection
 - All nonce/ownership/event logic identical to BatchRegistryV2
 - 24 tests: deployment, finalization, replay protection, nonces, end-to-end with QLSAVerifierV5 + real hints
+
+### `contracts/src/QLSAVerifierV6.sol`
+Multi-query FRI verifier with Fiat-Shamir query derivation — closes the cherry-pick vulnerability in V5.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding: identical to V5 (`QueryHints[]` struct array)
+- All queries must share the same `treeDepth` (single FRI domain)
+- Query positions derived on-chain: `TwoChannel.init() → mixRoot(embeddedRoot) → drawQueries(treeDepth, N)`
+- Each hint's `queryIndex` must equal the channel-derived index for that slot — caller cannot choose positions
+- 24 tests: constants, valid 1/2-query, Fiat-Shamir enforcement (wrong/swapped/zero index), treeDepth mismatch,
+  proof-level rejections, per-query rejections, wrong embedded root
+
+### `contracts/src/QLSAVerifierV7.sol`
+Full Fiat-Shamir binding: derived `friAlpha` + derived query indices — closes the remaining cherry-pick vulnerability in V6.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding: identical to V5/V6 (`QueryHints[]` struct array)
+- Channel transcript order: `init() → mixRoot(embeddedRoot) → drawSecureFelt() → drawQueries(treeDepth, N)`
+- Each hint's `friAlpha` must equal the channel-derived QM31 folding challenge
+- Each hint's `queryIndex` must equal the channel-derived index for that slot
+- 25 tests: constants, valid 1/2-query, friAlpha enforcement (wrong alpha, correct alpha + wrong fold,
+  second-query wrong alpha), query index enforcement, treeDepth mismatch, proof-level rejections,
+  per-query rejections, wrong embedded root
+
+### `contracts/src/QLSAVerifierV8.sol`
+Composition binding: `fPlus`/`fMinus` proved to be the correct QM31 linear combination of committed column values.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- New hint fields: `queryValuesNeg[]` (column values at antipodal index) + `merkleSiblingsNeg[]` (Merkle proof)
+- `antipodalIdx = (queryIdx + domainSize/2) mod domainSize` — gives circle-group complement (−x, y)
+- Channel transcript: `mixRoot → drawSecureFelt [compAlpha] → drawSecureFelt [friAlpha] → drawQueries`
+- `fPlus  = Σ_j [compAlpha^j · QM31.fromM31(queryValues[j])]` verified on-chain
+- `fMinus = Σ_j [compAlpha^j · QM31.fromM31(queryValuesNeg[j])]` verified on-chain
+- Antipodal position independently Merkle-verified in same trace commitment tree
+- 26 tests: constants, valid 1/2-query, fPlus/fMinus binding, antipodal Merkle, Fiat-Shamir, proof-level/per-query rejections
+
+### `contracts/src/QLSAVerifierV9.sol`
+OODS quotient check: `fPlus`/`fMinus` linked to polynomial evaluations at the OODS point z.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding changed to `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, QueryHints[])` — OODS evals are global (shared across all queries), not per-query
+- Channel transcript: `mixRoot → drawSecureFelt [z_x] → mixU32s(oodsEvalsPos) → mixU32s(oodsEvalsNeg) → drawSecureFelt [compAlpha] → drawSecureFelt [friAlpha] → drawQueries`
+- OODS quotient check (multiplication form — avoids QM31.inv):
+  - `fPlus  · (p.x − z_x) == Σ_j[α^j · col_j(p)]  − Σ_j[α^j · oodsEvalPos_j]`
+  - `fMinus · (−p.x − z_x) == Σ_j[α^j · col_j(−p)] − Σ_j[α^j · oodsEvalNeg_j]`
+- Denominator zero-check: rejects if `p.x == ±z_x` (degenerate OODS point)
+- `QueryHints` struct: identical 13 fields as V8; meaning of `fPlus`/`fMinus` changes to OODS quotient values
+- 27 tests: constants, valid 1/2-query, OODS eval tampering, fPlus/fMinus quotient binding, queryValues tampering, empty/mismatched eval arrays, inherited Fiat-Shamir/Merkle/fold rejections
+
+### `contracts/src/QLSAVerifierV10.sol`
+FRI layer 1 decommitment: circle-fold outputs committed in a dedicated Merkle tree, binding foldedValue to the prover's committed polynomial.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32 friLayer1Root, QueryHints[])`
+- FRI layer 1 tree: `2^treeDepth` leaves; leaf j = `Blake2s(qm31Words(foldedValue_j))` for each circle-domain position j
+- Channel transcript: `mixRoot → z_x → mixU32s(oodsPos) → mixU32s(oodsNeg) → compAlpha → friAlpha → mixRoot(friLayer1Root) → drawQueries`
+- Per-query check: `MerkleVerify(friLayer1Root, Blake2s(qm31Words(foldedValue)), queryIndex, treeDepth, friL1Siblings)`
+- `QueryHints` struct: 14 fields (adds `friL1Siblings: bytes32[]` over V9's 13)
+- JS fixture computes foldedValues for ALL `2^treeDepth` circle positions to build the complete FRI layer 1 tree before drawing query indices
+- 32 tests: constants, valid 1/2-query, FRI L1 tampering (root/siblings/value), channel binding (root changes query indices), inherited OODS/Fiat-Shamir/trace-Merkle rejections
+
+### `contracts/src/QLSAVerifierV11.sol`
+FRI layer 2: line fold step reducing circle-fold outputs from N→N/2, with a second Merkle decommitment.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32 friLayer1Root, bytes32 friLayer2Root, QueryHints[])`
+- Line fold pairs FRI layer 1 positions j and j+N/2: `G(x_j)` and `G(−x_j)` fold to `lineFolded[j]`
+  - `gPlus = foldedValue` if `idx < N/2`, else `friL1SiblingValue`
+  - `gMinus` is the other; `xInv = M31.inv(cosetAt(treeDepth, lineIdx).x)`
+  - `lineFolded = lineFold(gPlus, gMinus, friAlpha2, xInv)` (same formula as circleFold but using x⁻¹)
+- FRI layer 2 tree: `2^(treeDepth−1)` leaves at line domain positions; depth = `treeDepth−1`
+- Channel transcript: `... → mixRoot(friLayer1Root) → friAlpha2 → mixRoot(friLayer2Root) → drawQueries`
+- Per-query: sibling foldedValue Merkle-verified in friLayer1Root, line fold computed on-chain, lineFoldedValue Merkle-verified in friLayer2Root
+- `QueryHints` struct: 18 fields (adds `friL1SiblingValue`, `friL1SiblingProof`, `lineFoldedValue`, `friL2Siblings` over V10's 14)
+- Requires `treeDepth ≥ 2` (FRI layer 2 tree must have at least 2 leaves)
+- 31 tests: constants, valid 1/2-query, FRI L2 tampering, sibling enforcement, channel binding, inherited OODS/Fiat-Shamir/trace-Merkle
+
+### `contracts/src/QLSAVerifierV12.sol`
+FRI layer 3: second line fold with doubled-x twiddle, reducing N/2 → N/4 values.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32 friLayer1Root, bytes32 friLayer2Root, bytes32 friLayer3Root, QueryHints[])`
+- Second line fold pairs FRI layer 2 positions j and j+N/4 using **doubled-x twiddle**:
+  - `doubleX = 2·cosetAt(treeDepth, lineIdx2).x² − 1` (x-coord of doubled circle point)
+  - Mathematical proof: `doubleX(j) + doubleX(j+N/4) = 2(x_j²+y_j²)−2 = 0` in M31, so they are negatives
+  - `lineFolded2 = lineFold(gPlus2, gMinus2, friAlpha3, M31.inv(doubleX))`
+- FRI layer 3 tree: `2^(treeDepth−2)` leaves; depth = `treeDepth−2`
+- Channel transcript: `... → mixRoot(friLayer2Root) → friAlpha3 → mixRoot(friLayer3Root) → drawQueries`
+- Per-query: sibling in FRI L2 Merkle-verified, second fold computed on-chain, lineFoldedValue2 Merkle-verified in friLayer3Root
+- `QueryHints` struct: 22 fields (adds `l2SiblingValue`, `l2SiblingProof`, `lineFoldedValue2`, `friL3Siblings` over V11's 18)
+- Requires `treeDepth ≥ 3` (FRI layer 3 tree must have at least 2 leaves)
+- 36 tests: constants, valid 1/2-query, FRI L3 tampering, L2-sibling enforcement, channel binding, inherited OODS/Fiat-Shamir/trace-Merkle
+
+### `contracts/src/QLSAVerifierV13.sol`
+FRI layer 4: third line fold with T₄(x) twiddle, reducing N/4 → N/8 values.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32 friLayer1Root, bytes32 friLayer2Root, bytes32 friLayer3Root, bytes32 friLayer4Root, QueryHints[])`
+- Third fold pairing: FRI L3 positions j and j+N/8, twiddle = T₄(x_j) = 2·(2·x_j²−1)²−1
+  - Mathematical proof: T₄(cos θ) = cos(4θ) (Chebyshev identity), so T₄(x_j) + T₄(x_{j+N/8}) = cos(4θ)+cos(4θ+π) = 0 ✓
+- FRI layer 4 tree: `2^(treeDepth−3)` leaves; depth = `treeDepth−3`
+- Channel transcript: `... → mixRoot(friLayer3Root) → friAlpha4 → mixRoot(friLayer4Root) → drawQueries`
+- `QueryHints` struct: 26 fields (adds `l3SiblingValue`, `l3SiblingProof`, `lineFoldedValue3`, `friL4Siblings` over V12's 22)
+- Requires `treeDepth ≥ 4` (FRI L4 tree must have at least 2 leaves)
+- 34 tests: constants, valid 1/2-query, FRI L4 tampering, L3-sibling enforcement, channel binding, inherited OODS/Fiat-Shamir/trace-Merkle
+
+### `contracts/src/QLSAVerifierVFRI.sol`
+Parametric multi-round FRI verifier — generalises V11/V12/V13 with K = `friLayerRoots.length − 1` line fold rounds.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32[] friLayerRoots, QueryHints[])`
+- `FoldHint` struct: `(siblingValue, siblingProof, foldedValue, merkleProof)` — one entry per fold round per query
+- `QueryHints` struct: 14 base fields + `friL1Siblings` + `FoldHint[] folds`
+- Twiddle for fold round k: T_{2^k}(x_j) computed by k iterations of `t → 2t²−1` starting from `cosetAt(treeDepth, lineIdx_k).x`
+- Channel transcript: `mixRoot(traceRoot) → z_x → mixU32s(oodsPos) → mixU32s(oodsNeg) → compAlpha → friAlpha → mixRoot(friLayerRoots[0]) → for k: friAlphas[k] = drawSecureFelt(); mixRoot(friLayerRoots[k+1]) → drawQueries`
+- Requires `friLayerRoots.length ≥ 2` (at least one fold round) and `treeDepth ≥ numFolds + 1`
+- Constants: `MAX_FOLD_ROUNDS = 28`
+- 46 tests: 5 configurations (numFolds=1/2/3/4 + input validation + Fiat-Shamir + trace-Merkle enforcement); tests across treeDepth=2/3/4/5
+
+### `contracts/src/QLSAVerifierVFRI2.sol`
+VFRI + last-layer constant-polynomial check — closes the final FRI soundness gap.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128 lastLayerValue, uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32[] friLayerRoots, QueryHints[])`
+- Last-layer check: verifier reconstructs the expected Merkle root of a constant tree of depth `treeDepth − K` where every leaf = `hashLeaf(qm31Words(lastLayerValue))`, then asserts it equals `friLayerRoots[K]`
+  - `node = hashLeaf(qm31ToWords(c)); for i in 0..lastDepth: node = hashPair(node, node)`
+  - Because per-query Merkle proofs already bind each final fold value into `friLayerRoots[K]`, and the constant-tree check proves all leaves equal `c`, every query's final fold is cryptographically fixed to `c`
+- All other structures (FoldHint, QueryHints, VerifyCtx, transcript) identical to VFRI
+- 41 tests: 4 treeDepth/numFolds configurations + input validation + Fiat-Shamir + constant-polynomial specifics (constant tree root verification, non-constant tree rejection, consistent-but-wrong value rejection)
+
+### `contracts/src/QLSAVerifierVFRI3.sol`
+VFRI3 — non-constant last-layer polynomial bounded-degree check (MVP-4).
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] lastLayerCoeffs, uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32[] friLayerRoots, QueryHints[])`
+- Last-layer check: prover supplies all `2^(treeDepth−K)` evaluations of the last-layer polynomial; verifier builds actual Merkle tree and asserts root == `friLayerRoots[K]`
+  - If `lastLayerCoeffs.length == 1`: constant-tree optimization (same as VFRI2, gas-efficient)
+  - Otherwise: `nodes[i] = hashLeaf(qm31Words(coeffs[i]))`; tree built bottom-up with `hashPair`
+  - `MAX_LAST_LAYER_SIZE = 65536` (2^16 evaluations max on-chain)
+- Per-query Merkle proofs already bind each final fold into `friLayerRoots[K]`, completing the bounded-degree argument
+- 43 tests: 4 treeDepth/numFolds configurations × constant+non-constant paths, array size validation, single-element tamper, Fiat-Shamir enforcement, trace-Merkle enforcement
 
 ## Multi-Component STARK Pattern
 
@@ -227,10 +386,10 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierV5 verifies N×(Merkle inclusion + circle fold); OODS + line fold chain + full decommitment is MVP-4 final
+1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul now passes full NttBatch E2E verification on-chain (1 poly / 1 query / 9 folds, ~855 ms, within 16.7 M gas eth_call cap); remaining for MVP-4: RPO256 hash AIR, full OODS wiring to a real STARK proof with production query count (20 queries / blowup 64)
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
-4. FRI LOG_BLOWUP=4 → blowup=16 → ~120-bit soundness (full 128-bit needs LOG_BLOWUP=6, blowup=64)
+4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
 
 ## Security Hardening (implemented)

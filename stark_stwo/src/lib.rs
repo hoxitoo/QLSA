@@ -22,6 +22,7 @@ pub mod poseidon2;
 pub mod poseidon2_air;
 pub mod poseidon2_merkle_air;
 pub mod trace;
+pub mod vfri2_bridge;
 
 use blake2::{Blake2s256, Digest};
 use stwo::core::air::Component;
@@ -155,13 +156,21 @@ pub(crate) fn parse_poly_commitment(commitment_hex: &str) -> Result<[u32; 4], St
     Ok(words)
 }
 
-/// log2 of the FRI blowup factor. 4 → blowup 16× (security margin ~120-bit at 30 FRI rounds).
+/// log2 of the FRI blowup factor.  6 → blowup 64× (polynomial proximity).
 /// Do NOT reduce below 4 for any network-facing deployment.
-const LOG_BLOWUP: u32 = 4;
+pub(crate) const LOG_BLOWUP: u32 = 6;
+
+/// FRI query count.  Security = LOG_BLOWUP × N_FRI_QUERIES + POW_BITS = 6×20+10 = 130 bits.
+pub(crate) const N_FRI_QUERIES: usize = 20;
+
+/// Proof-of-work bits mixed into Fiat-Shamir (adds POW_BITS to total security).
+pub(crate) const POW_BITS: u32 = 10;
 
 fn make_config(log_size: u32) -> PcsConfig {
     let mut c = PcsConfig::default();
     c.fri_config.log_blowup_factor = LOG_BLOWUP;
+    c.fri_config.n_queries = N_FRI_QUERIES;
+    c.pow_bits = POW_BITS;
     PcsConfig {
         lifting_log_size: Some(log_size + LOG_BLOWUP),
         ..c
@@ -307,6 +316,8 @@ pub fn verify_hash_chain_poseidon2(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let ids = preprocessed_column_ids();
     let component = poseidon2_air::Poseidon2Component::new(
@@ -447,6 +458,8 @@ pub fn verify_ntt(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, Stri
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = MlDsaNttButterflyComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -557,6 +570,8 @@ pub fn verify_poly_mul(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = PolyMulComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -659,6 +674,8 @@ pub fn verify_poly_add(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = PolyAddComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -786,6 +803,8 @@ pub fn verify_use_hint(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool,
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = UseHintComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -887,6 +906,8 @@ pub fn verify_norm_check(proof_bytes: &[u8], commitment_hex: &str) -> Result<boo
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = NormCheckComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1019,6 +1040,8 @@ pub fn verify_az_row(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = AzRowComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1179,6 +1202,8 @@ pub fn verify_az_full(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = AzFullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1343,6 +1368,8 @@ pub fn verify_ct1_full(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = Ct1FullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1506,7 +1533,7 @@ pub fn verify_az_ct1_combined(
     use mldsa_ct1_full_air::{Ct1FullEval, Ct1FullComponent, N_COLS as CT1_N_COLS};
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
 
@@ -1532,6 +1559,8 @@ pub fn verify_az_ct1_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let mut alloc = TraceLocationAllocator::default();
     let az_comp = AzFullComponent::new(
@@ -1684,6 +1713,8 @@ pub fn verify_wprime_full(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = WPrimeFullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1819,6 +1850,8 @@ pub fn verify_wprime_full_bound(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = WPrimeFullComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -1936,6 +1969,8 @@ pub fn verify_norm_check_batch(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = NormCheckBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -2134,6 +2169,8 @@ pub fn verify_use_hint_batch_v2(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = new_component_v2(log_size);
 
@@ -2275,7 +2312,7 @@ pub fn verify_norm_use_hint_combined(
     };
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
     use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -2303,6 +2340,8 @@ pub fn verify_norm_use_hint_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
     let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
@@ -2537,7 +2576,7 @@ pub fn verify_az_ct1_norm_use_hint_combined(
     };
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
     use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -2575,6 +2614,8 @@ pub fn verify_az_ct1_norm_use_hint_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
     let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
@@ -2821,7 +2862,7 @@ pub fn verify_ntt_az_ct1_combined(
     };
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
 
@@ -2854,6 +2895,8 @@ pub fn verify_ntt_az_ct1_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let mut alloc = TraceLocationAllocator::default();
     let ntt_comp = mldsa_ntt_batch_air::NttBatchComponent::new(
@@ -3234,7 +3277,7 @@ pub fn verify_full_mldsa_witness_combined(
     use mldsa_use_hint_batch_air::{UseHintBatchV2Eval, UseHintBatchV2Component, N_COLS_V2 as UH_N_COLS, pc_is_init_uh};
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
     use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -3289,8 +3332,11 @@ pub fn verify_full_mldsa_witness_combined(
             bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
         ).map_err(|e| format!("deserialization error: {e:?}"))?;
 
-    let mut config = PcsConfig::default();
-    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    // Must use make_config(NTT_LOG) to match the prover's lifting_log_size=Some(16).
+    // Using PcsConfig::default() would set lifting_log_size=None, causing Tree 0
+    // (preprocessed, LOG=8 after blowup=14) to use height=14 while the prover
+    // used lifting_log_size=16, resulting in WitnessTooLong errors.
+    let config = make_config(NTT_LOG);
 
     // ── Build components (same allocator order as prover) ─────────────────────
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
@@ -3380,6 +3426,489 @@ pub fn verify_full_mldsa_witness_combined(
 
     Ok(verify::<Blake2sM31MerkleChannel>(
         &[&ntt_comp, &az_comp, &ct1_comp, &intt_comp, &wp_comp, &norm_comp, &uh_comp],
+        verifier_channel, commitment_scheme, proof,
+    ).is_ok())
+}
+
+// ─── V23: 8-component combined STARK (V22 + RangeQBatch) ─────────────────────
+//
+// Extends V22 (7-component) by adding RangeQBatch(LOG=8, 288 cols) as the
+// 8th component, proving az_hat[i][p] ∈ [0, Q) for all K output polynomials.
+// This closes the primary soundness gap in the AzFull multiplication constraints.
+//
+// Tree 0: UseHintBatchV2 preprocessed column (is_init_uh, LOG=8, 1 col)
+// Tree 1: 3216 main cols (V22) + 288 RangeQ cols = 3504 total main columns
+// Total: 3504 main + 1 preproc = 3505 columns.
+//
+// No new transcript fingerprint — az_hat is already bound via az_out_fp.
+
+/// Prove the 8-component V23 ML-DSA.Verify STARK (V22 + RangeQBatch).
+#[allow(clippy::too_many_arguments)]
+pub fn prove_full_mldsa_witness_v23(
+    z:             &[[i64; mldsa::N]; mldsa::params::L],
+    c:             &[i64; mldsa::N],
+    t1:            &[[i64; mldsa::N]; mldsa::params::K],
+    a_hat:         &[[i64; mldsa::N]],
+    hints:         &[[bool; mldsa::N]; mldsa::params::K],
+    c_tilde_seed:  &[u8],
+    extra_binding: &[u8],
+) -> Result<(
+    Vec<u8>,
+    String, String, String, String, String, String, String,
+    Vec<[i64; mldsa::N]>, [i64; mldsa::N], Vec<[i64; mldsa::N]>,
+    [[i64; mldsa::N]; mldsa::params::K],
+    [[i64; mldsa::N]; mldsa::params::K],
+    [[i64; mldsa::N]; mldsa::params::K],
+    [[i64; mldsa::N]; mldsa::params::K],
+    [[i64; mldsa::N]; mldsa::params::K],
+    [i64; mldsa::params::L],
+    [[i64; mldsa::N]; mldsa::params::K],
+    usize,
+), String> {
+    use mldsa_range_q_batch_air::{
+        RangeQBatchEval, RangeQBatchComponent,
+        LOG_N_ROWS as RQ_LOG, N_COLS as RQ_N_COLS, build_trace as rq_build_trace,
+    };
+    use mldsa_ntt_batch_air::{
+        NttBatchEval, LOG_N_ROWS as NTT_LOG, n_cols_for as ntt_n_cols_for,
+        build_trace as ntt_build_trace,
+    };
+    use mldsa_az_full_air::{
+        AzFullEval, AzFullComponent,
+        LOG_N_ROWS as AZ_LOG, N_COLS as AZ_N_COLS, build_trace as az_build_trace,
+    };
+    use mldsa_ct1_full_air::{
+        Ct1FullEval, Ct1FullComponent,
+        LOG_N_ROWS as CT1_LOG, N_COLS as CT1_N_COLS, build_trace as ct1_build_trace,
+    };
+    use mldsa_intt_batch_air::{
+        InttBatchEval, LOG_N_ROWS as INTT_LOG, n_cols_for as intt_n_cols_for,
+        build_trace as intt_build_trace,
+    };
+    use mldsa_wprime_full_air::{
+        WPrimeFullEval, WPrimeFullComponent,
+        LOG_N_ROWS as WP_LOG, N_COLS as WP_N_COLS, build_trace as wp_build_trace,
+    };
+    use mldsa_norm_check_batch_air::{
+        NormCheckBatchEval, NormCheckBatchComponent,
+        LOG_N_ROWS as NORM_LOG, N_COLS as NORM_N_COLS, build_trace as norm_build_trace,
+    };
+    use mldsa_use_hint_batch_air::{
+        UseHintBatchV2Eval, UseHintBatchV2Component,
+        N_COLS_V2 as UH_N_COLS, build_trace_v2, pc_is_init_uh,
+    };
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
+    use stwo_constraint_framework::TraceLocationAllocator;
+    use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+
+    let l = mldsa::params::L;
+    let k = mldsa::params::K;
+
+    if a_hat.len() != k * l {
+        return Err(format!("a_hat must have k*l={} entries, got {}", k * l, a_hat.len()));
+    }
+
+    // ── Step 1: NTT(z, c, t1) ────────────────────────────────────────────────
+    let n_ntt_polys = l + 1 + k;
+    let mut ntt_inputs: Vec<[i64; mldsa::N]> = Vec::with_capacity(n_ntt_polys);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+    let (ntt_cols, ntt_outputs) = ntt_build_trace(&ntt_inputs);
+
+    let z_hat:  Vec<[i64; mldsa::N]> = ntt_outputs[0..l].to_vec();
+    let c_hat:  [i64; mldsa::N]      = ntt_outputs[l];
+    let t1_hat: Vec<[i64; mldsa::N]> = ntt_outputs[l + 1..l + 1 + k].to_vec();
+
+    // ── Step 2: Az and Ct1 in NTT domain ─────────────────────────────────────
+    let z_hat_arr: [[i64; mldsa::N]; mldsa::params::L] = z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have L entries".to_string())?;
+    let t1_hat_arr: [[i64; mldsa::N]; mldsa::params::K] = t1_hat.as_slice().try_into()
+        .map_err(|_| "t1_hat must have K entries".to_string())?;
+
+    let (az_cols,  az_hat)  = az_build_trace(a_hat, &z_hat_arr);
+    let (ct1_cols, ct1_hat) = ct1_build_trace(&c_hat, &t1_hat_arr);
+
+    // ── Step 2b: RangeQ trace for az_hat (proves az_hat ∈ [0, Q)) ────────────
+    let (rq_cols, rq_valid) = rq_build_trace(&az_hat);
+    if !rq_valid {
+        return Err("RangeQBatch: az_hat contains values outside [0, Q)".to_string());
+    }
+
+    // ── Step 3: INTT(az_hat, ct1_hat) ────────────────────────────────────────
+    let n_intt_polys = 2 * k;
+    let mut intt_inputs: Vec<[i64; mldsa::N]> = Vec::with_capacity(n_intt_polys);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, intt_out) = intt_build_trace(&intt_inputs);
+
+    let az_out:  [[i64; mldsa::N]; mldsa::params::K] = intt_out[..k].try_into()
+        .map_err(|_| "az_out slice err".to_string())?;
+    let ct1_out: [[i64; mldsa::N]; mldsa::params::K] = intt_out[k..].try_into()
+        .map_err(|_| "ct1_out slice err".to_string())?;
+
+    // ── Step 4: WPrime, NormCheck, UseHint ───────────────────────────────────
+    let (wp_cols,   w_prime)                          = wp_build_trace(&az_out, &ct1_out);
+    let (norm_cols, norm_out, max_norms)              = norm_build_trace(z);
+    let (uh_main_cols, uh_preproc_cols, w1_out, hint_weight_total) =
+        build_trace_v2(&w_prime, hints);
+
+    // Column-count assertions.
+    debug_assert_eq!(ntt_cols.len(),      ntt_n_cols_for(n_ntt_polys));
+    debug_assert_eq!(az_cols.len(),       AZ_N_COLS);
+    debug_assert_eq!(ct1_cols.len(),      CT1_N_COLS);
+    debug_assert_eq!(intt_cols.len(),     intt_n_cols_for(n_intt_polys));
+    debug_assert_eq!(wp_cols.len(),       WP_N_COLS);
+    debug_assert_eq!(norm_cols.len(),     NORM_N_COLS);
+    debug_assert_eq!(uh_main_cols.len(),  UH_N_COLS);
+    debug_assert_eq!(rq_cols.len(),       RQ_N_COLS);
+
+    // ── Fingerprints ──────────────────────────────────────────────────────────
+    let ntt_out_flat: Vec<i64> = ntt_outputs.iter().flat_map(|p| p.iter().copied()).collect();
+    let ntt_out_fp   = output_fingerprint(&ntt_out_flat);
+    let ntt_cm       = build_poly_commitment(&ntt_out_fp);
+
+    let az_out_flat: Vec<i64>  = az_hat.iter().flat_map(|r| r.iter().copied()).collect();
+    let az_out_fp    = output_fingerprint(&az_out_flat);
+    let az_cm        = build_poly_commitment(&az_out_fp);
+
+    let ct1_out_flat: Vec<i64> = ct1_hat.iter().flat_map(|r| r.iter().copied()).collect();
+    let ct1_out_fp   = output_fingerprint(&ct1_out_flat);
+    let ct1_cm       = build_poly_commitment(&ct1_out_fp);
+
+    let intt_in_fps: Vec<[u32; 4]> = intt_inputs.iter()
+        .map(|p| output_fingerprint(p.as_ref()))
+        .collect();
+    let intt_out_flat2: Vec<i64> = intt_out.iter().flat_map(|p| p.iter().copied()).collect();
+    let intt_out_fp  = output_fingerprint(&intt_out_flat2);
+    let intt_cm      = build_poly_commitment(&intt_out_fp);
+
+    let wp_out_flat: Vec<i64>   = w_prime.iter().flat_map(|r| r.iter().copied()).collect();
+    let wp_out_fp    = output_fingerprint(&wp_out_flat);
+    let wp_cm        = build_poly_commitment(&wp_out_fp);
+
+    let norm_flat: Vec<i64>     = norm_out.iter().flat_map(|r| r.iter().copied()).collect();
+    let norm_fp      = output_fingerprint(&norm_flat);
+    let norm_cm      = build_poly_commitment(&norm_fp);
+
+    let mut uh_flat: Vec<i64>   = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    uh_flat.push(hint_weight_total as i64);
+    let uh_fp        = output_fingerprint(&uh_flat);
+    let uh_cm        = build_poly_commitment(&uh_fp);
+
+    // ── STARK setup ───────────────────────────────────────────────────────────
+    let max_log = NTT_LOG;
+    let config   = make_config(max_log);
+    let lifting  = max_log + LOG_BLOWUP;
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(lifting + 1).circle_domain().half_coset,
+    );
+
+    let channel = &mut Blake2sM31Channel::default();
+    for seed in [c_tilde_seed, extra_binding] {
+        if !seed.is_empty() {
+            let words: Vec<u32> = seed.chunks(4).map(|b| {
+                let mut arr = [0u8; 4];
+                arr[..b.len()].copy_from_slice(b);
+                u32::from_le_bytes(arr)
+            }).collect();
+            channel.mix_u32s(&words);
+        }
+    }
+
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Tree 0: UseHintBatchV2 preprocessed column (is_init_uh, LOG=8).
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(uh_preproc_cols);
+    tree_builder.commit(channel);
+
+    // Tree 1: 8 components, total 3504 main columns.
+    //  [10;649] ++ [8;1523] ++ [8;295] ++ [10;649] ++ [8;24] ++ [8;15] ++ [8;61] ++ [8;288]
+    let mut combined_main = ntt_cols;
+    combined_main.extend(az_cols);
+    combined_main.extend(ct1_cols);
+    combined_main.extend(intt_cols);
+    combined_main.extend(wp_cols);
+    combined_main.extend(norm_cols);
+    combined_main.extend(uh_main_cols);
+    combined_main.extend(rq_cols);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(combined_main);
+    tree_builder.commit(channel);
+
+    // Transcript fingerprints (bind all inter-component data flows).
+    // RangeQBatch has no new output data — az_hat already bound via az_out_fp.
+    channel.mix_u32s(&ntt_out_fp);
+    channel.mix_u32s(&az_out_fp);
+    channel.mix_u32s(&ct1_out_fp);
+    for fp in &intt_in_fps {
+        channel.mix_u32s(fp);
+    }
+    channel.mix_u32s(&intt_out_fp);
+    channel.mix_u32s(&wp_out_fp);
+    channel.mix_u32s(&norm_fp);
+    channel.mix_u32s(&uh_fp);
+
+    // ── Components ────────────────────────────────────────────────────────────
+    let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
+    let ntt_comp = mldsa_ntt_batch_air::NttBatchComponent::new(
+        &mut alloc,
+        NttBatchEval { log_n_rows: NTT_LOG, n_polys: n_ntt_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let az_comp = AzFullComponent::new(
+        &mut alloc,
+        AzFullEval { log_n_rows: AZ_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let ct1_comp = Ct1FullComponent::new(
+        &mut alloc,
+        Ct1FullEval { log_n_rows: CT1_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let intt_comp = mldsa_intt_batch_air::InttBatchComponent::new(
+        &mut alloc,
+        InttBatchEval { log_n_rows: INTT_LOG, n_polys: n_intt_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let wp_comp = WPrimeFullComponent::new(
+        &mut alloc,
+        WPrimeFullEval { log_n_rows: WP_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let norm_comp = NormCheckBatchComponent::new(
+        &mut alloc,
+        NormCheckBatchEval { log_n_rows: NORM_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let uh_comp = UseHintBatchV2Component::new(
+        &mut alloc,
+        UseHintBatchV2Eval { log_n_rows: NORM_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let rq_comp = RangeQBatchComponent::new(
+        &mut alloc,
+        RangeQBatchEval { log_n_rows: RQ_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&ntt_comp, &az_comp, &ct1_comp, &intt_comp, &wp_comp, &norm_comp, &uh_comp, &rq_comp],
+        channel, commitment_scheme,
+    ).map_err(|e| format!("prove_full_mldsa_witness_v23 error: {e:?}"))?;
+
+    let proof_bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("serialization error: {e:?}"))?;
+
+    Ok((proof_bytes,
+        ntt_cm, az_cm, ct1_cm, intt_cm, wp_cm, norm_cm, uh_cm,
+        z_hat, c_hat, t1_hat,
+        az_hat, ct1_hat,
+        az_out, ct1_out,
+        w_prime, max_norms, w1_out,
+        hint_weight_total))
+}
+
+/// Verify a combined 8-component ML-DSA.Verify witness proof (V23).
+#[allow(clippy::too_many_arguments)]
+pub fn verify_full_mldsa_witness_v23(
+    proof_bytes:       &[u8],
+    ntt_cm:            &str,
+    az_cm:             &str,
+    ct1_cm:            &str,
+    intt_cm:           &str,
+    wp_cm:             &str,
+    norm_cm:           &str,
+    uh_cm:             &str,
+    _z:                &[[i64; mldsa::N]; mldsa::params::L],
+    _c:                &[i64; mldsa::N],
+    _t1:               &[[i64; mldsa::N]; mldsa::params::K],
+    z_hat:             &[[i64; mldsa::N]],
+    c_hat:             &[i64; mldsa::N],
+    t1_hat:            &[[i64; mldsa::N]],
+    az_hat:            &[[i64; mldsa::N]; mldsa::params::K],
+    ct1_hat:           &[[i64; mldsa::N]; mldsa::params::K],
+    az_out:            &[[i64; mldsa::N]; mldsa::params::K],
+    ct1_out:           &[[i64; mldsa::N]; mldsa::params::K],
+    w_prime:           &[[i64; mldsa::N]; mldsa::params::K],
+    w1_out:            &[[i64; mldsa::N]; mldsa::params::K],
+    hint_weight_total: usize,
+    c_tilde_seed:      &[u8],
+    extra_binding:     &[u8],
+) -> Result<bool, String> {
+    use stwo::core::proof::StarkProof;
+    use mldsa_range_q_batch_air::{
+        RangeQBatchEval, RangeQBatchComponent, LOG_N_ROWS as RQ_LOG, N_COLS as RQ_N_COLS,
+    };
+    use mldsa_ntt_batch_air::{NttBatchEval, LOG_N_ROWS as NTT_LOG, n_cols_for as ntt_n_cols_for};
+    use mldsa_az_full_air::{AzFullEval, AzFullComponent, LOG_N_ROWS as AZ_LOG, N_COLS as AZ_N_COLS};
+    use mldsa_ct1_full_air::{Ct1FullEval, Ct1FullComponent, LOG_N_ROWS as CT1_LOG, N_COLS as CT1_N_COLS};
+    use mldsa_intt_batch_air::{InttBatchEval, LOG_N_ROWS as INTT_LOG, n_cols_for as intt_n_cols_for};
+    use mldsa_wprime_full_air::{WPrimeFullEval, WPrimeFullComponent, LOG_N_ROWS as WP_LOG, N_COLS as WP_N_COLS};
+    use mldsa_norm_check_batch_air::{NormCheckBatchEval, NormCheckBatchComponent, LOG_N_ROWS as NORM_LOG, N_COLS as NORM_N_COLS};
+    use mldsa_use_hint_batch_air::{UseHintBatchV2Eval, UseHintBatchV2Component, N_COLS_V2 as UH_N_COLS, pc_is_init_uh};
+    use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
+    use stwo::core::channel::{Blake2sM31Channel, Channel};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
+    use stwo::core::verifier::verify;
+    use stwo_constraint_framework::TraceLocationAllocator;
+    use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+
+    let l = mldsa::params::L;
+    let k = mldsa::params::K;
+    let n_ntt_polys  = l + 1 + k;
+    let n_intt_polys = 2 * k;
+
+    // ── Recompute fingerprints ────────────────────────────────────────────────
+    let mut ntt_out_v: Vec<i64> = Vec::new();
+    for p in z_hat   { ntt_out_v.extend_from_slice(p); }
+    ntt_out_v.extend_from_slice(c_hat);
+    for p in t1_hat  { ntt_out_v.extend_from_slice(p); }
+    let ntt_out_fp = output_fingerprint(&ntt_out_v);
+    if build_poly_commitment(&ntt_out_fp) != ntt_cm { return Ok(false); }
+
+    let az_flat: Vec<i64>  = az_hat.iter().flat_map(|r| r.iter().copied()).collect();
+    let az_out_fp = output_fingerprint(&az_flat);
+    if build_poly_commitment(&az_out_fp) != az_cm { return Ok(false); }
+
+    let ct1_flat: Vec<i64> = ct1_hat.iter().flat_map(|r| r.iter().copied()).collect();
+    let ct1_out_fp = output_fingerprint(&ct1_flat);
+    if build_poly_commitment(&ct1_out_fp) != ct1_cm { return Ok(false); }
+
+    let mut intt_inputs: Vec<[i64; mldsa::N]> = az_hat.to_vec();
+    intt_inputs.extend_from_slice(ct1_hat);
+    let intt_in_fps: Vec<[u32; 4]> = intt_inputs.iter()
+        .map(|p| output_fingerprint(p.as_ref()))
+        .collect();
+
+    let intt_out_flat: Vec<i64> = az_out.iter().chain(ct1_out.iter())
+        .flat_map(|r| r.iter().copied()).collect();
+    let intt_out_fp = output_fingerprint(&intt_out_flat);
+    if build_poly_commitment(&intt_out_fp) != intt_cm { return Ok(false); }
+
+    let wp_flat: Vec<i64>   = w_prime.iter().flat_map(|r| r.iter().copied()).collect();
+    let wp_out_fp = output_fingerprint(&wp_flat);
+    if build_poly_commitment(&wp_out_fp) != wp_cm { return Ok(false); }
+
+    let norm_fp = parse_poly_commitment(norm_cm)?;
+
+    let mut uh_flat: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+    uh_flat.push(hint_weight_total as i64);
+    let uh_fp = output_fingerprint(&uh_flat);
+    if build_poly_commitment(&uh_fp) != uh_cm { return Ok(false); }
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        ).map_err(|e| format!("deserialization error: {e:?}"))?;
+
+    // Must use make_config(NTT_LOG) to match the prover's lifting_log_size=Some(16).
+    let config = make_config(NTT_LOG);
+
+    // ── Build components (same allocator order as prover) ─────────────────────
+    let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
+    let ntt_comp = mldsa_ntt_batch_air::NttBatchComponent::new(
+        &mut alloc,
+        NttBatchEval { log_n_rows: NTT_LOG, n_polys: n_ntt_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let az_comp = AzFullComponent::new(
+        &mut alloc,
+        AzFullEval { log_n_rows: AZ_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let ct1_comp = Ct1FullComponent::new(
+        &mut alloc,
+        Ct1FullEval { log_n_rows: CT1_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let intt_comp = mldsa_intt_batch_air::InttBatchComponent::new(
+        &mut alloc,
+        InttBatchEval { log_n_rows: INTT_LOG, n_polys: n_intt_polys },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let wp_comp = WPrimeFullComponent::new(
+        &mut alloc,
+        WPrimeFullEval { log_n_rows: WP_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let norm_comp = NormCheckBatchComponent::new(
+        &mut alloc,
+        NormCheckBatchEval { log_n_rows: NORM_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let uh_comp = UseHintBatchV2Component::new(
+        &mut alloc,
+        UseHintBatchV2Eval { log_n_rows: NORM_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+    let rq_comp = RangeQBatchComponent::new(
+        &mut alloc,
+        RangeQBatchEval { log_n_rows: RQ_LOG },
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
+
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    // Tree 0: 1 preproc col (is_init_uh) at NORM_LOG=8.
+    // Tree 1: [NTT_LOG; ntt_cols] ++ [AZ_LOG; AZ_N_COLS] ++ [CT1_LOG; CT1_N_COLS]
+    //      ++ [INTT_LOG; intt_cols] ++ [WP_LOG; WP_N_COLS]
+    //      ++ [NORM_LOG; NORM_N_COLS] ++ [NORM_LOG; UH_N_COLS] ++ [RQ_LOG; RQ_N_COLS]
+    let ntt_n_cols  = ntt_n_cols_for(n_ntt_polys);
+    let intt_n_cols = intt_n_cols_for(n_intt_polys);
+    let mut tree1_sizes: Vec<u32> = vec![NTT_LOG;  ntt_n_cols];
+    tree1_sizes.extend(vec![AZ_LOG;   AZ_N_COLS]);
+    tree1_sizes.extend(vec![CT1_LOG;  CT1_N_COLS]);
+    tree1_sizes.extend(vec![INTT_LOG; intt_n_cols]);
+    tree1_sizes.extend(vec![WP_LOG;   WP_N_COLS]);
+    tree1_sizes.extend(vec![NORM_LOG; NORM_N_COLS]);
+    tree1_sizes.extend(vec![NORM_LOG; UH_N_COLS]);
+    tree1_sizes.extend(vec![RQ_LOG;   RQ_N_COLS]);
+
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+
+    // Replay transcript (must match prover exactly).
+    for seed in [c_tilde_seed, extra_binding] {
+        if !seed.is_empty() {
+            let words: Vec<u32> = seed.chunks(4).map(|b| {
+                let mut arr = [0u8; 4];
+                arr[..b.len()].copy_from_slice(b);
+                u32::from_le_bytes(arr)
+            }).collect();
+            verifier_channel.mix_u32s(&words);
+        }
+    }
+
+    commitment_scheme.commit(proof.commitments[0], &[NORM_LOG; 1], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &tree1_sizes, verifier_channel);
+
+    verifier_channel.mix_u32s(&ntt_out_fp);
+    verifier_channel.mix_u32s(&az_out_fp);
+    verifier_channel.mix_u32s(&ct1_out_fp);
+    for fp in &intt_in_fps {
+        verifier_channel.mix_u32s(fp);
+    }
+    verifier_channel.mix_u32s(&intt_out_fp);
+    verifier_channel.mix_u32s(&wp_out_fp);
+    verifier_channel.mix_u32s(&norm_fp);
+    verifier_channel.mix_u32s(&uh_fp);
+
+    Ok(verify::<Blake2sM31MerkleChannel>(
+        &[&ntt_comp, &az_comp, &ct1_comp, &intt_comp, &wp_comp, &norm_comp, &uh_comp, &rq_comp],
         verifier_channel, commitment_scheme, proof,
     ).is_ok())
 }
@@ -3589,7 +4118,7 @@ pub fn verify_intt_wprime_norm_use_hint_combined(
     };
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
     use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -3623,8 +4152,8 @@ pub fn verify_intt_wprime_norm_use_hint_combined(
         )
         .map_err(|e| format!("deserialization error: {e:?}"))?;
 
-    let mut config = PcsConfig::default();
-    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    // Must use make_config(INTT_LOG) to match the prover's lifting_log_size=Some(16).
+    let config = make_config(INTT_LOG);
 
     let pc_ids: Vec<PreProcessedColumnId> = vec![pc_is_init_uh()];
     let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&pc_ids);
@@ -3707,6 +4236,8 @@ pub fn verify_use_hint_batch(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = UseHintBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -3810,6 +4341,8 @@ pub fn verify_range_q(proof_bytes: &[u8], commitment_hex: &str) -> Result<bool, 
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = range_check_air::new_component(log_size);
     let verifier_channel = &mut Blake2sM31Channel::default();
@@ -3906,6 +4439,8 @@ pub fn verify_range_q_batch(proof_bytes: &[u8], commitment_hex: &str) -> Result<
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = mldsa_range_q_batch_air::new_component(log_size);
     let verifier_channel = &mut Blake2sM31Channel::default();
@@ -4039,6 +4574,8 @@ pub fn verify_intt_batch(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_intt_batch_air::InttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4214,7 +4751,7 @@ pub fn verify_intt_wprime_combined(
     };
     use stwo::core::vcs_lifted::blake2_merkle::{Blake2sM31MerkleChannel, Blake2sM31MerkleHasher};
     use stwo::core::channel::{Blake2sM31Channel, Channel};
-    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
 
@@ -4246,6 +4783,8 @@ pub fn verify_intt_wprime_combined(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let mut alloc = TraceLocationAllocator::default();
     let intt_comp = mldsa_intt_batch_air::InttBatchComponent::new(
@@ -4403,6 +4942,8 @@ pub fn verify_intt_batch_m(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_intt_batch_air::InttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4537,6 +5078,8 @@ pub fn verify_ntt_batch(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_ntt_batch_air::NttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4672,6 +5215,8 @@ pub fn verify_ntt_batch_m(
 
     let mut pcs_config = PcsConfig::default();
     pcs_config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    pcs_config.fri_config.n_queries = N_FRI_QUERIES;
+    pcs_config.pow_bits = POW_BITS;
 
     let component = mldsa_ntt_batch_air::NttBatchComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -4790,6 +5335,8 @@ pub fn verify_hint_weight(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = new_component(log_size);
 
@@ -4937,6 +5484,8 @@ pub fn verify_merkle_root(
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
 
     let component = poseidon2_merkle_air::new_component(log_size);
 
@@ -5107,6 +5656,75 @@ fn wipe_bytes(buf: pyo3::Bound<'_, pyo3::types::PyByteArray>) -> PyResult<()> {
     Ok(())
 }
 
+/// gen_poseidon2_vfri2_hints(leaves, batch_merkle_root, n_queries) -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// Generates a VFRI2-compatible proof and ABI-encoded queryHints for the
+/// Poseidon2 hash-chain circuit.  `batch_merkle_root` is 32 bytes.
+/// Returns `(proof_bytes, commitment_hex, abi_encoded_hints)`.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn gen_poseidon2_vfri2_hints_py(
+    leaves: Vec<u64>,
+    batch_merkle_root: Vec<u8>,
+    n_queries: usize,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    vfri2_bridge::gen_poseidon2_vfri2_hints(&leaves, &batch_merkle_root, n_queries)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn gen_poseidon2_vfri3_real_py(
+    leaves: Vec<u64>,
+    batch_merkle_root: Vec<u8>,
+    n_queries: usize,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    vfri2_bridge::gen_poseidon2_vfri3_real(&leaves, &batch_merkle_root, n_queries)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn gen_ntt_batch_vfri3_hints_py(
+    polys: Vec<Vec<i64>>,
+    batch_merkle_root: Vec<u8>,
+    n_queries: usize,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    let polys_arr: Vec<[i64; 256]> = polys
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("polys[{i}] must have exactly 256 coefficients")
+            ))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    vfri2_bridge::gen_ntt_batch_vfri3_hints(&polys_arr, &batch_merkle_root, n_queries)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn gen_ntt_batch_vfri3_hints_nfolds_py(
+    polys: Vec<Vec<i64>>,
+    batch_merkle_root: Vec<u8>,
+    n_queries: usize,
+    num_folds: usize,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    let polys_arr: Vec<[i64; 256]> = polys
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("polys[{i}] must have exactly 256 coefficients")
+            ))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    vfri2_bridge::gen_ntt_batch_vfri3_hints_nfolds(
+        &polys_arr, &batch_merkle_root, n_queries, Some(num_folds)
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -5149,6 +5767,8 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v5_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v22_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v22_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_witness_v23_py, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_mldsa_witness_v23_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v21_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v21_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v20_py, m)?)?;
@@ -5186,6 +5806,10 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prove_range_q_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_range_q_py, m)?)?;
     m.add_function(wrap_pyfunction!(wipe_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_poseidon2_vfri2_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_poseidon2_vfri3_real_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri3_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri3_hints_nfolds_py, m)?)?;
     Ok(())
 }
 
@@ -6227,6 +6851,62 @@ fn verify_mldsa_witness_v22_py(proof_bundle: Vec<u8>) -> bool {
         return false;
     };
     mldsa_verify_stark::verify_mldsa_witness_v22(&proof).unwrap_or(false)
+}
+
+/// prove_mldsa_witness_v23_py — V22 + RangeQBatch (8-component STARK, 3504 main cols + 1 preproc).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (a_hat, z, c, t1, hints, k, l, c_tilde=None, merkle_root=None))]
+fn prove_mldsa_witness_v23_py(
+    a_hat:       Vec<Vec<i64>>,
+    z:           Vec<Vec<i64>>,
+    c:           Vec<i64>,
+    t1:          Vec<Vec<i64>>,
+    hints:       Vec<Vec<bool>>,
+    k:           usize,
+    l:           usize,
+    c_tilde:     Option<Vec<u8>>,
+    merkle_root: Option<Vec<u8>>,
+) -> PyResult<(Vec<u8>, Vec<i64>, Vec<Vec<i64>>, usize)> {
+    let to_poly_vec = |vv: Vec<Vec<i64>>, name: &str| -> PyResult<Vec<[i64; 256]>> {
+        vv.into_iter().enumerate().map(|(i, v)| {
+            v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("{name}[{i}] must have exactly 256 elements")
+            ))
+        }).collect()
+    };
+    let a_hat_arr = to_poly_vec(a_hat, "a_hat")?;
+    let z_arr     = to_poly_vec(z,     "z")?;
+    let c_arr: [i64; 256] = c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 elements"))?;
+    let t1_arr   = to_poly_vec(t1, "t1")?;
+    let seed     = c_tilde.as_deref().unwrap_or(&[]);
+    let root     = merkle_root.as_deref().unwrap_or(&[]);
+
+    let proof = mldsa_verify_stark::prove_verify_mldsa_v23(
+        &a_hat_arr, &z_arr, &c_arr, &t1_arr, &hints, k, l, seed, root,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let max_norms = proof.max_norms.clone();
+    let w1_prime: Vec<Vec<i64>> = proof.output.iter().map(|p| p.to_vec()).collect();
+    let hint_weight_total = proof.hint_weight_total;
+    let bundle = bincode::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+            format!("bincode serialize failed: {e}")
+        ))?;
+    Ok((bundle, max_norms, w1_prime, hint_weight_total))
+}
+
+/// verify_mldsa_witness_v23_py(proof_bundle: bytes) -> bool
+#[cfg(feature = "python")]
+#[pyfunction]
+fn verify_mldsa_witness_v23_py(proof_bundle: Vec<u8>) -> bool {
+    let Ok((proof, _)) = bincode::decode_from_slice::<
+        mldsa_verify_stark::VerifyMldsaProofV23, _
+    >(&proof_bundle, bincode::config::standard().with_limit::<MAX_PROOF_BYTES>()) else {
+        return false;
+    };
+    mldsa_verify_stark::verify_mldsa_witness_v23(&proof).unwrap_or(false)
 }
 
 /// prove_mldsa_witness_v20_py — 4-component INTT+WPrime+Norm+UseHint STARK (2 sub-proofs total).

@@ -1,6 +1,6 @@
 import base64
 import hashlib
-import oqs
+import oqs.oqs as oqs  # liboqs-python; oqs top-level is shadowed by the unrelated OQS package
 
 
 SUPPORTED_ALGORITHMS = ("ML-DSA-44", "ML-DSA-65", "ML-DSA-87")
