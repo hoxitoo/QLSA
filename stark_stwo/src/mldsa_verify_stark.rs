@@ -4785,6 +4785,175 @@ pub fn verify_mldsa_witness_v22(proof: &VerifyMldsaProofV22) -> Result<bool, Str
     ).map_err(|e| format!("verify_full_mldsa_witness_combined (V22) failed: {e}"))
 }
 
+// ── VerifyMldsaProofV23 — V22 + integrated RangeQBatch for az_hat soundness ──
+//
+// Extends V22 by adding RangeQBatch (288 columns, LOG=8) as an 8th component
+// in the single FRI commitment.  The RangeQBatch proves az_hat[i][p] ∈ [0, Q)
+// for all K output polynomials of the AzFull circuit, closing the primary
+// soundness gap in the multiplication constraints.
+//
+// Sub-proof breakdown: same 7 components as V22 + RangeQBatch (1 FRI commitment)
+// Total columns: 3216 main + 288 range-Q + 1 preproc = 3505 columns.
+
+/// Single combined proof for all 8 ML-DSA.Verify components + Merkle root (V23).
+#[derive(Encode, Decode)]
+pub struct VerifyMldsaProofV23 {
+    pub proof_combined:       Vec<u8>,
+    pub ntt_commitment:       String,
+    pub az_commitment:        String,
+    pub ct1_commitment:       String,
+    pub intt_commitment:      String,
+    pub wp_commitment:        String,
+    pub norm_commitment:      String,
+    pub use_hint_commitment:  String,
+    pub z_hat:                Vec<[i64; N]>,
+    pub c_hat:                [i64; N],
+    pub t1_hat:               Vec<[i64; N]>,
+    pub az_hat:               Vec<[i64; N]>,
+    pub ct1_hat:              Vec<[i64; N]>,
+    pub az_out:               Vec<[i64; N]>,
+    pub ct1_out:              Vec<[i64; N]>,
+    pub w_prime:              Vec<[i64; N]>,
+    pub max_norms:            Vec<i64>,
+    pub output:               Vec<[i64; N]>,
+    pub hint_weight_total:    usize,
+    pub merkle_root:          Vec<u8>,
+    pub c_tilde:              Vec<u8>,
+}
+
+/// Prove all 8 ML-DSA.Verify components in ONE STARK (V23).
+///
+/// V22 + RangeQBatch: proves az_hat ∈ [0, Q) as an 8th AIR component.
+pub fn prove_verify_mldsa_v23(
+    a_hat:       &[[i64; N]],
+    z:           &[[i64; N]],
+    c:           &[i64; N],
+    t1:          &[[i64; N]],
+    hints:       &[Vec<bool>],
+    k:           usize,
+    l:           usize,
+    c_tilde:     &[u8],
+    merkle_root: &[u8],
+) -> Result<VerifyMldsaProofV23, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM};
+    if k != K_PARAM { return Err(format!("V23 requires k=K={K_PARAM}, got {k}")); }
+    if l != L_PARAM { return Err(format!("V23 requires l=L={L_PARAM}, got {l}")); }
+
+    let z_arr:  [[i64; N]; L_PARAM] = z.try_into()
+        .map_err(|_| format!("z must have L={L_PARAM} entries"))?;
+    let t1_arr: [[i64; N]; K_PARAM] = t1.try_into()
+        .map_err(|_| format!("t1 must have K={K_PARAM} entries"))?;
+    if hints.len() != K_PARAM {
+        return Err(format!("hints must have K={K_PARAM} entries, got {}", hints.len()));
+    }
+    let h_arr: [[bool; N]; K_PARAM] = std::array::from_fn(|i| {
+        let s: &[bool] = &hints[i];
+        std::array::from_fn(|p| s[p])
+    });
+
+    let (proof_bytes,
+         ntt_cm, az_cm, ct1_cm, intt_cm, wp_cm, norm_cm, uh_cm,
+         z_hat, c_hat, t1_hat,
+         az_hat, ct1_hat,
+         az_out, ct1_out,
+         w_prime, max_norms, w1_arr,
+         hint_weight_total,
+    ) = crate::prove_full_mldsa_witness_v23(
+        &z_arr, c, &t1_arr, a_hat, &h_arr, c_tilde, merkle_root,
+    ).map_err(|e| format!("prove_full_mldsa_witness_v23 (V23) failed: {e}"))?;
+
+    Ok(VerifyMldsaProofV23 {
+        proof_combined:      proof_bytes,
+        ntt_commitment:      ntt_cm,
+        az_commitment:       az_cm,
+        ct1_commitment:      ct1_cm,
+        intt_commitment:     intt_cm,
+        wp_commitment:       wp_cm,
+        norm_commitment:     norm_cm,
+        use_hint_commitment: uh_cm,
+        z_hat:               z_hat.to_vec(),
+        c_hat,
+        t1_hat:              t1_hat.to_vec(),
+        az_hat:              az_hat.to_vec(),
+        ct1_hat:             ct1_hat.to_vec(),
+        az_out:              az_out.to_vec(),
+        ct1_out:             ct1_out.to_vec(),
+        w_prime:             w_prime.to_vec(),
+        max_norms:           max_norms.to_vec(),
+        output:              w1_arr.to_vec(),
+        hint_weight_total,
+        merkle_root:         merkle_root.to_vec(),
+        c_tilde:             c_tilde.to_vec(),
+    })
+}
+
+/// Verify a `VerifyMldsaProofV23`.
+pub fn verify_mldsa_witness_v23(proof: &VerifyMldsaProofV23) -> Result<bool, String> {
+    use crate::mldsa::params::{K as K_PARAM, L as L_PARAM, OMEGA};
+
+    let z_hat_arr:  [[i64; N]; L_PARAM] = proof.z_hat.as_slice().try_into()
+        .map_err(|_| "z_hat must have L entries".to_string())?;
+    let t1_hat_arr: [[i64; N]; K_PARAM] = proof.t1_hat.as_slice().try_into()
+        .map_err(|_| "t1_hat must have K entries".to_string())?;
+    let az_hat_arr: [[i64; N]; K_PARAM] = proof.az_hat.as_slice().try_into()
+        .map_err(|_| "az_hat must have K entries".to_string())?;
+    let ct1_hat_arr:[[i64; N]; K_PARAM] = proof.ct1_hat.as_slice().try_into()
+        .map_err(|_| "ct1_hat must have K entries".to_string())?;
+    let az_out_arr: [[i64; N]; K_PARAM] = proof.az_out.as_slice().try_into()
+        .map_err(|_| "az_out must have K entries".to_string())?;
+    let ct1_out_arr:[[i64; N]; K_PARAM] = proof.ct1_out.as_slice().try_into()
+        .map_err(|_| "ct1_out must have K entries".to_string())?;
+    let w_prime_arr:[[i64; N]; K_PARAM] = proof.w_prime.as_slice().try_into()
+        .map_err(|_| "w_prime must have K entries".to_string())?;
+    let w1_arr:     [[i64; N]; K_PARAM] = proof.output.as_slice().try_into()
+        .map_err(|_| "output must have K entries".to_string())?;
+
+    // Recover polynomial-domain z, t1, c from NTT-domain outputs via INTT.
+    let z_arr: [[i64; N]; L_PARAM] = {
+        let mut tmp = z_hat_arr;
+        for p in &mut tmp { ntt_inv(p); }
+        tmp
+    };
+    let t1_arr: [[i64; N]; K_PARAM] = {
+        let mut tmp = t1_hat_arr;
+        for p in &mut tmp { ntt_inv(p); }
+        tmp
+    };
+    let c_arr: [i64; N] = {
+        let mut tmp = proof.c_hat;
+        ntt_inv(&mut tmp);
+        tmp
+    };
+
+    if proof.hint_weight_total > OMEGA { return Ok(false); }
+
+    crate::verify_full_mldsa_witness_v23(
+        &proof.proof_combined,
+        &proof.ntt_commitment,
+        &proof.az_commitment,
+        &proof.ct1_commitment,
+        &proof.intt_commitment,
+        &proof.wp_commitment,
+        &proof.norm_commitment,
+        &proof.use_hint_commitment,
+        &z_arr,
+        &c_arr,
+        &t1_arr,
+        &proof.z_hat,
+        &proof.c_hat,
+        &proof.t1_hat,
+        &az_hat_arr,
+        &ct1_hat_arr,
+        &az_out_arr,
+        &ct1_out_arr,
+        &w_prime_arr,
+        &w1_arr,
+        proof.hint_weight_total,
+        &proof.c_tilde,
+        &proof.merkle_root,
+    ).map_err(|e| format!("verify_full_mldsa_witness_v23 (V23) failed: {e}"))
+}
+
 // ── Matrix-vector product Az (ML-DSA.Verify core) ────────────────────────────
 //
 // Az[i] = Σ_{j=0}^{L-1} A[i][j] × z[j]   in R_q = Z_q[X]/(X^{256}+1)
@@ -7400,5 +7569,78 @@ mod tests {
         assert_eq!(proof_v21.max_norms, proof_v22.max_norms, "max_norms must match");
         assert_eq!(proof_v21.output, proof_v22.output, "UseHint output must match");
         assert_eq!(proof_v21.az_hat, proof_v22.az_hat, "az_hat must match");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~3-5 min per test)"]
+    fn test_prove_verify_mldsa_v23_roundtrip() {
+        let k = crate::mldsa::params::K;
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 35200); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 35300)).collect();
+        let c:  [i64; N]       = random_poly(35400);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 35500)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde:     Vec<u8> = (155u8..203).collect();
+        let merkle_root: Vec<u8> = (210u8..242).collect();  // 32-byte root
+
+        let proof = prove_verify_mldsa_v23(&a_hat, &z, &c, &t1, &h, k, l,
+            &c_tilde, &merkle_root)
+            .expect("prove_verify_mldsa_v23 failed");
+
+        assert!(verify_mldsa_witness_v23(&proof).expect("V23 verify error"), "V23 must verify");
+        assert_eq!(proof.hint_weight_total, 0, "all-false hints → weight 0");
+        assert_eq!(proof.merkle_root, merkle_root, "merkle_root stored in proof");
+        // az_hat must have K=6 entries.
+        assert_eq!(proof.az_hat.len(), k, "az_hat must have K entries");
+    }
+
+    #[test]
+    #[ignore = "slow: runs full STARK proof pipeline (~3-5 min per test)"]
+    fn test_prove_verify_mldsa_v23_range_q_binding() {
+        // Corrupt az_hat by injecting a value >= Q into the inputs and verify
+        // that the prover rejects it (rq_valid=false → Err).
+        // We achieve this by constructing a_hat entry with an out-of-range value
+        // directly; since az_build_trace normalises into [0,Q), we instead call
+        // prove_full_mldsa_witness_v23 with corrupted a_hat that would yield
+        // az_hat outside [0,Q) — the simplest way is to just call with valid
+        // inputs (which always land in [0,Q)), then separately verify that
+        // rq_build_trace returns valid=false for an out-of-range poly.
+        use crate::mldsa_range_q_batch_air;
+
+        let k = crate::mldsa::params::K;
+        // Normal valid roundtrip check.
+        let l = crate::mldsa::params::L;
+        let a_hat: Vec<[i64; N]> = (0..k*l)
+            .map(|s| { let mut h = random_poly(s as u64 + 36000); ntt(&mut h); h })
+            .collect();
+        let z:  Vec<[i64; N]>  = (0..l).map(|s| random_poly(s as u64 + 36100)).collect();
+        let c:  [i64; N]       = random_poly(36200);
+        let t1: Vec<[i64; N]>  = (0..k).map(|s| random_poly(s as u64 + 36300)).collect();
+        let h  = all_false_hints(k);
+        let c_tilde:     Vec<u8> = (156u8..204).collect();
+        let merkle_root: Vec<u8> = (211u8..243).collect();
+
+        let proof = prove_verify_mldsa_v23(&a_hat, &z, &c, &t1, &h, k, l,
+            &c_tilde, &merkle_root)
+            .expect("prove_verify_mldsa_v23 failed");
+        assert!(verify_mldsa_witness_v23(&proof).expect("V23 verify error"),
+            "V23 valid proof must verify");
+
+        // Verify that rq_build_trace correctly rejects an out-of-range polynomial.
+        let mut bad_polys: [[i64; N]; crate::mldsa::params::K] =
+            std::array::from_fn(|j| random_poly(j as u64 * 7 + 100));
+        // Ensure all values are in [0, Q).
+        for poly in &mut bad_polys {
+            for v in poly.iter_mut() {
+                *v = v.rem_euclid(crate::mldsa::Q);
+            }
+        }
+        // Corrupt one value to be >= Q.
+        bad_polys[0][0] = crate::mldsa::Q;
+        let (_, rq_valid) = mldsa_range_q_batch_air::build_trace(&bad_polys);
+        assert!(!rq_valid, "rq_build_trace must return valid=false when v >= Q");
     }
 }

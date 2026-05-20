@@ -67,6 +67,7 @@ python -m testnet.e2e --txs 8 --dry-run
 | LAMBDA_BYTES (c̃) | 48 bytes | ML-DSA-65 |
 | onchain_commitment | 16 bytes | Blake2s(proof[:32] ∥ c_tilde[:32])[:16] |
 | V22 STARK columns | 3,217 | 649+1523+295+649+24+15+61 main + 1 preproc |
+| V23 STARK columns | 3,505 | V22 + 288 RangeQBatch + 1 preproc |
 
 ## Important Modules
 
@@ -78,13 +79,33 @@ python -m testnet.e2e --txs 8 --dry-run
 - `verify_mldsa_hash_check(pk, msg, result)` → `bool` — off-circuit FIPS 204 hash step
 - `NORM_BOUND: int = 524_092`
 
-**V22 pipeline (current production):**
+**V22 pipeline (7-component single STARK):**
 - `prove_mldsa_witness_stark_v22(a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root)` → `MldsaWitnessResult`
 - `verify_mldsa_witness_stark_v22(result)` → `bool`
 
-All prior versions (V4–V21) remain available for comparison and regression testing.
+**V23 pipeline (current production — 8-component single STARK + RangeQBatch):**
+- `prove_mldsa_witness_stark_v23(a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root)` → `MldsaWitnessResult`
+- `verify_mldsa_witness_stark_v23(result)` → `bool`
+- Adds `RangeQBatch(LOG=8, 288 cols)` proving `az_hat[i][p] ∈ [0, Q)` for all K output polynomials
+- Closes the primary soundness gap in AzFull multiplication constraints
+
+All prior versions (V4–V22) remain available for comparison and regression testing.
 
 ### `stark_stwo/src/mldsa_verify_stark.rs`
+
+**V23 proof struct and pipeline (8-component single STARK, current production):**
+```
+VerifyMldsaProofV23
+  prove_verify_mldsa_v23(a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root)
+  verify_mldsa_witness_v23(proof)
+```
+All 8 circuits in one FRI commitment (3504 main trace columns + 1 preproc):
+```
+NttBatch(LOG=10, 649) + AzFull(LOG=8, 1523) + Ct1Full(LOG=8, 295)
++ InttBatch(LOG=10, 649) + WPrimeFull(LOG=8, 24)
++ NormCheckBatch(LOG=8, 15) + UseHintBatchV2(LOG=8, 61 + 1 preproc)
++ RangeQBatch(LOG=8, 288)  ← NEW: az_hat ∈ [0, Q) range check
+```
 
 **V22 proof struct and pipeline (7-component single STARK):**
 ```

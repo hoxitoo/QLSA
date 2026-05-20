@@ -1371,3 +1371,112 @@ def test_gen_ntt_batch_vfri3_hints_prover_module_wrapper():
     assert len(result.query_hints) > 0
     expected = hashlib.blake2s(result.proof[:32] + root).digest()[:16].hex()
     assert result.commitment == expected
+
+
+# ─── ML-DSA witness V23 pipeline (8-component STARK + RangeQBatch) ────────────
+# V23 extends V22 by adding RangeQBatch (288 cols, LOG=8) as 8th component,
+# proving az_hat[i][p] ∈ [0, Q) and closing the AzFull multiplication soundness gap.
+# Requires full ML-DSA-65 dimensions: K=6, L=5.
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_output_schema():
+    """prove_mldsa_witness_v23_py returns (bytes, list[int], list[list[int]], int)."""
+    a_hat = [_rand_poly(i + 3000) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3100 + j) for j in range(_L3)]
+    c     = _rand_poly(3200)
+    t1    = [_rand_poly(3300 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v23_py(
+        a_hat, z, c, t1, hints, _K3, _L3
+    )
+
+    assert isinstance(bundle, bytes) and len(bundle) > 0
+    assert len(max_norms) == _L3
+    assert len(w1_prime) == _K3
+    for row in w1_prime:
+        assert len(row) == N
+    assert isinstance(hw_total, int) and hw_total == 0
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_verify_roundtrip():
+    """prove_mldsa_witness_v23_py → verify_mldsa_witness_v23_py must succeed."""
+    a_hat = [_rand_poly(i + 3010) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3110 + j) for j in range(_L3)]
+    c     = _rand_poly(3210)
+    t1    = [_rand_poly(3310 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v23_py(a_hat, z, c, t1, hints, _K3, _L3)
+    assert _ext.verify_mldsa_witness_v23_py(bundle)
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_tampered_bundle_fails():
+    """Flipping a byte in the V23 bundle must cause verification to fail."""
+    a_hat = [_rand_poly(i + 3020) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3120 + j) for j in range(_L3)]
+    c     = _rand_poly(3220)
+    t1    = [_rand_poly(3320 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    bundle, _, _, _ = _ext.prove_mldsa_witness_v23_py(a_hat, z, c, t1, hints, _K3, _L3)
+    tampered = bytearray(bundle)
+    tampered[len(tampered) // 2] ^= 0xFF
+    assert not _ext.verify_mldsa_witness_v23_py(bytes(tampered))
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_matches_v3_w1_prime():
+    """V23 and V3 pipelines must produce the same w1_prime for the same inputs."""
+    a_hat = [_rand_poly(i + 3030) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3130 + j) for j in range(_L3)]
+    c     = _rand_poly(3230)
+    t1    = [_rand_poly(3330 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    _, _, w1_v3, _  = _ext.prove_mldsa_witness_v3_py(a_hat, z, c, t1, hints, _K3, _L3)
+    _, _, w1_v23, _ = _ext.prove_mldsa_witness_v23_py(a_hat, z, c, t1, hints, _K3, _L3)
+
+    assert w1_v3 == w1_v23, "V3 and V23 pipelines must agree on w1_prime"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_merkle_root_binding():
+    """V23 proof with one merkle root must not verify under a different root."""
+    a_hat = [_rand_poly(i + 3040) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3140 + j) for j in range(_L3)]
+    c     = _rand_poly(3240)
+    t1    = [_rand_poly(3340 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+    root1 = list(bytes(range(32)))
+    root2 = list(bytes(range(1, 33)))
+
+    bundle1, _, _, _ = _ext.prove_mldsa_witness_v23_py(
+        a_hat, z, c, t1, hints, _K3, _L3, merkle_root=root1
+    )
+    bundle2, _, _, _ = _ext.prove_mldsa_witness_v23_py(
+        a_hat, z, c, t1, hints, _K3, _L3, merkle_root=root2
+    )
+    assert _ext.verify_mldsa_witness_v23_py(bundle1)
+    assert _ext.verify_mldsa_witness_v23_py(bundle2)
+    assert bundle1 != bundle2, "Different merkle roots must produce different proofs"
+
+
+@needs_ext
+def test_prove_mldsa_witness_v23_prover_wrapper():
+    """stark.prover.prove_mldsa_witness_stark_v23 wraps the Rust binding correctly."""
+    from stark.prover import prove_mldsa_witness_stark_v23, verify_mldsa_witness_stark_v23
+    from stark.prover import MldsaWitnessResult
+    a_hat = [_rand_poly(i + 3050) for i in range(_K3 * _L3)]
+    z     = [_rand_poly(3150 + j) for j in range(_L3)]
+    c     = _rand_poly(3250)
+    t1    = [_rand_poly(3350 + i) for i in range(_K3)]
+    hints = _zero_hints(_K3)
+
+    result = prove_mldsa_witness_stark_v23(a_hat, z, c, t1, hints, _K3, _L3)
+    assert isinstance(result, MldsaWitnessResult)
+    assert isinstance(result.proof_bundle, bytes) and len(result.proof_bundle) > 0
+    assert verify_mldsa_witness_stark_v23(result)

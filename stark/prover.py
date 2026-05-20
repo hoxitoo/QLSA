@@ -1117,6 +1117,52 @@ def verify_mldsa_witness_stark_v22(result: MldsaWitnessResult) -> bool:
     return bool(_ext.verify_mldsa_witness_v22_py(result.proof_bundle))
 
 
+def prove_mldsa_witness_stark_v23(
+    a_hat:       list[list[int]],
+    z:           list[list[int]],
+    c:           list[int],
+    t1:          list[list[int]],
+    hints:       list[list[bool]],
+    k:           int,
+    l:           int,
+    c_tilde:     bytes | None = None,
+    merkle_root: bytes | None = None,
+) -> MldsaWitnessResult:
+    """
+    Prove the full ML-DSA.Verify arithmetic witness (V23 pipeline, 1 sub-proof):
+      Single 8-component STARK — V22 + RangeQBatch AIR proving az_hat ∈ [0, Q).
+
+    Adds a RangeQBatch component (288 columns, LOG=8) as the 8th component in
+    Tree 1, closing the soundness gap in the AzFull multiplication constraints by
+    proving each output coefficient az_hat[j][p] ∈ [0, Q) for all j ∈ 0..K.
+
+    The proof is cryptographically tied to both the ML-DSA signature (c_tilde)
+    and the aggregation batch (merkle_root).  Tampered merkle_root causes FRI
+    transcript divergence and verification failure.
+
+    Raises RuntimeError if the extension is not installed or proving fails.
+    """
+    _require_ext("prove_mldsa_witness_v23_py")
+    try:
+        bundle, max_norms, w1_prime, hw_total = _ext.prove_mldsa_witness_v23_py(
+            a_hat, z, c, t1, hints, k, l, c_tilde, merkle_root
+        )
+    except Exception as exc:
+        raise RuntimeError(f"prove_mldsa_witness_v23_py failed: {exc}") from exc
+    return MldsaWitnessResult(
+        proof_bundle=bytes(bundle),
+        max_norms=list(max_norms),
+        w1_prime=[list(row) for row in w1_prime],
+        hint_weight_total=int(hw_total),
+    )
+
+
+def verify_mldsa_witness_stark_v23(result: MldsaWitnessResult) -> bool:
+    """Verify all STARK sub-proofs in an MldsaWitnessResult (V23 pipeline)."""
+    _require_ext("verify_mldsa_witness_v23_py")
+    return bool(_ext.verify_mldsa_witness_v23_py(result.proof_bundle))
+
+
 def verify_mldsa_hash_check(
     pk:     bytes,
     msg:    bytes,
