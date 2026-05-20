@@ -286,17 +286,19 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). MVP-3+ complete: all 7 ML-DSA AIR circuits unified in V22 (1 STARK proof, 3,217 trace columns, Merkle root Fiat-Shamir bound). MVP-4 started: complete on-chain FRI verifier library stack in Solidity. 265 Solidity + 243 Python + 210 Rust + 31 TS tests — all 5 CI jobs green.</p>
+            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). <strong>V23 production pipeline</strong>: 8 ML-DSA circuits in 1 STARK proof (3,505 trace columns) — RangeQBatch closes AzFull soundness gap. QLSAVerifierVFRI3 + Blake2sYul complete on-chain FRI. Security audit (2026-05-20): constant-time Merkle verify, rate-limit hardening, input validation. 249 Python + 210 Rust + 31 TS + Solidity tests — all CI green.</p>
           </div>
         </div>
         <div class="progress-grid">
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Cryptographic core</strong><span>ML-DSA-65/44/87, SHA3-512 Merkle, address derivation, pubkey validation, batch aggregation</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>STARK prover (Stwo 2.2.0) — V22</strong><span>Circle STARK, Poseidon2-over-M31 AIR, 7 ML-DSA circuits in 1 FRI commitment (3,217 trace columns), Merkle root Fiat-Shamir bound</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>STARK prover (Stwo 2.2.0) — V23</strong><span>Circle STARK, Poseidon2-over-M31 AIR, 8 ML-DSA circuits in 1 FRI commitment (3,505 trace columns): NttBatch + AzFull + Ct1Full + InttBatch + WPrimeFull + NormCheck + UseHintV2 + <strong>RangeQBatch</strong> (az_hat ∈ [0,Q))</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts — deployed Sepolia</strong><span>BatchRegistryV2 (nonce replay protection), QLSAVerifierFull + QLSAVerifierBound (128-bit Blake2s), 265 Solidity tests</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Aggregator node + API</strong><span>Thread-safe mempool (atomic drain), auto-batcher, FastAPI REST, rate limiting (100 tx/min per IP, proxy-aware), pk/sig length validation</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>SDKs (Python + TypeScript)</strong><span>Wallet, LocalClient + HttpClient, WitnessStatus, TypeScript AggregatorClient — mypy strict</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Testnet E2E (Sepolia, 2026-05-05)</strong><span>First batch: 4 tx, 3234-byte proof, 9.16 s finalization. submitBatchWithNonces on-chain.</span></div></div>
-          <div class="progress-item wip"><div class="progress-check wip">🔄</div><div><strong>MVP-4: on-chain FRI verifier library stack</strong><span>CM31 · QM31 · Blake2s · MerkleVerifier · TwoChannel (Fiat-Shamir) · CirclePoint (CanonicCoset, FRI fold) · QLSAVerifierV4 — circle fold + Merkle query verified on-chain</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>On-chain FRI verifier library stack</strong><span>CM31 · QM31 · Blake2sYul · MerkleVerifier · TwoChannel · CirclePoint · QLSAVerifierV4–V13 · VFRI/VFRI2/VFRI3 — full K-round FRI + non-constant last-layer bounded-degree check on-chain</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Security audit hardening (2026-05-20)</strong><span>Constant-time Merkle root comparison (hmac.compare_digest), X-Forwarded-For IP fix, rate-limit thread-safety, k/l input validation, Solidity depth overflow guards, CM31 M31 range validation</span></div></div>
+          <div class="progress-item wip"><div class="progress-check wip">🔄</div><div><strong>MVP-4 final: full V23 OODS wiring</strong><span>RPO256 hash AIR + 20 queries / blowup 64 / full Fiat-Shamir OODS wiring against production proof</span></div></div>
         </div>
       </div>
     </section>
@@ -405,9 +407,9 @@
               <p style="margin:0;color:var(--muted)">Batch formation and proving pipeline.</p>
               <ul>
                 <li>Collect transactions off-chain</li>
-                <li>Verify ML-DSA signatures off-chain; V22 proves arithmetic witness inside STARK</li>
-                <li>Build Merkle tree with <code>SHA3-512</code>; root bound into Fiat-Shamir channel (V22)</li>
-                <li>Generate STARK proof — c̃ + merkle_root mixed before Tree0 commit</li>
+                <li>Verify ML-DSA signatures off-chain; V23 proves arithmetic witness (8 circuits) inside STARK</li>
+                <li>Build Merkle tree with <code>SHA3-512</code>; root bound into Fiat-Shamir channel (V22+)</li>
+                <li>Generate STARK proof — c̃ + merkle_root mixed; RangeQBatch proves az_hat ∈ [0,Q)</li>
               </ul>
             </div>
           </div>
@@ -444,8 +446,8 @@
               <tr><td>MVP-1</td><td>Core crypto &amp; Merkle</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-2</td><td>Hash-chain + Poseidon2 AIR (Stwo)</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-2b</td><td>ML-DSA batch proof (Rust + STARK)</td><td class="warn">Off-chain</td><td class="good">✓ Done</td></tr>
-              <tr><td>MVP-3+</td><td>ML-DSA arithmetic natively inside AIR circuit (V22)</td><td class="good">Yes (V22)</td><td class="good">✓ Complete</td></tr>
-              <tr><td>MVP-4</td><td>Full on-chain FRI verifier, blowup ≥8, RPO256</td><td class="warn">Planned</td><td class="warn">🔄 In progress</td></tr>
+              <tr><td>MVP-3+</td><td>All 8 circuits inside AIR + RangeQBatch (V23)</td><td class="good">Yes (V23)</td><td class="good">✓ Complete</td></tr>
+              <tr><td>MVP-4</td><td>Full on-chain FRI verifier, blowup 64, OODS wiring</td><td class="warn">Planned</td><td class="warn">🔄 In progress</td></tr>
             </tbody>
           </table>
         </div>
@@ -453,7 +455,7 @@
         <div class="card">
           <h3>Key risks</h3>
           <ul>
-            <li><strong>ML-DSA inside STARK:</strong> All 7 circuits complete in V22 (NttBatch + AzFull + Ct1Full + InttBatch + WPrimeFull + NormCheckBatch + UseHintBatchV2), 3,217 trace columns, 1 FRI commitment. c̃ + Merkle root Fiat-Shamir bound closes proof-reuse soundness gap.</li>
+            <li><strong>ML-DSA inside STARK:</strong> All 8 circuits complete in V23 (NttBatch + AzFull + Ct1Full + InttBatch + WPrimeFull + NormCheckBatch + UseHintBatchV2 + <strong>RangeQBatch</strong>), 3,505 trace columns, 1 FRI commitment. c̃ + Merkle root Fiat-Shamir bound; RangeQBatch closes AzFull multiplication soundness gap.</li>
             <li><strong>Aggregator trust model:</strong> the MVP relies on off-chain verification before challenge systems exist.</li>
             <li><strong>Adoption timing:</strong> the need is real, but mainstream migration may still take years.</li>
           </ul>
