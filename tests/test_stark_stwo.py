@@ -1595,3 +1595,95 @@ def test_gen_mldsa_v23_vfri3_hints_multi_query():
     assert r3.query_hints != r1.query_hints
     assert len(r3.query_hints) > len(r1.query_hints), "More queries → larger hint payload"
     assert r3.n_queries == 3
+
+
+# ── VFRI4 NttBatch bridge tests ───────────────────────────────────────────────
+
+_VFRI4_BATCH_ROOT = bytes(range(32))
+
+
+def _ntt_polys(seed: int, n: int = 1) -> list[list[int]]:
+    """Return n random polynomials with 256 coefficients each (bounded by GAMMA1)."""
+    import random
+    rng = random.Random(seed)
+    GAMMA1 = 2**19
+    return [[rng.randint(-GAMMA1, GAMMA1) for _ in range(256)] for _ in range(n)]
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_schema():
+    """Result has correct types and n_cols = 1 + n_polys*54."""
+    from stark.prover import gen_ntt_batch_vfri4_hints, NttBatchVFRI4HintResult
+    polys = _ntt_polys(5000)
+    r = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert isinstance(r, NttBatchVFRI4HintResult)
+    assert r.n_cols == 55   # 1 + 1*54
+    assert r.n_queries == 1
+    assert len(r.proof) >= 700
+    assert len(r.commitment) == 32  # 16 bytes hex
+    assert len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_deterministic():
+    """Same inputs always produce the same output."""
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    polys = _ntt_polys(5100)
+    r1 = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r1.proof == r2.proof
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_commitment_binding():
+    """Commitment changes when batch_merkle_root changes."""
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    polys = _ntt_polys(5200)
+    root_a = bytes(range(32))
+    root_b = bytes([x ^ 0xFF for x in range(32)])
+    ra = gen_ntt_batch_vfri4_hints(polys, root_a, n_queries=1, num_folds=9)
+    rb = gen_ntt_batch_vfri4_hints(polys, root_b, n_queries=1, num_folds=9)
+    assert ra.commitment != rb.commitment
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_differs_from_vfri3():
+    """VFRI4 and VFRI3 produce different query_hints (different transcript)."""
+    from stark.prover import gen_ntt_batch_vfri4_hints, gen_ntt_batch_vfri3_hints
+    polys = _ntt_polys(5300)
+    r4 = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    # gen_ntt_batch_vfri3_hints uses num_folds=9 implicitly (tree_depth-1)
+    import qlsa_stark_stwo as _ext2
+    proof3, comm3, hints3 = _ext2.gen_ntt_batch_vfri3_hints_nfolds_py(
+        polys, list(_VFRI4_BATCH_ROOT), 1, 9
+    )
+    # Commitments match (same proof bytes, same batch_merkle_root)
+    assert r4.commitment == comm3
+    # But query_hints differ (different OODS transcript)
+    assert r4.query_hints != hints3, "VFRI4 and VFRI3 must produce different query_hints"
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_commitment_formula():
+    """Commitment = Blake2s(proof[:32] || batch_merkle_root)[:16]."""
+    import hashlib
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    polys = _ntt_polys(5400)
+    r = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    h = hashlib.new('blake2s')
+    h.update(r.proof[:32])
+    h.update(_VFRI4_BATCH_ROOT)
+    expected = h.digest()[:16].hex()
+    assert r.commitment == expected
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_multi_poly():
+    """2-poly trace (109 cols) produces larger query_hints than 1-poly (55 cols)."""
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    r1 = gen_ntt_batch_vfri4_hints(_ntt_polys(5500, 1), _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri4_hints(_ntt_polys(5500, 2), _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r2.n_cols == 109  # 1 + 2*54
+    assert len(r2.query_hints) > len(r1.query_hints)

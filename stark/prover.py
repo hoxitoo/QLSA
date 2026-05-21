@@ -1558,3 +1558,55 @@ def gen_ntt_batch_vfri3_hints(
     except Exception as exc:
         raise RuntimeError(f"gen_ntt_batch_vfri3_hints failed: {exc}") from exc
     return NttBatchVFRI3HintResult(proof=proof, commitment=commitment, query_hints=query_hints)
+
+
+@dataclass
+class NttBatchVFRI4HintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI4.verify(queryHints)
+    n_cols:      int    # trace columns (1 + n_polys * 54)
+    n_queries:   int
+
+
+def gen_ntt_batch_vfri4_hints(
+    polys:             list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries:         int = 1,
+    num_folds:         int = 9,
+) -> NttBatchVFRI4HintResult:
+    """Generate VFRI4-compatible hints from ML-DSA NttBatch AIR trace.
+
+    Identical to gen_ntt_batch_vfri3_hints except the Fiat-Shamir transcript uses
+    Poseidon2 sponge for OODS eval channel commitment (4 M31 words per OODS set
+    instead of n_cols×4 words), matching QLSAVerifierVFRI4.sol.
+
+    Args:
+        polys: List of polynomials, each with exactly 256 i64 coefficients.
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries: Number of FRI queries.
+        num_folds: Number of FRI fold rounds (1..tree_depth-1).
+
+    Returns:
+        NttBatchVFRI4HintResult with proof, commitment, and ABI-encoded query_hints.
+    """
+    _require_ext("gen_ntt_batch_vfri4_hints_nfolds_py")
+    if not polys:
+        raise ValueError("polys must not be empty")
+    if any(len(p) != 256 for p in polys):
+        raise ValueError("each polynomial must have exactly 256 coefficients")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_ntt_batch_vfri4_hints_nfolds_py(
+            polys, list(batch_merkle_root), n_queries, num_folds
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_ntt_batch_vfri4_hints failed: {exc}") from exc
+    n_cols = 1 + len(polys) * 54
+    return NttBatchVFRI4HintResult(
+        proof=proof, commitment=commitment, query_hints=query_hints,
+        n_cols=n_cols, n_queries=n_queries,
+    )

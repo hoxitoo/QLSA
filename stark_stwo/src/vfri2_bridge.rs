@@ -1779,6 +1779,288 @@ pub fn gen_ntt_batch_vfri3_hints_nfolds(
     gen_vfri3_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
 }
 
+// ── VFRI4: Poseidon2 OODS sponge commitment ──────────────────────────────────
+
+/// VFRI4 hint generator — identical to VFRI3 except OODS channel mixing.
+///
+/// VFRI3 transcript: `mixU32s(all_oods_pos_words)` + `mixU32s(all_oods_neg_words)`
+/// VFRI4 transcript: `mixU32s([p2sponge(pos_m31s).s0, .s1, p2sponge(neg_m31s).s0, .s1])`
+///
+/// where each QM31 eval is flattened into 4 M31 u32 values before sponge absorption.
+/// The channel always receives exactly 4 M31 words regardless of column count,
+/// making the Fiat-Shamir binding independent of n_cols (at verification side).
+///
+/// queryHints ABI format: identical to VFRI3.
+pub fn gen_vfri4_hints_from_cols_nfolds(
+    cols: &[Vec<u32>],
+    tree_depth: u32,
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds_opt: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if cols.is_empty() {
+        return Err("cols must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}",
+            batch_merkle_root.len()
+        ));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+    if tree_depth < 2 {
+        return Err(format!("tree_depth={tree_depth} must be ≥ 2"));
+    }
+    let n = 1usize << tree_depth;
+    for (j, col) in cols.iter().enumerate() {
+        if col.len() != n {
+            return Err(format!(
+                "cols[{j}] has {} entries, expected {n} (2^{tree_depth})",
+                col.len()
+            ));
+        }
+    }
+
+    // ── Trace Merkle tree ─────────────────────────────────────────────────────
+    let trace_leaves: Vec<[u8; 32]> = (0..n)
+        .map(|i| hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .collect();
+    let trace_levels = build_tree(trace_leaves);
+    let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
+
+    // ── Fiat-Shamir channel ───────────────────────────────────────────────────
+    let mut chan = Channel::init();
+    chan.mix_root(&trace_root);
+    let z_x = chan.draw_secure_felt();
+
+    // ── OODS evaluations via barycentric Lagrange interpolation ──────────────
+    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
+    let bary_weights = precompute_bary_weights(&domain_xs);
+    let z_neg = qm31_neg(z_x);
+
+    let oods_evals_pos: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .collect();
+    let oods_evals_neg: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .collect();
+
+    // ── VFRI4: Poseidon2 sponge commitment of OODS evals ─────────────────────
+    // Each QM31 → 4 M31 words; sponge absorbs all, mixes 4 output words.
+    {
+        let pos_m31s: Vec<u64> = oods_evals_pos.iter()
+            .flat_map(|&v| qm31_words(v).map(|w| w as u64))
+            .collect();
+        let neg_m31s: Vec<u64> = oods_evals_neg.iter()
+            .flat_map(|&v| qm31_words(v).map(|w| w as u64))
+            .collect();
+        let (ps0, ps1) = crate::poseidon2::poseidon2_chain(&pos_m31s);
+        let (ns0, ns1) = crate::poseidon2::poseidon2_chain(&neg_m31s);
+        chan.mix_u32s(&[ps0 as u32, ps1 as u32, ns0 as u32, ns1 as u32]);
+    }
+
+    let comp_alpha = chan.draw_secure_felt();
+    let fri_alpha  = chan.draw_secure_felt();
+
+    // ── Precompute composition OODS combos ────────────────────────────────────
+    let oods_combo_pos = {
+        let mut acc = 0u128;
+        let mut ap  = qm31_from_m31(1);
+        for &ev in &oods_evals_pos { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+    let oods_combo_neg = {
+        let mut acc = 0u128;
+        let mut ap  = qm31_from_m31(1);
+        for &ev in &oods_evals_neg { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+
+    // ── FRI Layer 1 ───────────────────────────────────────────────────────────
+    let mut l1_values: Vec<u128> = Vec::with_capacity(n);
+    for q in 0..n {
+        let anti_q = antipodal_of(q, tree_depth);
+        let (px, py) = coset_at(tree_depth, q as u64);
+
+        let raw_comp = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[q])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+        let raw_comp_neg = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[anti_q])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+
+        let px_qm31   = qm31_from_m31(px);
+        let denom_pos = qm31_sub(px_qm31, z_x);
+        let denom_neg = qm31_sub(qm31_neg(px_qm31), z_x);
+        if denom_pos == 0 || denom_neg == 0 {
+            return Err(format!("degenerate OODS denom at q={q}"));
+        }
+        let f_plus  = qm31_div(qm31_sub(raw_comp,     oods_combo_pos), denom_pos);
+        let f_minus = qm31_div(qm31_sub(raw_comp_neg, oods_combo_neg), denom_neg);
+        l1_values.push(circle_fold(f_plus, f_minus, fri_alpha, m31_inv(py)));
+    }
+
+    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let fri_l1_levels = build_tree(fri_l1_leaves);
+    let fri_layer1_root: [u8; 32] = fri_l1_levels.last().unwrap()[0];
+    chan.mix_root(&fri_layer1_root);
+
+    // ── Line fold rounds ──────────────────────────────────────────────────────
+    let max_folds = (tree_depth - 1) as usize;
+    let num_folds = match num_folds_opt {
+        None => max_folds,
+        Some(f) if f >= 1 && f <= max_folds => f,
+        Some(f) => return Err(format!("num_folds={f} must be in 1..={max_folds}")),
+    };
+    let mut layer_values: Vec<Vec<u128>>          = vec![l1_values];
+    let mut layer_levels: Vec<Vec<Vec<[u8; 32]>>> = vec![fri_l1_levels];
+    let mut layer_roots:  Vec<[u8; 32]>           = vec![fri_layer1_root];
+    let mut fri_alphas:   Vec<u128>               = Vec::new();
+
+    for k in 0..num_folds {
+        let alpha_k   = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+        let prev_vals = &layer_values[k];
+        let layer_sz  = prev_vals.len() / 2;
+        let mut new_vals = Vec::with_capacity(layer_sz);
+        for j in 0..layer_sz {
+            let x_j    = coset_at(tree_depth, j as u64).0;
+            let twiddle = chebyshev_twiddle(x_j, k);
+            if twiddle == 0 { return Err(format!("zero twiddle at k={k}, j={j}")); }
+            new_vals.push(line_fold(prev_vals[j], prev_vals[j + layer_sz], alpha_k, m31_inv(twiddle)));
+        }
+        let new_leaves: Vec<[u8; 32]> = new_vals.iter().map(|&v| hash_leaf_qm31(v)).collect();
+        let new_levels = build_tree(new_leaves);
+        let new_root: [u8; 32] = new_levels.last().unwrap()[0];
+        layer_values.push(new_vals);
+        layer_roots.push(new_root);
+        chan.mix_root(&new_root);
+        layer_levels.push(new_levels);
+    }
+
+    let last_layer_coeffs: Vec<u128> = layer_values[num_folds].clone();
+    let derived_indices = chan.draw_queries(tree_depth, n_queries);
+
+    // ── Per-query hints ───────────────────────────────────────────────────────
+    let mut hint_structs: Vec<QueryHintData> = Vec::new();
+    for &idx in &derived_indices {
+        let anti_idx = antipodal_of(idx, tree_depth);
+        let (qp_x, qp_y) = coset_at(tree_depth, idx as u64);
+
+        let query_values: Vec<u32>     = cols.iter().map(|c| c[idx]).collect();
+        let query_values_neg: Vec<u32> = cols.iter().map(|c| c[anti_idx]).collect();
+        let trace_siblings     = proof_path(&trace_levels, idx);
+        let trace_siblings_neg = proof_path(&trace_levels, anti_idx);
+
+        let raw_comp = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[idx])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+        let raw_comp_neg = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[anti_idx])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+        let px_qm31   = qm31_from_m31(qp_x);
+        let f_plus    = qm31_div(qm31_sub(raw_comp,     oods_combo_pos), qm31_sub(px_qm31, z_x));
+        let f_minus   = qm31_div(qm31_sub(raw_comp_neg, oods_combo_neg), qm31_sub(qm31_neg(px_qm31), z_x));
+        let folded_value = circle_fold(f_plus, f_minus, fri_alpha, m31_inv(qp_y));
+        debug_assert_eq!(folded_value, layer_values[0][idx]);
+
+        let fri_l1_sib = proof_path(&layer_levels[0], idx);
+        let mut fold_hints: Vec<FoldHintData> = Vec::new();
+        let mut cur_idx = idx;
+        for k in 0..num_folds {
+            let layer_sz  = layer_values[k].len() / 2;
+            let sib_idx   = if cur_idx < layer_sz { cur_idx + layer_sz } else { cur_idx - layer_sz };
+            let new_idx   = cur_idx & (layer_sz - 1);
+            let sibling_value = layer_values[k][sib_idx];
+            let sibling_proof = proof_path(&layer_levels[k], sib_idx);
+            let x_j      = coset_at(tree_depth, new_idx as u64).0;
+            let cur_val  = if k == 0 { folded_value } else { fold_hints[k-1].folded_value };
+            let (gp, gm) = if cur_idx < layer_sz { (cur_val, sibling_value) } else { (sibling_value, cur_val) };
+            let folded_k = line_fold(gp, gm, fri_alphas[k], m31_inv(chebyshev_twiddle(x_j, k)));
+            debug_assert_eq!(folded_k, layer_values[k + 1][new_idx]);
+            fold_hints.push(FoldHintData {
+                sibling_value,
+                sibling_proof,
+                folded_value: folded_k,
+                merkle_proof: proof_path(&layer_levels[k + 1], new_idx),
+            });
+            cur_idx = new_idx;
+        }
+        hint_structs.push(QueryHintData {
+            trace_root,
+            query_values, query_values_neg,
+            query_index: idx, tree_depth,
+            merkle_siblings: trace_siblings, merkle_siblings_neg: trace_siblings_neg,
+            fri_alpha, f_plus, f_minus, folded_value,
+            query_point_x: qp_x, query_point_y: qp_y,
+            fri_l1_siblings: fri_l1_sib, folds: fold_hints,
+        });
+    }
+
+    // ── Build proof bytes and commitment ──────────────────────────────────────
+    let mut proof = vec![0x01u8; 700];
+    proof[0..8].copy_from_slice(&2u64.to_le_bytes());
+    proof[8..40].copy_from_slice(&trace_root);
+
+    let mut hash_input = [0u8; 64];
+    hash_input[..32].copy_from_slice(&proof[..32]);
+    hash_input[32..].copy_from_slice(batch_merkle_root);
+    let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+    let commitment_hex = hex::encode(&h[..16]);
+
+    let query_hints = abi_encode_vfri3_hints(
+        &last_layer_coeffs,
+        &oods_evals_pos,
+        &oods_evals_neg,
+        &layer_roots,
+        &hint_structs,
+    );
+
+    Ok((proof, commitment_hex, query_hints))
+}
+
+/// VFRI4 hint generator for ML-DSA NttBatch AIR trace.
+pub fn gen_ntt_batch_vfri4_hints_nfolds(
+    polys: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    if polys.is_empty() {
+        return Err("polys must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}",
+            batch_merkle_root.len()
+        ));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let (ntt_cols, _ntt_outputs) = mldsa_ntt_batch_air::build_trace(polys);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS;
+
+    let cols: Vec<Vec<u32>> = ntt_cols
+        .iter()
+        .map(|col| col.values.iter().map(|v| v.0).collect())
+        .collect();
+
+    gen_vfri4_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
 // ── V23 NttBatch+InttBatch → VFRI3 hints ─────────────────────────────────────
 
 /// Generate VFRI3-compatible hints from V23's NttBatch + InttBatch components.

@@ -156,6 +156,15 @@ Complex extension of M31: `GF(2^31-1)[i] / (i²+1)`.
 - Encoding: `uint64` packed as `(a << 32) | b` where `a = re`, `b = im`
 - Operations: `pack/re/im`, `add/sub/mul/neg/inv/conj/scale`, `fromBytes8LE`
 
+### `contracts/src/verifier/Poseidon2M31.sol`
+Poseidon2 permutation over M31 (GF(2^31-1)), matching Stwo 2.2.0 Rust exactly.
+- Parameters: t=2 state, α=5 S-box (x^5), 8 full rounds, MDS=[[3,1],[1,3]]
+- Round constants: SHA-256 IV/K values reduced mod P
+- Gas: ~1000 gas per permute (8 rounds × 6 mulmod + 4 add)
+- Operations: `permute(s0, s1)`, `compress(left, right)`, `sponge(values[])`
+- 16 tests cross-checked against Stwo 2.2.0 Rust (Poseidon2M31.test.js)
+- Cross-check vectors: `permute(0,0)→(204783406,774225216)`, `sponge([1..8])→(1628177261,1519148168)`
+
 ### `contracts/src/verifier/QM31.sol`
 Quartic extension: `CM31[u] / (u² - R)` where `R = CM31(2, 1) = 2 + i` (matches Stwo).
 - Encoding: `uint128` packed as `(c0 << 64) | c1` where each component is CM31 (`uint64`)
@@ -393,6 +402,20 @@ VFRI3 — non-constant last-layer polynomial bounded-degree check (MVP-4).
   - `MAX_LAST_LAYER_SIZE = 65536` (2^16 evaluations max on-chain)
 - Per-query Merkle proofs already bind each final fold into `friLayerRoots[K]`, completing the bounded-degree argument
 - 43 tests: 4 treeDepth/numFolds configurations × constant+non-constant paths, array size validation, single-element tamper, Fiat-Shamir enforcement, trace-Merkle enforcement
+
+### `contracts/src/QLSAVerifierVFRI4.sol`
+VFRI4 — VFRI3 with Poseidon2 OODS sponge commitment (MVP-4).
+- Extends VFRI3 by replacing `mixU32s(allOodsEvals)` with `mixU32s(Poseidon2Sponge(oodsFlat).words)`
+- Transcript change: `mixRoot → z_x → mixU32s([p2(pos_m31s).s0, p2(pos_m31s).s1, p2(neg_m31s).s0, p2(neg_m31s).s1]) → compAlpha`
+- Channel receives exactly 4 M31 words for OODS commitment regardless of column count
+- `queryHints` encoding: identical to VFRI3 (oodsEvalsPos/Neg still provided for composition computation)
+- Security: Poseidon2-over-M31 collision resistance (128-bit, t=2, α=5, R_F=8)
+- Passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds) within 16.7 M gas
+- VFRI3 hints are NOT accepted by VFRI4 (different transcript → different query indices)
+- 11 JS tests + 6 Python tests
+- Rust bridge: `gen_vfri4_hints_from_cols_nfolds`, `gen_ntt_batch_vfri4_hints_nfolds`
+- Python wrapper: `gen_ntt_batch_vfri4_hints` → `NttBatchVFRI4HintResult`
+- Note: VFRI4 is the architectural foundation for VFRI5 (hash AIR integration); gas savings from Poseidon2 OODS sponge become significant when the full hash AIR eliminates O(n_cols) composition computation
 
 ## Multi-Component STARK Pattern
 
