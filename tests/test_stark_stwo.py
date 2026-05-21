@@ -1687,3 +1687,71 @@ def test_gen_ntt_batch_vfri4_hints_multi_poly():
     r2 = gen_ntt_batch_vfri4_hints(_ntt_polys(5500, 2), _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
     assert r2.n_cols == 109  # 1 + 2*54
     assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI4 Poseidon2 real-trace bridge tests ────────────────────────────────────
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_schema():
+    """Result has correct types and non-empty proof/hints."""
+    from stark.prover import gen_poseidon2_vfri4_hints, Poseidon2VFRI4HintResult
+    leaves = list(range(1, 9))  # 8 leaves
+    r = gen_poseidon2_vfri4_hints(leaves, bytes(range(32)))
+    assert isinstance(r, Poseidon2VFRI4HintResult)
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+    assert r.n_leaves == 8
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_deterministic():
+    """Same inputs always produce the same commitment and hints."""
+    from stark.prover import gen_poseidon2_vfri4_hints
+    leaves = list(range(1, 5))
+    root = bytes([0xAB] * 32)
+    r1 = gen_poseidon2_vfri4_hints(leaves, root)
+    r2 = gen_poseidon2_vfri4_hints(leaves, root)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_commitment_binding():
+    """commitment = hex(Blake2s(proof[:32] ‖ batch_merkle_root)[:16])."""
+    import hashlib
+    from stark.prover import gen_poseidon2_vfri4_hints
+    root = bytes(range(32))
+    r = gen_poseidon2_vfri4_hints([1, 2, 3, 4, 5, 6, 7, 8], root)
+    h = hashlib.new("blake2s", digest_size=32)
+    h.update(r.proof[:32])
+    h.update(root)
+    expected = h.digest()[:16].hex()
+    assert r.commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_differs_from_vfri3():
+    """VFRI4 and VFRI3 transcripts are incompatible: hints differ."""
+    from stark.prover import gen_poseidon2_vfri4_hints
+    # Import VFRI3 equivalent
+    import qlsa_stark_stwo as _ext  # type: ignore[import]
+    leaves = [1, 2, 3, 4, 5, 6, 7, 8]
+    root = bytes([0x42] * 32)
+    r4 = gen_poseidon2_vfri4_hints(leaves, root)
+    _proof3, _com3, h3 = _ext.gen_poseidon2_vfri3_real_py(leaves, list(root), 1)
+    assert r4.query_hints != bytes(h3), "VFRI4 and VFRI3 hints must differ (different transcripts)"
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_multi_query():
+    """Multiple queries succeed and produce proportionally larger hints."""
+    from stark.prover import gen_poseidon2_vfri4_hints
+    leaves = list(range(1, 17))  # 16 leaves
+    root = bytes(range(32))
+    r1 = gen_poseidon2_vfri4_hints(leaves, root, n_queries=1)
+    r2 = gen_poseidon2_vfri4_hints(leaves, root, n_queries=2)
+    assert r2.n_queries == 2
+    assert len(r2.query_hints) > len(r1.query_hints)

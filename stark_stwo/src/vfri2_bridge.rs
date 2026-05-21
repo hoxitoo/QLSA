@@ -1480,6 +1480,40 @@ pub fn gen_poseidon2_vfri3_real(
     Ok((proof, commitment_hex, query_hints))
 }
 
+/// VFRI4 hint generator for a real Poseidon2 AIR trace.
+///
+/// Builds the Poseidon2 trace from `leaves`, commits it, then runs the
+/// VFRI4 Fiat-Shamir transcript (Poseidon2 sponge OODS commitment) to
+/// produce ABI-encoded queryHints for `QLSAVerifierVFRI4`.
+pub fn gen_poseidon2_vfri4_real(
+    leaves: &[u64],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if leaves.is_empty() {
+        return Err("leaves must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}",
+            batch_merkle_root.len()
+        ));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let (main_cols, _preproc_cols, _commitment) =
+        crate::poseidon2_air::build_trace(leaves);
+    let tree_depth = crate::poseidon2_air::compute_log_size(leaves.len());
+    let cols: Vec<Vec<u32>> = main_cols
+        .iter()
+        .map(|col| col.values.iter().map(|v| v.0).collect())
+        .collect();
+
+    gen_vfri4_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, None)
+}
+
 // ── Generic VFRI3 hint generator ─────────────────────────────────────────────
 
 /// Generate VFRI3-compatible hints from any flat column trace.
@@ -2418,6 +2452,62 @@ mod tests {
         assert!(gen_poseidon2_vfri3_real(&[1], &vec![0u8; 31], 2).is_err(), "short root");
         assert!(gen_poseidon2_vfri3_real(&[1], &seed, 0).is_err(), "n_queries=0");
         assert!(gen_poseidon2_vfri3_real(&[1], &seed, 65).is_err(), "n_queries too large");
+    }
+
+    // ── gen_poseidon2_vfri4_real tests ───────────────────────────────────────
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_smoke() {
+        let leaves: Vec<u64> = (1..=4).collect();
+        let seed = vec![0u8; 32];
+        let result = gen_poseidon2_vfri4_real(&leaves, &seed, 2);
+        assert!(result.is_ok(), "vfri4_real should succeed: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_commitment_binding() {
+        let leaves: Vec<u64> = (1..=8).collect();
+        let batch_root: Vec<u8> = (0u8..32).collect();
+        let (proof, commitment, _) = gen_poseidon2_vfri4_real(&leaves, &batch_root, 2).unwrap();
+
+        let mut hash_input = [0u8; 64];
+        hash_input[..32].copy_from_slice(&proof[..32]);
+        hash_input[32..].copy_from_slice(&batch_root);
+        let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+        assert_eq!(commitment, hex::encode(&h[..16]));
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_deterministic() {
+        let leaves: Vec<u64> = (1..=4).collect();
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = gen_poseidon2_vfri4_real(&leaves, &seed, 2).unwrap();
+        let (_, c2, h2) = gen_poseidon2_vfri4_real(&leaves, &seed, 2).unwrap();
+        assert_eq!(c1, c2, "deterministic commitment");
+        assert_eq!(h1, h2, "deterministic hints");
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_differs_from_vfri3() {
+        // VFRI4 and VFRI3 have different transcripts → different query indices → different hints
+        let leaves: Vec<u64> = (1..=8).collect();
+        let seed = vec![0x42u8; 32];
+        let (_, _c3, h3) = gen_poseidon2_vfri3_real(&leaves, &seed, 2).unwrap();
+        let (_, _c4, h4) = gen_poseidon2_vfri4_real(&leaves, &seed, 2).unwrap();
+        assert_ne!(h3, h4, "VFRI4 transcript differs from VFRI3 transcript");
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_input_validation() {
+        let seed = vec![0u8; 32];
+        assert!(gen_poseidon2_vfri4_real(&[], &seed, 2).is_err(), "empty leaves");
+        assert!(gen_poseidon2_vfri4_real(&[1], &vec![0u8; 31], 2).is_err(), "short root");
+        assert!(gen_poseidon2_vfri4_real(&[1], &seed, 0).is_err(), "n_queries=0");
+        assert!(gen_poseidon2_vfri4_real(&[1], &seed, 65).is_err(), "n_queries too large");
     }
 
     // ── gen_ntt_batch_vfri3_hints tests ──────────────────────────────────────

@@ -5685,6 +5685,17 @@ fn gen_poseidon2_vfri3_real_py(
 
 #[cfg(feature = "python")]
 #[pyfunction]
+fn gen_poseidon2_vfri4_real_py(
+    leaves: Vec<u64>,
+    batch_merkle_root: Vec<u8>,
+    n_queries: usize,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    vfri2_bridge::gen_poseidon2_vfri4_real(&leaves, &batch_merkle_root, n_queries)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
 fn gen_ntt_batch_vfri3_hints_py(
     polys: Vec<Vec<i64>>,
     batch_merkle_root: Vec<u8>,
@@ -5909,6 +5920,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri3_hints_nfolds_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri3_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri4_hints_nfolds_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_poseidon2_vfri4_real_py, m)?)?;
     Ok(())
 }
 

@@ -1610,3 +1610,50 @@ def gen_ntt_batch_vfri4_hints(
         proof=proof, commitment=commitment, query_hints=query_hints,
         n_cols=n_cols, n_queries=n_queries,
     )
+
+
+@dataclass
+class Poseidon2VFRI4HintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI4.verify(queryHints)
+    n_leaves:    int
+    n_queries:   int
+
+
+def gen_poseidon2_vfri4_hints(
+    leaves:            list[int],
+    batch_merkle_root: bytes,
+    n_queries:         int = 1,
+) -> Poseidon2VFRI4HintResult:
+    """Generate VFRI4-compatible hints from a real Poseidon2 AIR trace.
+
+    Builds the Poseidon2 circuit trace for `leaves`, commits it via the VFRI4
+    Fiat-Shamir transcript (Poseidon2 sponge OODS commitment), and returns
+    ABI-encoded queryHints for QLSAVerifierVFRI4.
+
+    Args:
+        leaves: List of M31 leaf values (u64) to absorb into the Poseidon2 sponge.
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries: Number of FRI queries (1..64).
+
+    Returns:
+        Poseidon2VFRI4HintResult with proof, commitment, and ABI-encoded query_hints.
+    """
+    _require_ext("gen_poseidon2_vfri4_real_py")
+    if not leaves:
+        raise ValueError("leaves must not be empty")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_poseidon2_vfri4_real_py(
+            leaves, list(batch_merkle_root), n_queries
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_poseidon2_vfri4_hints failed: {exc}") from exc
+    return Poseidon2VFRI4HintResult(
+        proof=proof, commitment=commitment, query_hints=query_hints,
+        n_leaves=len(leaves), n_queries=n_queries,
+    )
