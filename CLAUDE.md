@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -427,6 +427,30 @@ VFRI4 — VFRI3 with Poseidon2 OODS sponge commitment (MVP-4).
   - 649 cols (12 poly, V23 NttBatch): ~120 M gas — exceeds cap (O(n_cols) composition)
   - 1298 cols (V23 full): ~240 M gas estimated — Poseidon2 OODS sponge fixes OODS mixing but not composition
 - Note: VFRI4 is the architectural foundation for VFRI5 (composition polynomial batching). The per-query O(n_cols) composition computation is the next bottleneck to solve.
+
+### `contracts/src/QLSAVerifierVFRI5.sol`
+VFRI5 — VFRI4 with composition polynomial Merkle tree (`compRoot`), eliminating per-query O(n_cols) work.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] lastLayerCoeffs, uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32 compRoot, bytes32[] friLayerRoots, QueryHints[])`
+  - `compRoot` is a **static bytes32** (placed inline at head slot 3, NOT an offset pointer)
+  - Head = 6 × 32 = 192 bytes
+- `QueryHints` struct (11 fields: 7 static + 4 dynamic, head = 352 bytes):
+  - Removed: `queryValues[]`, `queryValuesNeg[]`, `merkleSiblings[]`, `merkleSiblingsNeg[]`
+  - Added: `compValue` (F(p) = Σ α^j · col_j(p)), `compProof[]`, `compValueNeg`, `compProofNeg[]`
+  - Fields: `queryIndex, treeDepth, compValue, compProof[], compValueNeg, compProofNeg[], foldedValue, queryPointX, queryPointY, friL1Siblings[], folds[]`
+- Transcript: `mixRoot(traceRoot) → z_x → Poseidon2Sponge(oodsPos,oodsNeg) → compAlpha → mixRoot(compRoot) [NEW] → friAlpha → fold rounds → drawQueries`
+- `_buildCtx` computes `oodsComboPos/Neg = Σ α^j · oodsEval_j` ONCE (O(n_cols)); no per-query column sum
+- `_verifyQuery` Merkle-verifies `compValue` in `compRoot`, derives `fPlus/fMinus` as OODS quotients
+- Gas analysis (2026-05-21):
+  - Per-query calldata: 48.9 KB for 649 cols vs 90.6 KB for VFRI4 (1.9× smaller)
+  - For 1 query: ~same gas as VFRI4 (O(n_cols) oodsCombo computed once per call)
+  - For n_queries: VFRI5 is O(n_cols + n_queries × treeDepth) vs VFRI4's O(n_cols × n_queries)
+  - 649-col NttBatch with 1 query still exceeds 15M gas (oodsCombo bottleneck)
+  - VFRI6 will move oodsCombo off-chain (prover provides precomputed value + commitment)
+- VFRI4 hints are NOT accepted by VFRI5 (different ABI layout — QueryHints struct incompatible)
+- 5 Rust tests + 6 Python tests + 12 JS E2E tests
+- Rust bridge: `gen_vfri5_hints_from_cols_nfolds`, `gen_ntt_batch_vfri5_hints_nfolds`
+- Python wrapper: `gen_ntt_batch_vfri5_hints` → `NttBatchVFRI5HintResult`
 
 ## Multi-Component STARK Pattern
 

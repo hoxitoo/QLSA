@@ -5895,6 +5895,36 @@ fn gen_ntt_batch_vfri4_hints_nfolds_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
+/// gen_ntt_batch_vfri5_hints_nfolds_py(polys, batch_merkle_root, n_queries, num_folds)
+///   -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// VFRI5 variant of gen_ntt_batch_vfri4_hints_nfolds. Adds a composition polynomial
+/// Merkle tree (`compRoot`) so per-query hints carry only compValue + Merkle proof
+/// instead of all n_cols column values. For 649 cols (12-poly NttBatch), this reduces
+/// per-query calldata from ~41 KB to O(treeDepth × 32) bytes.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (polys, batch_merkle_root, n_queries=1, num_folds=9))]
+fn gen_ntt_batch_vfri5_hints_nfolds_py(
+    polys:             Vec<Vec<i64>>,
+    batch_merkle_root: Vec<u8>,
+    n_queries:         usize,
+    num_folds:         usize,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    let polys_arr: Vec<[i64; 256]> = polys
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+                format!("polys[{i}] must have exactly 256 coefficients")
+            ))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    vfri2_bridge::gen_ntt_batch_vfri5_hints_nfolds(
+        &polys_arr, &batch_merkle_root, n_queries, Some(num_folds)
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -5984,6 +6014,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri4_hints_nfolds_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_poseidon2_vfri4_real_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri4_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri5_hints_nfolds_py, m)?)?;
     Ok(())
 }
 
