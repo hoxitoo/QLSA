@@ -2185,7 +2185,87 @@ pub fn gen_mldsa_v23_vfri3_hints(
     gen_vfri3_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+/// VFRI4 hint generator for V23's NttBatch + InttBatch components.
+///
+/// Identical to `gen_mldsa_v23_vfri3_hints` but uses the VFRI4 Fiat-Shamir
+/// transcript: OODS evals are committed via Poseidon2 sponge (4 M31 words)
+/// instead of raw Blake2s mixing (n_cols×4 words).
+///
+/// queryHints ABI format is identical to VFRI3 — only the transcript differs.
+/// VFRI3 hints are NOT accepted by QLSAVerifierVFRI4 and vice versa.
+pub fn gen_mldsa_v23_vfri4_hints(
+    z: &[[i64; 256]; 5],
+    c: &[i64; 256],
+    t1: &[[i64; 256]; 6],
+    a_hat: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    // ── Step 1: NTT(z, c, t1) ────────────────────────────────────────────────
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+
+    let (ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS; // 10
+
+    let z_hat: [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into()
+        .map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat: [i64; 256] = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into()
+        .map_err(|_| "t1_hat slice error".to_string())?;
+
+    // ── Step 2: Az and Ct1 in NTT domain ─────────────────────────────────────
+    let (_az_cols, az_hat) = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (_ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    // ── Step 3: INTT(az_hat, ct1_hat) ────────────────────────────────────────
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, _intt_outputs) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+
+    // ── Step 4: Combine columns (both LOG=10, 1024 rows each) ────────────────
+    let n_rows = 1usize << tree_depth;
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(ntt_cols.len() + intt_cols.len());
+    for col in &ntt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("ntt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+    for col in &intt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("intt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+
+    // ── Step 5: Generate VFRI4 hints ─────────────────────────────────────────
+    gen_vfri4_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
 
 #[cfg(test)]
 mod tests {
@@ -2560,5 +2640,69 @@ mod tests {
         let poly1: Vec<[i64; 256]> = vec![[0i64; 256]];
         assert!(gen_ntt_batch_vfri3_hints(&poly1, &vec![0u8; 31], 2).is_err(), "short root");
         assert!(gen_ntt_batch_vfri3_hints(&poly1, &seed, 0).is_err(), "n_queries=0");
+    }
+
+    // ── gen_mldsa_v23_vfri4_hints tests ──────────────────────────────────────
+
+    fn make_v23_inputs(seed: u64) -> ([[i64;256];5], [i64;256], [[i64;256];6], Vec<[i64;256]>) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut rng_val = seed;
+        let mut next = || -> i64 {
+            let mut h = DefaultHasher::new();
+            rng_val.hash(&mut h);
+            rng_val = h.finish();
+            (rng_val % 8380417) as i64
+        };
+        let z:     [[i64;256];5]       = std::array::from_fn(|_| std::array::from_fn(|_| next()));
+        let c:     [i64;256]           = std::array::from_fn(|_| next() % 2);
+        let t1:    [[i64;256];6]       = std::array::from_fn(|_| std::array::from_fn(|_| next()));
+        let a_hat: Vec<[i64;256]>      = (0..30).map(|_| std::array::from_fn(|_| next())).collect();
+        (z, c, t1, a_hat)
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(7000);
+        let seed = vec![0u8; 32];
+        let result = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3));
+        assert!(result.is_ok(), "v23_vfri4 should succeed: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(7100);
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, c2, h2) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_eq!(c1, c2, "deterministic commitment");
+        assert_eq!(h1, h2, "deterministic hints");
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_differs_from_vfri3() {
+        // VFRI4 and VFRI3 transcripts are incompatible → different hints
+        let (z, c, t1, a_hat) = make_v23_inputs(7200);
+        let seed = vec![0x42u8; 32];
+        let (_, _c3, h3) = gen_mldsa_v23_vfri3_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, _c4, h4) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_ne!(h3, h4, "VFRI4 transcript must differ from VFRI3");
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_n_cols_1298() {
+        // Combined trace: NttBatch (649) + InttBatch (649) = 1298 columns
+        let (z, c, t1, a_hat) = make_v23_inputs(7300);
+        let seed = vec![0u8; 32];
+        // num_folds=3 → small last layer, fast test
+        let (proof, _, hints) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        // proof[8:40] = trace_root; must be non-zero for a real 1298-col trace
+        assert_ne!(&proof[8..40], &[0u8; 32]);
+        // hints encode 1298 query_values + 1298 query_values_neg per query
+        assert!(hints.len() > 10_000, "1298-col trace hints should be large");
     }
 }

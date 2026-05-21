@@ -1597,6 +1597,88 @@ def test_gen_mldsa_v23_vfri3_hints_multi_query():
     assert r3.n_queries == 3
 
 
+# ── VFRI4 V23 (NttBatch+InttBatch) bridge tests ──────────────────────────────
+
+_VFRI4_V23_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_schema():
+    """Output has correct types and n_cols=1298 (NttBatch+InttBatch)."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints, MldsaV23VFRI4HintResult
+    z, c, t1, a_hat = _v23_inputs(7000)
+    result = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(result, MldsaV23VFRI4HintResult)
+    assert isinstance(result.proof, bytes) and len(result.proof) >= 700
+    assert isinstance(result.commitment, str) and len(result.commitment) == 32
+    assert isinstance(result.query_hints, bytes) and len(result.query_hints) > 0
+    assert result.n_cols == 1298
+    assert result.n_queries == 1
+    assert result.proof[8:40] != b'\x00' * 32, "trace root must be non-zero"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_deterministic():
+    """Same inputs always produce identical commitment and hints."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7100)
+    r1 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.commitment  == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_batch_root_binding():
+    """Different batch roots → different commitment; same trace root."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7200)
+    root1 = bytes(range(32))
+    root2 = bytes(range(1, 33))
+    r1 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, root1, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, root2, n_queries=1, num_folds=3)
+    assert r1.commitment  != r2.commitment
+    assert r1.proof[8:40] == r2.proof[8:40], "trace root is batch-root-independent"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_differs_from_vfri3():
+    """VFRI4 and VFRI3 hints differ (incompatible transcripts)."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints, gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7300)
+    r3 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r4 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    # Trace roots are the same (same arithmetic computation)
+    assert r3.proof[8:40] == r4.proof[8:40], "trace root must match for same inputs"
+    # But transcripts diverge after OODS mixing → different commitments and hints
+    assert r3.query_hints != r4.query_hints, "VFRI4 transcript differs from VFRI3"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_validation_errors():
+    """Python-side validation catches bad inputs."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7400)
+    import pytest
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri4_hints(z[:-1], c, t1, a_hat, _VFRI4_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri4_hints(z, c, t1[:-1], a_hat, _VFRI4_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, b'\x00' * 16)
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_multi_query():
+    """n_queries=3 produces larger hints than n_queries=1."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7500)
+    r1 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r3 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=3, num_folds=3)
+    assert r3.n_queries == 3
+    assert len(r3.query_hints) > len(r1.query_hints)
+
+
 # ── VFRI4 NttBatch bridge tests ───────────────────────────────────────────────
 
 _VFRI4_BATCH_ROOT = bytes(range(32))

@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -25,7 +25,7 @@ benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_wit
 ## Key Commands
 
 ```bash
-# Run all Python tests (~243 passing when PyO3 ext installed)
+# Run all Python tests (~317 passing when PyO3 ext installed)
 pytest tests/ -v
 
 # Run only tests that do NOT need the PyO3 extension
@@ -412,10 +412,21 @@ VFRI4 — VFRI3 with Poseidon2 OODS sponge commitment (MVP-4).
 - Security: Poseidon2-over-M31 collision resistance (128-bit, t=2, α=5, R_F=8)
 - Passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds) within 16.7 M gas
 - VFRI3 hints are NOT accepted by VFRI4 (different transcript → different query indices)
-- 11 JS tests + 6 Python tests
-- Rust bridge: `gen_vfri4_hints_from_cols_nfolds`, `gen_ntt_batch_vfri4_hints_nfolds`
-- Python wrapper: `gen_ntt_batch_vfri4_hints` → `NttBatchVFRI4HintResult`
-- Note: VFRI4 is the architectural foundation for VFRI5 (hash AIR integration); gas savings from Poseidon2 OODS sponge become significant when the full hash AIR eliminates O(n_cols) composition computation
+- 11+10 JS tests + 6+6+6 Python tests (NttBatch + Poseidon2 AIR + V23 NttBatch)
+- Rust bridges:
+  - `gen_vfri4_hints_from_cols_nfolds` — generic VFRI4 from flat columns
+  - `gen_ntt_batch_vfri4_hints_nfolds` — ML-DSA NttBatch (1 poly = 55 cols, fits 15M gas)
+  - `gen_poseidon2_vfri4_real` — Poseidon2 AIR (7 cols) end-to-end
+  - `gen_mldsa_v23_vfri4_hints` — V23 NttBatch+InttBatch (1298 cols, gas > 15M)
+- Python wrappers:
+  - `gen_ntt_batch_vfri4_hints` → `NttBatchVFRI4HintResult`
+  - `gen_poseidon2_vfri4_hints` → `Poseidon2VFRI4HintResult`
+  - `gen_mldsa_v23_vfri4_hints` → `MldsaV23VFRI4HintResult` (n_cols=1298)
+- Gas scale findings (2026-05-21):
+  - 55 cols (1 poly): ~7.4 s, fits in 15 M gas ✓
+  - 649 cols (12 poly, V23 NttBatch): ~120 M gas — exceeds cap (O(n_cols) composition)
+  - 1298 cols (V23 full): ~240 M gas estimated — Poseidon2 OODS sponge fixes OODS mixing but not composition
+- Note: VFRI4 is the architectural foundation for VFRI5 (composition polynomial batching). The per-query O(n_cols) composition computation is the next bottleneck to solve.
 
 ## Multi-Component STARK Pattern
 
