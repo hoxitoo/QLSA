@@ -1781,3 +1781,58 @@ def gen_ntt_batch_vfri5_hints(
         proof=proof, commitment=commitment, query_hints=query_hints,
         n_polys=len(polys), n_queries=n_queries,
     )
+
+
+@dataclass
+class NttBatchVFRI6HintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI6.verify(queryHints)
+    n_polys:     int
+    n_queries:   int
+
+
+def gen_ntt_batch_vfri6_hints(
+    polys:             list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries:         int = 1,
+    num_folds:         int = 9,
+) -> NttBatchVFRI6HintResult:
+    """Generate VFRI6-compatible hints from ML-DSA NttBatch polynomials.
+
+    VFRI6 removes oodsEvalsPos/Neg arrays entirely. The prover precomputes
+    oodsComboPos/Neg off-chain and passes only two uint128 values. This
+    eliminates O(n_cols) on-chain work, enabling 649-col NttBatch to verify
+    within 15 M gas (vs ~120 M for VFRI5 with 649 cols).
+
+    Transcript vs VFRI5:
+        mixRoot(traceRoot) → z_x → compAlpha [drawn BEFORE OODS mix]
+        → mixU32s(8 M31 words from oodsComboPos/Neg)
+        → mixRoot(compRoot) → friAlpha → fold rounds → drawQueries
+
+    Args:
+        polys: List of ML-DSA polynomials, each with 256 M31 coefficients.
+        batch_merkle_root: 32-byte batch Merkle root bound into the commitment.
+        n_queries: Number of FRI queries (1..64).
+        num_folds: Number of FRI fold rounds (default 9 → 2-element last layer).
+
+    Returns:
+        NttBatchVFRI6HintResult with proof, commitment, and ABI-encoded query_hints.
+    """
+    _require_ext("gen_ntt_batch_vfri6_hints_nfolds_py")
+    if not polys:
+        raise ValueError("polys must not be empty")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_ntt_batch_vfri6_hints_nfolds_py(
+            polys, list(batch_merkle_root), n_queries, num_folds
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_ntt_batch_vfri6_hints failed: {exc}") from exc
+    return NttBatchVFRI6HintResult(
+        proof=proof, commitment=commitment, query_hints=query_hints,
+        n_polys=len(polys), n_queries=n_queries,
+    )

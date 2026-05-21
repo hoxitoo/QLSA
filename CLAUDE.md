@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -451,6 +451,30 @@ VFRI5 — VFRI4 with composition polynomial Merkle tree (`compRoot`), eliminatin
 - 5 Rust tests + 6 Python tests + 12 JS E2E tests
 - Rust bridge: `gen_vfri5_hints_from_cols_nfolds`, `gen_ntt_batch_vfri5_hints_nfolds`
 - Python wrapper: `gen_ntt_batch_vfri5_hints` → `NttBatchVFRI5HintResult`
+
+### `contracts/src/QLSAVerifierVFRI6.sol`
+VFRI6 — VFRI5 with off-chain OODS combo, eliminating O(n_cols) on-chain work entirely.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128 oodsComboPos, uint128 oodsComboNeg, bytes32 compRoot, bytes32[] friLayerRoots, QueryHints[])`
+  - `oodsComboPos`, `oodsComboNeg` are static uint128 scalars (head slots 0–1)
+  - `compRoot` is static bytes32 (head slot 2)
+  - Head = 5 × 32 = 160 bytes
+- `QueryHints` struct: **identical to VFRI5** (11 fields: 7 static + 4 dynamic)
+- Transcript (KEY changes from VFRI5):
+  - No Poseidon2 sponge
+  - `compAlpha` drawn BEFORE OODS combo is mixed (avoids circular dependency)
+  - `mixU32s([c0re(comboPos), c0im, c1re, c1im, c0re(comboNeg), c0im, c1re, c1im])` — 8 M31 words
+  - Full: `mixRoot(traceRoot) → z_x → compAlpha → mixU32s(8 combo words) → mixRoot(compRoot) → friAlpha → fold rounds → drawQueries`
+- `_buildCtx`: no `_compositionQM31`, no `_qm31ArrayToM31s`, no Poseidon2 import
+- Soundness: Schwartz-Zippel OODS quotient argument — if `(compValue − oodsComboPos)/(p.x − z_x)` is low-degree for random p, then `oodsComboPos = F(z_x)` with overwhelming probability
+- Gas analysis (2026-05-21):
+  - Per-query calldata: **7.2 KB** for 649 cols (6.8× smaller than VFRI5's 48.9 KB)
+  - **649-col NttBatch with 1 query PASSES within 15M gas** ✓ (vs VFRI5: >15M gas)
+  - O(n_cols) work eliminated on-chain: only 8 M31 words mixed per call
+- VFRI5 hints are NOT accepted by VFRI6 (different ABI layout + transcript)
+- 5 Rust tests + 6 Python tests + 14 JS E2E tests
+- Rust bridge: `gen_vfri6_hints_from_cols_nfolds`, `gen_ntt_batch_vfri6_hints_nfolds`
+- Python wrapper: `gen_ntt_batch_vfri6_hints` → `NttBatchVFRI6HintResult`
 
 ## Multi-Component STARK Pattern
 

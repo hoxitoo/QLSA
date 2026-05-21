@@ -1917,3 +1917,82 @@ def test_gen_ntt_batch_vfri5_hints_multi_query():
     r2 = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=2, num_folds=9)
     assert r2.n_queries == 2
     assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI6 NttBatch hint tests ──────────────────────────────────────────────────
+
+_VFRI6_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_schema():
+    """Result has correct type, n_polys, and non-empty fields."""
+    from stark.prover import gen_ntt_batch_vfri6_hints, NttBatchVFRI6HintResult
+    polys = _ntt_polys(7000)
+    r = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert isinstance(r, NttBatchVFRI6HintResult)
+    assert r.n_polys == 1
+    assert r.n_queries == 1
+    assert len(r.proof) >= 700
+    assert len(r.commitment) == 32  # 16 bytes hex = 32 chars
+    assert len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_deterministic():
+    """Same inputs produce identical proof, commitment, and hints."""
+    from stark.prover import gen_ntt_batch_vfri6_hints
+    polys = _ntt_polys(7100)
+    r1 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_batch_root_binding():
+    """Different batch_merkle_root produces different commitment (not hints)."""
+    from stark.prover import gen_ntt_batch_vfri6_hints
+    polys = _ntt_polys(7200)
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_ntt_batch_vfri6_hints(polys, root_a, n_queries=1, num_folds=9)
+    rb = gen_ntt_batch_vfri6_hints(polys, root_b, n_queries=1, num_folds=9)
+    assert ra.commitment != rb.commitment
+    # query_hints are transcript-derived (traceRoot only) — same polys → same hints
+    assert ra.query_hints == rb.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_differs_from_vfri5():
+    """VFRI6 transcript differs from VFRI5 (no Poseidon2, compAlpha drawn first)."""
+    from stark.prover import gen_ntt_batch_vfri6_hints, gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(7300)
+    r5 = gen_ntt_batch_vfri5_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r6 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r5.commitment == r6.commitment
+    assert r5.query_hints != r6.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_smaller_than_vfri5():
+    """VFRI6 hints are smaller than VFRI5 (oodsEvalsPos/Neg arrays removed)."""
+    from stark.prover import gen_ntt_batch_vfri6_hints, gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(7400, n=12)
+    r5 = gen_ntt_batch_vfri5_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r6 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert len(r6.query_hints) < len(r5.query_hints), (
+        f"VFRI6 hints ({len(r6.query_hints)} B) must be smaller than "
+        f"VFRI5 hints ({len(r5.query_hints)} B)"
+    )
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_multi_query():
+    """Multiple queries produce proportionally larger hints."""
+    from stark.prover import gen_ntt_batch_vfri6_hints
+    polys = _ntt_polys(7500)
+    r1 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=2, num_folds=9)
+    assert r2.n_queries == 2
+    assert len(r2.query_hints) > len(r1.query_hints)
