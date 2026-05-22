@@ -1981,3 +1981,84 @@ def gen_mldsa_v23_vfri6_hints_log8(
         n_cols=2206,
         n_queries=n_queries,
     )
+
+
+@dataclass
+class FullV23VFRI6HintResult:
+    """Combined VFRI6 hints for the full V23 trace (both LOG groups).
+
+    Bundles the outputs of gen_mldsa_v23_vfri6_hints (LOG=10) and
+    gen_mldsa_v23_vfri6_hints_log8 (LOG=8), providing everything needed
+    for dual-VFRI6 on-chain verification via BatchRegistryV4.
+
+    Both proofs bind to the same batch_merkle_root.
+    Total calldata: ~7.2 KB + ~5.3 KB = ~12.5 KB.
+    """
+
+    # LOG=10 group: NttBatch (649) + InttBatch (649) = 1298 cols
+    log10_proof: bytes
+    log10_commitment: str
+    log10_query_hints: bytes
+
+    # LOG=8 group: AzFull+Ct1Full+RangeQ+WPrime+NormCheck+UseHint = 2206 cols
+    log8_proof: bytes
+    log8_commitment: str
+    log8_query_hints: bytes
+
+    batch_merkle_root: bytes
+    n_queries: int
+
+
+def gen_full_v23_vfri6_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds_log10: int | None = None,
+    num_folds_log8: int | None = None,
+) -> "FullV23VFRI6HintResult":
+    """Generate VFRI6 hints for the complete V23 ML-DSA STARK trace.
+
+    Calls gen_mldsa_v23_vfri6_hints (LOG=10 group, 1298 cols) and
+    gen_mldsa_v23_vfri6_hints_log8 (LOG=8 group, 2206 cols) from the
+    same inputs, producing all data needed for BatchRegistryV4.submitBatch.
+
+    Both proofs embed the same batch_merkle_root in their VFRI6 commitment
+    (Blake2s(proof[:32] || batch_merkle_root)[:16]).
+
+    Note (research prototype): there is no on-chain binding between the NTT
+    outputs of the LOG=10 group and the AzFull inputs of the LOG=8 group.
+    Cross-proof consistency is guaranteed off-chain by this function.
+
+    Args:
+        z, c, t1, a_hat:   ML-DSA witness (same as prove_verify_mldsa_v23).
+        hints:             K=6 UseHint bool arrays, each 256 bools.
+        batch_merkle_root: 32-byte batch Merkle root (embedded in both proofs).
+        n_queries:         FRI queries per group (default 1).
+        num_folds_log10:   Fold rounds for LOG=10 group (default 9).
+        num_folds_log8:    Fold rounds for LOG=8 group (default 7).
+
+    Returns:
+        FullV23VFRI6HintResult with both proof triples.
+    """
+    r10 = gen_mldsa_v23_vfri6_hints(
+        z, c, t1, a_hat, batch_merkle_root,
+        n_queries=n_queries, num_folds=num_folds_log10,
+    )
+    r8 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, batch_merkle_root,
+        n_queries=n_queries, num_folds=num_folds_log8,
+    )
+    return FullV23VFRI6HintResult(
+        log10_proof=r10.proof,
+        log10_commitment=r10.commitment,
+        log10_query_hints=r10.query_hints,
+        log8_proof=r8.proof,
+        log8_commitment=r8.commitment,
+        log8_query_hints=r8.query_hints,
+        batch_merkle_root=batch_merkle_root,
+        n_queries=n_queries,
+    )

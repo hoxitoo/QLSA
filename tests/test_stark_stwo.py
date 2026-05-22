@@ -2163,3 +2163,107 @@ def test_gen_mldsa_v23_vfri6_hints_log8_multi_query():
     )
     assert r1.commitment == r2.commitment
     assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── Full V23 VFRI6 combined tests (LOG=10 + LOG=8 both proofs) ──────────────
+
+_FULL_V23_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_schema():
+    """Combined result contains both LOG=10 and LOG=8 proof triples."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11000)
+    hints = [[False] * 256 for _ in range(6)]
+    r = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    # LOG=10 group
+    assert isinstance(r.log10_proof, bytes) and len(r.log10_proof) >= 700
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log10_query_hints, bytes) and len(r.log10_query_hints) > 0
+    # LOG=8 group
+    assert isinstance(r.log8_proof, bytes) and len(r.log8_proof) >= 700
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    assert isinstance(r.log8_query_hints, bytes) and len(r.log8_query_hints) > 0
+    # Metadata
+    assert r.batch_merkle_root == _FULL_V23_BATCH_ROOT
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_both_bind_same_root():
+    """Both LOG groups embed the same batch_merkle_root in their commitment."""
+    import hashlib
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11100)
+    hints = [[False] * 256 for _ in range(6)]
+    r = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    def check_commitment(proof: bytes, commitment: str, root: bytes) -> bool:
+        h = hashlib.new("blake2s", digest_size=32)
+        h.update(proof[:32])
+        h.update(root)
+        expected = "0x" + h.digest()[:16].hex()
+        return commitment == expected or commitment == expected[2:]
+
+    assert check_commitment(r.log10_proof, r.log10_commitment, _FULL_V23_BATCH_ROOT), \
+        "LOG=10 commitment must bind to batch_merkle_root"
+    assert check_commitment(r.log8_proof, r.log8_commitment, _FULL_V23_BATCH_ROOT), \
+        "LOG=8 commitment must bind to batch_merkle_root"
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_deterministic():
+    """Same inputs produce identical outputs both times."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11200)
+    hints = [[False] * 256 for _ in range(6)]
+    r1 = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    r2 = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    assert r1.log10_commitment == r2.log10_commitment
+    assert r1.log10_query_hints == r2.log10_query_hints
+    assert r1.log8_commitment == r2.log8_commitment
+    assert r1.log8_query_hints == r2.log8_query_hints
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_total_calldata():
+    """Combined calldata < 20 KB — both groups fit in one L2 batch."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11300)
+    hints = [[False] * 256 for _ in range(6)]
+    r = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    total = len(r.log10_query_hints) + len(r.log8_query_hints)
+    assert total < 20_000, f"Combined hints {total} B should be < 20 KB"
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_groups_independent():
+    """Different batch roots produce different commitments for each group."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11400)
+    hints = [[False] * 256 for _ in range(6)]
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, root_a, n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    rb = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, root_b, n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    assert ra.log10_commitment != rb.log10_commitment, "Different roots must give different LOG=10 commitments"
+    assert ra.log8_commitment != rb.log8_commitment, "Different roots must give different LOG=8 commitments"
