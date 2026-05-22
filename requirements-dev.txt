@@ -1,9 +1,9 @@
-pytest==8.3.5
-bandit==1.8.3
-mypy==1.13.0
+pytest==9.0.3
+bandit==1.9.4
+mypy==1.20.2
 black==24.10.0
-pip-audit==2.7.3
-maturin==1.13.1
+pip-audit==2.10.0
+maturin==1.13.3
 # API testing (FastAPI TestClient)
-fastapi==0.115.6
+fastapi==0.136.1
 httpx==0.28.1
