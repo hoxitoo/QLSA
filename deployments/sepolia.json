@@ -8,5 +8,6 @@
     "BatchRegistryV2":   "0xF44A51CF1d7620e070ecaf611685418DE4679879"
   },
   "commitmentScheme": "Blake2s(proof[0:32] || merkleRoot[0:32])[0:16]",
-  "note": "Research-stage testnet deployment. QLSAVerifierBound binds proof to Merkle root via Blake2s but does not perform full FRI decommitment. Replace with full Circle STARK verifier before mainnet."
+  "note": "Research-stage testnet deployment. QLSAVerifierBound binds proof to Merkle root via Blake2s but does not perform full FRI decommitment. Replace with full Circle STARK verifier before mainnet.",
+  "security": "Deployer address is a dedicated testnet-only account. Do NOT reuse this address for mainnet deployment. Use a fresh, separately funded account for any production deployment."
 }
