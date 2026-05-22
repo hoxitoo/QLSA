@@ -1101,6 +1101,33 @@ fn precompute_bary_weights(domain_xs: &[u32]) -> Vec<u32> {
     weights
 }
 
+/// Evaluate the EVEN PART of a circle polynomial at a QM31 point `z`.
+///
+/// A circle polynomial f on CanonicCoset(tree_depth) of size N = 2^tree_depth
+/// decomposes as f(x,y) = a(x) + y·b(x).  The even part a(x) is the unique
+/// polynomial of degree < N/2 satisfying a(x_k) = (f(x_k,y_k) + f(x_k,-y_k))/2
+/// for each of the N/2 distinct x-coordinates in the half-domain k=0..N/2-1.
+///
+/// The conjugate pair for index k is N-1-k (same x, negated y), so:
+///   a(x_k) = (col[k] + col[N-1-k]) / 2
+///
+/// `xs_half[k]`     = coset_at(tree_depth, k).x  for k=0..N/2-1 (N/2 distinct values)
+/// `weights_half[k]` = precomputed barycentric weights for xs_half
+/// `col`             = N = 2·(xs_half.len()) column values on the full domain
+///
+/// Returns a(z) evaluated at the QM31 point z via barycentric interpolation
+/// on the N/2 distinct half-domain x-coordinates.
+fn eval_circle_even(col: &[u32], xs_half: &[u32], weights_half: &[u32], z: u128) -> u128 {
+    let half = xs_half.len();
+    let n = col.len();
+    debug_assert_eq!(n, 2 * half, "col length must equal 2 × half-domain size");
+    let two_inv = m31_inv(2);
+    let col_even: Vec<u32> = (0..half)
+        .map(|k| m31_mul(m31_add(col[k], col[n - 1 - k]), two_inv))
+        .collect();
+    eval_bary(&col_even, xs_half, weights_half, z)
+}
+
 // ── Main public function (VFRI3 real-trace version) ───────────────────────────
 
 /// VFRI3-compatible hint generator using the **real** Poseidon2 trace.
@@ -1168,22 +1195,24 @@ pub fn gen_poseidon2_vfri3_real(
     chan.mix_root(&trace_root);
     let z_x = chan.draw_secure_felt(); // QM31 OODS line point
 
-    // ── OODS evaluations via barycentric Lagrange interpolation ──────────────
-    // domain_xs[i] = coset_at(tree_depth, i).x (M31)
-    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
-
-    // Precompute barycentric weights once for all columns.
-    let bary_weights = precompute_bary_weights(&domain_xs);
+    // ── OODS evaluations via even-part barycentric interpolation ─────────────
+    // The CanonicCoset of size N has N/2 distinct x-coordinates (each appears
+    // twice as conjugate pair (k, N-1-k)).  We evaluate the even part of each
+    // circle polynomial:  a(z) = Σ_k w_k·col_even[k]/(z-x_k) / Σ_k w_k/(z-x_k)
+    // where col_even[k] = (col[k]+col[N-1-k])/2.
+    let half = n / 2;
+    let xs_half: Vec<u32> = (0..half).map(|k| coset_at(tree_depth, k as u64).0).collect();
+    let weights_half = precompute_bary_weights(&xs_half);
 
     let z_neg = qm31_neg(z_x); // −z_x for oodsEvalsNeg
 
     let oods_evals_pos: Vec<u128> = cols
         .iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_x))
         .collect();
     let oods_evals_neg: Vec<u128> = cols
         .iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_neg))
         .collect();
 
     // Mix OODS evals into channel (4 words per QM31).
@@ -1577,16 +1606,17 @@ pub fn gen_vfri3_hints_from_cols_nfolds(
     chan.mix_root(&trace_root);
     let z_x = chan.draw_secure_felt();
 
-    // ── OODS evaluations via barycentric Lagrange interpolation ──────────────
-    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
-    let bary_weights = precompute_bary_weights(&domain_xs);
+    // ── OODS evaluations via even-part barycentric interpolation ─────────────
+    let half = n / 2;
+    let xs_half: Vec<u32> = (0..half).map(|k| coset_at(tree_depth, k as u64).0).collect();
+    let weights_half = precompute_bary_weights(&xs_half);
     let z_neg = qm31_neg(z_x);
 
     let oods_evals_pos: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_x))
         .collect();
     let oods_evals_neg: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_neg))
         .collect();
 
     {
@@ -1869,16 +1899,17 @@ pub fn gen_vfri4_hints_from_cols_nfolds(
     chan.mix_root(&trace_root);
     let z_x = chan.draw_secure_felt();
 
-    // ── OODS evaluations via barycentric Lagrange interpolation ──────────────
-    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
-    let bary_weights = precompute_bary_weights(&domain_xs);
+    // ── OODS evaluations via even-part barycentric interpolation ─────────────
+    let half = n / 2;
+    let xs_half: Vec<u32> = (0..half).map(|k| coset_at(tree_depth, k as u64).0).collect();
+    let weights_half = precompute_bary_weights(&xs_half);
     let z_neg = qm31_neg(z_x);
 
     let oods_evals_pos: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_x))
         .collect();
     let oods_evals_neg: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_neg))
         .collect();
 
     // ── VFRI4: Poseidon2 sponge commitment of OODS evals ─────────────────────
@@ -2286,16 +2317,17 @@ pub fn gen_vfri5_hints_from_cols_nfolds(
     chan.mix_root(&trace_root);
     let z_x = chan.draw_secure_felt();
 
-    // ── OODS evaluations ──────────────────────────────────────────────────────
-    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
-    let bary_weights = precompute_bary_weights(&domain_xs);
+    // ── OODS evaluations via even-part barycentric interpolation ─────────────
+    let half = n / 2;
+    let xs_half: Vec<u32> = (0..half).map(|k| coset_at(tree_depth, k as u64).0).collect();
+    let weights_half = precompute_bary_weights(&xs_half);
     let z_neg = qm31_neg(z_x);
 
     let oods_evals_pos: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_x))
         .collect();
     let oods_evals_neg: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_neg))
         .collect();
 
     // ── Poseidon2 OODS sponge commitment (same as VFRI4) ─────────────────────
@@ -2604,15 +2636,19 @@ pub fn gen_vfri6_hints_from_cols_nfolds(
     let comp_alpha = chan.draw_secure_felt();
 
     // ── OODS evaluations (off-chain, never sent to verifier) ─────────────────
-    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
-    let bary_weights = precompute_bary_weights(&domain_xs);
+    // Use even-part barycentric: CanonicCoset has N/2 distinct x-coords (each
+    // appears twice as conjugate pair (k, N-1-k)).  a(z) = even part of the
+    // circle polynomial at z; this gives non-zero oodsCombo with prob. 1-2^{-128}.
+    let half = n / 2;
+    let xs_half: Vec<u32> = (0..half).map(|k| coset_at(tree_depth, k as u64).0).collect();
+    let weights_half = precompute_bary_weights(&xs_half);
     let z_neg = qm31_neg(z_x);
 
     let oods_evals_pos: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_x))
         .collect();
     let oods_evals_neg: Vec<u128> = cols.iter()
-        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_neg))
         .collect();
 
     // oodsComboPos = Σ compAlpha^j · oodsEvalsPos[j]  (off-chain)
