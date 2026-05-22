@@ -504,14 +504,19 @@ Development: `claude/review-repo-structure-E4kPW`
 
 `main` is a **protected branch** — direct `git push origin main` is always rejected with HTTP 403.
 
-**Required procedure for landing changes into main:**
-1. Develop and commit on `claude/review-repo-structure-E4kPW` (or any feature branch).
-2. Push the feature branch: `git push -u origin <branch>`.
-3. Create a PR via `mcp__github__create_pull_request` (owner=hoxitoo, repo=QLSA, base=main).
-4. Immediately merge the PR via `mcp__github__merge_pull_request` (merge_method="merge").
-5. Sync local main: `git fetch origin main && git reset --hard origin/main`.
+**Default mode — development sandbox:**
+All work stays on the feature branch `claude/review-repo-structure-E4kPW`.
+Commit and push to that branch freely. **Never create a PR or merge into `main` unless the user explicitly asks.**
 
-**Do this autonomously** — do not wait for the user to approve the PR unless there is a conflict or architectural ambiguity that requires a human decision. When the user asks to "update main", "push to main", or "merge into main", follow steps 1–5 without asking for confirmation.
+**When the user explicitly asks to merge / update main**, follow these steps:
+1. Commit all pending changes on `claude/review-repo-structure-E4kPW`.
+2. Push the branch: `git push -u origin claude/review-repo-structure-E4kPW`.
+3. Create a PR via `mcp__github__create_pull_request` (owner=hoxitoo, repo=QLSA, base=main).
+4. Merge the PR via `mcp__github__merge_pull_request` (merge_method="merge").
+5. Sync local main: `git fetch origin main && git checkout main && git reset --hard origin/main`.
+6. Switch back to dev branch: `git checkout claude/review-repo-structure-E4kPW`.
+
+**Trigger phrases** (explicit user request required): "замерджи в main", "обнови main", "смержи ветку", "merge into main", "push to main", "update main".
 
 ## Known Limitations (Research Prototype)
 
