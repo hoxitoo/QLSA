@@ -1836,3 +1836,70 @@ def gen_ntt_batch_vfri6_hints(
         proof=proof, commitment=commitment, query_hints=query_hints,
         n_polys=len(polys), n_queries=n_queries,
     )
+
+
+@dataclass
+class MldsaV23VFRI6HintResult:
+    proof:       bytes
+    commitment:  str    # 32-char hex = Blake2s(proof[:32]‖batch_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI6.verify(queryHints)
+    n_cols:      int    # 649 NttBatch + 649 InttBatch = 1298
+    n_queries:   int
+
+
+def gen_mldsa_v23_vfri6_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI6HintResult:
+    """Generate VFRI6-compatible hints from V23's NttBatch + InttBatch (1298 cols).
+
+    VFRI6 key improvement: on-chain cost is O(1) in n_cols regardless of trace
+    size. Even 1298 columns verify within 15M gas (vs ~240M for VFRI4/VFRI5).
+
+    Transcript: mixRoot → z_x → compAlpha → mixU32s(8 combo M31 words)
+                → mixRoot(compRoot) → friAlpha → fold rounds → drawQueries
+
+    Args:
+        z:                 5 polynomials (L=5), each 256 i64 coefficients.
+        c:                 Challenge polynomial, 256 i64 coefficients.
+        t1:                6 polynomials (K=6), each 256 i64 coefficients.
+        a_hat:             30 (K×L) NTT-domain polynomials, each 256 i64 coefficients.
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries:         FRI queries (default 1).
+        num_folds:         FRI fold rounds (default: tree_depth−1 = 9).
+
+    Returns:
+        MldsaV23VFRI6HintResult with proof, commitment, query_hints, n_cols=1298.
+    """
+    _require_ext("gen_mldsa_v23_vfri6_hints_py")
+    if len(z) != 5:
+        raise ValueError(f"z must have 5 polynomials (L=5), got {len(z)}")
+    if len(c) != 256:
+        raise ValueError(f"c must have 256 coefficients, got {len(c)}")
+    if len(t1) != 6:
+        raise ValueError(f"t1 must have 6 polynomials (K=6), got {len(t1)}")
+    if len(a_hat) != 30:
+        raise ValueError(f"a_hat must have 30 polynomials (K×L=30), got {len(a_hat)}")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri6_hints_py(
+            z, list(c), t1, a_hat,
+            list(batch_merkle_root), n_queries, num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri6_hints failed: {exc}") from exc
+    return MldsaV23VFRI6HintResult(
+        proof=proof,
+        commitment=commitment,
+        query_hints=query_hints,
+        n_cols=1298,
+        n_queries=n_queries,
+    )

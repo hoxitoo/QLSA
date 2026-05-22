@@ -1996,3 +1996,84 @@ def test_gen_ntt_batch_vfri6_hints_multi_query():
     r2 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=2, num_folds=9)
     assert r2.n_queries == 2
     assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI6 V23 (NttBatch+InttBatch, 1298 cols) tests ───────────────────────────
+
+_VFRI6_V23_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_schema():
+    """Output has correct types and n_cols=1298 (NttBatch+InttBatch)."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints, MldsaV23VFRI6HintResult
+    z, c, t1, a_hat = _v23_inputs(9000)
+    r = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI6HintResult)
+    assert len(r.proof) >= 700
+    assert len(r.commitment) == 32
+    assert len(r.query_hints) > 0
+    assert r.n_cols == 1298
+    assert r.n_queries == 1
+    assert r.proof[8:40] != b'\x00' * 32, "trace root must be non-zero"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_deterministic():
+    """Same inputs always produce identical commitment and hints."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9100)
+    r1 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.commitment  == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_smaller_than_vfri4():
+    """VFRI6 hints are much smaller than VFRI4 for 1298 cols (no oodsEvalsPos/Neg arrays)."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints, gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9200)
+    r4 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r6 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    # VFRI4 includes oodsEvalsPos[1298] + oodsEvalsNeg[1298] = 2×1298×16 = 41536 bytes
+    assert len(r6.query_hints) < len(r4.query_hints), (
+        f"VFRI6 hints ({len(r6.query_hints)} B) must be smaller than "
+        f"VFRI4 hints ({len(r4.query_hints)} B)"
+    )
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_differs_from_vfri4():
+    """VFRI6 and VFRI4 transcripts differ (different channel transcript)."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints, gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9300)
+    r4 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r6 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r4.proof[8:40] == r6.proof[8:40], "trace root must match for same inputs"
+    assert r4.query_hints != r6.query_hints, "VFRI6 transcript differs from VFRI4"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_validation_errors():
+    """Python-side validation catches bad inputs."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints
+    import pytest
+    z, c, t1, a_hat = _v23_inputs(9400)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints(z[:-1], c, t1, a_hat, _VFRI6_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints(z, c, t1[:-1], a_hat, _VFRI6_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, b'\x00' * 16)
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_multi_query():
+    """n_queries=2 produces larger hints than n_queries=1."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9500)
+    r1 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=2, num_folds=3)
+    assert r1.commitment == r2.commitment
+    assert len(r2.query_hints) > len(r1.query_hints)
