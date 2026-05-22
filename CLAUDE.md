@@ -500,6 +500,19 @@ When adding a new combined STARK (mixed-size components):
 
 Development: `claude/review-repo-structure-E4kPW`
 
+## Branch & Merge Workflow (Claude instructions)
+
+`main` is a **protected branch** — direct `git push origin main` is always rejected with HTTP 403.
+
+**Required procedure for landing changes into main:**
+1. Develop and commit on `claude/review-repo-structure-E4kPW` (or any feature branch).
+2. Push the feature branch: `git push -u origin <branch>`.
+3. Create a PR via `mcp__github__create_pull_request` (owner=hoxitoo, repo=QLSA, base=main).
+4. Immediately merge the PR via `mcp__github__merge_pull_request` (merge_method="merge").
+5. Sync local main: `git fetch origin main && git reset --hard origin/main`.
+
+**Do this autonomously** — do not wait for the user to approve the PR unless there is a conflict or architectural ambiguity that requires a human decision. When the user asks to "update main", "push to main", or "merge into main", follow steps 1–5 without asking for confirmation.
+
 ## Known Limitations (Research Prototype)
 
 1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.
