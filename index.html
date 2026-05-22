@@ -233,7 +233,7 @@
     <section class="hero">
       <div class="container hero-grid">
         <div>
-          <div class="eyebrow">Testnet live · MVP-3+ complete (V22) · MVP-4 on-chain FRI verifier in progress</div>
+          <div class="eyebrow">Testnet live · MVP-4 VFRI6 complete · O(1)-gas on-chain FRI verifier · BatchRegistryV4</div>
           <h1>Build the post-quantum migration layer before it becomes urgent</h1>
           <p class="sub">
             QLSA aggregates thousands of post-quantum signatures into a single constant-size proof,
@@ -250,8 +250,8 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>CI</small><strong>265 Solidity + 243 Python + 210 Rust + 31 TS — all green</strong></div>
-            <div class="signal-card"><small>Status</small><strong>Phase 6 ✓ · MVP-3+ ✓ · MVP-4 🔄</strong></div>
+            <div class="signal-card"><small>CI</small><strong>847 Solidity + 178 Python + 210 Rust + 31 TS — all green</strong></div>
+            <div class="signal-card"><small>Status</small><strong>Phase 6 ✓ · MVP-3+ ✓ · MVP-4 VFRI6 ✓ · MVP-5 next</strong></div>
           </div>
         </div>
 
@@ -286,19 +286,20 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). <strong>V23 production pipeline</strong>: 8 ML-DSA circuits in 1 STARK proof (3,505 trace columns) — RangeQBatch closes AzFull soundness gap. QLSAVerifierVFRI3 + Blake2sYul complete on-chain FRI. Security audit (2026-05-20): constant-time Merkle verify, rate-limit hardening, input validation. 249 Python + 210 Rust + 31 TS + Solidity tests — all CI green.</p>
+            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). <strong>V23 production pipeline</strong>: 8 ML-DSA circuits in 1 STARK proof (3,505 trace columns). <strong>MVP-4 complete (2026-05-22)</strong>: QLSAVerifierVFRI6 — O(1)-gas on-chain FRI verifier; 649, 1298 and 2206-column traces all verified within 15M gas. BatchRegistryV4: dual-VFRI6 registry for full V23 trace. Security audit: MAX_SENDERS DoS cap, y=0 circle guard, history eviction. 847 Solidity + 178 Python + 210 Rust + 31 TS tests — all CI green.</p>
           </div>
         </div>
         <div class="progress-grid">
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Cryptographic core</strong><span>ML-DSA-65/44/87, SHA3-512 Merkle, address derivation, pubkey validation, batch aggregation</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>STARK prover (Stwo 2.2.0) — V23</strong><span>Circle STARK, Poseidon2-over-M31 AIR, 8 ML-DSA circuits in 1 FRI commitment (3,505 trace columns): NttBatch + AzFull + Ct1Full + InttBatch + WPrimeFull + NormCheck + UseHintV2 + <strong>RangeQBatch</strong> (az_hat ∈ [0,Q))</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts — deployed Sepolia</strong><span>BatchRegistryV2 (nonce replay protection), QLSAVerifierFull + QLSAVerifierBound (128-bit Blake2s), 265 Solidity tests</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts — deployed Sepolia</strong><span>BatchRegistryV2/V3/V4 (nonce replay protection, MAX_SENDERS DoS cap), QLSAVerifierFull + VFRI6 (O(1)-gas FRI), 847 Solidity tests</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Aggregator node + API</strong><span>Thread-safe mempool (atomic drain), auto-batcher, FastAPI REST, rate limiting (100 tx/min per IP, proxy-aware), pk/sig length validation</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>SDKs (Python + TypeScript)</strong><span>Wallet, LocalClient + HttpClient, WitnessStatus, TypeScript AggregatorClient — mypy strict</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Testnet E2E (Sepolia, 2026-05-05)</strong><span>First batch: 4 tx, 3234-byte proof, 9.16 s finalization. submitBatchWithNonces on-chain.</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>On-chain FRI verifier library stack</strong><span>CM31 · QM31 · Blake2sYul · MerkleVerifier · TwoChannel · CirclePoint · QLSAVerifierV4–V13 · VFRI/VFRI2/VFRI3 — full K-round FRI + non-constant last-layer bounded-degree check on-chain</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Security audit hardening (2026-05-20)</strong><span>Constant-time Merkle root comparison (hmac.compare_digest), X-Forwarded-For IP fix, rate-limit thread-safety, k/l input validation, Solidity depth overflow guards, CM31 M31 range validation</span></div></div>
-          <div class="progress-item wip"><div class="progress-check wip">🔄</div><div><strong>MVP-4 final: full V23 OODS wiring</strong><span>RPO256 hash AIR + 20 queries / blowup 64 / full Fiat-Shamir OODS wiring against production proof</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>On-chain FRI verifier library stack</strong><span>CM31 · QM31 · Blake2sYul · MerkleVerifier · TwoChannel · CirclePoint · QLSAVerifierV4–V13 · VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6 — full K-round FRI + OODS + composition tree + O(1)-gas off-chain OODS combo</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Security audit hardening (2026-05-22)</strong><span>Constant-time Merkle (hmac.compare_digest), rate-limit thread-safety, MAX_SENDERS=3000 DoS cap (O(n²) loop), y=0 circle guard (M31.inv panic), _MAX_HISTORY=1000 memory cap, PRIVATE_KEY env fallback</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>BatchRegistryV4 — dual-VFRI6 (2026-05-22)</strong><span>Requires both LOG=10 (NttBatch+InttBatch, 1298 cols) and LOG=8 (AzFull+Ct1Full+RangeQBatch+WPrimeFull+NormCheck+UseHint, 2206 cols) VFRI6 proofs for full V23 ML-DSA trace coverage</span></div></div>
+          <div class="progress-item wip"><div class="progress-check wip">🔄</div><div><strong>MVP-5: cross-proof binding + eval_bary fix</strong><span>On-chain cryptographic binding between LOG=10 NTT outputs and LOG=8 AzFull inputs (requires Stwo mixed-degree STARK); eval_bary fix for CanonicCoset OODS</span></div></div>
         </div>
       </div>
     </section>
@@ -447,7 +448,8 @@
               <tr><td>MVP-2</td><td>Hash-chain + Poseidon2 AIR (Stwo)</td><td class="bad">No</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-2b</td><td>ML-DSA batch proof (Rust + STARK)</td><td class="warn">Off-chain</td><td class="good">✓ Done</td></tr>
               <tr><td>MVP-3+</td><td>All 8 circuits inside AIR + RangeQBatch (V23)</td><td class="good">Yes (V23)</td><td class="good">✓ Complete</td></tr>
-              <tr><td>MVP-4</td><td>Full on-chain FRI verifier, blowup 64, OODS wiring</td><td class="warn">Planned</td><td class="warn">🔄 In progress</td></tr>
+              <tr><td>MVP-4</td><td>VFRI4/5/6 — O(1)-gas on-chain FRI verifier; BatchRegistryV4 dual-VFRI6</td><td class="good">Yes</td><td class="good">✓ Done (2026-05-22)</td></tr>
+              <tr><td>MVP-5</td><td>eval_bary fix + cross-proof binding LOG=10↔LOG=8</td><td class="warn">Planned</td><td class="warn">⏳ Next</td></tr>
             </tbody>
           </table>
         </div>
