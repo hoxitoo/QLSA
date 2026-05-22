@@ -211,6 +211,7 @@ node_modules/
 
 # Rust build artifacts
 stark/target/
+stark_stwo/target/
 
 # Private audit and internal notes (owner-only, never published)
 .private/

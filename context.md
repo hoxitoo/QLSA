@@ -1,11 +1,11 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-05-20)
+## Статус (обновлено 2026-05-22)
 
-- Фаза: **Phase 6 завершена** (Sepolia, 2026-05-05) + **V23 production pipeline** (8-component STARK)
-- Все Phase 1–6, MVP-3, MVP-3+, V22, V23 — завершены полностью
-- Проведён полный аудит безопасности + code review (2026-05-20); все findings зафиксированы
-- Следующий приоритет: MVP-4 — RPO256 hash AIR + full V23 OODS wiring (20 queries, blowup 64)
+- Фаза: **Phase 6 завершена** (Sepolia, 2026-05-05) + **V23 dual-VFRI6 production pipeline**
+- Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6, BatchRegistryV4 — завершены полностью
+- Проведён повторный аудит безопасности + code review (2026-05-22); 6 новых findings — все устранены
+- Следующий приоритет: MVP-5 — fix eval_bary OODS для circle domain + cross-proof binding между LOG=10 и LOG=8
 
 ### Что готово
 
@@ -18,6 +18,7 @@
 - `aggregator/` — Mempool (thread-safe), Batcher (min_batch_size, force_batch), AggregatorNode
 - `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`
   - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min)
+  - `AggregatorNode._history` capped at 1000 entries (evict oldest) — memory-safe for long-running nodes
 - `sdk/python/qlsa/` — Wallet, LocalClient, HttpClient, WitnessStatus, BatchStatus
   - `prove_witness(tx)` — локальный ML-DSA witness без обращения к серверу
 - `sdk/js/src/` — TypeScript SDK: AggregatorClient, types
@@ -85,19 +86,24 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 
 #### Contracts
 - `BatchRegistry.sol` — v1, `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
-- `BatchRegistryV2.sol` — `submitBatchWithNonces()`: строгий порядок nonce per sender
+- `BatchRegistryV2.sol` — `submitBatchWithNonces()`: строгий порядок nonce per sender; `MAX_SENDERS=3000`
+- `BatchRegistryV3.sol` — IQLSAVerifierV4 interface + queryHints; `MAX_SENDERS=3000`
+- `BatchRegistryV4.sol` — dual-VFRI6: LOG=10 + LOG=8 proofs; `MAX_SENDERS=3000`
 - `QLSAVerifier.sol` — заглушка (всегда true)
 - `QLSAVerifierV2.sol` — M31 структурный верификатор
 - `QLSAVerifierV3.sol` — MIN_PROOF_LENGTH=700, Blake2s imported
 - `QLSAVerifierFull.sol` — onchain_commitment = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
+- `QLSAVerifierVFRI4.sol` — Poseidon2 OODS sponge; y=0 guard in _checkCircleFold
+- `QLSAVerifierVFRI5.sol` — compRoot Merkle tree (eliminates per-query O(n_cols)); y=0 guard
+- `QLSAVerifierVFRI6.sol` — off-chain OODS combo (O(1) gas for any n_cols); y=0 guard; 847 tests pass
 - `M31.sol` — field arithmetic library
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
-#### Тесты
-- Python: ~249 тестов (pytest); 6 новых V23 Python тестов (2026-05-20)
+#### Тесты (актуально 2026-05-22)
+- Python: **178 тестов** (без PyO3) / **317** (с PyO3 ext)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: 31 тест (jest)
-- Solidity: полный suite (hardhat) — все проходят после security fixes
+- Solidity/Hardhat: **847 тестов** — все проходят
 - mypy --strict: все 16 файлов `core/ + aggregator/ + sdk/python/` чистые
 
 #### Деплой
@@ -174,6 +180,9 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | Phase 6 | ✅ Done | Sepolia testnet, первый батч финализирован 2026-05-05 |
 | **MVP-3+** | **✅ Done** | **Все 7 AIR circuits → 1 STARK proof (V22) + Merkle root binding** |
 | **V23** | **✅ Done** | **RangeQBatch 8th circuit (az_hat ∈ [0,Q)) + security hardening** |
+| **VFRI4/5/6** | **✅ Done** | **O(1)-gas on-chain verifier; 1298 и 2206 cols ≤ 15M gas** |
+| **BatchRegistryV4** | **✅ Done** | **Dual-VFRI6 registry; full V23 trace coverage; 847 tests** |
+| MVP-5 | ⏳ Next | eval_bary fix (circle domain OODS); cross-proof binding LOG10↔LOG8 |
 | MVP-4 | ⏳ Future | RPO256 hash AIR + full V23 OODS wiring (20 queries, blowup 64) |
 
 ---
@@ -218,14 +227,25 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - **X-Forwarded-For**: берётся rightmost IP (proxy-added), не первый (client-controlled) (2026-05-20)
 - **Input validation**: `_validate_mldsa65_inputs` перед combined STARK prover calls (2026-05-20)
 - **Solidity guards**: depth > 32 в MerkleVerifier; logDomainSize > 30 в V11/V12/V13; M31 range check в CM31 (2026-05-20)
+- **MAX_SENDERS=3000**: `submitBatchWithNonces()` в V2/V3/V4 — ограничивает O(n²) dedup loop (2026-05-22)
+- **History eviction**: `AggregatorNode._history` ограничена 1000 записями, oldest evicted (2026-05-22)
+- **Circle fold y=0 guard**: `if (h.queryPointY == 0) return false` в VFRI4/VFRI5/VFRI6 (2026-05-22)
+- **stark_stwo/target/ в .gitignore**: предотвращает случайный коммит больших Rust артефактов (2026-05-22)
 
-### Таблица рисков (обновлено 2026-05-20)
+### Таблица рисков (обновлено 2026-05-22)
 
 | Риск | Уровень | Статус |
 |------|---------|--------|
 | ML-DSA верификация вне AIR circuit | Критично | ✅ Закрыт (V21: 1 STARK, 2026-05-16) |
 | Merkle-root не публичный вход STARK | Критично | ✅ Закрыт (V22: Fiat-Shamir, 2026-05-16) |
 | AzFull soundness gap (az_hat не range-checked) | Высокий | ✅ Закрыт (V23: RangeQBatch 288 cols, 2026-05-20) |
+| On-chain OODS O(n_cols) gas bottleneck | Высокий | ✅ Закрыт (VFRI6: off-chain combo, O(1) gas, 2026-05-22) |
+| submitBatchWithNonces O(n²) без лимита senders | Средний | ✅ Закрыт (MAX_SENDERS=3000 в V2/V3/V4, 2026-05-22) |
+| _history unbounded growth (memory leak) | Средний | ✅ Закрыт (cap 1000 + eviction, 2026-05-22) |
+| Circle fold y=0 — M31.inv panic | Низкий | ✅ Закрыт (y==0 guard в VFRI4/5/6, 2026-05-22) |
+| stark_stwo/target/ не в .gitignore | Низкий | ✅ Закрыт (.gitignore обновлён, 2026-05-22) |
+| .env не имел DEPLOYER_PRIVATE_KEY alias | Баг | ✅ Закрыт (.env + submit.py исправлены, 2026-05-22) |
+| Нет cross-proof binding между LOG=10 и LOG=8 | Средний | Open (tracked MVP-5: unified FRI commitment) |
 | QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (MVP-4: OODS + 20 queries) |
 | FRI blowup=4 → ~60-бит soundness | Высокий | ✅ Закрыт (blowup=64, 20 queries, 10 pow → 130 bits) |
 | M31 wrap-around soundness gap (mul constraints) | Высокий | ✅ Закрыт (Q-range check AIR, 2026-05-14) |

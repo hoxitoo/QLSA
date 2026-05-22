@@ -108,6 +108,9 @@ class AggregatorNode:
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
+    # Keep at most this many BatchResults in memory; oldest are evicted first.
+    _MAX_HISTORY = 1000
+
     def _record(self, result: BatchResult) -> None:
         n = len(result.batch.transactions)
         with self._lock:
@@ -116,6 +119,8 @@ class AggregatorNode:
             if result.is_proven:
                 self._stats.proofs_generated += 1
             self._history.append(result)
+            if len(self._history) > self._MAX_HISTORY:
+                self._history = self._history[-self._MAX_HISTORY :]
         logger.info(
             "batch created: id=%s txs=%d proven=%s",
             result.batch.batch_id[:8],

@@ -12,9 +12,9 @@ Circle STARK proof (~90–200 KB) for O(1) on-chain verification.
 ```
 core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
-stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V22
+stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -25,7 +25,7 @@ benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_wit
 ## Key Commands
 
 ```bash
-# Run all Python tests (~243 passing when PyO3 ext installed)
+# Run all Python tests (~317 passing when PyO3 ext installed)
 pytest tests/ -v
 
 # Run only tests that do NOT need the PyO3 extension
@@ -155,6 +155,15 @@ Always use `bincode::encode_to_vec` / `bincode::decode_from_slice` with these ty
 Complex extension of M31: `GF(2^31-1)[i] / (i²+1)`.
 - Encoding: `uint64` packed as `(a << 32) | b` where `a = re`, `b = im`
 - Operations: `pack/re/im`, `add/sub/mul/neg/inv/conj/scale`, `fromBytes8LE`
+
+### `contracts/src/verifier/Poseidon2M31.sol`
+Poseidon2 permutation over M31 (GF(2^31-1)), matching Stwo 2.2.0 Rust exactly.
+- Parameters: t=2 state, α=5 S-box (x^5), 8 full rounds, MDS=[[3,1],[1,3]]
+- Round constants: SHA-256 IV/K values reduced mod P
+- Gas: ~1000 gas per permute (8 rounds × 6 mulmod + 4 add)
+- Operations: `permute(s0, s1)`, `compress(left, right)`, `sponge(values[])`
+- 16 tests cross-checked against Stwo 2.2.0 Rust (Poseidon2M31.test.js)
+- Cross-check vectors: `permute(0,0)→(204783406,774225216)`, `sponge([1..8])→(1628177261,1519148168)`
 
 ### `contracts/src/verifier/QM31.sol`
 Quartic extension: `CM31[u] / (u² - R)` where `R = CM31(2, 1) = 2 + i` (matches Stwo).
@@ -360,6 +369,29 @@ VFRI + last-layer constant-polynomial check — closes the final FRI soundness g
 - All other structures (FoldHint, QueryHints, VerifyCtx, transcript) identical to VFRI
 - 41 tests: 4 treeDepth/numFolds configurations + input validation + Fiat-Shamir + constant-polynomial specifics (constant tree root verification, non-constant tree rejection, consistent-but-wrong value rejection)
 
+### `stark_stwo/src/vfri2_bridge.rs` — V23 VFRI3 hint bridge (MVP-4)
+
+**`gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)`**
+
+Combines V23's NttBatch (649 cols) + InttBatch (649 cols) = 1298 trace columns (both LOG=10)
+and generates VFRI3-compatible ABI-encoded hints. Returns `(proof_bytes, commitment_hex, abi_hints)`.
+
+Architecture:
+- Step 1: `build_trace(z,c,t1)` → NttBatch trace (649 cols)
+- Step 2: `build_trace(a_hat, z_hat)` → az_hat; `build_trace(c_hat, t1_hat)` → ct1_hat
+- Step 3: `build_trace(az_hat, ct1_hat)` → InttBatch trace (649 cols)
+- Step 4: combine → 1298 cols at LOG=10 (1024 rows each)
+- Step 5: `gen_vfri3_hints_from_cols_nfolds` → VFRI3 Fiat-Shamir + OODS + FRI fold chain
+
+**Gas scale finding:** 1298 cols require ~120M gas for on-chain OODS mixing (exceeds 16.7M cap).
+On-chain verification of full V23 components requires OODS batching (algebraic hash, e.g. RPO256).
+
+Python wrapper: `stark/prover.py::gen_mldsa_v23_vfri3_hints()` → `MldsaV23VFRI3HintResult`
+Tests: `tests/test_stark_stwo.py` — 6 Python tests (schema, deterministic, batch_root_binding,
+consistent_with_v23_ntt, validation_errors, multi_query)
+JS test: `contracts/test/QLSAVerifierVFRI3MldsaV23NttE2E.test.js` — 9 tests
+  (structural checks, rejection paths, gas-scale boundary documentation)
+
 ### `contracts/src/QLSAVerifierVFRI3.sol`
 VFRI3 — non-constant last-layer polynomial bounded-degree check (MVP-4).
 - Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
@@ -370,6 +402,90 @@ VFRI3 — non-constant last-layer polynomial bounded-degree check (MVP-4).
   - `MAX_LAST_LAYER_SIZE = 65536` (2^16 evaluations max on-chain)
 - Per-query Merkle proofs already bind each final fold into `friLayerRoots[K]`, completing the bounded-degree argument
 - 43 tests: 4 treeDepth/numFolds configurations × constant+non-constant paths, array size validation, single-element tamper, Fiat-Shamir enforcement, trace-Merkle enforcement
+
+### `contracts/src/QLSAVerifierVFRI4.sol`
+VFRI4 — VFRI3 with Poseidon2 OODS sponge commitment (MVP-4).
+- Extends VFRI3 by replacing `mixU32s(allOodsEvals)` with `mixU32s(Poseidon2Sponge(oodsFlat).words)`
+- Transcript change: `mixRoot → z_x → mixU32s([p2(pos_m31s).s0, p2(pos_m31s).s1, p2(neg_m31s).s0, p2(neg_m31s).s1]) → compAlpha`
+- Channel receives exactly 4 M31 words for OODS commitment regardless of column count
+- `queryHints` encoding: identical to VFRI3 (oodsEvalsPos/Neg still provided for composition computation)
+- Security: Poseidon2-over-M31 collision resistance (128-bit, t=2, α=5, R_F=8)
+- Passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds) within 16.7 M gas
+- VFRI3 hints are NOT accepted by VFRI4 (different transcript → different query indices)
+- 11+10 JS tests + 6+6+6 Python tests (NttBatch + Poseidon2 AIR + V23 NttBatch)
+- Rust bridges:
+  - `gen_vfri4_hints_from_cols_nfolds` — generic VFRI4 from flat columns
+  - `gen_ntt_batch_vfri4_hints_nfolds` — ML-DSA NttBatch (1 poly = 55 cols, fits 15M gas)
+  - `gen_poseidon2_vfri4_real` — Poseidon2 AIR (7 cols) end-to-end
+  - `gen_mldsa_v23_vfri4_hints` — V23 NttBatch+InttBatch (1298 cols, gas > 15M)
+- Python wrappers:
+  - `gen_ntt_batch_vfri4_hints` → `NttBatchVFRI4HintResult`
+  - `gen_poseidon2_vfri4_hints` → `Poseidon2VFRI4HintResult`
+  - `gen_mldsa_v23_vfri4_hints` → `MldsaV23VFRI4HintResult` (n_cols=1298)
+- Gas scale findings (2026-05-21):
+  - 55 cols (1 poly): ~7.4 s, fits in 15 M gas ✓
+  - 649 cols (12 poly, V23 NttBatch): ~120 M gas — exceeds cap (O(n_cols) composition)
+  - 1298 cols (V23 full): ~240 M gas estimated — Poseidon2 OODS sponge fixes OODS mixing but not composition
+- Note: VFRI4 is the architectural foundation for VFRI5 (composition polynomial batching). The per-query O(n_cols) composition computation is the next bottleneck to solve.
+
+### `contracts/src/QLSAVerifierVFRI5.sol`
+VFRI5 — VFRI4 with composition polynomial Merkle tree (`compRoot`), eliminating per-query O(n_cols) work.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128[] lastLayerCoeffs, uint128[] oodsEvalsPos, uint128[] oodsEvalsNeg, bytes32 compRoot, bytes32[] friLayerRoots, QueryHints[])`
+  - `compRoot` is a **static bytes32** (placed inline at head slot 3, NOT an offset pointer)
+  - Head = 6 × 32 = 192 bytes
+- `QueryHints` struct (11 fields: 7 static + 4 dynamic, head = 352 bytes):
+  - Removed: `queryValues[]`, `queryValuesNeg[]`, `merkleSiblings[]`, `merkleSiblingsNeg[]`
+  - Added: `compValue` (F(p) = Σ α^j · col_j(p)), `compProof[]`, `compValueNeg`, `compProofNeg[]`
+  - Fields: `queryIndex, treeDepth, compValue, compProof[], compValueNeg, compProofNeg[], foldedValue, queryPointX, queryPointY, friL1Siblings[], folds[]`
+- Transcript: `mixRoot(traceRoot) → z_x → Poseidon2Sponge(oodsPos,oodsNeg) → compAlpha → mixRoot(compRoot) [NEW] → friAlpha → fold rounds → drawQueries`
+- `_buildCtx` computes `oodsComboPos/Neg = Σ α^j · oodsEval_j` ONCE (O(n_cols)); no per-query column sum
+- `_verifyQuery` Merkle-verifies `compValue` in `compRoot`, derives `fPlus/fMinus` as OODS quotients
+- Gas analysis (2026-05-21):
+  - Per-query calldata: 48.9 KB for 649 cols vs 90.6 KB for VFRI4 (1.9× smaller)
+  - For 1 query: ~same gas as VFRI4 (O(n_cols) oodsCombo computed once per call)
+  - For n_queries: VFRI5 is O(n_cols + n_queries × treeDepth) vs VFRI4's O(n_cols × n_queries)
+  - 649-col NttBatch with 1 query still exceeds 15M gas (oodsCombo bottleneck)
+  - VFRI6 will move oodsCombo off-chain (prover provides precomputed value + commitment)
+- VFRI4 hints are NOT accepted by VFRI5 (different ABI layout — QueryHints struct incompatible)
+- 5 Rust tests + 6 Python tests + 12 JS E2E tests
+- Rust bridge: `gen_vfri5_hints_from_cols_nfolds`, `gen_ntt_batch_vfri5_hints_nfolds`
+- Python wrapper: `gen_ntt_batch_vfri5_hints` → `NttBatchVFRI5HintResult`
+
+### `contracts/src/QLSAVerifierVFRI6.sol`
+VFRI6 — VFRI5 with off-chain OODS combo, eliminating O(n_cols) on-chain work entirely.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` encoding: `abi.encode(uint128 oodsComboPos, uint128 oodsComboNeg, bytes32 compRoot, bytes32[] friLayerRoots, QueryHints[])`
+  - `oodsComboPos`, `oodsComboNeg` are static uint128 scalars (head slots 0–1)
+  - `compRoot` is static bytes32 (head slot 2)
+  - Head = 5 × 32 = 160 bytes
+- `QueryHints` struct: **identical to VFRI5** (11 fields: 7 static + 4 dynamic)
+- Transcript (KEY changes from VFRI5):
+  - No Poseidon2 sponge
+  - `compAlpha` drawn BEFORE OODS combo is mixed (avoids circular dependency)
+  - `mixU32s([c0re(comboPos), c0im, c1re, c1im, c0re(comboNeg), c0im, c1re, c1im])` — 8 M31 words
+  - Full: `mixRoot(traceRoot) → z_x → compAlpha → mixU32s(8 combo words) → mixRoot(compRoot) → friAlpha → fold rounds → drawQueries`
+- `_buildCtx`: no `_compositionQM31`, no `_qm31ArrayToM31s`, no Poseidon2 import
+- Soundness: Schwartz-Zippel OODS quotient argument — if `(compValue − oodsComboPos)/(p.x − z_x)` is low-degree for random p, then `oodsComboPos = F(z_x)` with overwhelming probability
+- Gas analysis (2026-05-22):
+  - Per-query calldata: **7.2 KB** for any n_cols at LOG=10 (O(1) — same for 649 and 1298 cols!)
+  - **649-col NttBatch (1 query) PASSES within 15M gas** ✓ (vs VFRI5: >15M gas)
+  - **1298-col NttBatch+InttBatch (1 query) PASSES within 15M gas** ✓ (same gas as 649-col)
+  - **2206-col LOG=8 group (1 query) PASSES within 15M gas** ✓ (5.3 KB hints, shorter Merkle paths at depth=8)
+  - O(n_cols) work eliminated on-chain: only 8 M31 words mixed per call regardless of trace size
+  - Hint size depends on tree_depth and num_folds, not n_cols: depth=10 → 7.2 KB; depth=8 → 5.3 KB
+- VFRI5 hints are NOT accepted by VFRI6 (different ABI layout + transcript)
+- 15 Rust tests + 17 Python tests + 33 JS E2E tests
+- Rust bridges:
+  - `gen_vfri6_hints_from_cols_nfolds` — generic VFRI6 from flat columns
+  - `gen_ntt_batch_vfri6_hints_nfolds` — ML-DSA NttBatch (1 poly = 649 cols)
+  - `gen_mldsa_v23_vfri6_hints` — V23 LOG=10 group: NttBatch+InttBatch (1298 cols)
+  - `gen_mldsa_v23_vfri6_hints_log8` — V23 LOG=8 group: AzFull+Ct1Full+RangeQBatch+WPrimeFull+NormCheckBatch+UseHintBatchV2 (2206 cols)
+- Python wrappers:
+  - `gen_ntt_batch_vfri6_hints` → `NttBatchVFRI6HintResult`
+  - `gen_mldsa_v23_vfri6_hints` → `MldsaV23VFRI6HintResult` (n_cols=1298)
+  - `gen_mldsa_v23_vfri6_hints_log8` → `MldsaV23VFRI6Log8HintResult` (n_cols=2206)
+- Together, the two LOG groups cover the full V23 trace (3504 main cols) via two separate VFRI6 calls
 
 ## Multi-Component STARK Pattern
 
@@ -386,7 +502,7 @@ Development: `claude/review-repo-structure-E4kPW`
 
 ## Known Limitations (Research Prototype)
 
-1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul now passes full NttBatch E2E verification on-chain (1 poly / 1 query / 9 folds, ~855 ms, within 16.7 M gas eth_call cap); remaining for MVP-4: RPO256 hash AIR, full OODS wiring to a real STARK proof with production query count (20 queries / blowup 64)
+1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)

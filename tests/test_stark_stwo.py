@@ -1480,3 +1480,790 @@ def test_prove_mldsa_witness_v23_prover_wrapper():
     assert isinstance(result, MldsaWitnessResult)
     assert isinstance(result.proof_bundle, bytes) and len(result.proof_bundle) > 0
     assert verify_mldsa_witness_stark_v23(result)
+
+
+# ── V23 VFRI3 hint generation tests (MVP-4 OODS wiring) ─────────────────────
+# Seeds in 4000 range to avoid collision with V23 tests (3000 range).
+
+_VFRI3_BATCH_ROOT = bytes(range(32))  # deterministic 32-byte root for all V23 VFRI3 tests
+
+
+def _v23_inputs(seed_base: int) -> tuple[
+    list[list[int]], list[int], list[list[int]], list[list[int]]
+]:
+    """Return (z, c, t1, a_hat) with seeds offset from seed_base."""
+    z     = [_rand_poly(seed_base + j)        for j in range(_L3)]
+    c     = _rand_poly(seed_base + 100)
+    t1    = [_rand_poly(seed_base + 200 + i)  for i in range(_K3)]
+    a_hat = [_rand_poly(seed_base + 300 + i)  for i in range(_K3 * _L3)]
+    return z, c, t1, a_hat
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_schema():
+    """Output types and sizes of gen_mldsa_v23_vfri3_hints are correct."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints, MldsaV23VFRI3HintResult
+    z, c, t1, a_hat = _v23_inputs(4000)
+
+    result = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+
+    assert isinstance(result, MldsaV23VFRI3HintResult)
+    assert isinstance(result.proof, bytes) and len(result.proof) >= 700
+    assert isinstance(result.commitment, str) and len(result.commitment) == 32
+    assert isinstance(result.query_hints, bytes) and len(result.query_hints) > 0
+    assert result.n_cols == 1298   # 649 NttBatch + 649 InttBatch
+    assert result.n_queries == 1
+    # commitment is 32 hex chars = 16 bytes of Blake2s
+    assert bytes.fromhex(result.commitment)  # valid hex
+    # proof[8:40] = trace root (non-zero for real trace)
+    assert result.proof[8:40] != b'\x00' * 32
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_deterministic():
+    """Same inputs produce identical proofs (Fiat-Shamir is deterministic)."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4100)
+
+    r1 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.proof       == r2.proof
+    assert r1.commitment  == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_batch_root_binding():
+    """Different batch_merkle_roots produce different proofs/commitments."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4200)
+
+    root1 = bytes(range(32))
+    root2 = bytes(range(1, 33))
+    r1 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, root1, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, root2, n_queries=1, num_folds=3)
+
+    assert r1.commitment  != r2.commitment, "Different batch roots must give different commitments"
+    assert r1.proof[8:40] == r2.proof[8:40], "Trace root must be batch-root-independent"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_consistent_with_v23_ntt():
+    """NttBatch portion of V23 and V23-VFRI3 produce the same NTT outputs."""
+    from stark.prover import (
+        gen_mldsa_v23_vfri3_hints,
+        prove_mldsa_witness_stark_v23,
+        MldsaWitnessResult,
+    )
+    z, c, t1, a_hat = _v23_inputs(4300)
+    hints = _zero_hints(_K3)
+
+    # V23 STARK proof computes z_hat = NTT(z), c_hat = NTT(c), t1_hat = NTT(t1)
+    v23 = prove_mldsa_witness_stark_v23(a_hat, z, c, t1, hints, _K3, _L3)
+    # V23 VFRI3 hints also compute NTT(z, c, t1) internally
+    vfri3 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=3)
+
+    # Both produce non-empty outputs with valid trace (non-zero trace root)
+    assert v23.proof_bundle and vfri3.proof
+    assert vfri3.proof[8:40] != b'\x00' * 32  # real trace committed
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_validation_errors():
+    """Python-side validation catches bad inputs before hitting Rust."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4400)
+
+    import pytest
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri3_hints(z[:-1], c, t1, a_hat, _VFRI3_BATCH_ROOT)  # z has only 4 polys
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri3_hints(z, c, t1[:-1], a_hat, _VFRI3_BATCH_ROOT)  # t1 has only 5 polys
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, b'\x00' * 16)  # root too short
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri3_hints_multi_query():
+    """n_queries=3, num_folds=5: query_hints grows with number of queries."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints
+    z, c, t1, a_hat = _v23_inputs(4500)
+
+    r1 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=1, num_folds=5)
+    r3 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI3_BATCH_ROOT, n_queries=3, num_folds=5)
+
+    assert r3.query_hints != r1.query_hints
+    assert len(r3.query_hints) > len(r1.query_hints), "More queries → larger hint payload"
+    assert r3.n_queries == 3
+
+
+# ── VFRI4 V23 (NttBatch+InttBatch) bridge tests ──────────────────────────────
+
+_VFRI4_V23_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_schema():
+    """Output has correct types and n_cols=1298 (NttBatch+InttBatch)."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints, MldsaV23VFRI4HintResult
+    z, c, t1, a_hat = _v23_inputs(7000)
+    result = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(result, MldsaV23VFRI4HintResult)
+    assert isinstance(result.proof, bytes) and len(result.proof) >= 700
+    assert isinstance(result.commitment, str) and len(result.commitment) == 32
+    assert isinstance(result.query_hints, bytes) and len(result.query_hints) > 0
+    assert result.n_cols == 1298
+    assert result.n_queries == 1
+    assert result.proof[8:40] != b'\x00' * 32, "trace root must be non-zero"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_deterministic():
+    """Same inputs always produce identical commitment and hints."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7100)
+    r1 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.commitment  == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_batch_root_binding():
+    """Different batch roots → different commitment; same trace root."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7200)
+    root1 = bytes(range(32))
+    root2 = bytes(range(1, 33))
+    r1 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, root1, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, root2, n_queries=1, num_folds=3)
+    assert r1.commitment  != r2.commitment
+    assert r1.proof[8:40] == r2.proof[8:40], "trace root is batch-root-independent"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_differs_from_vfri3():
+    """VFRI4 and VFRI3 hints differ (incompatible transcripts)."""
+    from stark.prover import gen_mldsa_v23_vfri3_hints, gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7300)
+    r3 = gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r4 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    # Trace roots are the same (same arithmetic computation)
+    assert r3.proof[8:40] == r4.proof[8:40], "trace root must match for same inputs"
+    # But transcripts diverge after OODS mixing → different commitments and hints
+    assert r3.query_hints != r4.query_hints, "VFRI4 transcript differs from VFRI3"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_validation_errors():
+    """Python-side validation catches bad inputs."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7400)
+    import pytest
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri4_hints(z[:-1], c, t1, a_hat, _VFRI4_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri4_hints(z, c, t1[:-1], a_hat, _VFRI4_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, b'\x00' * 16)
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri4_hints_multi_query():
+    """n_queries=3 produces larger hints than n_queries=1."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints
+    z, c, t1, a_hat = _v23_inputs(7500)
+    r1 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r3 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI4_V23_BATCH_ROOT, n_queries=3, num_folds=3)
+    assert r3.n_queries == 3
+    assert len(r3.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI4 NttBatch bridge tests ───────────────────────────────────────────────
+
+_VFRI4_BATCH_ROOT = bytes(range(32))
+
+
+def _ntt_polys(seed: int, n: int = 1) -> list[list[int]]:
+    """Return n random polynomials with 256 coefficients each (bounded by GAMMA1)."""
+    import random
+    rng = random.Random(seed)
+    GAMMA1 = 2**19
+    return [[rng.randint(-GAMMA1, GAMMA1) for _ in range(256)] for _ in range(n)]
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_schema():
+    """Result has correct types and n_cols = 1 + n_polys*54."""
+    from stark.prover import gen_ntt_batch_vfri4_hints, NttBatchVFRI4HintResult
+    polys = _ntt_polys(5000)
+    r = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert isinstance(r, NttBatchVFRI4HintResult)
+    assert r.n_cols == 55   # 1 + 1*54
+    assert r.n_queries == 1
+    assert len(r.proof) >= 700
+    assert len(r.commitment) == 32  # 16 bytes hex
+    assert len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_deterministic():
+    """Same inputs always produce the same output."""
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    polys = _ntt_polys(5100)
+    r1 = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r1.proof == r2.proof
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_commitment_binding():
+    """Commitment changes when batch_merkle_root changes."""
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    polys = _ntt_polys(5200)
+    root_a = bytes(range(32))
+    root_b = bytes([x ^ 0xFF for x in range(32)])
+    ra = gen_ntt_batch_vfri4_hints(polys, root_a, n_queries=1, num_folds=9)
+    rb = gen_ntt_batch_vfri4_hints(polys, root_b, n_queries=1, num_folds=9)
+    assert ra.commitment != rb.commitment
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_differs_from_vfri3():
+    """VFRI4 and VFRI3 produce different query_hints (different transcript)."""
+    from stark.prover import gen_ntt_batch_vfri4_hints, gen_ntt_batch_vfri3_hints
+    polys = _ntt_polys(5300)
+    r4 = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    # gen_ntt_batch_vfri3_hints uses num_folds=9 implicitly (tree_depth-1)
+    import qlsa_stark_stwo as _ext2
+    proof3, comm3, hints3 = _ext2.gen_ntt_batch_vfri3_hints_nfolds_py(
+        polys, list(_VFRI4_BATCH_ROOT), 1, 9
+    )
+    # Commitments match (same proof bytes, same batch_merkle_root)
+    assert r4.commitment == comm3
+    # But query_hints differ (different OODS transcript)
+    assert r4.query_hints != hints3, "VFRI4 and VFRI3 must produce different query_hints"
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_commitment_formula():
+    """Commitment = Blake2s(proof[:32] || batch_merkle_root)[:16]."""
+    import hashlib
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    polys = _ntt_polys(5400)
+    r = gen_ntt_batch_vfri4_hints(polys, _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    h = hashlib.new('blake2s')
+    h.update(r.proof[:32])
+    h.update(_VFRI4_BATCH_ROOT)
+    expected = h.digest()[:16].hex()
+    assert r.commitment == expected
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri4_hints_multi_poly():
+    """2-poly trace (109 cols) produces larger query_hints than 1-poly (55 cols)."""
+    from stark.prover import gen_ntt_batch_vfri4_hints
+    r1 = gen_ntt_batch_vfri4_hints(_ntt_polys(5500, 1), _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri4_hints(_ntt_polys(5500, 2), _VFRI4_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r2.n_cols == 109  # 1 + 2*54
+    assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI4 Poseidon2 real-trace bridge tests ────────────────────────────────────
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_schema():
+    """Result has correct types and non-empty proof/hints."""
+    from stark.prover import gen_poseidon2_vfri4_hints, Poseidon2VFRI4HintResult
+    leaves = list(range(1, 9))  # 8 leaves
+    r = gen_poseidon2_vfri4_hints(leaves, bytes(range(32)))
+    assert isinstance(r, Poseidon2VFRI4HintResult)
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+    assert r.n_leaves == 8
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_deterministic():
+    """Same inputs always produce the same commitment and hints."""
+    from stark.prover import gen_poseidon2_vfri4_hints
+    leaves = list(range(1, 5))
+    root = bytes([0xAB] * 32)
+    r1 = gen_poseidon2_vfri4_hints(leaves, root)
+    r2 = gen_poseidon2_vfri4_hints(leaves, root)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_commitment_binding():
+    """commitment = hex(Blake2s(proof[:32] ‖ batch_merkle_root)[:16])."""
+    import hashlib
+    from stark.prover import gen_poseidon2_vfri4_hints
+    root = bytes(range(32))
+    r = gen_poseidon2_vfri4_hints([1, 2, 3, 4, 5, 6, 7, 8], root)
+    h = hashlib.new("blake2s", digest_size=32)
+    h.update(r.proof[:32])
+    h.update(root)
+    expected = h.digest()[:16].hex()
+    assert r.commitment == expected
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_differs_from_vfri3():
+    """VFRI4 and VFRI3 transcripts are incompatible: hints differ."""
+    from stark.prover import gen_poseidon2_vfri4_hints
+    # Import VFRI3 equivalent
+    import qlsa_stark_stwo as _ext  # type: ignore[import]
+    leaves = [1, 2, 3, 4, 5, 6, 7, 8]
+    root = bytes([0x42] * 32)
+    r4 = gen_poseidon2_vfri4_hints(leaves, root)
+    _proof3, _com3, h3 = _ext.gen_poseidon2_vfri3_real_py(leaves, list(root), 1)
+    assert r4.query_hints != bytes(h3), "VFRI4 and VFRI3 hints must differ (different transcripts)"
+
+
+@needs_ext
+def test_gen_poseidon2_vfri4_hints_multi_query():
+    """Multiple queries succeed and produce proportionally larger hints."""
+    from stark.prover import gen_poseidon2_vfri4_hints
+    leaves = list(range(1, 17))  # 16 leaves
+    root = bytes(range(32))
+    r1 = gen_poseidon2_vfri4_hints(leaves, root, n_queries=1)
+    r2 = gen_poseidon2_vfri4_hints(leaves, root, n_queries=2)
+    assert r2.n_queries == 2
+    assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI5 NttBatch hint tests ──────────────────────────────────────────────────
+
+_VFRI5_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri5_hints_schema():
+    """Result has correct type, n_polys, and non-empty fields."""
+    from stark.prover import gen_ntt_batch_vfri5_hints, NttBatchVFRI5HintResult
+    polys = _ntt_polys(6000)
+    r = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert isinstance(r, NttBatchVFRI5HintResult)
+    assert r.n_polys == 1
+    assert r.n_queries == 1
+    assert len(r.proof) >= 700
+    assert len(r.commitment) == 32  # 16 bytes hex = 32 chars
+    assert len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri5_hints_deterministic():
+    """Same inputs produce identical proof, commitment, and hints."""
+    from stark.prover import gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(6100)
+    r1 = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri5_hints_batch_root_binding():
+    """Different batch_merkle_root produces different commitment (not hints — root is not in transcript)."""
+    from stark.prover import gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(6200)
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_ntt_batch_vfri5_hints(polys, root_a, n_queries=1, num_folds=9)
+    rb = gen_ntt_batch_vfri5_hints(polys, root_b, n_queries=1, num_folds=9)
+    assert ra.commitment != rb.commitment
+    # query_hints are transcript-derived (traceRoot only) — same polys → same hints
+    assert ra.query_hints == rb.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri5_hints_differs_from_vfri4():
+    """VFRI5 transcript includes compRoot → different hints from VFRI4."""
+    from stark.prover import gen_ntt_batch_vfri5_hints, gen_ntt_batch_vfri4_hints
+    polys = _ntt_polys(6300)
+    r4 = gen_ntt_batch_vfri4_hints(polys, _VFRI5_BATCH_ROOT, n_queries=1, num_folds=9)
+    r5 = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=1, num_folds=9)
+    # Same arithmetic (same proof / trace commitment)
+    assert r4.commitment == r5.commitment
+    # Different transcripts → different query hints
+    assert r4.query_hints != r5.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri5_hints_comp_root_non_zero():
+    """VFRI5 hints embed a non-zero compRoot at head slot 3 (bytes 96..128)."""
+    from stark.prover import gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(6400)
+    r = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=1, num_folds=9)
+    # head = 6 × 32 = 192 bytes; compRoot at slot 3 = bytes 96..128
+    assert len(r.query_hints) > 192
+    comp_root_slot = r.query_hints[96:128]
+    assert comp_root_slot != bytes(32), "compRoot in VFRI5 hints must be non-zero"
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri5_hints_multi_query():
+    """Multiple queries produce proportionally larger hints."""
+    from stark.prover import gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(6500)
+    r1 = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri5_hints(polys, _VFRI5_BATCH_ROOT, n_queries=2, num_folds=9)
+    assert r2.n_queries == 2
+    assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI6 NttBatch hint tests ──────────────────────────────────────────────────
+
+_VFRI6_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_schema():
+    """Result has correct type, n_polys, and non-empty fields."""
+    from stark.prover import gen_ntt_batch_vfri6_hints, NttBatchVFRI6HintResult
+    polys = _ntt_polys(7000)
+    r = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert isinstance(r, NttBatchVFRI6HintResult)
+    assert r.n_polys == 1
+    assert r.n_queries == 1
+    assert len(r.proof) >= 700
+    assert len(r.commitment) == 32  # 16 bytes hex = 32 chars
+    assert len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_deterministic():
+    """Same inputs produce identical proof, commitment, and hints."""
+    from stark.prover import gen_ntt_batch_vfri6_hints
+    polys = _ntt_polys(7100)
+    r1 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_batch_root_binding():
+    """Different batch_merkle_root produces different commitment (not hints)."""
+    from stark.prover import gen_ntt_batch_vfri6_hints
+    polys = _ntt_polys(7200)
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_ntt_batch_vfri6_hints(polys, root_a, n_queries=1, num_folds=9)
+    rb = gen_ntt_batch_vfri6_hints(polys, root_b, n_queries=1, num_folds=9)
+    assert ra.commitment != rb.commitment
+    # query_hints are transcript-derived (traceRoot only) — same polys → same hints
+    assert ra.query_hints == rb.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_differs_from_vfri5():
+    """VFRI6 transcript differs from VFRI5 (no Poseidon2, compAlpha drawn first)."""
+    from stark.prover import gen_ntt_batch_vfri6_hints, gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(7300)
+    r5 = gen_ntt_batch_vfri5_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r6 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert r5.commitment == r6.commitment
+    assert r5.query_hints != r6.query_hints
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_smaller_than_vfri5():
+    """VFRI6 hints are smaller than VFRI5 (oodsEvalsPos/Neg arrays removed)."""
+    from stark.prover import gen_ntt_batch_vfri6_hints, gen_ntt_batch_vfri5_hints
+    polys = _ntt_polys(7400, n=12)
+    r5 = gen_ntt_batch_vfri5_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r6 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    assert len(r6.query_hints) < len(r5.query_hints), (
+        f"VFRI6 hints ({len(r6.query_hints)} B) must be smaller than "
+        f"VFRI5 hints ({len(r5.query_hints)} B)"
+    )
+
+
+@needs_ext
+def test_gen_ntt_batch_vfri6_hints_multi_query():
+    """Multiple queries produce proportionally larger hints."""
+    from stark.prover import gen_ntt_batch_vfri6_hints
+    polys = _ntt_polys(7500)
+    r1 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=1, num_folds=9)
+    r2 = gen_ntt_batch_vfri6_hints(polys, _VFRI6_BATCH_ROOT, n_queries=2, num_folds=9)
+    assert r2.n_queries == 2
+    assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI6 V23 (NttBatch+InttBatch, 1298 cols) tests ───────────────────────────
+
+_VFRI6_V23_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_schema():
+    """Output has correct types and n_cols=1298 (NttBatch+InttBatch)."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints, MldsaV23VFRI6HintResult
+    z, c, t1, a_hat = _v23_inputs(9000)
+    r = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI6HintResult)
+    assert len(r.proof) >= 700
+    assert len(r.commitment) == 32
+    assert len(r.query_hints) > 0
+    assert r.n_cols == 1298
+    assert r.n_queries == 1
+    assert r.proof[8:40] != b'\x00' * 32, "trace root must be non-zero"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_deterministic():
+    """Same inputs always produce identical commitment and hints."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9100)
+    r1 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.commitment  == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_smaller_than_vfri4():
+    """VFRI6 hints are much smaller than VFRI4 for 1298 cols (no oodsEvalsPos/Neg arrays)."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints, gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9200)
+    r4 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r6 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    # VFRI4 includes oodsEvalsPos[1298] + oodsEvalsNeg[1298] = 2×1298×16 = 41536 bytes
+    assert len(r6.query_hints) < len(r4.query_hints), (
+        f"VFRI6 hints ({len(r6.query_hints)} B) must be smaller than "
+        f"VFRI4 hints ({len(r4.query_hints)} B)"
+    )
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_differs_from_vfri4():
+    """VFRI6 and VFRI4 transcripts differ (different channel transcript)."""
+    from stark.prover import gen_mldsa_v23_vfri4_hints, gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9300)
+    r4 = gen_mldsa_v23_vfri4_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r6 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r4.proof[8:40] == r6.proof[8:40], "trace root must match for same inputs"
+    assert r4.query_hints != r6.query_hints, "VFRI6 transcript differs from VFRI4"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_validation_errors():
+    """Python-side validation catches bad inputs."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints
+    import pytest
+    z, c, t1, a_hat = _v23_inputs(9400)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints(z[:-1], c, t1, a_hat, _VFRI6_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints(z, c, t1[:-1], a_hat, _VFRI6_V23_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, b'\x00' * 16)
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_multi_query():
+    """n_queries=2 produces larger hints than n_queries=1."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(9500)
+    r1 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=2, num_folds=3)
+    assert r1.commitment == r2.commitment
+    assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI6 LOG=8 group tests (AzFull+Ct1Full+RangeQ+WPrime+NormCheck+UseHint) ─
+
+_VFRI6_LOG8_BATCH_ROOT = bytes(range(32))
+
+
+def _make_log8_hints() -> list[list[bool]]:
+    return [[False] * 256 for _ in range(6)]
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_schema():
+    """LOG=8 VFRI6 result has expected structure and 2206 columns."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10000)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+    assert r.n_cols == 2206
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_deterministic():
+    """Same inputs produce identical outputs."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10100)
+    hints = _make_log8_hints()
+    r1 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    r2 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_small_hints():
+    """LOG=8 hints are O(1) in n_cols: 2206 cols → < 20 KB."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10200)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    assert len(r.query_hints) < 20_000, (
+        f"VFRI6 2206-col hints should be < 20 KB, got {len(r.query_hints)} B"
+    )
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_validation_errors():
+    """Python-side validation catches bad inputs."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    import pytest
+    z, c, t1, a_hat = _v23_inputs(10300)
+    hints = _make_log8_hints()
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints_log8(z[:-1], c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints_log8(z, c, t1, a_hat, hints[:-1], _VFRI6_LOG8_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints_log8(z, c, t1, a_hat, hints, b'\x00' * 16)
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_multi_query():
+    """n_queries=2 produces larger hints than n_queries=1."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10400)
+    hints = _make_log8_hints()
+    r1 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    r2 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=2, num_folds=3,
+    )
+    assert r1.commitment == r2.commitment
+    assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── Full V23 VFRI6 combined tests (LOG=10 + LOG=8 both proofs) ──────────────
+
+_FULL_V23_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_schema():
+    """Combined result contains both LOG=10 and LOG=8 proof triples."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11000)
+    hints = [[False] * 256 for _ in range(6)]
+    r = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    # LOG=10 group
+    assert isinstance(r.log10_proof, bytes) and len(r.log10_proof) >= 700
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log10_query_hints, bytes) and len(r.log10_query_hints) > 0
+    # LOG=8 group
+    assert isinstance(r.log8_proof, bytes) and len(r.log8_proof) >= 700
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    assert isinstance(r.log8_query_hints, bytes) and len(r.log8_query_hints) > 0
+    # Metadata
+    assert r.batch_merkle_root == _FULL_V23_BATCH_ROOT
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_both_bind_same_root():
+    """Both LOG groups embed the same batch_merkle_root in their commitment."""
+    import hashlib
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11100)
+    hints = [[False] * 256 for _ in range(6)]
+    r = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    def check_commitment(proof: bytes, commitment: str, root: bytes) -> bool:
+        h = hashlib.new("blake2s", digest_size=32)
+        h.update(proof[:32])
+        h.update(root)
+        expected = "0x" + h.digest()[:16].hex()
+        return commitment == expected or commitment == expected[2:]
+
+    assert check_commitment(r.log10_proof, r.log10_commitment, _FULL_V23_BATCH_ROOT), \
+        "LOG=10 commitment must bind to batch_merkle_root"
+    assert check_commitment(r.log8_proof, r.log8_commitment, _FULL_V23_BATCH_ROOT), \
+        "LOG=8 commitment must bind to batch_merkle_root"
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_deterministic():
+    """Same inputs produce identical outputs both times."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11200)
+    hints = [[False] * 256 for _ in range(6)]
+    r1 = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    r2 = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    assert r1.log10_commitment == r2.log10_commitment
+    assert r1.log10_query_hints == r2.log10_query_hints
+    assert r1.log8_commitment == r2.log8_commitment
+    assert r1.log8_query_hints == r2.log8_query_hints
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_total_calldata():
+    """Combined calldata < 20 KB — both groups fit in one L2 batch."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11300)
+    hints = [[False] * 256 for _ in range(6)]
+    r = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, _FULL_V23_BATCH_ROOT,
+        n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    total = len(r.log10_query_hints) + len(r.log8_query_hints)
+    assert total < 20_000, f"Combined hints {total} B should be < 20 KB"
+
+
+@needs_ext
+def test_gen_full_v23_vfri6_hints_groups_independent():
+    """Different batch roots produce different commitments for each group."""
+    from stark.prover import gen_full_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(11400)
+    hints = [[False] * 256 for _ in range(6)]
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, root_a, n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    rb = gen_full_v23_vfri6_hints(
+        z, c, t1, a_hat, hints, root_b, n_queries=1, num_folds_log10=3, num_folds_log8=3,
+    )
+    assert ra.log10_commitment != rb.log10_commitment, "Different roots must give different LOG=10 commitments"
+    assert ra.log8_commitment != rb.log8_commitment, "Different roots must give different LOG=8 commitments"

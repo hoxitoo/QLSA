@@ -1480,6 +1480,40 @@ pub fn gen_poseidon2_vfri3_real(
     Ok((proof, commitment_hex, query_hints))
 }
 
+/// VFRI4 hint generator for a real Poseidon2 AIR trace.
+///
+/// Builds the Poseidon2 trace from `leaves`, commits it, then runs the
+/// VFRI4 Fiat-Shamir transcript (Poseidon2 sponge OODS commitment) to
+/// produce ABI-encoded queryHints for `QLSAVerifierVFRI4`.
+pub fn gen_poseidon2_vfri4_real(
+    leaves: &[u64],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if leaves.is_empty() {
+        return Err("leaves must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}",
+            batch_merkle_root.len()
+        ));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let (main_cols, _preproc_cols, _commitment) =
+        crate::poseidon2_air::build_trace(leaves);
+    let tree_depth = crate::poseidon2_air::compute_log_size(leaves.len());
+    let cols: Vec<Vec<u32>> = main_cols
+        .iter()
+        .map(|col| col.values.iter().map(|v| v.0).collect())
+        .collect();
+
+    gen_vfri4_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, None)
+}
+
 // ── Generic VFRI3 hint generator ─────────────────────────────────────────────
 
 /// Generate VFRI3-compatible hints from any flat column trace.
@@ -1779,9 +1813,1356 @@ pub fn gen_ntt_batch_vfri3_hints_nfolds(
     gen_vfri3_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── VFRI4: Poseidon2 OODS sponge commitment ──────────────────────────────────
 
-#[cfg(test)]
+/// VFRI4 hint generator — identical to VFRI3 except OODS channel mixing.
+///
+/// VFRI3 transcript: `mixU32s(all_oods_pos_words)` + `mixU32s(all_oods_neg_words)`
+/// VFRI4 transcript: `mixU32s([p2sponge(pos_m31s).s0, .s1, p2sponge(neg_m31s).s0, .s1])`
+///
+/// where each QM31 eval is flattened into 4 M31 u32 values before sponge absorption.
+/// The channel always receives exactly 4 M31 words regardless of column count,
+/// making the Fiat-Shamir binding independent of n_cols (at verification side).
+///
+/// queryHints ABI format: identical to VFRI3.
+pub fn gen_vfri4_hints_from_cols_nfolds(
+    cols: &[Vec<u32>],
+    tree_depth: u32,
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds_opt: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if cols.is_empty() {
+        return Err("cols must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}",
+            batch_merkle_root.len()
+        ));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+    if tree_depth < 2 {
+        return Err(format!("tree_depth={tree_depth} must be ≥ 2"));
+    }
+    let n = 1usize << tree_depth;
+    for (j, col) in cols.iter().enumerate() {
+        if col.len() != n {
+            return Err(format!(
+                "cols[{j}] has {} entries, expected {n} (2^{tree_depth})",
+                col.len()
+            ));
+        }
+    }
+
+    // ── Trace Merkle tree ─────────────────────────────────────────────────────
+    let trace_leaves: Vec<[u8; 32]> = (0..n)
+        .map(|i| hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .collect();
+    let trace_levels = build_tree(trace_leaves);
+    let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
+
+    // ── Fiat-Shamir channel ───────────────────────────────────────────────────
+    let mut chan = Channel::init();
+    chan.mix_root(&trace_root);
+    let z_x = chan.draw_secure_felt();
+
+    // ── OODS evaluations via barycentric Lagrange interpolation ──────────────
+    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
+    let bary_weights = precompute_bary_weights(&domain_xs);
+    let z_neg = qm31_neg(z_x);
+
+    let oods_evals_pos: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .collect();
+    let oods_evals_neg: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .collect();
+
+    // ── VFRI4: Poseidon2 sponge commitment of OODS evals ─────────────────────
+    // Each QM31 → 4 M31 words; sponge absorbs all, mixes 4 output words.
+    {
+        let pos_m31s: Vec<u64> = oods_evals_pos.iter()
+            .flat_map(|&v| qm31_words(v).map(|w| w as u64))
+            .collect();
+        let neg_m31s: Vec<u64> = oods_evals_neg.iter()
+            .flat_map(|&v| qm31_words(v).map(|w| w as u64))
+            .collect();
+        let (ps0, ps1) = crate::poseidon2::poseidon2_chain(&pos_m31s);
+        let (ns0, ns1) = crate::poseidon2::poseidon2_chain(&neg_m31s);
+        chan.mix_u32s(&[ps0 as u32, ps1 as u32, ns0 as u32, ns1 as u32]);
+    }
+
+    let comp_alpha = chan.draw_secure_felt();
+    let fri_alpha  = chan.draw_secure_felt();
+
+    // ── Precompute composition OODS combos ────────────────────────────────────
+    let oods_combo_pos = {
+        let mut acc = 0u128;
+        let mut ap  = qm31_from_m31(1);
+        for &ev in &oods_evals_pos { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+    let oods_combo_neg = {
+        let mut acc = 0u128;
+        let mut ap  = qm31_from_m31(1);
+        for &ev in &oods_evals_neg { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+
+    // ── FRI Layer 1 ───────────────────────────────────────────────────────────
+    let mut l1_values: Vec<u128> = Vec::with_capacity(n);
+    for q in 0..n {
+        let anti_q = antipodal_of(q, tree_depth);
+        let (px, py) = coset_at(tree_depth, q as u64);
+
+        let raw_comp = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[q])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+        let raw_comp_neg = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[anti_q])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+
+        let px_qm31   = qm31_from_m31(px);
+        let denom_pos = qm31_sub(px_qm31, z_x);
+        let denom_neg = qm31_sub(qm31_neg(px_qm31), z_x);
+        if denom_pos == 0 || denom_neg == 0 {
+            return Err(format!("degenerate OODS denom at q={q}"));
+        }
+        let f_plus  = qm31_div(qm31_sub(raw_comp,     oods_combo_pos), denom_pos);
+        let f_minus = qm31_div(qm31_sub(raw_comp_neg, oods_combo_neg), denom_neg);
+        l1_values.push(circle_fold(f_plus, f_minus, fri_alpha, m31_inv(py)));
+    }
+
+    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let fri_l1_levels = build_tree(fri_l1_leaves);
+    let fri_layer1_root: [u8; 32] = fri_l1_levels.last().unwrap()[0];
+    chan.mix_root(&fri_layer1_root);
+
+    // ── Line fold rounds ──────────────────────────────────────────────────────
+    let max_folds = (tree_depth - 1) as usize;
+    let num_folds = match num_folds_opt {
+        None => max_folds,
+        Some(f) if f >= 1 && f <= max_folds => f,
+        Some(f) => return Err(format!("num_folds={f} must be in 1..={max_folds}")),
+    };
+    let mut layer_values: Vec<Vec<u128>>          = vec![l1_values];
+    let mut layer_levels: Vec<Vec<Vec<[u8; 32]>>> = vec![fri_l1_levels];
+    let mut layer_roots:  Vec<[u8; 32]>           = vec![fri_layer1_root];
+    let mut fri_alphas:   Vec<u128>               = Vec::new();
+
+    for k in 0..num_folds {
+        let alpha_k   = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+        let prev_vals = &layer_values[k];
+        let layer_sz  = prev_vals.len() / 2;
+        let mut new_vals = Vec::with_capacity(layer_sz);
+        for j in 0..layer_sz {
+            let x_j    = coset_at(tree_depth, j as u64).0;
+            let twiddle = chebyshev_twiddle(x_j, k);
+            if twiddle == 0 { return Err(format!("zero twiddle at k={k}, j={j}")); }
+            new_vals.push(line_fold(prev_vals[j], prev_vals[j + layer_sz], alpha_k, m31_inv(twiddle)));
+        }
+        let new_leaves: Vec<[u8; 32]> = new_vals.iter().map(|&v| hash_leaf_qm31(v)).collect();
+        let new_levels = build_tree(new_leaves);
+        let new_root: [u8; 32] = new_levels.last().unwrap()[0];
+        layer_values.push(new_vals);
+        layer_roots.push(new_root);
+        chan.mix_root(&new_root);
+        layer_levels.push(new_levels);
+    }
+
+    let last_layer_coeffs: Vec<u128> = layer_values[num_folds].clone();
+    let derived_indices = chan.draw_queries(tree_depth, n_queries);
+
+    // ── Per-query hints ───────────────────────────────────────────────────────
+    let mut hint_structs: Vec<QueryHintData> = Vec::new();
+    for &idx in &derived_indices {
+        let anti_idx = antipodal_of(idx, tree_depth);
+        let (qp_x, qp_y) = coset_at(tree_depth, idx as u64);
+
+        let query_values: Vec<u32>     = cols.iter().map(|c| c[idx]).collect();
+        let query_values_neg: Vec<u32> = cols.iter().map(|c| c[anti_idx]).collect();
+        let trace_siblings     = proof_path(&trace_levels, idx);
+        let trace_siblings_neg = proof_path(&trace_levels, anti_idx);
+
+        let raw_comp = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[idx])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+        let raw_comp_neg = {
+            let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+            for c in cols { acc = qm31_add(acc, qm31_mul_m31(ap, c[anti_idx])); ap = qm31_mul(ap, comp_alpha); }
+            acc
+        };
+        let px_qm31   = qm31_from_m31(qp_x);
+        let f_plus    = qm31_div(qm31_sub(raw_comp,     oods_combo_pos), qm31_sub(px_qm31, z_x));
+        let f_minus   = qm31_div(qm31_sub(raw_comp_neg, oods_combo_neg), qm31_sub(qm31_neg(px_qm31), z_x));
+        let folded_value = circle_fold(f_plus, f_minus, fri_alpha, m31_inv(qp_y));
+        debug_assert_eq!(folded_value, layer_values[0][idx]);
+
+        let fri_l1_sib = proof_path(&layer_levels[0], idx);
+        let mut fold_hints: Vec<FoldHintData> = Vec::new();
+        let mut cur_idx = idx;
+        for k in 0..num_folds {
+            let layer_sz  = layer_values[k].len() / 2;
+            let sib_idx   = if cur_idx < layer_sz { cur_idx + layer_sz } else { cur_idx - layer_sz };
+            let new_idx   = cur_idx & (layer_sz - 1);
+            let sibling_value = layer_values[k][sib_idx];
+            let sibling_proof = proof_path(&layer_levels[k], sib_idx);
+            let x_j      = coset_at(tree_depth, new_idx as u64).0;
+            let cur_val  = if k == 0 { folded_value } else { fold_hints[k-1].folded_value };
+            let (gp, gm) = if cur_idx < layer_sz { (cur_val, sibling_value) } else { (sibling_value, cur_val) };
+            let folded_k = line_fold(gp, gm, fri_alphas[k], m31_inv(chebyshev_twiddle(x_j, k)));
+            debug_assert_eq!(folded_k, layer_values[k + 1][new_idx]);
+            fold_hints.push(FoldHintData {
+                sibling_value,
+                sibling_proof,
+                folded_value: folded_k,
+                merkle_proof: proof_path(&layer_levels[k + 1], new_idx),
+            });
+            cur_idx = new_idx;
+        }
+        hint_structs.push(QueryHintData {
+            trace_root,
+            query_values, query_values_neg,
+            query_index: idx, tree_depth,
+            merkle_siblings: trace_siblings, merkle_siblings_neg: trace_siblings_neg,
+            fri_alpha, f_plus, f_minus, folded_value,
+            query_point_x: qp_x, query_point_y: qp_y,
+            fri_l1_siblings: fri_l1_sib, folds: fold_hints,
+        });
+    }
+
+    // ── Build proof bytes and commitment ──────────────────────────────────────
+    let mut proof = vec![0x01u8; 700];
+    proof[0..8].copy_from_slice(&2u64.to_le_bytes());
+    proof[8..40].copy_from_slice(&trace_root);
+
+    let mut hash_input = [0u8; 64];
+    hash_input[..32].copy_from_slice(&proof[..32]);
+    hash_input[32..].copy_from_slice(batch_merkle_root);
+    let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+    let commitment_hex = hex::encode(&h[..16]);
+
+    let query_hints = abi_encode_vfri3_hints(
+        &last_layer_coeffs,
+        &oods_evals_pos,
+        &oods_evals_neg,
+        &layer_roots,
+        &hint_structs,
+    );
+
+    Ok((proof, commitment_hex, query_hints))
+}
+
+/// VFRI4 hint generator for ML-DSA NttBatch AIR trace.
+pub fn gen_ntt_batch_vfri4_hints_nfolds(
+    polys: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    if polys.is_empty() {
+        return Err("polys must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}",
+            batch_merkle_root.len()
+        ));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let (ntt_cols, _ntt_outputs) = mldsa_ntt_batch_air::build_trace(polys);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS;
+
+    let cols: Vec<Vec<u32>> = ntt_cols
+        .iter()
+        .map(|col| col.values.iter().map(|v| v.0).collect())
+        .collect();
+
+    gen_vfri4_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+// ── VFRI5 hint generator ──────────────────────────────────────────────────────
+//
+// VFRI5 adds a dedicated composition polynomial tree (`compRoot`), eliminating
+// per-query O(n_cols) calldata and on-chain computation.
+//
+// Transcript (vs VFRI4):
+//   mixRoot(traceRoot) → z_x → Poseidon2Sponge(oodsPos/Neg) → mixU32s(4)
+//   → compAlpha → mixRoot(compRoot) [NEW] → friAlpha → FRI fold chain → drawQueries
+//
+// Per-query hints: only compValue + compProof (no queryValues).
+// Per-query on-chain work: O(tree_depth) instead of O(n_cols).
+
+struct QueryHintDataV5 {
+    query_index:    usize,
+    tree_depth:     u32,
+    comp_value:     u128,
+    comp_proof:     Vec<[u8; 32]>,
+    comp_value_neg: u128,
+    comp_proof_neg: Vec<[u8; 32]>,
+    folded_value:   u128,
+    query_point_x:  u32,
+    query_point_y:  u32,
+    fri_l1_siblings: Vec<[u8; 32]>,
+    folds:          Vec<FoldHintData>,
+}
+
+/// Encode a single VFRI5 QueryHints struct.
+/// Fields (11 total: 7 static + 4 dynamic), head = 11 × 32 = 352 bytes.
+///   0: queryIndex    (uint256)   static
+///   1: treeDepth     (uint256)   static
+///   2: compValue     (uint128)   static
+///   3: compProof     (bytes32[]) dynamic
+///   4: compValueNeg  (uint128)   static
+///   5: compProofNeg  (bytes32[]) dynamic
+///   6: foldedValue   (uint128)   static
+///   7: queryPointX   (uint256)   static
+///   8: queryPointY   (uint256)   static
+///   9: friL1Siblings (bytes32[]) dynamic
+///  10: folds         (FoldHint[]) dynamic
+fn encode_query_hint_v5(qh: &QueryHintDataV5) -> Vec<u8> {
+    let head_size = 11 * 32usize;
+
+    let cp_body   = encode_bytes32_array(&qh.comp_proof);
+    let cpn_body  = encode_bytes32_array(&qh.comp_proof_neg);
+    let l1s_body  = encode_bytes32_array(&qh.fri_l1_siblings);
+    let fold_body = encode_fold_hints_array(&qh.folds);
+
+    let cp_offset   = head_size;
+    let cpn_offset  = cp_offset  + cp_body.len();
+    let l1s_offset  = cpn_offset + cpn_body.len();
+    let fold_offset = l1s_offset + l1s_body.len();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&abi_word_usize(qh.query_index));           // 0
+    out.extend_from_slice(&abi_word_usize(qh.tree_depth as usize));   // 1
+    out.extend_from_slice(&abi_word_u128(qh.comp_value));             // 2
+    out.extend_from_slice(&abi_word_usize(cp_offset));                // 3
+    out.extend_from_slice(&abi_word_u128(qh.comp_value_neg));         // 4
+    out.extend_from_slice(&abi_word_usize(cpn_offset));               // 5
+    out.extend_from_slice(&abi_word_u128(qh.folded_value));           // 6
+    out.extend_from_slice(&abi_word_u256(qh.query_point_x as u64));   // 7
+    out.extend_from_slice(&abi_word_u256(qh.query_point_y as u64));   // 8
+    out.extend_from_slice(&abi_word_usize(l1s_offset));               // 9
+    out.extend_from_slice(&abi_word_usize(fold_offset));              // 10
+    out.extend_from_slice(&cp_body);
+    out.extend_from_slice(&cpn_body);
+    out.extend_from_slice(&l1s_body);
+    out.extend_from_slice(&fold_body);
+    out
+}
+
+fn encode_query_hints_array_v5(hints: &[QueryHintDataV5]) -> Vec<u8> {
+    let n = hints.len();
+    let encoded: Vec<Vec<u8>> = hints.iter().map(encode_query_hint_v5).collect();
+    let offsets_size = n * 32;
+    let mut current_offset = offsets_size;
+    let mut offsets = Vec::with_capacity(n);
+    for enc in &encoded {
+        offsets.push(current_offset);
+        current_offset += enc.len();
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&abi_word_usize(n));
+    for &off in &offsets { out.extend_from_slice(&abi_word_usize(off)); }
+    for enc in &encoded  { out.extend_from_slice(enc); }
+    out
+}
+
+/// ABI-encode VFRI5 queryHints.
+///
+/// Layout: abi.encode(uint128[] lastLayerCoeffs, uint128[] oodsEvalsPos,
+///   uint128[] oodsEvalsNeg, bytes32 compRoot, bytes32[] friLayerRoots, QueryHints[])
+///
+/// Note: `compRoot` is a static `bytes32` (not a dynamic array), so it sits
+/// directly in the head at slot 3. Head = 6 × 32 = 192 bytes.
+fn abi_encode_vfri5_hints(
+    last_layer_coeffs: &[u128],
+    oods_evals_pos: &[u128],
+    oods_evals_neg: &[u128],
+    comp_root: &[u8; 32],
+    fri_layer_roots: &[[u8; 32]],
+    hints: &[QueryHintDataV5],
+) -> Vec<u8> {
+    // Slots 0,1,2 → dynamic offsets; slot 3 → static bytes32; slots 4,5 → dynamic offsets.
+    // Static bytes32 fields do NOT get an offset — their value is placed inline.
+    // Offsets for dynamic fields are relative to start of the entire encoding.
+    //
+    // Head (6 × 32 = 192 bytes):
+    //   slot 0: offset → lastLayerCoeffs
+    //   slot 1: offset → oodsEvalsPos
+    //   slot 2: offset → oodsEvalsNeg
+    //   slot 3: compRoot  (static bytes32)
+    //   slot 4: offset → friLayerRoots
+    //   slot 5: offset → QueryHints[]
+
+    let head_size: usize = 6 * 32;
+
+    let coeffs_body = encode_uint128_array(last_layer_coeffs);
+    let pos_body    = encode_uint128_array(oods_evals_pos);
+    let neg_body    = encode_uint128_array(oods_evals_neg);
+    let roots_body  = encode_bytes32_array(fri_layer_roots);
+    let hints_body  = encode_query_hints_array_v5(hints);
+
+    let coeffs_offset = head_size;
+    let pos_offset    = coeffs_offset + coeffs_body.len();
+    let neg_offset    = pos_offset    + pos_body.len();
+    // compRoot is static → no offset, skip its body in offset calculation
+    let roots_offset  = neg_offset    + neg_body.len();
+    let hints_offset  = roots_offset  + roots_body.len();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&abi_word_usize(coeffs_offset));  // 0
+    out.extend_from_slice(&abi_word_usize(pos_offset));     // 1
+    out.extend_from_slice(&abi_word_usize(neg_offset));     // 2
+    out.extend_from_slice(comp_root);                        // 3: static bytes32
+    out.extend_from_slice(&abi_word_usize(roots_offset));   // 4
+    out.extend_from_slice(&abi_word_usize(hints_offset));   // 5
+    out.extend_from_slice(&coeffs_body);
+    out.extend_from_slice(&pos_body);
+    out.extend_from_slice(&neg_body);
+    out.extend_from_slice(&roots_body);
+    out.extend_from_slice(&hints_body);
+    out
+}
+
+/// Generic VFRI5 hint generator.
+///
+/// Builds a composition polynomial tree in addition to the FRI layer trees.
+/// Per-query hints contain only `compValue + compProof` (O(tree_depth) each)
+/// instead of all n_cols column values (O(n_cols)).
+///
+/// Gas improvement vs VFRI4: O(n_cols) computation moved from per-query to
+/// once-in-`_buildCtx`; per-query work is O(tree_depth) = O(log n_rows).
+pub fn gen_vfri5_hints_from_cols_nfolds(
+    cols: &[Vec<u32>],
+    tree_depth: u32,
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds_opt: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if cols.is_empty() {
+        return Err("cols must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+    if tree_depth < 2 {
+        return Err(format!("tree_depth={tree_depth} must be ≥ 2"));
+    }
+    let n = 1usize << tree_depth;
+    for (j, col) in cols.iter().enumerate() {
+        if col.len() != n {
+            return Err(format!("cols[{j}] has {} entries, expected {n}", col.len()));
+        }
+    }
+
+    // ── Trace Merkle tree ─────────────────────────────────────────────────────
+    let trace_leaves: Vec<[u8; 32]> = (0..n)
+        .map(|i| hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .collect();
+    let trace_levels = build_tree(trace_leaves);
+    let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
+
+    // ── Fiat-Shamir transcript (VFRI5) ────────────────────────────────────────
+    let mut chan = Channel::init();
+    chan.mix_root(&trace_root);
+    let z_x = chan.draw_secure_felt();
+
+    // ── OODS evaluations ──────────────────────────────────────────────────────
+    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
+    let bary_weights = precompute_bary_weights(&domain_xs);
+    let z_neg = qm31_neg(z_x);
+
+    let oods_evals_pos: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .collect();
+    let oods_evals_neg: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .collect();
+
+    // ── Poseidon2 OODS sponge commitment (same as VFRI4) ─────────────────────
+    {
+        let pos_m31s: Vec<u64> = oods_evals_pos.iter()
+            .flat_map(|&v| qm31_words(v).map(|w| w as u64))
+            .collect();
+        let neg_m31s: Vec<u64> = oods_evals_neg.iter()
+            .flat_map(|&v| qm31_words(v).map(|w| w as u64))
+            .collect();
+        let (ps0, ps1) = crate::poseidon2::poseidon2_chain(&pos_m31s);
+        let (ns0, ns1) = crate::poseidon2::poseidon2_chain(&neg_m31s);
+        chan.mix_u32s(&[ps0 as u32, ps1 as u32, ns0 as u32, ns1 as u32]);
+    }
+
+    let comp_alpha = chan.draw_secure_felt();
+
+    // ── Composition polynomial tree (NEW in VFRI5) ───────────────────────────
+    // F(x) = Σ_j compAlpha^j · col_j(x) for all domain positions x.
+    let oods_combo_pos = {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for &ev in &oods_evals_pos { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+    let oods_combo_neg = {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for &ev in &oods_evals_neg { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+
+    // comp_values[i] = F(domain[i]) = Σ_j compAlpha^j · cols[j][i]
+    let comp_values: Vec<u128> = (0..n).map(|i| {
+        let mut acc = 0u128;
+        let mut ap  = qm31_from_m31(1);
+        for c in cols {
+            acc = qm31_add(acc, qm31_mul_m31(ap, c[i]));
+            ap  = qm31_mul(ap, comp_alpha);
+        }
+        acc
+    }).collect();
+
+    let comp_leaves: Vec<[u8; 32]> = comp_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let comp_levels = build_tree(comp_leaves);
+    let comp_root: [u8; 32] = comp_levels.last().unwrap()[0];
+
+    // Mix compRoot into channel (NEW VFRI5 step), then draw friAlpha.
+    chan.mix_root(&comp_root);
+    let fri_alpha = chan.draw_secure_felt();
+
+    // ── FRI Layer 1: circle fold from composition values ─────────────────────
+    let mut l1_values: Vec<u128> = Vec::with_capacity(n);
+    for q in 0..n {
+        let anti_q = antipodal_of(q, tree_depth);
+        let (px, py) = coset_at(tree_depth, q as u64);
+        let px_qm31   = qm31_from_m31(px);
+        let denom_pos = qm31_sub(px_qm31, z_x);
+        let denom_neg = qm31_sub(qm31_neg(px_qm31), z_x);
+        if denom_pos == 0 || denom_neg == 0 {
+            return Err(format!("degenerate OODS denom at q={q}"));
+        }
+        let f_plus  = qm31_div(qm31_sub(comp_values[q],     oods_combo_pos), denom_pos);
+        let f_minus = qm31_div(qm31_sub(comp_values[anti_q], oods_combo_neg), denom_neg);
+        l1_values.push(circle_fold(f_plus, f_minus, fri_alpha, m31_inv(py)));
+    }
+
+    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let fri_l1_levels = build_tree(fri_l1_leaves);
+    let fri_layer1_root: [u8; 32] = fri_l1_levels.last().unwrap()[0];
+    chan.mix_root(&fri_layer1_root);
+
+    // ── Line fold rounds ──────────────────────────────────────────────────────
+    let max_folds = (tree_depth - 1) as usize;
+    let num_folds = match num_folds_opt {
+        None => max_folds,
+        Some(f) if f >= 1 && f <= max_folds => f,
+        Some(f) => return Err(format!("num_folds={f} must be in 1..={max_folds}")),
+    };
+    let mut layer_values: Vec<Vec<u128>>          = vec![l1_values];
+    let mut layer_levels: Vec<Vec<Vec<[u8; 32]>>> = vec![fri_l1_levels];
+    let mut layer_roots:  Vec<[u8; 32]>           = vec![fri_layer1_root];
+    let mut fri_alphas:   Vec<u128>               = Vec::new();
+
+    for k in 0..num_folds {
+        let alpha_k   = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+        let prev_vals = &layer_values[k];
+        let layer_sz  = prev_vals.len() / 2;
+        let mut new_vals = Vec::with_capacity(layer_sz);
+        for j in 0..layer_sz {
+            let x_j    = coset_at(tree_depth, j as u64).0;
+            let twiddle = chebyshev_twiddle(x_j, k);
+            if twiddle == 0 { return Err(format!("zero twiddle at k={k}, j={j}")); }
+            new_vals.push(line_fold(prev_vals[j], prev_vals[j + layer_sz], alpha_k, m31_inv(twiddle)));
+        }
+        let new_leaves: Vec<[u8; 32]> = new_vals.iter().map(|&v| hash_leaf_qm31(v)).collect();
+        let new_levels = build_tree(new_leaves);
+        let new_root: [u8; 32] = new_levels.last().unwrap()[0];
+        layer_values.push(new_vals);
+        layer_roots.push(new_root);
+        chan.mix_root(&new_root);
+        layer_levels.push(new_levels);
+    }
+
+    let last_layer_coeffs: Vec<u128> = layer_values[num_folds].clone();
+    let derived_indices = chan.draw_queries(tree_depth, n_queries);
+
+    // ── Per-query hints (VFRI5: composition proofs instead of column values) ──
+    let mut hint_structs: Vec<QueryHintDataV5> = Vec::new();
+    for &idx in &derived_indices {
+        let anti_idx = antipodal_of(idx, tree_depth);
+        let (qp_x, qp_y) = coset_at(tree_depth, idx as u64);
+
+        let comp_value     = comp_values[idx];
+        let comp_value_neg = comp_values[anti_idx];
+
+        let comp_proof     = proof_path(&comp_levels, idx);
+        let comp_proof_neg = proof_path(&comp_levels, anti_idx);
+
+        let fri_l1_sib = proof_path(&layer_levels[0], idx);
+
+        // Debug check: folded value at idx must match layer_values[0][idx].
+        let px_qm31   = qm31_from_m31(qp_x);
+        let f_plus    = qm31_div(qm31_sub(comp_value,     oods_combo_pos), qm31_sub(px_qm31, z_x));
+        let f_minus   = qm31_div(qm31_sub(comp_value_neg, oods_combo_neg), qm31_sub(qm31_neg(px_qm31), z_x));
+        let folded_value = circle_fold(f_plus, f_minus, fri_alpha, m31_inv(qp_y));
+        debug_assert_eq!(folded_value, layer_values[0][idx]);
+
+        let mut fold_hints: Vec<FoldHintData> = Vec::new();
+        let mut cur_idx = idx;
+        for k in 0..num_folds {
+            let layer_sz  = layer_values[k].len() / 2;
+            let sib_idx   = if cur_idx < layer_sz { cur_idx + layer_sz } else { cur_idx - layer_sz };
+            let new_idx   = cur_idx & (layer_sz - 1);
+            let sib_val   = layer_values[k][sib_idx];
+            let sib_proof = proof_path(&layer_levels[k], sib_idx);
+            let x_j       = coset_at(tree_depth, new_idx as u64).0;
+            let cur_val   = if k == 0 { folded_value } else { fold_hints[k-1].folded_value };
+            let (gp, gm)  = if cur_idx < layer_sz { (cur_val, sib_val) } else { (sib_val, cur_val) };
+            let folded_k  = line_fold(gp, gm, fri_alphas[k], m31_inv(chebyshev_twiddle(x_j, k)));
+            debug_assert_eq!(folded_k, layer_values[k + 1][new_idx]);
+            fold_hints.push(FoldHintData {
+                sibling_value: sib_val,
+                sibling_proof: sib_proof,
+                folded_value: folded_k,
+                merkle_proof: proof_path(&layer_levels[k + 1], new_idx),
+            });
+            cur_idx = new_idx;
+        }
+
+        hint_structs.push(QueryHintDataV5 {
+            query_index: idx,
+            tree_depth,
+            comp_value,
+            comp_proof,
+            comp_value_neg,
+            comp_proof_neg,
+            folded_value,
+            query_point_x: qp_x,
+            query_point_y: qp_y,
+            fri_l1_siblings: fri_l1_sib,
+            folds: fold_hints,
+        });
+    }
+
+    // ── Build proof bytes and commitment ──────────────────────────────────────
+    let mut proof = vec![0x01u8; 700];
+    proof[0..8].copy_from_slice(&2u64.to_le_bytes());
+    proof[8..40].copy_from_slice(&trace_root);
+
+    let mut hash_input = [0u8; 64];
+    hash_input[..32].copy_from_slice(&proof[..32]);
+    hash_input[32..].copy_from_slice(batch_merkle_root);
+    let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+    let commitment_hex = hex::encode(&h[..16]);
+
+    let query_hints = abi_encode_vfri5_hints(
+        &last_layer_coeffs,
+        &oods_evals_pos,
+        &oods_evals_neg,
+        &comp_root,
+        &layer_roots,
+        &hint_structs,
+    );
+
+    Ok((proof, commitment_hex, query_hints))
+}
+
+/// VFRI5 hint generator for ML-DSA NttBatch AIR trace.
+pub fn gen_ntt_batch_vfri5_hints_nfolds(
+    polys: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    if polys.is_empty() {
+        return Err("polys must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+    let (ntt_cols, _) = mldsa_ntt_batch_air::build_trace(polys);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS;
+    let cols: Vec<Vec<u32>> = ntt_cols.iter().map(|col| col.values.iter().map(|v| v.0).collect()).collect();
+    gen_vfri5_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+// ── VFRI6 hint generator ──────────────────────────────────────────────────────
+//
+// VFRI6 removes `oodsEvalsPos/Neg` arrays from hints entirely. The prover
+// precomputes `oodsComboPos = Σ compAlpha^j · oodsEvalsPos[j]` off-chain and
+// passes it as a single QM31 value. On-chain: no Poseidon2 sponge, no O(n_cols)
+// composition loop. Per-call work is O(1) for OODS + O(tree_depth × n_queries).
+//
+// Transcript (vs VFRI5):
+//   mixRoot(traceRoot) → z_x = draw → compAlpha = draw   [compAlpha drawn BEFORE OODS]
+//   → [off-chain: compute oodsComboPos/Neg]
+//   → mixU32s([8 M31 words from oodsComboPos/Neg])        [replaces Poseidon2 sponge]
+//   → mixRoot(compRoot) → friAlpha = draw → FRI rounds → drawQueries
+//
+// Security: OODS soundness argument (Schwartz-Zippel): for multiple FRI-verified
+// domain positions p, if (F(p) − oodsComboPos)/(p.x − z_x) is low-degree then
+// oodsComboPos = F(z_x) with overwhelming probability. No on-chain verification
+// of individual column evals needed.
+
+/// ABI-encode VFRI6 queryHints.
+///
+/// Layout: abi.encode(uint128 oodsComboPos, uint128 oodsComboNeg,
+///   bytes32 compRoot, bytes32[] friLayerRoots, QueryHints[])
+///
+/// Head (5 × 32 = 160 bytes):
+///   slot 0: oodsComboPos (static uint128)
+///   slot 1: oodsComboNeg (static uint128)
+///   slot 2: compRoot     (static bytes32)
+///   slot 3: offset → friLayerRoots
+///   slot 4: offset → QueryHints[]
+fn abi_encode_vfri6_hints(
+    oods_combo_pos:  u128,
+    oods_combo_neg:  u128,
+    comp_root:       &[u8; 32],
+    fri_layer_roots: &[[u8; 32]],
+    hints:           &[QueryHintDataV5],
+) -> Vec<u8> {
+    let head_size: usize = 5 * 32;
+
+    let roots_body = encode_bytes32_array(fri_layer_roots);
+    let hints_body = encode_query_hints_array_v5(hints);
+
+    let roots_offset = head_size;
+    let hints_offset = roots_offset + roots_body.len();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&abi_word_u128(oods_combo_pos));    // 0: static uint128
+    out.extend_from_slice(&abi_word_u128(oods_combo_neg));    // 1: static uint128
+    out.extend_from_slice(comp_root);                          // 2: static bytes32
+    out.extend_from_slice(&abi_word_usize(roots_offset));      // 3: offset
+    out.extend_from_slice(&abi_word_usize(hints_offset));      // 4: offset
+    out.extend_from_slice(&roots_body);
+    out.extend_from_slice(&hints_body);
+    out
+}
+
+/// Generic VFRI6 hint generator from flat column data.
+pub fn gen_vfri6_hints_from_cols_nfolds(
+    cols:              &[Vec<u32>],
+    tree_depth:        u32,
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds_opt:     Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if cols.is_empty() {
+        return Err("cols must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+    if tree_depth < 2 {
+        return Err(format!("tree_depth={tree_depth} must be ≥ 2"));
+    }
+    let n = 1usize << tree_depth;
+    for (j, col) in cols.iter().enumerate() {
+        if col.len() != n {
+            return Err(format!("cols[{j}] has {} entries, expected {n}", col.len()));
+        }
+    }
+
+    // ── Trace Merkle tree ─────────────────────────────────────────────────────
+    let trace_leaves: Vec<[u8; 32]> = (0..n)
+        .map(|i| hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .collect();
+    let trace_levels = build_tree(trace_leaves);
+    let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
+
+    // ── Fiat-Shamir transcript (VFRI6) ───────────────────────────────────────
+    // Key difference from VFRI5: compAlpha is drawn BEFORE mixing OODS evals.
+    // Then oodsComboPos/Neg (8 M31 words) replace the Poseidon2 sponge.
+    let mut chan = Channel::init();
+    chan.mix_root(&trace_root);
+    let z_x      = chan.draw_secure_felt();
+    let comp_alpha = chan.draw_secure_felt();
+
+    // ── OODS evaluations (off-chain, never sent to verifier) ─────────────────
+    let domain_xs: Vec<u32> = (0..n).map(|i| coset_at(tree_depth, i as u64).0).collect();
+    let bary_weights = precompute_bary_weights(&domain_xs);
+    let z_neg = qm31_neg(z_x);
+
+    let oods_evals_pos: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_x))
+        .collect();
+    let oods_evals_neg: Vec<u128> = cols.iter()
+        .map(|col| eval_bary(col, &domain_xs, &bary_weights, z_neg))
+        .collect();
+
+    // oodsComboPos = Σ compAlpha^j · oodsEvalsPos[j]  (off-chain)
+    let oods_combo_pos = {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for &ev in &oods_evals_pos { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+    let oods_combo_neg = {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for &ev in &oods_evals_neg { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+
+    // Mix 8 M31 words (4 from comboPos, 4 from comboNeg) into channel.
+    // This binds oodsComboPos/Neg to the transcript without O(n_cols) work on-chain.
+    let combo_words = {
+        let p = qm31_words(oods_combo_pos);
+        let n = qm31_words(oods_combo_neg);
+        [p[0], p[1], p[2], p[3], n[0], n[1], n[2], n[3]]
+    };
+    chan.mix_u32s(&combo_words);
+
+    // ── Composition polynomial tree (same as VFRI5) ──────────────────────────
+    let comp_values: Vec<u128> = (0..n).map(|i| {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for c in cols {
+            acc = qm31_add(acc, qm31_mul_m31(ap, c[i]));
+            ap  = qm31_mul(ap, comp_alpha);
+        }
+        acc
+    }).collect();
+
+    let comp_leaves: Vec<[u8; 32]> = comp_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let comp_levels = build_tree(comp_leaves);
+    let comp_root: [u8; 32] = comp_levels.last().unwrap()[0];
+
+    chan.mix_root(&comp_root);
+    let fri_alpha = chan.draw_secure_felt();
+
+    // ── FRI Layer 1: circle fold ──────────────────────────────────────────────
+    let mut l1_values: Vec<u128> = Vec::with_capacity(n);
+    for q in 0..n {
+        let anti_q = antipodal_of(q, tree_depth);
+        let (px, py) = coset_at(tree_depth, q as u64);
+        let px_qm31   = qm31_from_m31(px);
+        let denom_pos = qm31_sub(px_qm31, z_x);
+        let denom_neg = qm31_sub(qm31_neg(px_qm31), z_x);
+        if denom_pos == 0 || denom_neg == 0 {
+            return Err(format!("degenerate OODS denom at q={q}"));
+        }
+        let f_plus  = qm31_div(qm31_sub(comp_values[q],      oods_combo_pos), denom_pos);
+        let f_minus = qm31_div(qm31_sub(comp_values[anti_q], oods_combo_neg), denom_neg);
+        l1_values.push(circle_fold(f_plus, f_minus, fri_alpha, m31_inv(py)));
+    }
+
+    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let fri_l1_levels = build_tree(fri_l1_leaves);
+    let fri_layer1_root: [u8; 32] = fri_l1_levels.last().unwrap()[0];
+    chan.mix_root(&fri_layer1_root);
+
+    // ── Line fold rounds ──────────────────────────────────────────────────────
+    let max_folds = (tree_depth - 1) as usize;
+    let num_folds = match num_folds_opt {
+        None    => max_folds,
+        Some(f) if f >= 1 && f <= max_folds => f,
+        Some(f) => return Err(format!("num_folds={f} must be in 1..={max_folds}")),
+    };
+    let mut layer_values: Vec<Vec<u128>>          = vec![l1_values];
+    let mut layer_levels: Vec<Vec<Vec<[u8; 32]>>> = vec![fri_l1_levels];
+    let mut layer_roots:  Vec<[u8; 32]>           = vec![fri_layer1_root];
+    let mut fri_alphas:   Vec<u128>               = Vec::new();
+
+    for k in 0..num_folds {
+        let alpha_k   = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+        let prev_vals = &layer_values[k];
+        let layer_sz  = prev_vals.len() / 2;
+        let mut new_vals = Vec::with_capacity(layer_sz);
+        for j in 0..layer_sz {
+            let x_j     = coset_at(tree_depth, j as u64).0;
+            let twiddle = chebyshev_twiddle(x_j, k);
+            if twiddle == 0 { return Err(format!("zero twiddle at k={k}, j={j}")); }
+            new_vals.push(line_fold(prev_vals[j], prev_vals[j + layer_sz], alpha_k, m31_inv(twiddle)));
+        }
+        let new_leaves: Vec<[u8; 32]> = new_vals.iter().map(|&v| hash_leaf_qm31(v)).collect();
+        let new_levels = build_tree(new_leaves);
+        let new_root   = new_levels.last().unwrap()[0];
+        layer_values.push(new_vals);
+        layer_roots.push(new_root);
+        chan.mix_root(&new_root);
+        layer_levels.push(new_levels);
+    }
+
+    let derived_indices = chan.draw_queries(tree_depth, n_queries);
+
+    // ── Per-query hints (same structure as VFRI5) ─────────────────────────────
+    let mut hint_structs: Vec<QueryHintDataV5> = Vec::new();
+    for &idx in &derived_indices {
+        let anti_idx = antipodal_of(idx, tree_depth);
+        let (qp_x, qp_y) = coset_at(tree_depth, idx as u64);
+
+        let comp_value     = comp_values[idx];
+        let comp_value_neg = comp_values[anti_idx];
+        let comp_proof     = proof_path(&comp_levels, idx);
+        let comp_proof_neg = proof_path(&comp_levels, anti_idx);
+        let fri_l1_sib     = proof_path(&layer_levels[0], idx);
+
+        let px_qm31   = qm31_from_m31(qp_x);
+        let f_plus    = qm31_div(qm31_sub(comp_value,     oods_combo_pos), qm31_sub(px_qm31, z_x));
+        let f_minus   = qm31_div(qm31_sub(comp_value_neg, oods_combo_neg), qm31_sub(qm31_neg(px_qm31), z_x));
+        let folded_value = circle_fold(f_plus, f_minus, fri_alpha, m31_inv(qp_y));
+        debug_assert_eq!(folded_value, layer_values[0][idx]);
+
+        let mut fold_hints: Vec<FoldHintData> = Vec::new();
+        let mut cur_idx = idx;
+        for k in 0..num_folds {
+            let layer_sz  = layer_values[k].len() / 2;
+            let sib_idx   = if cur_idx < layer_sz { cur_idx + layer_sz } else { cur_idx - layer_sz };
+            let new_idx   = cur_idx & (layer_sz - 1);
+            let sib_val   = layer_values[k][sib_idx];
+            let sib_proof = proof_path(&layer_levels[k], sib_idx);
+            let x_j       = coset_at(tree_depth, new_idx as u64).0;
+            let cur_val   = if k == 0 { folded_value } else { fold_hints[k-1].folded_value };
+            let (gp, gm)  = if cur_idx < layer_sz { (cur_val, sib_val) } else { (sib_val, cur_val) };
+            let folded_k  = line_fold(gp, gm, fri_alphas[k], m31_inv(chebyshev_twiddle(x_j, k)));
+            debug_assert_eq!(folded_k, layer_values[k + 1][new_idx]);
+            fold_hints.push(FoldHintData {
+                sibling_value: sib_val,
+                sibling_proof: sib_proof,
+                folded_value:  folded_k,
+                merkle_proof:  proof_path(&layer_levels[k + 1], new_idx),
+            });
+            cur_idx = new_idx;
+        }
+
+        hint_structs.push(QueryHintDataV5 {
+            query_index: idx,
+            tree_depth,
+            comp_value,
+            comp_proof,
+            comp_value_neg,
+            comp_proof_neg,
+            folded_value,
+            query_point_x: qp_x,
+            query_point_y: qp_y,
+            fri_l1_siblings: fri_l1_sib,
+            folds: fold_hints,
+        });
+    }
+
+    // ── Build proof bytes and commitment ──────────────────────────────────────
+    let mut proof = vec![0x01u8; 700];
+    proof[0..8].copy_from_slice(&2u64.to_le_bytes());
+    proof[8..40].copy_from_slice(&trace_root);
+
+    let mut hash_input = [0u8; 64];
+    hash_input[..32].copy_from_slice(&proof[..32]);
+    hash_input[32..].copy_from_slice(batch_merkle_root);
+    let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+    let commitment_hex = hex::encode(&h[..16]);
+
+    let query_hints = abi_encode_vfri6_hints(
+        oods_combo_pos,
+        oods_combo_neg,
+        &comp_root,
+        &layer_roots,
+        &hint_structs,
+    );
+
+    Ok((proof, commitment_hex, query_hints))
+}
+
+/// VFRI6 hint generator for ML-DSA NttBatch AIR trace.
+pub fn gen_ntt_batch_vfri6_hints_nfolds(
+    polys:             &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    if polys.is_empty() {
+        return Err("polys must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+    let (ntt_cols, _) = mldsa_ntt_batch_air::build_trace(polys);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS;
+    let cols: Vec<Vec<u32>> = ntt_cols.iter()
+        .map(|col| col.values.iter().map(|v| v.0).collect())
+        .collect();
+    gen_vfri6_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+// ── V23 NttBatch+InttBatch → VFRI3 hints ─────────────────────────────────────
+
+/// Generate VFRI3-compatible hints from V23's NttBatch + InttBatch components.
+///
+/// Both components have LOG_N_ROWS=10 (1024 rows, 649 columns each).
+/// Combined: 1298 trace columns, all at the same domain size (2^10 = 1024 rows).
+///
+/// This proves on-chain (via QLSAVerifierVFRI3) that:
+/// - NTT(z, c, t1) was computed correctly  (NttBatch — 649 cols)
+/// - INTT(az_hat, ct1_hat) was computed correctly  (InttBatch — 649 cols)
+///
+/// `a_hat` — K×L = 30 NTT-domain polynomials; used to compute az_hat so that
+/// the InttBatch inputs are consistent with the V23 AzFull circuit.
+///
+/// Returns `(proof_bytes, commitment_hex, abi_encoded_query_hints)` accepted by
+/// `QLSAVerifierVFRI3.verify()`.
+pub fn gen_mldsa_v23_vfri3_hints(
+    z: &[[i64; 256]; 5],
+    c: &[i64; 256],
+    t1: &[[i64; 256]; 6],
+    a_hat: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    // ── Step 1: NTT(z, c, t1) ────────────────────────────────────────────────
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+
+    let (ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS; // 10
+
+    let z_hat: [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into()
+        .map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat: [i64; 256] = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into()
+        .map_err(|_| "t1_hat slice error".to_string())?;
+
+    // ── Step 2: Az and Ct1 in NTT domain (InttBatch inputs) ──────────────────
+    let (_az_cols, az_hat) = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (_ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    // ── Step 3: INTT(az_hat, ct1_hat) ────────────────────────────────────────
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, _intt_outputs) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+
+    // ── Step 4: Combine columns (both LOG=10, 1024 rows each) ────────────────
+    let n_rows = 1usize << tree_depth;
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(ntt_cols.len() + intt_cols.len());
+    for col in &ntt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("ntt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+    for col in &intt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("intt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+
+    // ── Step 5: Generate VFRI3 hints ─────────────────────────────────────────
+    gen_vfri3_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// VFRI4 hint generator for V23's NttBatch + InttBatch components.
+///
+/// Identical to `gen_mldsa_v23_vfri3_hints` but uses the VFRI4 Fiat-Shamir
+/// transcript: OODS evals are committed via Poseidon2 sponge (4 M31 words)
+/// instead of raw Blake2s mixing (n_cols×4 words).
+///
+/// queryHints ABI format is identical to VFRI3 — only the transcript differs.
+/// VFRI3 hints are NOT accepted by QLSAVerifierVFRI4 and vice versa.
+pub fn gen_mldsa_v23_vfri4_hints(
+    z: &[[i64; 256]; 5],
+    c: &[i64; 256],
+    t1: &[[i64; 256]; 6],
+    a_hat: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    // ── Step 1: NTT(z, c, t1) ────────────────────────────────────────────────
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+
+    let (ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS; // 10
+
+    let z_hat: [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into()
+        .map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat: [i64; 256] = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into()
+        .map_err(|_| "t1_hat slice error".to_string())?;
+
+    // ── Step 2: Az and Ct1 in NTT domain ─────────────────────────────────────
+    let (_az_cols, az_hat) = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (_ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    // ── Step 3: INTT(az_hat, ct1_hat) ────────────────────────────────────────
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, _intt_outputs) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+
+    // ── Step 4: Combine columns (both LOG=10, 1024 rows each) ────────────────
+    let n_rows = 1usize << tree_depth;
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(ntt_cols.len() + intt_cols.len());
+    for col in &ntt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("ntt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+    for col in &intt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("intt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+
+    // ── Step 5: Generate VFRI4 hints ─────────────────────────────────────────
+    gen_vfri4_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// Generate VFRI6-compatible hints from V23's NttBatch + InttBatch components.
+///
+/// Same 1298-column combined trace as gen_mldsa_v23_vfri4_hints, but uses the
+/// VFRI6 ABI encoding (off-chain oodsComboPos/Neg, no Poseidon2 sponge).
+///
+/// Key result: 1298 cols fit within 15M gas — same as 649 cols in VFRI6, because
+/// VFRI6's on-chain cost is O(1) in n_cols (only 8 M31 words mixed per call).
+pub fn gen_mldsa_v23_vfri6_hints(
+    z: &[[i64; 256]; 5],
+    c: &[i64; 256],
+    t1: &[[i64; 256]; 6],
+    a_hat: &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+
+    let (ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS;
+
+    let z_hat: [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into()
+        .map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat: [i64; 256] = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into()
+        .map_err(|_| "t1_hat slice error".to_string())?;
+
+    let (_az_cols, az_hat) = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (_ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, _intt_outputs) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+
+    let n_rows = 1usize << tree_depth;
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(ntt_cols.len() + intt_cols.len());
+    for col in &ntt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("ntt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+    for col in &intt_cols {
+        if col.values.len() != n_rows {
+            return Err(format!("intt col has {} rows, expected {n_rows}", col.values.len()));
+        }
+        cols.push(col.values.iter().map(|v| v.0).collect());
+    }
+
+    gen_vfri6_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// VFRI6 hint generator for V23's LOG=8 component group.
+///
+/// Covers AzFull (1523) + Ct1Full (295) + RangeQBatch (288) +
+/// WPrimeFull (24) + NormCheckBatch (15) + UseHintBatchV2 (60 main + 1 preproc)
+/// = 2206 columns at tree_depth=8 (256 rows each).
+///
+/// Combined with `gen_mldsa_v23_vfri6_hints` (LOG=10 group, 1298 cols),
+/// these two calls cover the full V23 trace (3504 main cols).
+///
+/// Returns `(proof_bytes, commitment_hex, abi_encoded_query_hints)` accepted by
+/// `QLSAVerifierVFRI6.verify()`.
+pub fn gen_mldsa_v23_vfri6_hints_log8(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+    use crate::mldsa_wprime_full_air;
+    use crate::mldsa_norm_check_batch_air;
+    use crate::mldsa_range_q_batch_air;
+    use crate::mldsa_use_hint_batch_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    // ── Step 1: NTT(z, c, t1) — intermediate values, columns not included ─────
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+    let (_ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+
+    let z_hat:  [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into().map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat:  [i64; 256]      = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into().map_err(|_| "t1_hat slice error".to_string())?;
+
+    // ── Step 2: AzFull and Ct1Full (LOG=8) ───────────────────────────────────
+    let (az_cols,  az_hat)  = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    // ── Step 3: RangeQBatch — proves az_hat ∈ [0, Q) ─────────────────────────
+    let (rq_cols, rq_valid) = mldsa_range_q_batch_air::build_trace(&az_hat);
+    if !rq_valid {
+        return Err("RangeQBatch: az_hat contains values outside [0, Q)".to_string());
+    }
+
+    // ── Step 4: INTT(az_hat || ct1_hat) — intermediate, columns not included ──
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (_intt_cols, intt_out) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+    let az_out:  [[i64; 256]; K] = intt_out[..K]
+        .try_into().map_err(|_| "az_out slice error".to_string())?;
+    let ct1_out: [[i64; 256]; K] = intt_out[K..]
+        .try_into().map_err(|_| "ct1_out slice error".to_string())?;
+
+    // ── Step 5: WPrimeFull, NormCheckBatch, UseHintBatchV2 (LOG=8) ───────────
+    let (wp_cols,   _w_prime) = mldsa_wprime_full_air::build_trace(&az_out, &ct1_out);
+    let w_prime: [[i64; 256]; K] = _w_prime;
+    let (norm_cols, _norm_out, _max_norms) = mldsa_norm_check_batch_air::build_trace(z);
+    let (uh_main_cols, uh_preproc_cols, _w1_out, _hint_weight) =
+        mldsa_use_hint_batch_air::build_trace_v2(&w_prime, hints);
+
+    // ── Step 6: Combine all LOG=8 columns (256 rows each) ────────────────────
+    const TREE_DEPTH: u32 = 8;
+    let n_rows = 1usize << (TREE_DEPTH as usize);
+    let total_cols = az_cols.len() + ct1_cols.len() + rq_cols.len()
+        + wp_cols.len() + norm_cols.len() + uh_main_cols.len() + uh_preproc_cols.len();
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(total_cols);
+    let groups = [&az_cols, &ct1_cols, &rq_cols, &wp_cols, &norm_cols, &uh_main_cols, &uh_preproc_cols];
+    for group in &groups {
+        for col in group.iter() {
+            if col.values.len() != n_rows {
+                return Err(format!(
+                    "LOG=8 col has {} rows, expected {n_rows}", col.values.len()
+                ));
+            }
+            cols.push(col.values.iter().map(|v| v.0).collect());
+        }
+    }
+
+    gen_vfri6_hints_from_cols_nfolds(&cols, TREE_DEPTH, batch_merkle_root, n_queries, num_folds)
+}
+
 mod tests {
     use super::*;
 
@@ -2048,6 +3429,62 @@ mod tests {
         assert!(gen_poseidon2_vfri3_real(&[1], &seed, 65).is_err(), "n_queries too large");
     }
 
+    // ── gen_poseidon2_vfri4_real tests ───────────────────────────────────────
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_smoke() {
+        let leaves: Vec<u64> = (1..=4).collect();
+        let seed = vec![0u8; 32];
+        let result = gen_poseidon2_vfri4_real(&leaves, &seed, 2);
+        assert!(result.is_ok(), "vfri4_real should succeed: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_commitment_binding() {
+        let leaves: Vec<u64> = (1..=8).collect();
+        let batch_root: Vec<u8> = (0u8..32).collect();
+        let (proof, commitment, _) = gen_poseidon2_vfri4_real(&leaves, &batch_root, 2).unwrap();
+
+        let mut hash_input = [0u8; 64];
+        hash_input[..32].copy_from_slice(&proof[..32]);
+        hash_input[32..].copy_from_slice(&batch_root);
+        let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+        assert_eq!(commitment, hex::encode(&h[..16]));
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_deterministic() {
+        let leaves: Vec<u64> = (1..=4).collect();
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = gen_poseidon2_vfri4_real(&leaves, &seed, 2).unwrap();
+        let (_, c2, h2) = gen_poseidon2_vfri4_real(&leaves, &seed, 2).unwrap();
+        assert_eq!(c1, c2, "deterministic commitment");
+        assert_eq!(h1, h2, "deterministic hints");
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_differs_from_vfri3() {
+        // VFRI4 and VFRI3 have different transcripts → different query indices → different hints
+        let leaves: Vec<u64> = (1..=8).collect();
+        let seed = vec![0x42u8; 32];
+        let (_, _c3, h3) = gen_poseidon2_vfri3_real(&leaves, &seed, 2).unwrap();
+        let (_, _c4, h4) = gen_poseidon2_vfri4_real(&leaves, &seed, 2).unwrap();
+        assert_ne!(h3, h4, "VFRI4 transcript differs from VFRI3 transcript");
+    }
+
+    #[test]
+    fn test_gen_poseidon2_vfri4_real_input_validation() {
+        let seed = vec![0u8; 32];
+        assert!(gen_poseidon2_vfri4_real(&[], &seed, 2).is_err(), "empty leaves");
+        assert!(gen_poseidon2_vfri4_real(&[1], &vec![0u8; 31], 2).is_err(), "short root");
+        assert!(gen_poseidon2_vfri4_real(&[1], &seed, 0).is_err(), "n_queries=0");
+        assert!(gen_poseidon2_vfri4_real(&[1], &seed, 65).is_err(), "n_queries too large");
+    }
+
     // ── gen_ntt_batch_vfri3_hints tests ──────────────────────────────────────
 
     #[test]
@@ -2098,5 +3535,343 @@ mod tests {
         let poly1: Vec<[i64; 256]> = vec![[0i64; 256]];
         assert!(gen_ntt_batch_vfri3_hints(&poly1, &vec![0u8; 31], 2).is_err(), "short root");
         assert!(gen_ntt_batch_vfri3_hints(&poly1, &seed, 0).is_err(), "n_queries=0");
+    }
+
+    // ── gen_mldsa_v23_vfri4_hints tests ──────────────────────────────────────
+
+    pub(super) fn make_v23_inputs(seed: u64) -> ([[i64;256];5], [i64;256], [[i64;256];6], Vec<[i64;256]>) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut rng_val = seed;
+        let mut next = || -> i64 {
+            let mut h = DefaultHasher::new();
+            rng_val.hash(&mut h);
+            rng_val = h.finish();
+            (rng_val % 8380417) as i64
+        };
+        let z:     [[i64;256];5]       = std::array::from_fn(|_| std::array::from_fn(|_| next()));
+        let c:     [i64;256]           = std::array::from_fn(|_| next() % 2);
+        let t1:    [[i64;256];6]       = std::array::from_fn(|_| std::array::from_fn(|_| next()));
+        let a_hat: Vec<[i64;256]>      = (0..30).map(|_| std::array::from_fn(|_| next())).collect();
+        (z, c, t1, a_hat)
+    }
+
+    // ── VFRI5 tests ───────────────────────────────────────────────────────────
+
+    fn make_vfri5_polys(n_polys: usize, seed: usize) -> Vec<[i64; 256]> {
+        (0..n_polys).map(|k| {
+            let mut p = [0i64; 256];
+            for (i, x) in p.iter_mut().enumerate() {
+                *x = ((seed + k * 257 + i + 1) % 500) as i64;
+            }
+            p
+        }).collect()
+    }
+
+    #[test]
+    fn test_gen_vfri5_hints_smoke() {
+        let polys = make_vfri5_polys(3, 0);
+        let seed = vec![0x55u8; 32];
+        let result = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(2));
+        assert!(result.is_ok(), "vfri5 smoke: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 100);
+        assert_eq!(commitment.len(), 32, "commitment is 16-byte hex = 32 chars");
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_vfri5_hints_deterministic() {
+        let polys = make_vfri5_polys(4, 100);
+        let seed = vec![0xddu8; 32];
+        let (_, c1, h1) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        let (_, c2, h2) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        assert_eq!(c1, c2);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_gen_vfri5_hints_differ_from_vfri4() {
+        let polys = make_vfri5_polys(4, 200);
+        let seed = vec![0x99u8; 32];
+        let (_, _c4, h4) = gen_ntt_batch_vfri4_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        let (_, _c5, h5) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        assert_ne!(h4, h5, "VFRI5 and VFRI4 hints must differ (different transcripts)");
+    }
+
+    #[test]
+    fn test_gen_vfri5_hints_multi_query() {
+        let polys = make_vfri5_polys(2, 300);
+        let seed = vec![0x12u8; 32];
+        let (_, c1, h1) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        let (_, c2, h2) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 2, Some(2)).unwrap();
+        assert_eq!(c1, c2, "same trace → same commitment regardless of n_queries");
+        assert_ne!(h1, h2, "more queries → different hints");
+        assert!(h2.len() > h1.len(), "2-query hints must be larger than 1-query hints");
+    }
+
+    #[test]
+    fn test_gen_vfri5_hints_comp_root_in_hints() {
+        let polys = make_vfri5_polys(4, 400);
+        let seed = vec![0xabu8; 32];
+        let (_, _, hints) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        // head = 6 × 32 = 192 bytes; compRoot at slot 3 = bytes 96..128
+        assert!(hints.len() > 192, "hints must contain head + bodies");
+        let comp_root_slot = &hints[96..128];
+        assert_ne!(comp_root_slot, &[0u8; 32], "compRoot must be non-zero");
+    }
+
+    // ── ML-DSA V23 VFRI4 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(7000);
+        let seed = vec![0u8; 32];
+        let result = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3));
+        assert!(result.is_ok(), "v23_vfri4 should succeed: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(7100);
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, c2, h2) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_eq!(c1, c2, "deterministic commitment");
+        assert_eq!(h1, h2, "deterministic hints");
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_differs_from_vfri3() {
+        // VFRI4 and VFRI3 transcripts are incompatible → different hints
+        let (z, c, t1, a_hat) = make_v23_inputs(7200);
+        let seed = vec![0x42u8; 32];
+        let (_, _c3, h3) = gen_mldsa_v23_vfri3_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, _c4, h4) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_ne!(h3, h4, "VFRI4 transcript must differ from VFRI3");
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri4_hints_n_cols_1298() {
+        // Combined trace: NttBatch (649) + InttBatch (649) = 1298 columns
+        let (z, c, t1, a_hat) = make_v23_inputs(7300);
+        let seed = vec![0u8; 32];
+        // num_folds=3 → small last layer, fast test
+        let (proof, _, hints) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        // proof[8:40] = trace_root; must be non-zero for a real 1298-col trace
+        assert_ne!(&proof[8..40], &[0u8; 32]);
+        // hints encode 1298 query_values + 1298 query_values_neg per query
+        assert!(hints.len() > 10_000, "1298-col trace hints should be large");
+    }
+
+    // ── VFRI6 tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gen_vfri6_hints_smoke() {
+        let polys = make_vfri5_polys(3, 0);
+        let seed = vec![0x55u8; 32];
+        let result = gen_ntt_batch_vfri6_hints_nfolds(&polys, &seed, 1, Some(2));
+        assert!(result.is_ok(), "vfri6 smoke: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 100);
+        assert_eq!(commitment.len(), 32, "commitment is 16-byte hex = 32 chars");
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_vfri6_hints_deterministic() {
+        let polys = make_vfri5_polys(4, 100);
+        let seed = vec![0xddu8; 32];
+        let (_, c1, h1) = gen_ntt_batch_vfri6_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        let (_, c2, h2) = gen_ntt_batch_vfri6_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        assert_eq!(c1, c2);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_gen_vfri6_hints_differ_from_vfri5() {
+        let polys = make_vfri5_polys(4, 200);
+        let seed = vec![0x99u8; 32];
+        let (_, _c5, h5) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        let (_, _c6, h6) = gen_ntt_batch_vfri6_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        assert_ne!(h5, h6, "VFRI6 and VFRI5 hints must differ (different transcripts + ABI)");
+    }
+
+    #[test]
+    fn test_gen_vfri6_hints_multi_query() {
+        let polys = make_vfri5_polys(2, 300);
+        let seed = vec![0x12u8; 32];
+        let (_, c1, h1) = gen_ntt_batch_vfri6_hints_nfolds(&polys, &seed, 1, Some(2)).unwrap();
+        let (_, c2, h2) = gen_ntt_batch_vfri6_hints_nfolds(&polys, &seed, 2, Some(2)).unwrap();
+        assert_eq!(c1, c2, "same trace → same commitment regardless of n_queries");
+        assert_ne!(h1, h2, "more queries → different hints");
+        assert!(h2.len() > h1.len(), "2-query hints must be larger than 1-query hints");
+    }
+
+    #[test]
+    fn test_gen_vfri6_hints_smaller_than_vfri5() {
+        // VFRI6 removes oodsEvalsPos[649] + oodsEvalsNeg[649] (2×649×16 = 20768 B)
+        let polys = make_vfri5_polys(12, 500);
+        let seed = vec![0xabu8; 32];
+        let (_, _, h5) = gen_ntt_batch_vfri5_hints_nfolds(&polys, &seed, 1, Some(9)).unwrap();
+        let (_, _, h6) = gen_ntt_batch_vfri6_hints_nfolds(&polys, &seed, 1, Some(9)).unwrap();
+        assert!(h6.len() < h5.len(),
+            "VFRI6 hints ({} B) must be smaller than VFRI5 ({} B)", h6.len(), h5.len());
+    }
+}
+// ── ML-DSA V23 VFRI6 test helpers (need access to private make_v23_inputs) ──
+#[cfg(test)]
+mod tests_v23_vfri6_inner {
+    use super::gen_mldsa_v23_vfri6_hints;
+    use super::gen_mldsa_v23_vfri4_hints;
+    use super::tests::make_v23_inputs;
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(8000);
+        let seed = vec![0u8; 32];
+        let result = gen_mldsa_v23_vfri6_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3));
+        assert!(result.is_ok(), "v23_vfri6: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(8100);
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = gen_mldsa_v23_vfri6_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, c2, h2) = gen_mldsa_v23_vfri6_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_eq!(c1, c2);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_differ_from_vfri4() {
+        let (z, c, t1, a_hat) = make_v23_inputs(8200);
+        let seed = vec![0x42u8; 32];
+        let (_, _c4, h4) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, _c6, h6) = gen_mldsa_v23_vfri6_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_ne!(h4, h6, "VFRI6 transcript must differ from VFRI4");
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_smaller_than_vfri4() {
+        let (z, c, t1, a_hat) = make_v23_inputs(8300);
+        let seed = vec![0u8; 32];
+        let (_, _, h4) = gen_mldsa_v23_vfri4_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, _, h6) = gen_mldsa_v23_vfri6_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert!(h6.len() < h4.len(),
+            "VFRI6 hints ({} B) must be smaller than VFRI4 ({} B)", h6.len(), h4.len());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_n_cols_1298() {
+        let (z, c, t1, a_hat) = make_v23_inputs(8400);
+        let seed = vec![0u8; 32];
+        let (proof, _, hints) = gen_mldsa_v23_vfri6_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_ne!(&proof[8..40], &[0u8; 32], "trace root non-zero");
+        assert!(hints.len() < 20_000,
+            "VFRI6 1298-col hints should be small, got {} B", hints.len());
+    }
+
+    // ── LOG=8 group tests ─────────────────────────────────────────────────────
+
+    fn make_log8_hints() -> [[bool; 256]; 6] {
+        [[false; 256]; 6]
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9000);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        let result = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        );
+        assert!(result.is_ok(), "log8 smoke: {:?}", result.err());
+        let (proof, commitment, query_hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!query_hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9100);
+        let hints = make_log8_hints();
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        let (_, c2, h2) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        assert_eq!(c1, c2, "deterministic commitment");
+        assert_eq!(h1, h2, "deterministic hints");
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_n_cols_2206() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9200);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        let (proof, _, query_hints) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        // proof[8:40] = trace root — non-zero for a real 2206-col trace
+        assert_ne!(&proof[8..40], &[0u8; 32], "trace root non-zero");
+        // VFRI6: hint size is O(1) in n_cols — same ~7 KB regardless of column count
+        assert!(query_hints.len() < 20_000,
+            "VFRI6 2206-col hints should be small, got {} B", query_hints.len());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_smaller_than_vfri4() {
+        // VFRI6 LOG=8 (2206 cols) hints must be substantially smaller than VFRI4
+        // which grows O(n_cols) with oodsEvalsPos[2206] + oodsEvalsNeg[2206] arrays.
+        // VFRI4 at 2206 cols: ~70 KB; VFRI6: ~3.5 KB (same 2 uint128 + Merkle proof)
+        let (z, c, t1, a_hat) = make_v23_inputs(9300);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        let (_, _, h_log8_v6) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        let (_, _, h_log10_v6) = gen_mldsa_v23_vfri6_hints(
+            &z, &c, &t1, &a_hat, &seed, 1, Some(3),
+        ).unwrap();
+        // VFRI6 hint size depends only on tree_depth and num_folds, not n_cols.
+        // LOG=8 (tree_depth=8) has shorter Merkle paths than LOG=10 (tree_depth=10),
+        // so LOG=8 hints should be ≤ LOG=10 hints.
+        assert!(h_log8_v6.len() <= h_log10_v6.len(),
+            "VFRI6 LOG=8 hints ({} B) should not exceed LOG=10 ({} B)",
+            h_log8_v6.len(), h_log10_v6.len());
+        // Both are much smaller than the O(n_cols) VFRI4 equivalent (>50 KB for 2206 cols)
+        assert!(h_log8_v6.len() < 20_000,
+            "VFRI6 2206-col hints should be < 20 KB, got {} B", h_log8_v6.len());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_validation_errors() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9400);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        // Wrong a_hat length
+        let short_a_hat: Vec<[i64; 256]> = vec![[0i64; 256]; 29];
+        let err = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &short_a_hat, &hints, &seed, 1, Some(3),
+        );
+        assert!(err.is_err(), "should reject wrong a_hat length");
+        // n_queries=0
+        let err2 = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 0, Some(3),
+        );
+        assert!(err2.is_err(), "should reject n_queries=0");
     }
 }

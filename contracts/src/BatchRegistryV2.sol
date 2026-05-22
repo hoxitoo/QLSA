@@ -40,6 +40,9 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
 
     IQLSAVerifierV2 public verifier;
 
+    /// @notice Maximum senders per submitBatchWithNonces call (caps O(n²) dedup loop).
+    uint256 public constant MAX_SENDERS = 3000;
+
     /// @notice Returns true if the given Merkle root has been finalized.
     mapping(bytes32 => bool) public finalizedBatches;
 
@@ -83,6 +86,7 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
     error ZeroAddressVerifier();
     error SenderNonceTooLow(bytes32 sender, uint64 provided, uint64 expected);
     error NoncesLengthMismatch();
+    error SenderCountExceedsLimit();
 
     // ──────────────────────────────────────────────────────────────────────────
     // Constructor
@@ -143,6 +147,7 @@ contract BatchRegistryV2 is ReentrancyGuard, Ownable {
         if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
         if (finalizedBatches[merkleRoot]) revert BatchAlreadyFinalized(merkleRoot);
         if (senders.length != newNonces.length) revert NoncesLengthMismatch();
+        if (senders.length > MAX_SENDERS) revert SenderCountExceedsLimit();
 
         // Validate all nonces before touching state (fail-fast).
         // Also detect duplicate senders in the same call to prevent nonce bypass.
