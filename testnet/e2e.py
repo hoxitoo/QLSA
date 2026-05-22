@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import sys
 import time
@@ -182,7 +183,6 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
     # Build per-sender nonce list: highest nonce in this batch for each unique sender.
     sender_nonces: dict[bytes, int] = {}
     for tx in txs:
-        import hashlib
         sender_key = hashlib.sha3_256(tx.public_key).digest()
         if tx.nonce > sender_nonces.get(sender_key, -1):
             sender_nonces[sender_key] = tx.nonce

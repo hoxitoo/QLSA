@@ -49,6 +49,9 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
     /// @notice The VFRI6 verifier used for BOTH the LOG=10 and LOG=8 proof checks.
     IQLSAVerifierV4 public verifier;
 
+    /// @notice Maximum senders per submitBatchWithNonces call (caps O(n²) dedup loop).
+    uint256 public constant MAX_SENDERS = 3000;
+
     /// @notice Returns true if the given Merkle root has been finalized.
     mapping(bytes32 => bool) public finalizedBatches;
 
@@ -93,6 +96,7 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
     error ZeroAddressVerifier();
     error SenderNonceTooLow(bytes32 sender, uint64 provided, uint64 expected);
     error NoncesLengthMismatch();
+    error SenderCountExceedsLimit();
 
     // ──────────────────────────────────────────────────────────────────────────
     // Constructor
@@ -170,6 +174,7 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
         if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
         if (finalizedBatches[merkleRoot]) revert BatchAlreadyFinalized(merkleRoot);
         if (senders.length != newNonces.length) revert NoncesLengthMismatch();
+        if (senders.length > MAX_SENDERS) revert SenderCountExceedsLimit();
 
         // Validate all nonces before touching state.
         for (uint256 i = 0; i < senders.length; ++i) {

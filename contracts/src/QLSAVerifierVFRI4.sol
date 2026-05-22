@@ -348,6 +348,7 @@ contract QLSAVerifierVFRI4 is IQLSAVerifierV4 {
 
     function _checkCircleFold(QueryHints memory h) internal pure returns (bool) {
         if (!CirclePoint.isOnCircle(h.queryPointX, h.queryPointY)) return false;
+        if (h.queryPointY == 0) return false;
         if (h.treeDepth < 1 || h.treeDepth > 30) return false;
         if (h.queryIndex >= (1 << h.treeDepth))  return false;
 

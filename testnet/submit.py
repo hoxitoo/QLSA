@@ -72,7 +72,8 @@ class OnchainSubmitter:
     def from_env(cls) -> "OnchainSubmitter":
         """Construct from environment variables (loaded from .env by caller)."""
         rpc_url = os.environ["RPC_URL"]
-        private_key = os.environ["DEPLOYER_PRIVATE_KEY"]
+        # PRIVATE_KEY is the canonical name; DEPLOYER_PRIVATE_KEY is the legacy alias.
+        private_key = os.environ.get("PRIVATE_KEY") or os.environ["DEPLOYER_PRIVATE_KEY"]
         registry_address = os.environ["REGISTRY_ADDRESS"]
         return cls(rpc_url=rpc_url, private_key=private_key, registry_address=registry_address)
 

@@ -335,6 +335,7 @@ contract QLSAVerifierVFRI6 is IQLSAVerifierV4 {
         uint128 friAlpha
     ) internal pure returns (bool) {
         if (!CirclePoint.isOnCircle(h.queryPointX, h.queryPointY)) return false;
+        if (h.queryPointY == 0) return false; // identity-adjacent points have no y-inverse
         if (h.treeDepth < 1 || h.treeDepth > 30) return false;
         if (h.queryIndex >= (uint256(1) << h.treeDepth)) return false;
 
