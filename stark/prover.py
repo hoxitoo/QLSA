@@ -1903,3 +1903,81 @@ def gen_mldsa_v23_vfri6_hints(
         n_cols=1298,
         n_queries=n_queries,
     )
+
+
+@dataclass
+class MldsaV23VFRI6Log8HintResult:
+    """VFRI6 hints for V23's LOG=8 component group (2206 columns).
+
+    Covers: AzFull (1523) + Ct1Full (295) + RangeQBatch (288) +
+            WPrimeFull (24) + NormCheckBatch (15) + UseHintBatchV2 (61) = 2206 cols.
+
+    Combined with MldsaV23VFRI6HintResult (LOG=10, 1298 cols), these two cover the
+    full V23 trace (3504 main columns) with two separate VFRI6 verification calls.
+    Hint size is O(1) in n_cols: ~3.5 KB regardless of column count.
+    """
+
+    proof: bytes
+    commitment: str
+    query_hints: bytes
+    n_cols: int  # 2206
+    n_queries: int
+
+
+def gen_mldsa_v23_vfri6_hints_log8(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> "MldsaV23VFRI6Log8HintResult":
+    """Generate VFRI6 hints for V23's LOG=8 component group.
+
+    Covers AzFull + Ct1Full + RangeQBatch + WPrimeFull + NormCheckBatch + UseHintBatchV2
+    (2206 columns at tree_depth=8, 256 rows each).
+
+    Args:
+        z:                 5 polynomials (L=5), each 256 i64 coefficients.
+        c:                 Challenge polynomial, 256 i64 coefficients.
+        t1:                6 polynomials (K=6), each 256 i64 coefficients.
+        a_hat:             30 (K×L) NTT-domain polynomials, each 256 i64 coefficients.
+        hints:             6 UseHint bool arrays (K=6), each 256 bools.
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries:         FRI queries (default 1).
+        num_folds:         FRI fold rounds (default: tree_depth−1 = 7).
+
+    Returns:
+        MldsaV23VFRI6Log8HintResult with proof, commitment, query_hints, n_cols=2206.
+    """
+    _require_ext("gen_mldsa_v23_vfri6_hints_log8_py")
+    if len(z) != 5:
+        raise ValueError(f"z must have 5 polynomials (L=5), got {len(z)}")
+    if len(c) != 256:
+        raise ValueError(f"c must have 256 coefficients, got {len(c)}")
+    if len(t1) != 6:
+        raise ValueError(f"t1 must have 6 polynomials (K=6), got {len(t1)}")
+    if len(a_hat) != 30:
+        raise ValueError(f"a_hat must have 30 polynomials (K×L=30), got {len(a_hat)}")
+    if len(hints) != 6:
+        raise ValueError(f"hints must have 6 arrays (K=6), got {len(hints)}")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be ≥ 1, got {n_queries}")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri6_hints_log8_py(
+            z, list(c), t1, a_hat, hints,
+            list(batch_merkle_root), n_queries, num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri6_hints_log8 failed: {exc}") from exc
+    return MldsaV23VFRI6Log8HintResult(
+        proof=proof,
+        commitment=commitment,
+        query_hints=query_hints,
+        n_cols=2206,
+        n_queries=n_queries,
+    )

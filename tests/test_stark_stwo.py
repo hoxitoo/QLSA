@@ -2077,3 +2077,89 @@ def test_gen_mldsa_v23_vfri6_hints_multi_query():
     r2 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI6_V23_BATCH_ROOT, n_queries=2, num_folds=3)
     assert r1.commitment == r2.commitment
     assert len(r2.query_hints) > len(r1.query_hints)
+
+
+# ── VFRI6 LOG=8 group tests (AzFull+Ct1Full+RangeQ+WPrime+NormCheck+UseHint) ─
+
+_VFRI6_LOG8_BATCH_ROOT = bytes(range(32))
+
+
+def _make_log8_hints() -> list[list[bool]]:
+    return [[False] * 256 for _ in range(6)]
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_schema():
+    """LOG=8 VFRI6 result has expected structure and 2206 columns."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10000)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+    assert r.n_cols == 2206
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_deterministic():
+    """Same inputs produce identical outputs."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10100)
+    hints = _make_log8_hints()
+    r1 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    r2 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_small_hints():
+    """LOG=8 hints are O(1) in n_cols: 2206 cols → < 20 KB."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10200)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    assert len(r.query_hints) < 20_000, (
+        f"VFRI6 2206-col hints should be < 20 KB, got {len(r.query_hints)} B"
+    )
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_validation_errors():
+    """Python-side validation catches bad inputs."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    import pytest
+    z, c, t1, a_hat = _v23_inputs(10300)
+    hints = _make_log8_hints()
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints_log8(z[:-1], c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints_log8(z, c, t1, a_hat, hints[:-1], _VFRI6_LOG8_BATCH_ROOT)
+    with pytest.raises((ValueError, RuntimeError)):
+        gen_mldsa_v23_vfri6_hints_log8(z, c, t1, a_hat, hints, b'\x00' * 16)
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri6_hints_log8_multi_query():
+    """n_queries=2 produces larger hints than n_queries=1."""
+    from stark.prover import gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(10400)
+    hints = _make_log8_hints()
+    r1 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=1, num_folds=3,
+    )
+    r2 = gen_mldsa_v23_vfri6_hints_log8(
+        z, c, t1, a_hat, hints, _VFRI6_LOG8_BATCH_ROOT, n_queries=2, num_folds=3,
+    )
+    assert r1.commitment == r2.commitment
+    assert len(r2.query_hints) > len(r1.query_hints)

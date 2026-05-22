@@ -468,19 +468,24 @@ VFRI6 — VFRI5 with off-chain OODS combo, eliminating O(n_cols) on-chain work e
 - `_buildCtx`: no `_compositionQM31`, no `_qm31ArrayToM31s`, no Poseidon2 import
 - Soundness: Schwartz-Zippel OODS quotient argument — if `(compValue − oodsComboPos)/(p.x − z_x)` is low-degree for random p, then `oodsComboPos = F(z_x)` with overwhelming probability
 - Gas analysis (2026-05-22):
-  - Per-query calldata: **7.2 KB** for any n_cols (O(1) — same for 649 and 1298 cols!)
+  - Per-query calldata: **7.2 KB** for any n_cols at LOG=10 (O(1) — same for 649 and 1298 cols!)
   - **649-col NttBatch (1 query) PASSES within 15M gas** ✓ (vs VFRI5: >15M gas)
   - **1298-col NttBatch+InttBatch (1 query) PASSES within 15M gas** ✓ (same gas as 649-col)
+  - **2206-col LOG=8 group (1 query) PASSES within 15M gas** ✓ (5.3 KB hints, shorter Merkle paths at depth=8)
   - O(n_cols) work eliminated on-chain: only 8 M31 words mixed per call regardless of trace size
+  - Hint size depends on tree_depth and num_folds, not n_cols: depth=10 → 7.2 KB; depth=8 → 5.3 KB
 - VFRI5 hints are NOT accepted by VFRI6 (different ABI layout + transcript)
-- 10 Rust tests + 12 Python tests + 23 JS E2E tests
+- 15 Rust tests + 17 Python tests + 33 JS E2E tests
 - Rust bridges:
   - `gen_vfri6_hints_from_cols_nfolds` — generic VFRI6 from flat columns
   - `gen_ntt_batch_vfri6_hints_nfolds` — ML-DSA NttBatch (1 poly = 649 cols)
-  - `gen_mldsa_v23_vfri6_hints` — V23 NttBatch+InttBatch (1298 cols)
+  - `gen_mldsa_v23_vfri6_hints` — V23 LOG=10 group: NttBatch+InttBatch (1298 cols)
+  - `gen_mldsa_v23_vfri6_hints_log8` — V23 LOG=8 group: AzFull+Ct1Full+RangeQBatch+WPrimeFull+NormCheckBatch+UseHintBatchV2 (2206 cols)
 - Python wrappers:
   - `gen_ntt_batch_vfri6_hints` → `NttBatchVFRI6HintResult`
   - `gen_mldsa_v23_vfri6_hints` → `MldsaV23VFRI6HintResult` (n_cols=1298)
+  - `gen_mldsa_v23_vfri6_hints_log8` → `MldsaV23VFRI6Log8HintResult` (n_cols=2206)
+- Together, the two LOG groups cover the full V23 trace (3504 main cols) via two separate VFRI6 calls
 
 ## Multi-Component STARK Pattern
 

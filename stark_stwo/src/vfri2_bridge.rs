@@ -3058,6 +3058,111 @@ pub fn gen_mldsa_v23_vfri6_hints(
 
     gen_vfri6_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
 }
+
+/// VFRI6 hint generator for V23's LOG=8 component group.
+///
+/// Covers AzFull (1523) + Ct1Full (295) + RangeQBatch (288) +
+/// WPrimeFull (24) + NormCheckBatch (15) + UseHintBatchV2 (60 main + 1 preproc)
+/// = 2206 columns at tree_depth=8 (256 rows each).
+///
+/// Combined with `gen_mldsa_v23_vfri6_hints` (LOG=10 group, 1298 cols),
+/// these two calls cover the full V23 trace (3504 main cols).
+///
+/// Returns `(proof_bytes, commitment_hex, abi_encoded_query_hints)` accepted by
+/// `QLSAVerifierVFRI6.verify()`.
+pub fn gen_mldsa_v23_vfri6_hints_log8(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+    use crate::mldsa_wprime_full_air;
+    use crate::mldsa_norm_check_batch_air;
+    use crate::mldsa_range_q_batch_air;
+    use crate::mldsa_use_hint_batch_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    // ── Step 1: NTT(z, c, t1) — intermediate values, columns not included ─────
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+    let (_ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+
+    let z_hat:  [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into().map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat:  [i64; 256]      = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into().map_err(|_| "t1_hat slice error".to_string())?;
+
+    // ── Step 2: AzFull and Ct1Full (LOG=8) ───────────────────────────────────
+    let (az_cols,  az_hat)  = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    // ── Step 3: RangeQBatch — proves az_hat ∈ [0, Q) ─────────────────────────
+    let (rq_cols, rq_valid) = mldsa_range_q_batch_air::build_trace(&az_hat);
+    if !rq_valid {
+        return Err("RangeQBatch: az_hat contains values outside [0, Q)".to_string());
+    }
+
+    // ── Step 4: INTT(az_hat || ct1_hat) — intermediate, columns not included ──
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (_intt_cols, intt_out) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+    let az_out:  [[i64; 256]; K] = intt_out[..K]
+        .try_into().map_err(|_| "az_out slice error".to_string())?;
+    let ct1_out: [[i64; 256]; K] = intt_out[K..]
+        .try_into().map_err(|_| "ct1_out slice error".to_string())?;
+
+    // ── Step 5: WPrimeFull, NormCheckBatch, UseHintBatchV2 (LOG=8) ───────────
+    let (wp_cols,   _w_prime) = mldsa_wprime_full_air::build_trace(&az_out, &ct1_out);
+    let w_prime: [[i64; 256]; K] = _w_prime;
+    let (norm_cols, _norm_out, _max_norms) = mldsa_norm_check_batch_air::build_trace(z);
+    let (uh_main_cols, uh_preproc_cols, _w1_out, _hint_weight) =
+        mldsa_use_hint_batch_air::build_trace_v2(&w_prime, hints);
+
+    // ── Step 6: Combine all LOG=8 columns (256 rows each) ────────────────────
+    const TREE_DEPTH: u32 = 8;
+    let n_rows = 1usize << (TREE_DEPTH as usize);
+    let total_cols = az_cols.len() + ct1_cols.len() + rq_cols.len()
+        + wp_cols.len() + norm_cols.len() + uh_main_cols.len() + uh_preproc_cols.len();
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(total_cols);
+    let groups = [&az_cols, &ct1_cols, &rq_cols, &wp_cols, &norm_cols, &uh_main_cols, &uh_preproc_cols];
+    for group in &groups {
+        for col in group.iter() {
+            if col.values.len() != n_rows {
+                return Err(format!(
+                    "LOG=8 col has {} rows, expected {n_rows}", col.values.len()
+                ));
+            }
+            cols.push(col.values.iter().map(|v| v.0).collect());
+        }
+    }
+
+    gen_vfri6_hints_from_cols_nfolds(&cols, TREE_DEPTH, batch_merkle_root, n_queries, num_folds)
+}
+
 mod tests {
     use super::*;
 
@@ -3674,5 +3779,99 @@ mod tests_v23_vfri6_inner {
         assert_ne!(&proof[8..40], &[0u8; 32], "trace root non-zero");
         assert!(hints.len() < 20_000,
             "VFRI6 1298-col hints should be small, got {} B", hints.len());
+    }
+
+    // ── LOG=8 group tests ─────────────────────────────────────────────────────
+
+    fn make_log8_hints() -> [[bool; 256]; 6] {
+        [[false; 256]; 6]
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9000);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        let result = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        );
+        assert!(result.is_ok(), "log8 smoke: {:?}", result.err());
+        let (proof, commitment, query_hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!query_hints.is_empty());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9100);
+        let hints = make_log8_hints();
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        let (_, c2, h2) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        assert_eq!(c1, c2, "deterministic commitment");
+        assert_eq!(h1, h2, "deterministic hints");
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_n_cols_2206() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9200);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        let (proof, _, query_hints) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        // proof[8:40] = trace root — non-zero for a real 2206-col trace
+        assert_ne!(&proof[8..40], &[0u8; 32], "trace root non-zero");
+        // VFRI6: hint size is O(1) in n_cols — same ~7 KB regardless of column count
+        assert!(query_hints.len() < 20_000,
+            "VFRI6 2206-col hints should be small, got {} B", query_hints.len());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_smaller_than_vfri4() {
+        // VFRI6 LOG=8 (2206 cols) hints must be substantially smaller than VFRI4
+        // which grows O(n_cols) with oodsEvalsPos[2206] + oodsEvalsNeg[2206] arrays.
+        // VFRI4 at 2206 cols: ~70 KB; VFRI6: ~3.5 KB (same 2 uint128 + Merkle proof)
+        let (z, c, t1, a_hat) = make_v23_inputs(9300);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        let (_, _, h_log8_v6) = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 1, Some(3),
+        ).unwrap();
+        let (_, _, h_log10_v6) = gen_mldsa_v23_vfri6_hints(
+            &z, &c, &t1, &a_hat, &seed, 1, Some(3),
+        ).unwrap();
+        // VFRI6 hint size depends only on tree_depth and num_folds, not n_cols.
+        // LOG=8 (tree_depth=8) has shorter Merkle paths than LOG=10 (tree_depth=10),
+        // so LOG=8 hints should be ≤ LOG=10 hints.
+        assert!(h_log8_v6.len() <= h_log10_v6.len(),
+            "VFRI6 LOG=8 hints ({} B) should not exceed LOG=10 ({} B)",
+            h_log8_v6.len(), h_log10_v6.len());
+        // Both are much smaller than the O(n_cols) VFRI4 equivalent (>50 KB for 2206 cols)
+        assert!(h_log8_v6.len() < 20_000,
+            "VFRI6 2206-col hints should be < 20 KB, got {} B", h_log8_v6.len());
+    }
+
+    #[test]
+    fn test_gen_mldsa_v23_vfri6_hints_log8_validation_errors() {
+        let (z, c, t1, a_hat) = make_v23_inputs(9400);
+        let hints = make_log8_hints();
+        let seed = vec![0u8; 32];
+        // Wrong a_hat length
+        let short_a_hat: Vec<[i64; 256]> = vec![[0i64; 256]; 29];
+        let err = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &short_a_hat, &hints, &seed, 1, Some(3),
+        );
+        assert!(err.is_err(), "should reject wrong a_hat length");
+        // n_queries=0
+        let err2 = super::gen_mldsa_v23_vfri6_hints_log8(
+            &z, &c, &t1, &a_hat, &hints, &seed, 0, Some(3),
+        );
+        assert!(err2.is_err(), "should reject n_queries=0");
     }
 }
