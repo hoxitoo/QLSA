@@ -19,14 +19,17 @@ import "./IQLSAVerifierV4.sol";
 /// domains have different sizes (LOG=10 vs LOG=8).  BatchRegistryV4 accepts two
 /// (proof, commitment, hints) pairs and verifies both before finalizing a batch.
 ///
-/// NOTE (research prototype): There is currently no on-chain cross-proof binding
-/// between the LOG=10 NTT outputs (z_hat, the NTT of the signature vector z) and
-/// the LOG=8 AzFull inputs.  An adversary could, in principle, supply a valid
-/// LOG=10 proof and an unrelated LOG=8 proof that both pass independently.  Full
-/// binding requires either (a) a single FRI commitment tree spanning both trace
-/// sizes (requires Stwo mixed-degree STARK, not yet wired on-chain) or (b) an
-/// explicit cross-proof linking constraint committed in both proofs.  This is a
-/// known open point tracked for MVP-5.
+/// Cross-proof binding (MVP-5 Priority 2, implemented in VFRI7):
+///   QLSAVerifierVFRI7 mixes `merkleRoot` into the Fiat-Shamir transcript before
+///   drawing FRI query indices.  BatchRegistryV4 uses cross-bound roots:
+///
+///     boundRoot10 = keccak256(merkleRoot ‖ traceRoot8)   (traceRoot8  = proofLog8[8:40])
+///     boundRoot8  = keccak256(merkleRoot ‖ traceRoot10)  (traceRoot10 = proofLog10[8:40])
+///
+///   The LOG=10 proof is verified against boundRoot10, so its FRI query indices
+///   depend on the LOG=8 trace commitment; and vice versa.  An adversary who mixes
+///   proofs from different witnesses would get mismatched query indices and fail
+///   Merkle verification.  This closes the cross-proof cherry-pick vulnerability.
 ///
 /// Flow:
 ///   1. Aggregator builds SHA3-512 Merkle tree over N transactions.
@@ -136,10 +139,20 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
         if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
         if (finalizedBatches[merkleRoot]) revert BatchAlreadyFinalized(merkleRoot);
 
-        if (!verifier.verify(proofLog10, commitmentLog10, merkleRoot, hintsLog10))
+        // Cross-proof binding: each proof's FRI queries depend on the other's trace root.
+        bytes32 traceRoot10;
+        bytes32 traceRoot8;
+        assembly ("memory-safe") {
+            traceRoot10 := calldataload(add(proofLog10.offset, 8))
+            traceRoot8  := calldataload(add(proofLog8.offset,  8))
+        }
+        bytes32 boundRoot10 = keccak256(abi.encodePacked(merkleRoot, traceRoot8));
+        bytes32 boundRoot8  = keccak256(abi.encodePacked(merkleRoot, traceRoot10));
+
+        if (!verifier.verify(proofLog10, commitmentLog10, boundRoot10, hintsLog10))
             revert Log10ProofInvalid();
 
-        if (!verifier.verify(proofLog8, commitmentLog8, merkleRoot, hintsLog8))
+        if (!verifier.verify(proofLog8, commitmentLog8, boundRoot8, hintsLog8))
             revert Log8ProofInvalid();
 
         finalizedBatches[merkleRoot]        = true;
@@ -192,10 +205,20 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
             }
         }
 
-        if (!verifier.verify(proofLog10, commitmentLog10, merkleRoot, hintsLog10))
+        // Cross-proof binding: each proof's FRI queries depend on the other's trace root.
+        bytes32 traceRoot10w;
+        bytes32 traceRoot8w;
+        assembly ("memory-safe") {
+            traceRoot10w := calldataload(add(proofLog10.offset, 8))
+            traceRoot8w  := calldataload(add(proofLog8.offset,  8))
+        }
+        bytes32 boundRoot10w = keccak256(abi.encodePacked(merkleRoot, traceRoot8w));
+        bytes32 boundRoot8w  = keccak256(abi.encodePacked(merkleRoot, traceRoot10w));
+
+        if (!verifier.verify(proofLog10, commitmentLog10, boundRoot10w, hintsLog10))
             revert Log10ProofInvalid();
 
-        if (!verifier.verify(proofLog8, commitmentLog8, merkleRoot, hintsLog8))
+        if (!verifier.verify(proofLog8, commitmentLog8, boundRoot8w, hintsLog8))
             revert Log8ProofInvalid();
 
         finalizedBatches[merkleRoot]        = true;

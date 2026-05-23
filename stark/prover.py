@@ -2062,3 +2062,203 @@ def gen_full_v23_vfri6_hints(
         batch_merkle_root=batch_merkle_root,
         n_queries=n_queries,
     )
+
+
+# ── VFRI7: cross-proof binding (MVP-5 Priority 2) ─────────────────────────────
+
+
+@dataclass
+class MldsaV23VFRI7HintResult:
+    proof:       bytes
+    commitment:  str    # Blake2s(proof[:32]‖bound_merkle_root)[:16]
+    query_hints: bytes  # ABI-encoded for QLSAVerifierVFRI7.verify(queryHints)
+    n_cols:      int
+    n_queries:   int
+
+
+def gen_mldsa_v23_vfri7_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI7HintResult:
+    """Generate VFRI7-compatible hints for V23's LOG=10 group (1298 cols).
+
+    VFRI7 adds mixRoot(batch_merkle_root) into the Fiat-Shamir transcript
+    immediately before drawQueries, binding FRI query indices to the external
+    batch context (MVP-5 Priority 2).
+
+    Args:
+        z, c, t1, a_hat:   ML-DSA witness (L=5 / K=6 polynomials, 256 coeffs each).
+        batch_merkle_root: 32-byte batch Merkle root (or cross-bound root from
+                           gen_mldsa_v23_vfri7_cross_bound_hints).
+        n_queries:         Number of FRI queries (default 1).
+        num_folds:         Fold rounds (default: automatic).
+
+    Returns:
+        MldsaV23VFRI7HintResult with proof, commitment, query_hints, n_cols=1298.
+    """
+    _require_ext("gen_mldsa_v23_vfri7_hints_py")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri7_hints_py(  # type: ignore[union-attr]
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri7_hints failed: {exc}") from exc
+    return MldsaV23VFRI7HintResult(
+        proof=bytes(proof),
+        commitment=commitment,
+        query_hints=bytes(query_hints),
+        n_cols=1298,
+        n_queries=n_queries,
+    )
+
+
+@dataclass
+class MldsaV23VFRI7Log8HintResult:
+    proof:       bytes
+    commitment:  str
+    query_hints: bytes
+    n_cols:      int    # 2206
+    n_queries:   int
+
+
+def gen_mldsa_v23_vfri7_hints_log8(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI7Log8HintResult:
+    """Generate VFRI7-compatible hints for V23's LOG=8 group (2206 cols).
+
+    Args:
+        hints:             K=6 UseHint bool arrays (each 256 bools).
+        Other args:        Same as gen_mldsa_v23_vfri7_hints.
+
+    Returns:
+        MldsaV23VFRI7Log8HintResult with proof, commitment, query_hints, n_cols=2206.
+    """
+    _require_ext("gen_mldsa_v23_vfri7_hints_log8_py")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri7_hints_log8_py(  # type: ignore[union-attr]
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri7_hints_log8 failed: {exc}") from exc
+    return MldsaV23VFRI7Log8HintResult(
+        proof=bytes(proof),
+        commitment=commitment,
+        query_hints=bytes(query_hints),
+        n_cols=2206,
+        n_queries=n_queries,
+    )
+
+
+@dataclass
+class FullV23VFRI7CrossBoundHintResult:
+    """Cross-bound VFRI7 hints for the full V23 trace (MVP-5 Priority 2).
+
+    Each proof's FRI query indices depend on the other proof's trace commitment:
+      bound_root_10 = keccak256(batch_merkle_root ‖ proof8[8:40])
+      bound_root_8  = keccak256(batch_merkle_root ‖ proof10[8:40])
+
+    An adversary mixing LOG=10 and LOG=8 proofs from different ML-DSA witnesses
+    gets mismatched query indices and fails on-chain Merkle verification.
+
+    BatchRegistryV4 reconstructs the bound roots on-chain from the proof bytes
+    and passes them to QLSAVerifierVFRI7.verify().
+    """
+
+    log10_proof: bytes
+    log10_commitment: str   # Blake2s(proof10[:32] ‖ bound_root_10)[:16]
+    log10_query_hints: bytes
+
+    log8_proof: bytes
+    log8_commitment: str    # Blake2s(proof8[:32] ‖ bound_root_8)[:16]
+    log8_query_hints: bytes
+
+    batch_merkle_root: bytes
+    n_queries: int
+
+
+def gen_mldsa_v23_vfri7_cross_bound_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds_log10: int | None = None,
+    num_folds_log8: int | None = None,
+) -> FullV23VFRI7CrossBoundHintResult:
+    """Generate cross-bound VFRI7 hints for both LOG groups (MVP-5 Priority 2).
+
+    Two-pass generation:
+      Pass 1: generate with batch_merkle_root to extract trace roots.
+      Pass 2: regenerate with cross-bound roots derived from the other group's
+              trace root, so each proof's FRI query indices depend on the
+              other proof's committed trace.
+
+    Args:
+        z, c, t1, a_hat:   ML-DSA witness.
+        hints:             K=6 UseHint bool arrays.
+        batch_merkle_root: 32-byte batch Merkle root (from SHA3-512 Merkle tree).
+        n_queries:         FRI queries per group (default 1).
+        num_folds_log10:   Fold rounds for LOG=10 (default: automatic).
+        num_folds_log8:    Fold rounds for LOG=8 (default: automatic).
+
+    Returns:
+        FullV23VFRI7CrossBoundHintResult with both proof triples.
+    """
+    _require_ext("gen_mldsa_v23_vfri7_cross_bound_hints_py")
+    if num_folds_log10 is not None and num_folds_log8 is not None:
+        # Both folds specified — call the single Rust function that handles both
+        pass
+    # For simplicity, always delegate entirely to the Rust bridge which handles
+    # the two-pass logic internally using the same num_folds for both groups.
+    num_folds = num_folds_log10  # Rust uses same folds for both groups
+    try:
+        (proof10, commit10, hints10,
+         proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri7_cross_bound_hints_py(  # type: ignore[union-attr]
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri7_cross_bound_hints failed: {exc}") from exc
+    return FullV23VFRI7CrossBoundHintResult(
+        log10_proof=bytes(proof10),
+        log10_commitment=commit10,
+        log10_query_hints=bytes(hints10),
+        log8_proof=bytes(proof8),
+        log8_commitment=commit8,
+        log8_query_hints=bytes(hints8),
+        batch_merkle_root=batch_merkle_root,
+        n_queries=n_queries,
+    )

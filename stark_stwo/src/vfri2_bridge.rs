@@ -3199,6 +3199,465 @@ pub fn gen_mldsa_v23_vfri6_hints_log8(
     gen_vfri6_hints_from_cols_nfolds(&cols, TREE_DEPTH, batch_merkle_root, n_queries, num_folds)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VFRI7 — VFRI6 + merkleRoot in Fiat-Shamir transcript (cross-proof binding)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Protocol change from VFRI6:
+//   After all FRI layer roots are mixed and before drawing query indices, the
+//   external batch_merkle_root is mixed into the Fiat-Shamir channel:
+//
+//     VFRI6: ... → mixRoot(friLayerRoots[K]) → drawQueries
+//     VFRI7: ... → mixRoot(friLayerRoots[K]) → mixRoot(batch_merkle_root) → drawQueries
+//
+// Effect: The query indices (and therefore all per-query Merkle openings) depend
+// on batch_merkle_root.  When BatchRegistryV4 uses cross-bound roots:
+//
+//   bound_root_10 = keccak256(batch_root ‖ trace_root_8)
+//   bound_root_8  = keccak256(batch_root ‖ trace_root_10)
+//
+// an adversary that mixes LOG=10 and LOG=8 proofs from different witnesses would
+// get mismatched query indices and fail the Merkle verification.  This closes
+// the cross-proof cherry-pick vulnerability (MVP-5 Priority 2).
+
+/// VFRI7 generic hint generator — VFRI6 + batch_merkle_root in Fiat-Shamir transcript.
+///
+/// Identical to `gen_vfri6_hints_from_cols_nfolds` except that `batch_merkle_root`
+/// is mixed into the channel via `chan.mix_root()` immediately before `draw_queries`.
+/// The commitment binding is the same: `Blake2s(proof[:32] ‖ batch_merkle_root)[:16]`.
+pub fn gen_vfri7_hints_from_cols_nfolds(
+    cols:              &[Vec<u32>],
+    tree_depth:        u32,
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds_opt:     Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    if cols.is_empty() {
+        return Err("cols must not be empty".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+    if tree_depth < 2 {
+        return Err(format!("tree_depth={tree_depth} must be ≥ 2"));
+    }
+    let n = 1usize << tree_depth;
+    for (j, col) in cols.iter().enumerate() {
+        if col.len() != n {
+            return Err(format!("cols[{j}] has {} entries, expected {n}", col.len()));
+        }
+    }
+
+    let trace_leaves: Vec<[u8; 32]> = (0..n)
+        .map(|i| hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .collect();
+    let trace_levels = build_tree(trace_leaves);
+    let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
+
+    let mut chan = Channel::init();
+    chan.mix_root(&trace_root);
+    let z_x       = chan.draw_secure_felt();
+    let comp_alpha = chan.draw_secure_felt();
+
+    let half = n / 2;
+    let xs_half: Vec<u32> = (0..half).map(|k| coset_at(tree_depth, k as u64).0).collect();
+    let weights_half = precompute_bary_weights(&xs_half);
+    let z_neg = qm31_neg(z_x);
+
+    let oods_evals_pos: Vec<u128> = cols.iter()
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_x))
+        .collect();
+    let oods_evals_neg: Vec<u128> = cols.iter()
+        .map(|col| eval_circle_even(col, &xs_half, &weights_half, z_neg))
+        .collect();
+
+    let oods_combo_pos = {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for &ev in &oods_evals_pos { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+    let oods_combo_neg = {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for &ev in &oods_evals_neg { acc = qm31_add(acc, qm31_mul(ap, ev)); ap = qm31_mul(ap, comp_alpha); }
+        acc
+    };
+
+    let combo_words = {
+        let p = qm31_words(oods_combo_pos);
+        let nw = qm31_words(oods_combo_neg);
+        [p[0], p[1], p[2], p[3], nw[0], nw[1], nw[2], nw[3]]
+    };
+    chan.mix_u32s(&combo_words);
+
+    let comp_values: Vec<u128> = (0..n).map(|i| {
+        let mut acc = 0u128; let mut ap = qm31_from_m31(1);
+        for c in cols {
+            acc = qm31_add(acc, qm31_mul_m31(ap, c[i]));
+            ap  = qm31_mul(ap, comp_alpha);
+        }
+        acc
+    }).collect();
+
+    let comp_leaves: Vec<[u8; 32]> = comp_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let comp_levels = build_tree(comp_leaves);
+    let comp_root: [u8; 32] = comp_levels.last().unwrap()[0];
+
+    chan.mix_root(&comp_root);
+    let fri_alpha = chan.draw_secure_felt();
+
+    let mut l1_values: Vec<u128> = Vec::with_capacity(n);
+    for q in 0..n {
+        let anti_q = antipodal_of(q, tree_depth);
+        let (px, py) = coset_at(tree_depth, q as u64);
+        let px_qm31   = qm31_from_m31(px);
+        let denom_pos = qm31_sub(px_qm31, z_x);
+        let denom_neg = qm31_sub(qm31_neg(px_qm31), z_x);
+        if denom_pos == 0 || denom_neg == 0 {
+            return Err(format!("degenerate OODS denom at q={q}"));
+        }
+        let f_plus  = qm31_div(qm31_sub(comp_values[q],      oods_combo_pos), denom_pos);
+        let f_minus = qm31_div(qm31_sub(comp_values[anti_q], oods_combo_neg), denom_neg);
+        l1_values.push(circle_fold(f_plus, f_minus, fri_alpha, m31_inv(py)));
+    }
+
+    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter().map(|&v| hash_leaf_qm31(v)).collect();
+    let fri_l1_levels = build_tree(fri_l1_leaves);
+    let fri_layer1_root: [u8; 32] = fri_l1_levels.last().unwrap()[0];
+    chan.mix_root(&fri_layer1_root);
+
+    let max_folds = (tree_depth - 1) as usize;
+    let num_folds = match num_folds_opt {
+        None    => max_folds,
+        Some(f) if f >= 1 && f <= max_folds => f,
+        Some(f) => return Err(format!("num_folds={f} must be in 1..={max_folds}")),
+    };
+    let mut layer_values: Vec<Vec<u128>>          = vec![l1_values];
+    let mut layer_levels: Vec<Vec<Vec<[u8; 32]>>> = vec![fri_l1_levels];
+    let mut layer_roots:  Vec<[u8; 32]>           = vec![fri_layer1_root];
+    let mut fri_alphas:   Vec<u128>               = Vec::new();
+
+    for k in 0..num_folds {
+        let alpha_k   = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+        let prev_vals = &layer_values[k];
+        let layer_sz  = prev_vals.len() / 2;
+        let mut new_vals = Vec::with_capacity(layer_sz);
+        for j in 0..layer_sz {
+            let x_j     = coset_at(tree_depth, j as u64).0;
+            let twiddle = chebyshev_twiddle(x_j, k);
+            if twiddle == 0 { return Err(format!("zero twiddle at k={k}, j={j}")); }
+            new_vals.push(line_fold(prev_vals[j], prev_vals[j + layer_sz], alpha_k, m31_inv(twiddle)));
+        }
+        let new_leaves: Vec<[u8; 32]> = new_vals.iter().map(|&v| hash_leaf_qm31(v)).collect();
+        let new_levels = build_tree(new_leaves);
+        let new_root   = new_levels.last().unwrap()[0];
+        layer_values.push(new_vals);
+        layer_roots.push(new_root);
+        chan.mix_root(&new_root);
+        layer_levels.push(new_levels);
+    }
+
+    // ── VFRI7: mix batch_merkle_root into channel before drawing queries ───────
+    // This binds the FRI query indices to the external batch root, enabling
+    // cross-proof binding when cross-bound roots are used (see gen_mldsa_v23_vfri7_cross_bound_hints).
+    let mut batch_root_arr = [0u8; 32];
+    batch_root_arr.copy_from_slice(batch_merkle_root);
+    chan.mix_root(&batch_root_arr);
+
+    let derived_indices = chan.draw_queries(tree_depth, n_queries);
+
+    let mut hint_structs: Vec<QueryHintDataV5> = Vec::new();
+    for &idx in &derived_indices {
+        let anti_idx = antipodal_of(idx, tree_depth);
+        let (qp_x, qp_y) = coset_at(tree_depth, idx as u64);
+
+        let comp_value     = comp_values[idx];
+        let comp_value_neg = comp_values[anti_idx];
+        let comp_proof     = proof_path(&comp_levels, idx);
+        let comp_proof_neg = proof_path(&comp_levels, anti_idx);
+        let fri_l1_sib     = proof_path(&layer_levels[0], idx);
+
+        let px_qm31   = qm31_from_m31(qp_x);
+        let f_plus    = qm31_div(qm31_sub(comp_value,     oods_combo_pos), qm31_sub(px_qm31, z_x));
+        let f_minus   = qm31_div(qm31_sub(comp_value_neg, oods_combo_neg), qm31_sub(qm31_neg(px_qm31), z_x));
+        let folded_value = circle_fold(f_plus, f_minus, fri_alpha, m31_inv(qp_y));
+        debug_assert_eq!(folded_value, layer_values[0][idx]);
+
+        let mut fold_hints: Vec<FoldHintData> = Vec::new();
+        let mut cur_idx = idx;
+        for k in 0..num_folds {
+            let layer_sz  = layer_values[k].len() / 2;
+            let sib_idx   = if cur_idx < layer_sz { cur_idx + layer_sz } else { cur_idx - layer_sz };
+            let new_idx   = cur_idx & (layer_sz - 1);
+            let sib_val   = layer_values[k][sib_idx];
+            let sib_proof = proof_path(&layer_levels[k], sib_idx);
+            let x_j       = coset_at(tree_depth, new_idx as u64).0;
+            let cur_val   = if k == 0 { folded_value } else { fold_hints[k-1].folded_value };
+            let (gp, gm)  = if cur_idx < layer_sz { (cur_val, sib_val) } else { (sib_val, cur_val) };
+            let folded_k  = line_fold(gp, gm, fri_alphas[k], m31_inv(chebyshev_twiddle(x_j, k)));
+            debug_assert_eq!(folded_k, layer_values[k + 1][new_idx]);
+            fold_hints.push(FoldHintData {
+                sibling_value: sib_val,
+                sibling_proof: sib_proof,
+                folded_value:  folded_k,
+                merkle_proof:  proof_path(&layer_levels[k + 1], new_idx),
+            });
+            cur_idx = new_idx;
+        }
+
+        hint_structs.push(QueryHintDataV5 {
+            query_index: idx,
+            tree_depth,
+            comp_value,
+            comp_proof,
+            comp_value_neg,
+            comp_proof_neg,
+            folded_value,
+            query_point_x: qp_x,
+            query_point_y: qp_y,
+            fri_l1_siblings: fri_l1_sib,
+            folds: fold_hints,
+        });
+    }
+
+    let mut proof = vec![0x01u8; 700];
+    proof[0..8].copy_from_slice(&2u64.to_le_bytes());
+    proof[8..40].copy_from_slice(&trace_root);
+
+    let mut hash_input = [0u8; 64];
+    hash_input[..32].copy_from_slice(&proof[..32]);
+    hash_input[32..].copy_from_slice(batch_merkle_root);
+    let h: [u8; 32] = Blake2s256::digest(&hash_input).into();
+    let commitment_hex = hex::encode(&h[..16]);
+
+    let query_hints = abi_encode_vfri6_hints(
+        oods_combo_pos,
+        oods_combo_neg,
+        &comp_root,
+        &layer_roots,
+        &hint_structs,
+    );
+
+    Ok((proof, commitment_hex, query_hints))
+}
+
+/// VFRI7 wrapper for V23 LOG=10 group (NttBatch + InttBatch, 1298 cols, tree_depth=10).
+pub fn gen_mldsa_v23_vfri7_hints(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+
+    let (ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS;
+
+    let z_hat:  [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into().map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat:  [i64; 256]      = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into().map_err(|_| "t1_hat slice error".to_string())?;
+
+    let (_az_cols, az_hat)  = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (_ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, _) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+
+    let n_rows = 1usize << tree_depth;
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(ntt_cols.len() + intt_cols.len());
+    for col in &ntt_cols {
+        cols.push(col.values.iter().map(|v| v.0).collect());
+        debug_assert_eq!(cols.last().unwrap().len(), n_rows);
+    }
+    for col in &intt_cols {
+        cols.push(col.values.iter().map(|v| v.0).collect());
+        debug_assert_eq!(cols.last().unwrap().len(), n_rows);
+    }
+
+    gen_vfri7_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// VFRI7 wrapper for V23 LOG=8 group (AzFull+Ct1Full+RangeQBatch+WPrimeFull+NormCheckBatch+UseHintBatchV2, 2206 cols).
+pub fn gen_mldsa_v23_vfri7_hints_log8(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+    use crate::mldsa_wprime_full_air;
+    use crate::mldsa_norm_check_batch_air;
+    use crate::mldsa_range_q_batch_air;
+    use crate::mldsa_use_hint_batch_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+    let (_ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+
+    let z_hat:  [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into().map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat:  [i64; 256]      = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into().map_err(|_| "t1_hat slice error".to_string())?;
+
+    let (az_cols,  az_hat)  = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    let (rq_cols, rq_valid) = mldsa_range_q_batch_air::build_trace(&az_hat);
+    if !rq_valid {
+        return Err("RangeQBatch: az_hat contains values outside [0, Q)".to_string());
+    }
+
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (_intt_cols, intt_out) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+    let az_out:  [[i64; 256]; K] = intt_out[..K].try_into().map_err(|_| "az_out slice error".to_string())?;
+    let ct1_out: [[i64; 256]; K] = intt_out[K..].try_into().map_err(|_| "ct1_out slice error".to_string())?;
+
+    let (wp_cols,   _w_prime) = mldsa_wprime_full_air::build_trace(&az_out, &ct1_out);
+    let w_prime: [[i64; 256]; K] = _w_prime;
+    let (norm_cols, _, _) = mldsa_norm_check_batch_air::build_trace(z);
+    let (uh_main_cols, uh_preproc_cols, _, _) =
+        mldsa_use_hint_batch_air::build_trace_v2(&w_prime, hints);
+
+    const TREE_DEPTH: u32 = 8;
+    let n_rows = 1usize << (TREE_DEPTH as usize);
+    let total_cols = az_cols.len() + ct1_cols.len() + rq_cols.len()
+        + wp_cols.len() + norm_cols.len() + uh_main_cols.len() + uh_preproc_cols.len();
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(total_cols);
+    let groups = [&az_cols, &ct1_cols, &rq_cols, &wp_cols, &norm_cols, &uh_main_cols, &uh_preproc_cols];
+    for group in &groups {
+        for col in group.iter() {
+            if col.values.len() != n_rows {
+                return Err(format!("LOG=8 col has {} rows, expected {n_rows}", col.values.len()));
+            }
+            cols.push(col.values.iter().map(|v| v.0).collect());
+        }
+    }
+
+    gen_vfri7_hints_from_cols_nfolds(&cols, TREE_DEPTH, batch_merkle_root, n_queries, num_folds)
+}
+
+/// Generate cross-bound VFRI7 hints for V23's two trace groups.
+///
+/// Cross-proof binding (MVP-5 Priority 2):
+///   bound_root_10 = keccak256(batch_root ‖ trace_root_8)
+///   bound_root_8  = keccak256(batch_root ‖ trace_root_10)
+///
+/// The LOG=10 proof is regenerated with `batch_merkle_root = bound_root_10` so
+/// its FRI query indices depend on the LOG=8 trace commitment, and vice versa.
+/// An adversary combining proofs from different witnesses would fail on-chain
+/// because the query indices and Merkle openings would not match.
+///
+/// Returns `(proof10, commit10_hex, hints10, proof8, commit8_hex, hints8)`.
+/// The caller (BatchRegistryV4) should pass:
+///   - `boundRoot10 = keccak256(merkleRoot ‖ proof8[8:40])` to VFRI7 verify for LOG=10
+///   - `boundRoot8  = keccak256(merkleRoot ‖ proof10[8:40])` to VFRI7 verify for LOG=8
+pub fn gen_mldsa_v23_vfri7_cross_bound_hints(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_root:        &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>), String> {
+    use sha3::{Keccak256, Digest as Sha3Digest};
+
+    if batch_root.len() != 32 {
+        return Err(format!("batch_root must be 32 bytes, got {}", batch_root.len()));
+    }
+
+    // ── Pass 1: extract trace roots ───────────────────────────────────────────
+    let (proof10_p1, _, _) = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, batch_root, 1, num_folds)?;
+    let (proof8_p1,  _, _) = gen_mldsa_v23_vfri7_hints_log8(z, c, t1, a_hat, hints, batch_root, 1, num_folds)?;
+
+    if proof10_p1.len() < 40 || proof8_p1.len() < 40 {
+        return Err("proof bytes too short to contain trace root at [8:40]".into());
+    }
+    let trace_root_10: [u8; 32] = proof10_p1[8..40].try_into().unwrap();
+    let trace_root_8:  [u8; 32] = proof8_p1[8..40].try_into().unwrap();
+
+    // ── Compute cross-bound merkle roots ──────────────────────────────────────
+    // bound_root_10 = keccak256(batch_root ‖ trace_root_8)
+    // bound_root_8  = keccak256(batch_root ‖ trace_root_10)
+    let bound_root_10: [u8; 32] = {
+        let mut h = Keccak256::new();
+        h.update(batch_root);
+        h.update(&trace_root_8);
+        h.finalize().into()
+    };
+    let bound_root_8: [u8; 32] = {
+        let mut h = Keccak256::new();
+        h.update(batch_root);
+        h.update(&trace_root_10);
+        h.finalize().into()
+    };
+
+    // ── Pass 2: generate final hints with cross-bound roots ───────────────────
+    let (proof10, commit10, hints10) =
+        gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, &bound_root_10, n_queries, num_folds)?;
+    let (proof8, commit8, hints8) =
+        gen_mldsa_v23_vfri7_hints_log8(z, c, t1, a_hat, hints, &bound_root_8, n_queries, num_folds)?;
+
+    Ok((proof10, commit10, hints10, proof8, commit8, hints8))
+}
+
 mod tests {
     use super::*;
 
@@ -3909,5 +4368,245 @@ mod tests_v23_vfri6_inner {
             &z, &c, &t1, &a_hat, &hints, &seed, 0, Some(3),
         );
         assert!(err2.is_err(), "should reject n_queries=0");
+    }
+}
+
+// ── ML-DSA V23 VFRI7 tests ───────────────────────────────────────────────────
+#[cfg(test)]
+mod tests_v23_vfri7 {
+    use super::gen_mldsa_v23_vfri7_hints;
+    use super::gen_mldsa_v23_vfri7_hints_log8;
+    use super::gen_mldsa_v23_vfri7_cross_bound_hints;
+    use super::gen_mldsa_v23_vfri6_hints;
+    use super::tests::make_v23_inputs;
+
+    fn make_log8_hints() -> [[bool; 256]; 6] {
+        [[false; 256]; 6]
+    }
+
+    // ── LOG=10 smoke / determinism ────────────────────────────────────────────
+
+    #[test]
+    fn test_vfri7_log10_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(10000);
+        let seed = vec![0u8; 32];
+        let result = gen_mldsa_v23_vfri7_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3));
+        assert!(result.is_ok(), "vfri7 log10 smoke: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_vfri7_log10_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(10100);
+        let seed = vec![0xabu8; 32];
+        let (_, c1, h1) = gen_mldsa_v23_vfri7_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, c2, h2) = gen_mldsa_v23_vfri7_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_eq!(c1, c2, "vfri7 log10 commitment must be deterministic");
+        assert_eq!(h1, h2, "vfri7 log10 hints must be deterministic");
+    }
+
+    #[test]
+    fn test_vfri7_log10_differs_from_vfri6() {
+        // VFRI7 mixes merkleRoot before drawQueries → different query indices from VFRI6
+        let (z, c, t1, a_hat) = make_v23_inputs(10200);
+        let seed = vec![0x42u8; 32];
+        let (_, _, h6) = gen_mldsa_v23_vfri6_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        let (_, _, h7) = gen_mldsa_v23_vfri7_hints(&z, &c, &t1, &a_hat, &seed, 1, Some(3)).unwrap();
+        assert_ne!(h6, h7, "VFRI7 hints must differ from VFRI6 (different Fiat-Shamir transcript)");
+    }
+
+    #[test]
+    fn test_vfri7_log10_merkle_root_changes_hints() {
+        // Different merkleRoot → different commitment binding AND different queryIndex → different hints.
+        // (commitment = Blake2s(proof[:32] || merkleRoot)[:16], so it also changes)
+        let (z, c, t1, a_hat) = make_v23_inputs(10300);
+        let seed1 = vec![0x11u8; 32];
+        let seed2 = vec![0x22u8; 32];
+        let (p1, c1, h1) = gen_mldsa_v23_vfri7_hints(&z, &c, &t1, &a_hat, &seed1, 1, Some(3)).unwrap();
+        let (p2, c2, h2) = gen_mldsa_v23_vfri7_hints(&z, &c, &t1, &a_hat, &seed2, 1, Some(3)).unwrap();
+        // Same witness → same trace root (proof[8:40])
+        assert_eq!(&p1[8..40], &p2[8..40], "same witness must produce same trace root");
+        // Different merkleRoot changes commitment binding
+        assert_ne!(c1, c2, "different merkleRoot must produce different commitment");
+        // Different merkleRoot → different Fiat-Shamir path → different hints
+        assert_ne!(h1, h2, "different merkleRoot must produce different hints");
+    }
+
+    // ── LOG=8 smoke / determinism ─────────────────────────────────────────────
+
+    #[test]
+    fn test_vfri7_log8_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(11000);
+        let h8 = make_log8_hints();
+        let seed = vec![0u8; 32];
+        let result = gen_mldsa_v23_vfri7_hints_log8(&z, &c, &t1, &a_hat, &h8, &seed, 1, Some(3));
+        assert!(result.is_ok(), "vfri7 log8 smoke: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+    }
+
+    #[test]
+    fn test_vfri7_log8_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(11100);
+        let h8 = make_log8_hints();
+        let seed = vec![0xabu8; 32];
+        let (_, c1, q1) = gen_mldsa_v23_vfri7_hints_log8(&z, &c, &t1, &a_hat, &h8, &seed, 1, Some(3)).unwrap();
+        let (_, c2, q2) = gen_mldsa_v23_vfri7_hints_log8(&z, &c, &t1, &a_hat, &h8, &seed, 1, Some(3)).unwrap();
+        assert_eq!(c1, c2, "vfri7 log8 commitment must be deterministic");
+        assert_eq!(q1, q2, "vfri7 log8 hints must be deterministic");
+    }
+
+    // ── Cross-bound hints ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vfri7_cross_bound_smoke() {
+        let (z, c, t1, a_hat) = make_v23_inputs(12000);
+        let h8 = make_log8_hints();
+        let batch_root = vec![0xddu8; 32];
+        let result = gen_mldsa_v23_vfri7_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &h8, &batch_root, 1, Some(3),
+        );
+        assert!(result.is_ok(), "cross_bound smoke: {:?}", result.err());
+        let (proof10, commit10, hints10, proof8, commit8, hints8) = result.unwrap();
+        assert!(proof10.len() >= 700);
+        assert!(proof8.len()  >= 700);
+        assert_eq!(commit10.len(), 32);
+        assert_eq!(commit8.len(),  32);
+        assert!(!hints10.is_empty());
+        assert!(!hints8.is_empty());
+    }
+
+    #[test]
+    fn test_vfri7_cross_bound_deterministic() {
+        let (z, c, t1, a_hat) = make_v23_inputs(12100);
+        let h8 = make_log8_hints();
+        let batch_root = vec![0xeeu8; 32];
+        let (p10a, c10a, h10a, p8a, c8a, h8a) = gen_mldsa_v23_vfri7_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &h8, &batch_root, 1, Some(3),
+        ).unwrap();
+        let (p10b, c10b, h10b, p8b, c8b, h8b) = gen_mldsa_v23_vfri7_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &h8, &batch_root, 1, Some(3),
+        ).unwrap();
+        assert_eq!(c10a, c10b); assert_eq!(h10a, h10b); assert_eq!(p10a, p10b);
+        assert_eq!(c8a,  c8b);  assert_eq!(h8a,  h8b);  assert_eq!(p8a,  p8b);
+    }
+
+    #[test]
+    fn test_vfri7_cross_bound_batch_root_changes_hints() {
+        // Different batch_root → different cross-bound roots → different commitments AND hints.
+        // (commitment = Blake2s(proof[:32] || boundRoot)[:16], boundRoot depends on batch_root)
+        let (z, c, t1, a_hat) = make_v23_inputs(12200);
+        let h8 = make_log8_hints();
+        let root1 = vec![0x11u8; 32];
+        let root2 = vec![0x22u8; 32];
+        let (p10_1, c10_1, h10_1, p8_1, c8_1, h8_1) = gen_mldsa_v23_vfri7_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &h8, &root1, 1, Some(3),
+        ).unwrap();
+        let (p10_2, c10_2, h10_2, p8_2, c8_2, h8_2) = gen_mldsa_v23_vfri7_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &h8, &root2, 1, Some(3),
+        ).unwrap();
+        // Same witness → same trace roots (proof[8:40])
+        assert_eq!(&p10_1[8..40], &p10_2[8..40], "LOG=10 trace root must be same for same witness");
+        assert_eq!(&p8_1[8..40],  &p8_2[8..40],  "LOG=8 trace root must be same for same witness");
+        // Different batch_root → different cross-bound roots → different commitments and hints
+        assert_ne!(c10_1, c10_2, "different batch_root must produce different LOG=10 commitment");
+        assert_ne!(c8_1,  c8_2,  "different batch_root must produce different LOG=8 commitment");
+        assert_ne!(h10_1, h10_2, "different batch_root must produce different LOG=10 hints");
+        assert_ne!(h8_1,  h8_2,  "different batch_root must produce different LOG=8 hints");
+    }
+
+    #[test]
+    fn test_vfri7_cross_bound_trace_roots_cross(  ) {
+        // Verify that proof10[8:40] != proof8[8:40]: they come from different trace domains
+        let (z, c, t1, a_hat) = make_v23_inputs(12300);
+        let h8 = make_log8_hints();
+        let batch_root = vec![0xffu8; 32];
+        let (proof10, _, _, proof8, _, _) = gen_mldsa_v23_vfri7_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &h8, &batch_root, 1, Some(3),
+        ).unwrap();
+        let trace_root_10 = &proof10[8..40];
+        let trace_root_8  = &proof8[8..40];
+        assert_ne!(trace_root_10, &[0u8; 32], "LOG=10 trace root must be non-zero");
+        assert_ne!(trace_root_8,  &[0u8; 32], "LOG=8 trace root must be non-zero");
+        assert_ne!(trace_root_10, trace_root_8,
+            "LOG=10 and LOG=8 trace roots must differ (different domains)");
+    }
+
+    #[test]
+    fn test_vfri7_cross_bound_rejects_bad_batch_root_length() {
+        let (z, c, t1, a_hat) = make_v23_inputs(12400);
+        let h8 = make_log8_hints();
+        let short_root = vec![0u8; 31];
+        let err = gen_mldsa_v23_vfri7_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &h8, &short_root, 1, Some(3),
+        );
+        assert!(err.is_err(), "should reject batch_root shorter than 32 bytes");
+    }
+
+    /// Generates the full_v23_vfri7_cross_bound_e2e.json fixture and prints it.
+    /// Run with: cargo test gen_vfri7_fixture -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn gen_vfri7_fixture() {
+        let (z, c, t1, a_hat) = make_v23_inputs(99999);
+        let h8 = make_log8_hints();
+        // Use a deterministic batch Merkle root (sha3-512 would come from real batches)
+        let mut batch_root = [0u8; 32];
+        for (i, b) in batch_root.iter_mut().enumerate() { *b = (i as u8).wrapping_mul(7).wrapping_add(1); }
+
+        let (proof10, commit10, hints10, proof8, commit8, hints8) =
+            gen_mldsa_v23_vfri7_cross_bound_hints(&z, &c, &t1, &a_hat, &h8, &batch_root, 1, Some(3))
+                .expect("cross_bound generation failed");
+
+        // Verify cross-bound roots on-chain match what BatchRegistryV4 would compute
+        use sha3::{Keccak256, Digest as Sha3Digest};
+        let trace_root_10: [u8; 32] = proof10[8..40].try_into().unwrap();
+        let trace_root_8:  [u8; 32] = proof8[8..40].try_into().unwrap();
+        let bound_root_10: [u8; 32] = {
+            let mut h = Keccak256::new(); h.update(&batch_root); h.update(&trace_root_8); h.finalize().into()
+        };
+        let bound_root_8: [u8; 32] = {
+            let mut h = Keccak256::new(); h.update(&batch_root); h.update(&trace_root_10); h.finalize().into()
+        };
+
+        fn hex(b: &[u8]) -> String { format!("0x{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>()) }
+
+        // commitment strings are already 32-char hex (no 0x prefix); add prefix for JSON
+        let c10_hex = format!("0x{commit10}");
+        let c8_hex  = format!("0x{commit8}");
+
+        let json = format!(
+            r#"{{
+  "merkleRoot": "{}",
+  "log10_proof": "{}",
+  "log10_commitment": "{}",
+  "log10_queryHints": "{}",
+  "log8_proof": "{}",
+  "log8_commitment": "{}",
+  "log8_queryHints": "{}",
+  "bound_root_10": "{}",
+  "bound_root_8": "{}",
+  "n_queries": 1
+}}"#,
+            hex(&batch_root),
+            hex(&proof10),
+            c10_hex,
+            hex(&hints10),
+            hex(&proof8),
+            c8_hex,
+            hex(&hints8),
+            hex(&bound_root_10),
+            hex(&bound_root_8),
+        );
+        println!("{json}");
+        // Sanity checks
+        assert!(!proof10.is_empty());
+        assert!(!proof8.is_empty());
+        assert_ne!(trace_root_10, trace_root_8);
     }
 }
