@@ -29,6 +29,10 @@ class BatchStatus:
     stark_commitment: str | None = None
     has_witness: bool = False
     witness_commitment: str | None = None  # 32-char hex (16-byte binding for tx[0])
+    # VFRI7 cross-bound ML-DSA V23 proofs (MVP-5)
+    has_vfri7: bool = False
+    vfri7_commitment_log10: str | None = None  # 32-char hex
+    vfri7_commitment_log8:  str | None = None  # 32-char hex
 
 
 @dataclass

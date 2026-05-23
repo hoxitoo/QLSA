@@ -21,6 +21,9 @@ def _batch_status(result: BatchResult) -> BatchStatus:
         stark_commitment=result.commitment,
         has_witness=result.has_witness,
         witness_commitment=result.witness_commitment,
+        has_vfri7=result.has_vfri7,
+        vfri7_commitment_log10=result.vfri7_commitment_log10,
+        vfri7_commitment_log8=result.vfri7_commitment_log8,
     )
 
 

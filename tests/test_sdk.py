@@ -212,6 +212,9 @@ def test_batch_status_has_witness_false_by_default():
     assert status is not None
     assert status.has_witness is False
     assert status.witness_commitment is None
+    assert status.has_vfri7 is False
+    assert status.vfri7_commitment_log10 is None
+    assert status.vfri7_commitment_log8 is None
 
 
 def test_batch_status_prove_witnesses_param_accepted():
@@ -223,6 +226,7 @@ def test_batch_status_prove_witnesses_param_accepted():
         status = client.flush(prove_witnesses=True)
     assert status is not None
     assert isinstance(status.has_witness, bool)
+    assert isinstance(status.has_vfri7, bool)
 
 
 def test_run_cycle_prove_witnesses_param_accepted():

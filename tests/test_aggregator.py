@@ -257,7 +257,10 @@ class TestBatcher:
         _wipe(privs)
         assert result is not None
         assert result.has_witness is False
+        assert result.has_vfri7 is False
         assert result.witness_commitment is None
+        assert result.vfri7_commitment_log10 is None
+        assert result.vfri7_commitment_log8 is None
 
     def test_try_batch_prove_witnesses_true_accepted(self):
         """prove_witnesses=True runs without error; has_witness may be False without PyO3 ext."""
@@ -269,6 +272,7 @@ class TestBatcher:
         _wipe(privs)
         assert result is not None
         assert isinstance(result.has_witness, bool)
+        assert isinstance(result.has_vfri7, bool)
 
     def test_force_batch_prove_witnesses_true_accepted(self):
         mp = Mempool()
@@ -278,6 +282,22 @@ class TestBatcher:
         result = Batcher(mp, min_batch_size=100).force_batch(prove_witnesses=True)
         assert result is not None
         assert isinstance(result.has_witness, bool)
+        assert isinstance(result.has_vfri7, bool)
+
+    def test_batch_result_vfri7_fields_accessible(self):
+        """VFRI7 fields are present on BatchResult regardless of extension availability."""
+        mp = Mempool()
+        tx, priv = _make_signed_tx()
+        mp.add(tx)
+        wipe_key(priv)
+        result = Batcher(mp).try_batch()
+        assert result is not None
+        assert hasattr(result, "vfri7_proof_log10")
+        assert hasattr(result, "vfri7_commitment_log10")
+        assert hasattr(result, "vfri7_hints_log10")
+        assert hasattr(result, "vfri7_proof_log8")
+        assert hasattr(result, "vfri7_commitment_log8")
+        assert hasattr(result, "vfri7_hints_log8")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
