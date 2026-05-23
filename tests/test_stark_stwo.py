@@ -2434,3 +2434,62 @@ def test_gen_mldsa_v23_vfri7_cross_bound_total_calldata():
     )
     total = len(r.log10_query_hints) + len(r.log8_query_hints)
     assert total < 20_000, f"Combined cross-bound hints {total} B should be < 20 KB"
+
+
+# ── prove_mldsa_sig_vfri7_stark: end-to-end from real sig ─────────────────────
+
+@needs_oqs
+def test_prove_mldsa_sig_vfri7_stark_schema():
+    """prove_mldsa_sig_vfri7_stark returns a well-formed FullV23VFRI7CrossBoundHintResult."""
+    from stark.prover import prove_mldsa_sig_vfri7_stark, FullV23VFRI7CrossBoundHintResult
+    alg = _oqs.Signature("ML-DSA-65")
+    pk  = alg.generate_keypair()
+    msg = b"qlsa vfri7 e2e test"
+    sig = alg.sign(msg)
+    batch_root = bytes(range(32))
+
+    r = prove_mldsa_sig_vfri7_stark(pk, msg, sig, batch_root, n_queries=1)
+
+    assert isinstance(r, FullV23VFRI7CrossBoundHintResult)
+    assert isinstance(r.log10_proof, bytes) and len(r.log10_proof) >= 700
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log10_query_hints, bytes) and len(r.log10_query_hints) > 0
+    assert isinstance(r.log8_proof, bytes) and len(r.log8_proof) >= 700
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    assert isinstance(r.log8_query_hints, bytes) and len(r.log8_query_hints) > 0
+    assert r.batch_merkle_root == batch_root
+    assert r.n_queries == 1
+    # Commitments are valid 16-byte hex strings
+    assert len(bytes.fromhex(r.log10_commitment)) == 16
+    assert len(bytes.fromhex(r.log8_commitment)) == 16
+
+
+@needs_oqs
+def test_prove_mldsa_sig_vfri7_stark_invalid_sig_raises():
+    """prove_mldsa_sig_vfri7_stark raises ValueError for an invalid signature."""
+    from stark.prover import prove_mldsa_sig_vfri7_stark
+    alg = _oqs.Signature("ML-DSA-65")
+    pk  = alg.generate_keypair()
+    bad_sig = bytes(3309)  # all-zero signature is invalid
+    batch_root = bytes(32)
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="ML-DSA-65 signature verification failed"):
+        prove_mldsa_sig_vfri7_stark(pk, b"any message", bad_sig, batch_root)
+
+
+@needs_oqs
+def test_prove_mldsa_sig_vfri7_stark_batch_root_binding():
+    """Different batch roots produce different VFRI7 commitments from the same sig."""
+    from stark.prover import prove_mldsa_sig_vfri7_stark
+    alg = _oqs.Signature("ML-DSA-65")
+    pk  = alg.generate_keypair()
+    msg = b"batch root binding test"
+    sig = alg.sign(msg)
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+
+    ra = prove_mldsa_sig_vfri7_stark(pk, msg, sig, root_a, n_queries=1)
+    rb = prove_mldsa_sig_vfri7_stark(pk, msg, sig, root_b, n_queries=1)
+
+    assert ra.log10_commitment != rb.log10_commitment, "Different batch roots must give different LOG=10 commitments"
+    assert ra.log8_commitment  != rb.log8_commitment,  "Different batch roots must give different LOG=8 commitments"

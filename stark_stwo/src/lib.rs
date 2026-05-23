@@ -6387,6 +6387,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prove_mldsa_witness_v7_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_witness_v7_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_sig_witness_py, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_mldsa_witness_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_mldsa_hash_check_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_range_q_py, m)?)?;
     m.add_function(wrap_pyfunction!(verify_range_q_py, m)?)?;
@@ -8108,6 +8109,62 @@ fn prove_mldsa_sig_witness_py(
     let c_tilde_hex = hex::encode(&c_tilde);
 
     Ok((bundle, max_norms, w1_prime, onchain_commitment, c_tilde_hex, hint_weight_total))
+}
+
+/// extract_mldsa_witness_py(pk, msg, sig) -> (z, c, t1, a_hat, hints)
+///
+/// Decodes an ML-DSA-65 signature and returns the arithmetic witness components
+/// needed by gen_mldsa_v23_vfri7_cross_bound_hints_py.
+///
+/// Returns:
+///   z:     L=5 polynomials of 256 coefficients each, reduced to [0, Q)
+///   c:     challenge polynomial, 256 coefficients in [0, Q)
+///   t1:    K=6 public-key polynomials scaled by 2^D, 256 coefficients each
+///   a_hat: K×L=30 NTT matrix polynomials, 256 coefficients each
+///   hints: K=6 UseHint boolean arrays, 256 booleans each
+///
+/// Raises ValueError if the signature fails ML-DSA-65 verification.
+#[cfg(feature = "python")]
+#[pyfunction]
+fn extract_mldsa_witness_py(
+    pk:  Vec<u8>,
+    msg: Vec<u8>,
+    sig: Vec<u8>,
+) -> PyResult<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<bool>>)> {
+    use mldsa::encoding::{pk_decode, sig_decode};
+    use mldsa::xof::{expand_a, sample_in_ball};
+    use mldsa::field;
+    use mldsa::params::D;
+
+    if !mldsa::verify::ml_dsa_verify(&pk, &msg, &sig) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ML-DSA-65 signature verification failed — cannot extract witness for invalid signature"
+        ));
+    }
+
+    let (rho, t1) = pk_decode(&pk)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("pk_decode failed: {e}")))?;
+    let (c_tilde, z, hints) = sig_decode(&sig)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("sig_decode failed: {e}")))?;
+
+    let a_hat_matrix = expand_a(&rho);
+    let a_hat_flat: Vec<Vec<i64>> = a_hat_matrix.rows.iter()
+        .flat_map(|row| row.0.iter().map(|poly| poly.coeffs.to_vec()))
+        .collect();
+
+    let c_poly = sample_in_ball(&c_tilde);
+    let c_arr: Vec<i64> = c_poly.coeffs.iter().map(|&v| field::reduce(v)).collect();
+
+    let z_arr: Vec<Vec<i64>> = z.0.iter()
+        .map(|poly| poly.coeffs.iter().map(|&v| field::reduce(v)).collect())
+        .collect();
+
+    let t1_scaled = t1.scale_power2(D);
+    let t1_arr: Vec<Vec<i64>> = t1_scaled.0.iter()
+        .map(|poly| poly.coeffs.to_vec())
+        .collect();
+
+    Ok((z_arr, c_arr, t1_arr, a_hat_flat, hints))
 }
 
 /// prove_range_q_py(poly: list[int]) -> (proof: bytes, commitment: str)
