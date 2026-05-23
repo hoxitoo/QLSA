@@ -2103,7 +2103,7 @@ def gen_mldsa_v23_vfri7_hints(
     """
     _require_ext("gen_mldsa_v23_vfri7_hints_py")
     try:
-        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri7_hints_py(  # type: ignore[union-attr]
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri7_hints_py(
             [list(p) for p in z],
             list(c),
             [list(p) for p in t1],
@@ -2153,7 +2153,7 @@ def gen_mldsa_v23_vfri7_hints_log8(
     """
     _require_ext("gen_mldsa_v23_vfri7_hints_log8_py")
     try:
-        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri7_hints_log8_py(  # type: ignore[union-attr]
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri7_hints_log8_py(
             [list(p) for p in z],
             list(c),
             [list(p) for p in t1],
@@ -2240,7 +2240,7 @@ def gen_mldsa_v23_vfri7_cross_bound_hints(
     num_folds = num_folds_log10  # Rust uses same folds for both groups
     try:
         (proof10, commit10, hints10,
-         proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri7_cross_bound_hints_py(  # type: ignore[union-attr]
+         proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri7_cross_bound_hints_py(
             [list(p) for p in z],
             list(c),
             [list(p) for p in t1],
