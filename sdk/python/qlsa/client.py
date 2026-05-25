@@ -21,6 +21,9 @@ def _batch_status(result: BatchResult) -> BatchStatus:
         stark_commitment=result.commitment,
         has_witness=result.has_witness,
         witness_commitment=result.witness_commitment,
+        has_vfri7=result.has_vfri7,
+        vfri7_commitment_log10=result.vfri7_commitment_log10,
+        vfri7_commitment_log8=result.vfri7_commitment_log8,
     )
 
 
@@ -164,6 +167,9 @@ class HttpClient:
                 stark_commitment=data.get("stark_commitment"),
                 has_witness=data.get("has_witness", False),
                 witness_commitment=data.get("witness_commitment"),
+                has_vfri7=data.get("has_vfri7", False),
+                vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
+                vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
             )
         except KeyError as exc:
             raise RuntimeError(
@@ -186,6 +192,9 @@ class HttpClient:
                 stark_commitment=data.get("stark_commitment"),
                 has_witness=data.get("has_witness", False),
                 witness_commitment=data.get("witness_commitment"),
+                has_vfri7=data.get("has_vfri7", False),
+                vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
+                vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
             )
         except KeyError as exc:
             raise RuntimeError(

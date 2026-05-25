@@ -26,6 +26,15 @@ class BatchResult:
     witness_max_norms:    list[int] | None = None  # L=5 ‖z[j]‖_∞ values
     witness_c_tilde_hex:  str | None = None  # 96-char hex (48-byte ML-DSA-65 c̃)
 
+    # VFRI7 cross-bound ML-DSA V23 proofs for tx[0] (MVP-5).
+    # Populated when prove_witnesses=True and the PyO3 extension is available.
+    vfri7_proof_log10:      bytes | None = field(default=None, repr=False)
+    vfri7_commitment_log10: str | None = None   # 32-char hex (16-byte Blake2s binding)
+    vfri7_hints_log10:      bytes | None = field(default=None, repr=False)
+    vfri7_proof_log8:       bytes | None = field(default=None, repr=False)
+    vfri7_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
+    vfri7_hints_log8:       bytes | None = field(default=None, repr=False)
+
     # Convenience properties for Solidity submission
     @property
     def merkle_root_onchain(self) -> bytes:
@@ -54,8 +63,12 @@ class BatchResult:
         return self.proof is not None and self.commitment is not None
 
     @property
+    def has_vfri7(self) -> bool:
+        return self.vfri7_proof_log10 is not None and self.vfri7_proof_log8 is not None
+
+    @property
     def has_witness(self) -> bool:
-        return self.witness_bundle is not None
+        return self.witness_bundle is not None or self.has_vfri7
 
     @property
     def witness_norm_bound_ok(self) -> bool:
@@ -171,19 +184,26 @@ class Batcher:
             tx0 = batch.transactions[0]
             if tx0.signature is not None and tx0.public_key is not None:
                 try:
-                    from stark.prover import prove_mldsa_sig_witness_stark
-                    wr = prove_mldsa_sig_witness_stark(
+                    from stark.prover import prove_mldsa_sig_vfri7_stark
+                    vr = prove_mldsa_sig_vfri7_stark(
                         pk=tx0.public_key,
                         msg=tx0.to_bytes(),
                         sig=tx0.signature,
+                        batch_merkle_root=result.merkle_root_onchain,
+                        n_queries=1,
                     )
-                    result.witness_bundle      = wr.proof_bundle
-                    result.witness_commitment  = wr.onchain_commitment
-                    result.witness_max_norms   = wr.max_norms
-                    result.witness_c_tilde_hex = wr.c_tilde_hex
-                except RuntimeError as exc:
-                    logging.warning("ML-DSA witness proof skipped: %s", exc)
+                    result.vfri7_proof_log10      = vr.log10_proof
+                    result.vfri7_commitment_log10 = vr.log10_commitment
+                    result.vfri7_hints_log10      = vr.log10_query_hints
+                    result.vfri7_proof_log8       = vr.log8_proof
+                    result.vfri7_commitment_log8  = vr.log8_commitment
+                    result.vfri7_hints_log8       = vr.log8_query_hints
+                    result.witness_commitment     = vr.log10_commitment
+                except (RuntimeError, ImportError) as exc:
+                    logging.warning("VFRI7 witness proof skipped: %s", exc)
+                except ValueError as exc:
+                    logging.warning("ML-DSA signature invalid for VFRI7 proving: %s", exc)
                 except Exception as exc:
-                    logging.error("Unexpected error during witness proving: %s", exc, exc_info=True)
+                    logging.error("Unexpected error during VFRI7 proving: %s", exc, exc_info=True)
 
         return result

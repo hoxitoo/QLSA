@@ -94,15 +94,17 @@ describe("AggregatorClient _toBatchStatus", () => {
       stark_commitment: "0".repeat(32),
       has_witness: true,
       witness_commitment: "1".repeat(32),
+      has_vfri7: false,
     });
     expect(status.batchId).toBe("test-id");
     expect(status.txCount).toBe(4);
     expect(status.isProven).toBe(true);
     expect(status.hasWitness).toBe(true);
     expect(status.witnessCommitment).toBe("1".repeat(32));
+    expect(status.hasVfri7).toBe(false);
   });
 
-  it("defaults hasWitness to false when absent", () => {
+  it("defaults hasWitness and hasVfri7 to false when absent", () => {
     const client = new AggregatorClient("http://localhost:8000");
     // @ts-expect-error accessing private for test
     const status = client._toBatchStatus({
@@ -113,5 +115,27 @@ describe("AggregatorClient _toBatchStatus", () => {
     });
     expect(status.hasWitness).toBe(false);
     expect(status.witnessCommitment).toBeUndefined();
+    expect(status.hasVfri7).toBe(false);
+    expect(status.vfri7CommitmentLog10).toBeUndefined();
+    expect(status.vfri7CommitmentLog8).toBeUndefined();
+  });
+
+  it("maps VFRI7 commitment fields from snake_case", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    // @ts-expect-error accessing private for test
+    const status = client._toBatchStatus({
+      batch_id: "vfri7-id",
+      tx_count: 1,
+      merkle_root: "b".repeat(128),
+      is_proven: false,
+      has_witness: true,
+      witness_commitment: "a".repeat(32),
+      has_vfri7: true,
+      vfri7_commitment_log10: "c".repeat(32),
+      vfri7_commitment_log8: "d".repeat(32),
+    });
+    expect(status.hasVfri7).toBe(true);
+    expect(status.vfri7CommitmentLog10).toBe("c".repeat(32));
+    expect(status.vfri7CommitmentLog8).toBe("d".repeat(32));
   });
 });

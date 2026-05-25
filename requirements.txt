@@ -1,1 +1,1 @@
-liboqs-python==0.14.1
+liboqs-python==0.15.0

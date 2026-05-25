@@ -99,6 +99,7 @@ library TwoChannel {
         uint256 logDomainSize,
         uint256 nQueries
     ) internal pure returns (uint256[] memory queries) {
+        require(logDomainSize <= 31, "TwoChannel: logDomainSize > 31 overflows mask");
         uint256 mask = (1 << logDomainSize) - 1;
         queries = new uint256[](nQueries);
         uint256 filled = 0;

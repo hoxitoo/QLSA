@@ -2267,3 +2267,229 @@ def test_gen_full_v23_vfri6_hints_groups_independent():
     )
     assert ra.log10_commitment != rb.log10_commitment, "Different roots must give different LOG=10 commitments"
     assert ra.log8_commitment != rb.log8_commitment, "Different roots must give different LOG=8 commitments"
+
+
+# ── VFRI7: cross-proof binding (MVP-5 Priority 2) ─────────────────────────────
+
+_VFRI7_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_hints_schema():
+    """LOG=10 VFRI7 result has expected structure and n_cols=1298."""
+    from stark.prover import gen_mldsa_v23_vfri7_hints, MldsaV23VFRI7HintResult
+    z, c, t1, a_hat = _v23_inputs(12000)
+    r = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI7HintResult)
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+    assert r.n_cols == 1298
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_hints_deterministic():
+    """Same inputs produce identical VFRI7 LOG=10 outputs."""
+    from stark.prover import gen_mldsa_v23_vfri7_hints
+    z, c, t1, a_hat = _v23_inputs(12100)
+    r1 = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_hints_differs_from_vfri6():
+    """VFRI7 transcript differs from VFRI6 (mixRoot(merkleRoot) before drawQueries)."""
+    from stark.prover import gen_mldsa_v23_vfri7_hints, gen_mldsa_v23_vfri6_hints
+    z, c, t1, a_hat = _v23_inputs(12200)
+    r6 = gen_mldsa_v23_vfri6_hints(z, c, t1, a_hat, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    r7 = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r6.query_hints != r7.query_hints, "VFRI7 must differ from VFRI6 (different transcript)"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_hints_batch_root_binding():
+    """Different batch roots produce different VFRI7 LOG=10 hints."""
+    from stark.prover import gen_mldsa_v23_vfri7_hints
+    z, c, t1, a_hat = _v23_inputs(12300)
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, root_a, n_queries=1, num_folds=3)
+    rb = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, root_b, n_queries=1, num_folds=3)
+    assert ra.query_hints != rb.query_hints, "Different batch roots must give different hints"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_hints_log8_schema():
+    """LOG=8 VFRI7 result has expected structure and n_cols=2206."""
+    from stark.prover import gen_mldsa_v23_vfri7_hints_log8, MldsaV23VFRI7Log8HintResult
+    z, c, t1, a_hat = _v23_inputs(12400)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri7_hints_log8(z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI7Log8HintResult)
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+    assert r.n_cols == 2206
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_hints_log8_differs_from_vfri6():
+    """VFRI7 LOG=8 hints differ from VFRI6 LOG=8 (different transcript)."""
+    from stark.prover import gen_mldsa_v23_vfri7_hints_log8, gen_mldsa_v23_vfri6_hints_log8
+    z, c, t1, a_hat = _v23_inputs(12500)
+    hints = _make_log8_hints()
+    r6 = gen_mldsa_v23_vfri6_hints_log8(z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    r7 = gen_mldsa_v23_vfri7_hints_log8(z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r6.query_hints != r7.query_hints, "VFRI7 LOG=8 must differ from VFRI6 (different transcript)"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_cross_bound_hints_schema():
+    """Cross-bound result has correct structure for both LOG groups."""
+    from stark.prover import (
+        gen_mldsa_v23_vfri7_cross_bound_hints,
+        FullV23VFRI7CrossBoundHintResult,
+    )
+    z, c, t1, a_hat = _v23_inputs(12600)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    assert isinstance(r, FullV23VFRI7CrossBoundHintResult)
+    assert isinstance(r.log10_proof, bytes) and len(r.log10_proof) >= 700
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log10_query_hints, bytes) and len(r.log10_query_hints) > 0
+    assert isinstance(r.log8_proof, bytes) and len(r.log8_proof) >= 700
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    assert isinstance(r.log8_query_hints, bytes) and len(r.log8_query_hints) > 0
+    assert r.batch_merkle_root == _VFRI7_BATCH_ROOT
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_cross_bound_hints_deterministic():
+    """Same inputs produce identical cross-bound outputs."""
+    from stark.prover import gen_mldsa_v23_vfri7_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(12700)
+    hints = _make_log8_hints()
+    r1 = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    r2 = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    assert r1.log10_commitment == r2.log10_commitment
+    assert r1.log10_query_hints == r2.log10_query_hints
+    assert r1.log8_commitment == r2.log8_commitment
+    assert r1.log8_query_hints == r2.log8_query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_cross_bound_hints_commitment_binding():
+    """Cross-bound commitments are 32-char hex strings (Blake2s(proof[:32]‖bound_root)[:16])."""
+    from stark.prover import gen_mldsa_v23_vfri7_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(12800)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    # Commitment format: 32-char hex of Blake2s(proof[:32] ‖ bound_root)[:16] (no 0x prefix)
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    # Both commitments are valid hex strings
+    assert len(bytes.fromhex(r.log10_commitment)) == 16
+    assert len(bytes.fromhex(r.log8_commitment)) == 16
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_cross_bound_hints_batch_root_changes():
+    """Different batch roots produce different cross-bound commitments."""
+    from stark.prover import gen_mldsa_v23_vfri7_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(12900)
+    hints = _make_log8_hints()
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, root_a, n_queries=1, num_folds_log10=3,
+    )
+    rb = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, root_b, n_queries=1, num_folds_log10=3,
+    )
+    assert ra.log10_commitment != rb.log10_commitment, "Different batch roots → different LOG=10 commitments"
+    assert ra.log8_commitment != rb.log8_commitment, "Different batch roots → different LOG=8 commitments"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri7_cross_bound_total_calldata():
+    """Cross-bound combined calldata < 20 KB."""
+    from stark.prover import gen_mldsa_v23_vfri7_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(13000)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI7_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    total = len(r.log10_query_hints) + len(r.log8_query_hints)
+    assert total < 20_000, f"Combined cross-bound hints {total} B should be < 20 KB"
+
+
+# ── prove_mldsa_sig_vfri7_stark: end-to-end from real sig ─────────────────────
+
+@needs_oqs
+def test_prove_mldsa_sig_vfri7_stark_schema():
+    """prove_mldsa_sig_vfri7_stark returns a well-formed FullV23VFRI7CrossBoundHintResult."""
+    from stark.prover import prove_mldsa_sig_vfri7_stark, FullV23VFRI7CrossBoundHintResult
+    alg = _oqs.Signature("ML-DSA-65")
+    pk  = alg.generate_keypair()
+    msg = b"qlsa vfri7 e2e test"
+    sig = alg.sign(msg)
+    batch_root = bytes(range(32))
+
+    r = prove_mldsa_sig_vfri7_stark(pk, msg, sig, batch_root, n_queries=1)
+
+    assert isinstance(r, FullV23VFRI7CrossBoundHintResult)
+    assert isinstance(r.log10_proof, bytes) and len(r.log10_proof) >= 700
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log10_query_hints, bytes) and len(r.log10_query_hints) > 0
+    assert isinstance(r.log8_proof, bytes) and len(r.log8_proof) >= 700
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    assert isinstance(r.log8_query_hints, bytes) and len(r.log8_query_hints) > 0
+    assert r.batch_merkle_root == batch_root
+    assert r.n_queries == 1
+    # Commitments are valid 16-byte hex strings
+    assert len(bytes.fromhex(r.log10_commitment)) == 16
+    assert len(bytes.fromhex(r.log8_commitment)) == 16
+
+
+@needs_oqs
+def test_prove_mldsa_sig_vfri7_stark_invalid_sig_raises():
+    """prove_mldsa_sig_vfri7_stark raises ValueError for an invalid signature."""
+    from stark.prover import prove_mldsa_sig_vfri7_stark
+    alg = _oqs.Signature("ML-DSA-65")
+    pk  = alg.generate_keypair()
+    bad_sig = bytes(3309)  # all-zero signature is invalid
+    batch_root = bytes(32)
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="ML-DSA-65 signature verification failed"):
+        prove_mldsa_sig_vfri7_stark(pk, b"any message", bad_sig, batch_root)
+
+
+@needs_oqs
+def test_prove_mldsa_sig_vfri7_stark_batch_root_binding():
+    """Different batch roots produce different VFRI7 commitments from the same sig."""
+    from stark.prover import prove_mldsa_sig_vfri7_stark
+    alg = _oqs.Signature("ML-DSA-65")
+    pk  = alg.generate_keypair()
+    msg = b"batch root binding test"
+    sig = alg.sign(msg)
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+
+    ra = prove_mldsa_sig_vfri7_stark(pk, msg, sig, root_a, n_queries=1)
+    rb = prove_mldsa_sig_vfri7_stark(pk, msg, sig, root_b, n_queries=1)
+
+    assert ra.log10_commitment != rb.log10_commitment, "Different batch roots must give different LOG=10 commitments"
+    assert ra.log8_commitment  != rb.log8_commitment,  "Different batch roots must give different LOG=8 commitments"

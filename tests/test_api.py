@@ -211,6 +211,17 @@ class TestBatchRun:
         assert data["status"] == "ok"
         assert isinstance(data["has_witness"], bool)
 
+    def test_run_response_includes_vfri7_fields(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        resp = client.post("/batch/run")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "has_vfri7" in data
+        assert data["has_vfri7"] is False
+        assert "vfri7_commitment_log10" in data
+        assert "vfri7_commitment_log8" in data
+
 
 # ── POST /batch/flush ─────────────────────────────────────────────────────────
 
@@ -251,6 +262,17 @@ class TestBatchFlush:
         assert data["status"] == "ok"
         assert isinstance(data["has_witness"], bool)
 
+    def test_flush_response_includes_vfri7_fields(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        resp = client.post("/batch/flush")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "has_vfri7" in data
+        assert data["has_vfri7"] is False
+        assert "vfri7_commitment_log10" in data
+        assert "vfri7_commitment_log8" in data
+
     def test_flush_updates_stats(self, client, signed_payload):
         for _ in range(2):
             client.post("/transactions", json=signed_payload)
@@ -277,6 +299,7 @@ class TestBatchWitness:
         data = resp.json()
         assert data["batch_id"] == batch_id
         assert data["has_witness"] is False
+        assert data["has_vfri7"] is False
 
     def test_witness_endpoint_returns_correct_batch_id(self, client, signed_payload):
         client.post("/transactions", json=signed_payload)

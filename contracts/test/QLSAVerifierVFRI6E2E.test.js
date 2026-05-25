@@ -166,6 +166,16 @@ describe("QLSAVerifierVFRI6 — NttBatch E2E (off-chain OODS combo, 649 cols)", 
     expect(rejected).to.equal(true);
   });
 
+  // ── Proof correctness: verify() must return true with valid NttBatch fixture ─
+
+  it("verify() returns true for valid 649-col NttBatch proof", async function () {
+    this.timeout(60_000);
+    const result = await verifier.verify(
+      fixture.proof, fixture.commitment, fixture.merkleRoot, fixture.queryHints
+    );
+    expect(result).to.equal(true, "VFRI6 verify must return true for valid NttBatch proof");
+  });
+
   // ── KEY VFRI6 IMPROVEMENT: 649-col trace fits within 15 M gas ────────────
 
   it("649-col VFRI6 1-query gas ≤ 15 M — O(n_cols) eliminated", async function () {

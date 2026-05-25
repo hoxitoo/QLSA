@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-QLSA Phase 6 — End-to-End Testnet Demo
+QLSA Phase 6 — End-to-End Testnet Demo (MVP-5 VFRI7)
 
 Flow:
   1. Generate N ML-DSA-65 keypairs (ephemeral)
   2. Create and sign N transactions
   3. Build a Batch (Merkle tree, signature verification)
-  4. Generate a Circle STARK proof via the Stwo prover
-  5. Submit to BatchRegistryV2 on the configured testnet
+  4. Generate VFRI7 cross-bound STARK proofs for tx[0] via Stwo prover
+     (LOG=10 + LOG=8 groups bound to each other's trace commitments)
+  5. Submit to BatchRegistryV4 on the configured testnet
   6. Verify on-chain finalization
 
 Prerequisites:
   pip install -r requirements.txt -r requirements-api.txt -r requirements-testnet.txt
-  cd stark_stwo && cargo +nightly-2025-07-01 build --release
+  cd stark_stwo && maturin develop --features python --release
 
 Environment (.env):
-  RPC_URL             — L2 RPC endpoint (e.g. Polygon zkEVM Cardona)
+  RPC_URL              — L2 RPC endpoint (e.g. Polygon zkEVM Cardona)
   DEPLOYER_PRIVATE_KEY — 0x-prefixed deployer private key
-  REGISTRY_ADDRESS    — deployed BatchRegistryV2 address
+  REGISTRY_ADDRESS     — deployed BatchRegistryV4 address
 
 Usage:
   python -m testnet.e2e [--txs N] [--dry-run]
@@ -44,11 +45,7 @@ from core.keys import generate_keypair, derive_address, wipe_key
 from core.signing import sign
 from core.transaction import Transaction
 from stark.prover import (
-    prove_batch,
-    prove_mldsa_sig_witness_stark,
-    verify_mldsa_witness_stark,
-    verify_mldsa_hash_check,
-    NORM_BOUND,
+    prove_mldsa_sig_vfri7_stark,
 )
 
 logging.basicConfig(
@@ -114,65 +111,54 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
         time.monotonic() - t0,
     )
 
-    # ── Step 4: Generate batch STARK proof ───────────────────────────────────
-    logger.info("Generating Circle STARK proof (Stwo, LOG_BLOWUP=4)…")
-    t0 = time.monotonic()
-    proof_result = prove_batch(batch)
-    elapsed = time.monotonic() - t0
-    logger.info(
-        "  proof_size=%d bytes | commitment=%s | log_size=%d | onchain_commitment=%s (%.2fs)",
-        len(proof_result.proof),
-        proof_result.commitment,
-        proof_result.log_size,
-        proof_result.onchain_commitment,
-        elapsed,
-    )
-
-    # ── Step 4.5: ML-DSA arithmetic witness proof (MVP-3+) ────────────────────
-    # Prove the full Az → c·t₁ → sub → norm_check → UseHint pipeline for the
-    # first transaction's signature. This demonstrates that the signer's
-    # ML-DSA-65 verification logic is correct and committed to the batch.
-    logger.info("Proving ML-DSA-65 arithmetic witness for tx[0]…")
+    # ── Step 4: Generate VFRI7 cross-bound ML-DSA V23 proofs for tx[0] ─────────
+    # Prove the full V23 ML-DSA-65 arithmetic witness for tx[0]'s signature and
+    # generate cross-bound VFRI7 hints for both LOG=10 (NttBatch+InttBatch, 1298 cols)
+    # and LOG=8 (AzFull+Ct1Full+RangeQBatch+WPrime+NormCheck+UseHint, 2206 cols) groups.
+    # The cross-bound roots bind each group's FRI query indices to the other group's
+    # trace commitment, preventing adversarial proof mixing.
+    logger.info("Generating VFRI7 cross-bound V23 ML-DSA STARK proofs for tx[0]…")
     tx0 = txs[0]
+    batch_merkle_root = batch.merkle_root[:32]
     t0 = time.monotonic()
     try:
-        witness_result = prove_mldsa_sig_witness_stark(
+        vfri7_result = prove_mldsa_sig_vfri7_stark(
             pk=tx0.public_key,
             msg=tx0.to_bytes(),
             sig=tx0.signature,
+            batch_merkle_root=batch_merkle_root,
+            n_queries=1,
         )
-        elapsed_w = time.monotonic() - t0
-        norm_ok   = all(mn < NORM_BOUND for mn in witness_result.max_norms)
-        valid_w   = verify_mldsa_witness_stark(witness_result)
-        hash_ok   = verify_mldsa_hash_check(tx0.public_key, tx0.to_bytes(), witness_result)
+        elapsed_v = time.monotonic() - t0
         logger.info(
-            "  witness_proof=%d bytes | norms_ok=%s | stark_ok=%s | hash_ok=%s"
-            " | onchain_commitment=%s (%.2fs)",
-            len(witness_result.proof_bundle),
-            norm_ok,
-            valid_w,
-            hash_ok,
-            witness_result.onchain_commitment,
-            elapsed_w,
+            "  log10: proof=%d B commit=%s hints=%d B | "
+            "log8: proof=%d B commit=%s hints=%d B (%.2fs)",
+            len(vfri7_result.log10_proof),
+            vfri7_result.log10_commitment,
+            len(vfri7_result.log10_query_hints),
+            len(vfri7_result.log8_proof),
+            vfri7_result.log8_commitment,
+            len(vfri7_result.log8_query_hints),
+            elapsed_v,
         )
-        if not valid_w or not hash_ok:
-            logger.error("ML-DSA witness proof or hash check failed — aborting")
-            return 1
+    except ValueError as exc:
+        logger.error("ML-DSA signature invalid or witness extraction failed: %s", exc)
+        return 1
     except RuntimeError as exc:
-        logger.error("ML-DSA witness proof failed: %s", exc)
+        logger.error("VFRI7 proof generation failed: %s", exc)
         return 1
 
     if dry_run:
         logger.info("[DRY-RUN] Skipping on-chain submission.")
         logger.info("To submit, set RPC_URL, DEPLOYER_PRIVATE_KEY, REGISTRY_ADDRESS in .env")
+        logger.info("  REGISTRY_ADDRESS should point to a deployed BatchRegistryV4 contract.")
         logger.info("=== DRY-RUN COMPLETE ===")
         return 0
 
-
     # ── Step 5: Submit on-chain ───────────────────────────────────────────────
     try:
-        from testnet.submit import OnchainSubmitter
-        submitter = OnchainSubmitter.from_env()
+        from testnet.submit import OnchainSubmitterV4
+        submitter = OnchainSubmitterV4.from_env()
     except KeyError as exc:
         logger.error("Missing env var: %s — run with --dry-run or set .env", exc)
         return 1
@@ -187,12 +173,16 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
         if tx.nonce > sender_nonces.get(sender_key, -1):
             sender_nonces[sender_key] = tx.nonce
 
-    logger.info("Submitting batch to BatchRegistryV2 (with nonce replay protection)…")
+    logger.info("Submitting batch to BatchRegistryV4 (VFRI7 cross-bound proofs + nonces)…")
     t0 = time.monotonic()
     tx_hash = submitter.submit_batch_with_nonces(
-        merkle_root=batch.merkle_root,
-        onchain_commitment=proof_result.onchain_commitment,
-        proof_bytes=proof_result.proof,
+        merkle_root=batch_merkle_root,
+        commitment_log10=vfri7_result.log10_commitment,
+        proof_log10=vfri7_result.log10_proof,
+        hints_log10=vfri7_result.log10_query_hints,
+        commitment_log8=vfri7_result.log8_commitment,
+        proof_log8=vfri7_result.log8_proof,
+        hints_log8=vfri7_result.log8_query_hints,
         senders=list(sender_nonces.keys()),
         new_nonces=list(sender_nonces.values()),
     )
@@ -201,13 +191,13 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
     # ── Step 6: Verify on-chain ───────────────────────────────────────────────
     logger.info("Waiting for confirmation and verifying finalization…")
     t0 = time.monotonic()
-    finalized = submitter.wait_and_verify(tx_hash, batch.merkle_root)
+    finalized = submitter.wait_and_verify(tx_hash, batch_merkle_root)
     if not finalized:
         logger.error("Batch NOT finalized on-chain after tx confirmed — unexpected state")
         return 1
 
     logger.info("  finalized=True (%.2fs)", time.monotonic() - t0)
-    logger.info("=== E2E COMPLETE — batch finalized on testnet ===")
+    logger.info("=== E2E COMPLETE — batch finalized on testnet (VFRI7 cross-bound) ===")
     return 0
 
 

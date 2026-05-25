@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3/V4, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7, CM31.sol, QM31.sol, MerkleVerifier.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -487,6 +487,39 @@ VFRI6 — VFRI5 with off-chain OODS combo, eliminating O(n_cols) on-chain work e
   - `gen_mldsa_v23_vfri6_hints_log8` → `MldsaV23VFRI6Log8HintResult` (n_cols=2206)
 - Together, the two LOG groups cover the full V23 trace (3504 main cols) via two separate VFRI6 calls
 
+### `contracts/src/QLSAVerifierVFRI7.sol`
+VFRI7 — VFRI6 + `mixRoot(merkleRoot)` before `drawQueries` in the Fiat-Shamir transcript (MVP-5 Priority 2).
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding: **identical to VFRI6** (`abi.encode(uint128, uint128, bytes32, bytes32[], QueryHints[])`)
+- Transcript change vs VFRI6:
+  - VFRI6: `... → mixRoot(friLayerRoots[K]) → drawQueries`
+  - VFRI7: `... → mixRoot(friLayerRoots[K]) → mixRoot(merkleRoot) → drawQueries`
+- Effect: FRI query indices depend on `merkleRoot`. When `BatchRegistryV4` uses cross-bound roots, an adversary mixing proofs from different witnesses gets mismatched query indices and fails on-chain Merkle verification.
+- Cross-proof binding in `BatchRegistryV4.submitBatch()`:
+  - `traceRoot10 = proofLog10[8:40]`, `traceRoot8 = proofLog8[8:40]` (extracted via assembly)
+  - `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)` — passed to VFRI7 for LOG=10
+  - `boundRoot8  = keccak256(batchRoot ‖ traceRoot10)` — passed to VFRI7 for LOG=8
+- VFRI6 hints are NOT accepted by VFRI7 (different Fiat-Shamir path → different query indices)
+- 11 Rust tests (smoke, deterministic, differs-from-vfri6, cross-bound-smoke/deterministic/batch-root-changes/trace-roots-cross/bad-root-length)
+- Rust bridges:
+  - `gen_vfri7_hints_from_cols_nfolds` — generic VFRI7 from flat columns
+  - `gen_mldsa_v23_vfri7_hints` — V23 LOG=10 group (1298 cols)
+  - `gen_mldsa_v23_vfri7_hints_log8` — V23 LOG=8 group (2206 cols)
+  - `gen_mldsa_v23_vfri7_cross_bound_hints` — two-pass cross-binding generator using `sha3::Keccak256`
+    - Pass 1: generate with `batch_root` to extract trace roots from `proof[8:40]`
+    - Pass 2: regenerate with `bound_root_10` / `bound_root_8` computed from cross trace roots
+    - Returns `(proof10, commit10_hex, hints10, proof8, commit8_hex, hints8)`
+- Python wrappers:
+  - `gen_mldsa_v23_vfri7_hints` → `MldsaV23VFRI7HintResult` (n_cols=1298)
+  - `gen_mldsa_v23_vfri7_hints_log8` → `MldsaV23VFRI7Log8HintResult` (n_cols=2206)
+  - `gen_mldsa_v23_vfri7_cross_bound_hints` → `FullV23VFRI7CrossBoundHintResult`
+- 16 JS E2E tests (`QLSAVerifierVFRI7E2E.test.js`): fixture structural checks, cross-bound root derivation, `verify() == true` for both LOG groups, wrong-merkleRoot rejection, raw-batchRoot rejection, BatchRegistryV4 integration (finalize + replay + Log10ProofInvalid)
+- Fixture: `contracts/test/fixtures/full_v23_vfri7_cross_bound_e2e.json`
+
+### `contracts/src/BatchRegistryV4.sol` (updated for cross-proof binding)
+- `submitBatch()` and `submitBatchWithNonces()` both now extract trace roots from proof bytes via `calldataload(proof.offset + 8)` and compute cross-bound roots before calling the verifier
+- Verifier receives `boundRoot10`/`boundRoot8` instead of raw `batchRoot`
+
 ## Multi-Component STARK Pattern
 
 When adding a new combined STARK (mixed-size components):
@@ -504,14 +537,19 @@ Development: `claude/review-repo-structure-E4kPW`
 
 `main` is a **protected branch** — direct `git push origin main` is always rejected with HTTP 403.
 
-**Required procedure for landing changes into main:**
-1. Develop and commit on `claude/review-repo-structure-E4kPW` (or any feature branch).
-2. Push the feature branch: `git push -u origin <branch>`.
-3. Create a PR via `mcp__github__create_pull_request` (owner=hoxitoo, repo=QLSA, base=main).
-4. Immediately merge the PR via `mcp__github__merge_pull_request` (merge_method="merge").
-5. Sync local main: `git fetch origin main && git reset --hard origin/main`.
+**Default mode — development sandbox:**
+All work stays on the feature branch `claude/review-repo-structure-E4kPW`.
+Commit and push to that branch freely. **Never create a PR or merge into `main` unless the user explicitly asks.**
 
-**Do this autonomously** — do not wait for the user to approve the PR unless there is a conflict or architectural ambiguity that requires a human decision. When the user asks to "update main", "push to main", or "merge into main", follow steps 1–5 without asking for confirmation.
+**When the user explicitly asks to merge / update main**, follow these steps:
+1. Commit all pending changes on `claude/review-repo-structure-E4kPW`.
+2. Push the branch: `git push -u origin claude/review-repo-structure-E4kPW`.
+3. Create a PR via `mcp__github__create_pull_request` (owner=hoxitoo, repo=QLSA, base=main).
+4. Merge the PR via `mcp__github__merge_pull_request` (merge_method="merge").
+5. Sync local main: `git fetch origin main && git checkout main && git reset --hard origin/main`.
+6. Switch back to dev branch: `git checkout claude/review-repo-structure-E4kPW`.
+
+**Trigger phrases** (explicit user request required): "замерджи в main", "обнови main", "смержи ветку", "merge into main", "push to main", "update main".
 
 ## Known Limitations (Research Prototype)
 
@@ -530,6 +568,7 @@ Development: `claude/review-repo-structure-E4kPW`
 - **Key wipe**: `wipe_key()` backed by Rust `wipe_bytes` (zeroize crate, volatile_set) — primary key buffer is securely zeroed; Python-side copies from liboqs signing remain best-effort
 - **c_tilde Fiat-Shamir binding**: ML-DSA challenge bytes mixed into channel before Tree0 commit (V19+)
 - **Merkle root Fiat-Shamir binding**: batch Merkle root mixed into channel after c_tilde (V22) — proof is cryptographically specific to one batch
+- **Cross-proof binding** (MVP-5 Priority 2): `QLSAVerifierVFRI7` mixes `merkleRoot` before `drawQueries`. `BatchRegistryV4` passes `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)` / `boundRoot8 = keccak256(batchRoot ‖ traceRoot10)` — mixing proofs from different witnesses fails Merkle verification
 
 ## CI Pipeline
 

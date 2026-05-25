@@ -29,8 +29,29 @@ const toBytes16 = (hash32hex) => "0x" + hash32hex.slice(2, 34);
 
 const EMPTY_HINTS = "0x"; // MockVerifierV4Dual ignores queryHints
 
+// ── Cross-bound root helpers ─────────────────────────────────────────────────
+// BatchRegistryV4 derives cross-bound roots before calling the verifier:
+//   boundRoot10 = keccak256(batchRoot ‖ proof8[8:40])
+//   boundRoot8  = keccak256(batchRoot ‖ proof10[8:40])
+//
+// VALID_PROOF_10 uses fill "ab" → traceRoot10 = proof10[8:40] = 0xab×32
+// VALID_PROOF_8  uses fill "dc" → traceRoot8  = proof8[8:40]  = 0xdc×32
+const TRACE_ROOT_10 = "0x" + "ab".repeat(32);
+const TRACE_ROOT_8  = "0x" + "dc".repeat(32);
+
+function makeBoundRoots(merkleHex) {
+    const boundRoot10 = ethers.keccak256(
+        ethers.solidityPacked(["bytes32","bytes32"], [merkleHex, TRACE_ROOT_8])
+    );
+    const boundRoot8 = ethers.keccak256(
+        ethers.solidityPacked(["bytes32","bytes32"], [merkleHex, TRACE_ROOT_10])
+    );
+    return [boundRoot10, boundRoot8];
+}
+
 // ── Fixture: compute a valid Blake2s commitment ──────────────────────────────
 // MockVerifierV4Dual: commitment = Blake2s(proof[:32] ‖ merkleRoot)[:16]
+// merkleRoot here is the cross-bound root that BatchRegistryV4 passes to verify().
 async function makeCommitment(b2s, proofFill, merkleHex) {
     const proofHead = "0x" + proofFill.repeat(32);
     const input64   = proofHead + merkleHex.slice(2, 66);   // drop "0x" prefix
@@ -74,9 +95,11 @@ describe("BatchRegistryV4", function () {
         VALID_PROOF_10 = makeProof(PROOF_LEN, "ab");  // LOG=10 proof
         VALID_PROOF_8  = makeProof(PROOF_LEN, "dc");  // LOG=8 proof
 
-        // Compute commitments: Blake2s(proof[:32] ‖ merkleRoot)[:16]
-        VALID_COMMIT_10 = await makeCommitment(b2s, "ab", VALID_MERKLE);
-        VALID_COMMIT_8  = await makeCommitment(b2s, "dc", VALID_MERKLE);
+        // BatchRegistryV4 passes cross-bound roots to the verifier, not the raw batch root.
+        // MockVerifierV4Dual checks Blake2s(proof[:32] ‖ crossBoundRoot)[:16] == commitment.
+        const [br10, br8] = makeBoundRoots(VALID_MERKLE);
+        VALID_COMMIT_10 = await makeCommitment(b2s, "ab", br10);
+        VALID_COMMIT_8  = await makeCommitment(b2s, "dc", br8);
     });
 
     // ── Deployment ────────────────────────────────────────────────────────────
@@ -157,10 +180,10 @@ describe("BatchRegistryV4", function () {
 
     it("reverts with Log10ProofInvalid when LOG=10 verify() returns false", async function () {
         const freshRoot = "0x" + "a1".repeat(32);
-        // Use a deliberately wrong commitment for the LOG=10 call
-        // (mismatched commitment → MockVerifierV4Dual returns false).
-        const wrongCommit10 = "0x" + "00".repeat(16); // all-zeros is never valid
-        const goodCommit8   = await makeCommitment(b2s, "dc", freshRoot);
+        // all-zeros commitment is never valid (zero check fires before Blake2s)
+        const wrongCommit10 = "0x" + "00".repeat(16);
+        const [, br8] = makeBoundRoots(freshRoot);
+        const goodCommit8   = await makeCommitment(b2s, "dc", br8);
         await expect(
             registry.submitBatch(
                 freshRoot,
@@ -172,9 +195,9 @@ describe("BatchRegistryV4", function () {
 
     it("reverts with Log8ProofInvalid when LOG=8 verify() returns false (LOG=10 passes)", async function () {
         const freshRoot = "0x" + "b2".repeat(32);
-        const goodCommit10  = await makeCommitment(b2s, "ab", freshRoot);
-        // Wrong commitment for LOG=8 — MockVerifierV4Dual will reject it.
-        const wrongCommit8  = "0x" + "00".repeat(16);
+        const [br10, ] = makeBoundRoots(freshRoot);
+        const goodCommit10 = await makeCommitment(b2s, "ab", br10);
+        const wrongCommit8 = "0x" + "00".repeat(16);
         await expect(
             registry.submitBatch(
                 freshRoot,
@@ -214,7 +237,8 @@ describe("BatchRegistryV4", function () {
         await registry.setVerifier(await sentinelV.getAddress());
 
         const freshRoot    = "0x" + "d4".repeat(32);
-        const goodCommit10 = await makeCommitment(b2s, "ab", freshRoot);
+        const [br10, ] = makeBoundRoots(freshRoot);
+        const goodCommit10 = await makeCommitment(b2s, "ab", br10);
         // Pass SENTINEL as commitmentLog8 → SentinelVerifier rejects it → Log8ProofInvalid.
         await expect(
             registry.submitBatch(
@@ -279,8 +303,9 @@ describe("BatchRegistryV4", function () {
         });
 
         async function makeNonceCommitments(merkleHex) {
-            const c10 = await makeCommitment(b2s, "ab", merkleHex);
-            const c8  = await makeCommitment(b2s, "dc", merkleHex);
+            const [br10, br8] = makeBoundRoots(merkleHex);
+            const c10 = await makeCommitment(b2s, "ab", br10);
+            const c8  = await makeCommitment(b2s, "dc", br8);
             return { c10, c8 };
         }
 
