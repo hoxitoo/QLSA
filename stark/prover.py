@@ -2232,12 +2232,14 @@ def gen_mldsa_v23_vfri7_cross_bound_hints(
         FullV23VFRI7CrossBoundHintResult with both proof triples.
     """
     _require_ext("gen_mldsa_v23_vfri7_cross_bound_hints_py")
-    if num_folds_log10 is not None and num_folds_log8 is not None:
-        # Both folds specified — call the single Rust function that handles both
-        pass
-    # For simplicity, always delegate entirely to the Rust bridge which handles
-    # the two-pass logic internally using the same num_folds for both groups.
-    num_folds = num_folds_log10  # Rust uses same folds for both groups
+    if num_folds_log10 is not None and num_folds_log8 is not None and num_folds_log10 != num_folds_log8:
+        raise ValueError(
+            f"num_folds_log10={num_folds_log10} and num_folds_log8={num_folds_log8} differ; "
+            "the Rust bridge uses the same fold count for both groups — pass only num_folds_log10."
+        )
+    # The Rust bridge gen_mldsa_v23_vfri7_cross_bound_hints_py uses one fold
+    # count for both LOG groups. num_folds_log8 is accepted for API symmetry.
+    num_folds = num_folds_log10
     try:
         (proof10, commit10, hints10,
          proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri7_cross_bound_hints_py(

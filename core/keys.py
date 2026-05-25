@@ -54,4 +54,13 @@ def serialize_public_key(public_key: bytes) -> str:
 
 
 def deserialize_public_key(data: str) -> bytes:
-    return base64.b64decode(data.encode("ascii"))
+    try:
+        key = base64.b64decode(data.encode("ascii"))
+    except Exception as exc:
+        raise ValueError(f"deserialize_public_key: invalid base64 data: {exc}") from exc
+    if len(key) not in _PUBKEY_SIZES:
+        raise ValueError(
+            f"deserialize_public_key: decoded length {len(key)} is not a valid "
+            f"ML-DSA public key size. Expected one of {sorted(_PUBKEY_SIZES)} bytes."
+        )
+    return key

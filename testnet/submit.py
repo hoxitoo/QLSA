@@ -21,6 +21,36 @@ from web3.middleware import ExtraDataToPOAMiddleware
 
 logger = logging.getLogger(__name__)
 
+
+def _as_bytes32(b: bytes, name: str = "value") -> bytes:
+    """Validate that *b* is at least 32 bytes and return the first 32 bytes."""
+    if len(b) < 32:
+        raise ValueError(f"{name} must be at least 32 bytes, got {len(b)}")
+    return b[:32]
+
+
+def _decode_commitment16(hex_str: str, name: str = "commitment") -> bytes:
+    """Decode a 32-char hex string to 16 bytes; raises ValueError on bad input."""
+    try:
+        raw = bytes.fromhex(hex_str)
+    except ValueError as exc:
+        raise ValueError(f"{name} is not valid hex: {exc}") from exc
+    if len(raw) != 16:
+        raise ValueError(f"{name} must be 32 hex chars (16 bytes), got {len(raw)} bytes")
+    return raw
+
+
+def _validate_senders(senders: list[bytes]) -> list[bytes]:
+    """Validate that every sender hash is exactly 32 bytes."""
+    for i, s in enumerate(senders):
+        if len(s) != 32:
+            raise ValueError(
+                f"senders[{i}] must be exactly 32 bytes (SHA3-256 of public key), "
+                f"got {len(s)}"
+            )
+    return list(senders)
+
+
 # Inline ABI — generated from contracts/artifacts/src/BatchRegistryV2.sol
 _REGISTRY_ABI = json.loads("""
 [
@@ -94,13 +124,8 @@ class OnchainSubmitter:
         Returns:
             Transaction hash as a hex string (0x-prefixed).
         """
-        root_bytes32: bytes = merkle_root[:32]
-        raw = bytes.fromhex(onchain_commitment)
-        if len(raw) != 16:
-            raise ValueError(
-                f"onchain_commitment must be 32 hex chars (16 bytes), got {len(raw)} bytes"
-            )
-        commitment_bytes16: bytes = raw
+        root_bytes32: bytes = _as_bytes32(merkle_root, "merkle_root")
+        commitment_bytes16: bytes = _decode_commitment16(onchain_commitment, "onchain_commitment")
 
         nonce = self.w3.eth.get_transaction_count(self.account.address)
         gas_price = self.w3.eth.gas_price
@@ -146,15 +171,9 @@ class OnchainSubmitter:
         if len(senders) != len(new_nonces):
             raise ValueError("senders and new_nonces must have equal length")
 
-        root_bytes32 = merkle_root[:32]
-        raw = bytes.fromhex(onchain_commitment)
-        if len(raw) != 16:
-            raise ValueError(
-                f"onchain_commitment must be 32 hex chars (16 bytes), got {len(raw)} bytes"
-            )
-        commitment_bytes16 = raw
-
-        senders_b32 = [s if len(s) == 32 else s[:32] for s in senders]
+        root_bytes32 = _as_bytes32(merkle_root, "merkle_root")
+        commitment_bytes16 = _decode_commitment16(onchain_commitment, "onchain_commitment")
+        senders_b32 = _validate_senders(senders)
 
         nonce = self.w3.eth.get_transaction_count(self.account.address)
         gas_price = self.w3.eth.gas_price
@@ -180,7 +199,7 @@ class OnchainSubmitter:
 
     def get_sender_nonce(self, sender_hash: bytes) -> int:
         """Return the current on-chain nonce for a sender (bytes32 address hash)."""
-        return int(self.registry.functions.senderNonces(sender_hash[:32]).call())
+        return int(self.registry.functions.senderNonces(_as_bytes32(sender_hash, "sender_hash")).call())
 
     def wait_and_verify_v4(self, tx_hash: str, merkle_root: bytes) -> bool:
         """Wait for confirmation then verify finalization on BatchRegistryV4."""
@@ -209,7 +228,7 @@ class OnchainSubmitter:
         else:
             raise RuntimeError(f"tx not confirmed within {self.confirm_timeout_s}s: {tx_hash}")
 
-        root_bytes32 = merkle_root[:32]
+        root_bytes32 = _as_bytes32(merkle_root, "merkle_root")
         finalized: bool = self.registry.functions.isBatchFinalized(root_bytes32).call()
         if finalized:
             commitment = self.registry.functions.getCommitment(root_bytes32).call()
@@ -299,11 +318,9 @@ class OnchainSubmitterV4:
         Returns:
             Transaction hash as a hex string (0x-prefixed).
         """
-        root_b32  = merkle_root[:32]
-        c10_b16   = bytes.fromhex(commitment_log10)
-        c8_b16    = bytes.fromhex(commitment_log8)
-        if len(c10_b16) != 16 or len(c8_b16) != 16:
-            raise ValueError("commitments must be 32-char hex strings (16 bytes each)")
+        root_b32  = _as_bytes32(merkle_root, "merkle_root")
+        c10_b16   = _decode_commitment16(commitment_log10, "commitment_log10")
+        c8_b16    = _decode_commitment16(commitment_log8, "commitment_log8")
 
         nonce     = self.w3.eth.get_transaction_count(self.account.address)
         gas_price = self.w3.eth.gas_price
@@ -337,10 +354,10 @@ class OnchainSubmitterV4:
         """Call BatchRegistryV4.submitBatchWithNonces() with replay protection."""
         if len(senders) != len(new_nonces):
             raise ValueError("senders and new_nonces must have equal length")
-        root_b32   = merkle_root[:32]
-        c10_b16    = bytes.fromhex(commitment_log10)
-        c8_b16     = bytes.fromhex(commitment_log8)
-        senders_b32 = [s if len(s) == 32 else s[:32] for s in senders]
+        root_b32    = _as_bytes32(merkle_root, "merkle_root")
+        c10_b16     = _decode_commitment16(commitment_log10, "commitment_log10")
+        c8_b16      = _decode_commitment16(commitment_log8, "commitment_log8")
+        senders_b32 = _validate_senders(senders)
         nonce      = self.w3.eth.get_transaction_count(self.account.address)
         gas_price  = self.w3.eth.gas_price
         tx = self.registry.functions.submitBatchWithNonces(
@@ -377,7 +394,7 @@ class OnchainSubmitterV4:
         else:
             raise RuntimeError(f"tx not confirmed within {self.confirm_timeout_s}s: {tx_hash}")
 
-        root_b32 = merkle_root[:32]
+        root_b32 = _as_bytes32(merkle_root, "merkle_root")
         finalized: bool = self.registry.functions.isBatchFinalized(root_b32).call()
         if finalized:
             c10 = self.registry.functions.batchCommitmentsLog10(root_b32).call()
@@ -390,4 +407,4 @@ class OnchainSubmitterV4:
 
     def get_sender_nonce(self, sender_hash: bytes) -> int:
         """Return the current on-chain nonce for a sender."""
-        return int(self.registry.functions.senderNonces(sender_hash[:32]).call())
+        return int(self.registry.functions.senderNonces(_as_bytes32(sender_hash, "sender_hash")).call())
