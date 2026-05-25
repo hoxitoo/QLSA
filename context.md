@@ -1,11 +1,12 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-05-22)
+## Статус (обновлено 2026-05-25)
 
-- Фаза: **Phase 6 завершена** (Sepolia, 2026-05-05) + **V23 dual-VFRI6 production pipeline**
-- Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6, BatchRegistryV4 — завершены полностью
-- Проведён повторный аудит безопасности + code review (2026-05-22); 6 новых findings — все устранены
-- Следующий приоритет: MVP-5 — fix eval_bary OODS для circle domain + cross-proof binding между LOG=10 и LOG=8
+- Фаза: **MVP-5 завершён** (2026-05-25) + **V23 dual-VFRI7 production pipeline с cross-proof binding**
+- Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4 — завершены полностью
+- QLSAVerifierVFRI7: `mixRoot(merkleRoot)` перед `drawQueries`; BatchRegistryV4 использует cross-bound roots
+- Aggregator, HTTP API, Python SDK, TypeScript SDK — обновлены под VFRI7 dual-commitment
+- Проведён аудит безопасности + code review (2026-05-25); 5 новых findings — все устранены
 
 ### Что готово
 
@@ -88,23 +89,24 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `BatchRegistry.sol` — v1, `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
 - `BatchRegistryV2.sol` — `submitBatchWithNonces()`: строгий порядок nonce per sender; `MAX_SENDERS=3000`
 - `BatchRegistryV3.sol` — IQLSAVerifierV4 interface + queryHints; `MAX_SENDERS=3000`
-- `BatchRegistryV4.sol` — dual-VFRI6: LOG=10 + LOG=8 proofs; `MAX_SENDERS=3000`
+- `BatchRegistryV4.sol` — dual-VFRI7: LOG=10 + LOG=8 cross-bound proofs; `MAX_SENDERS=3000`; `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)`
 - `QLSAVerifier.sol` — заглушка (всегда true)
 - `QLSAVerifierV2.sol` — M31 структурный верификатор
 - `QLSAVerifierV3.sol` — MIN_PROOF_LENGTH=700, Blake2s imported
 - `QLSAVerifierFull.sol` — onchain_commitment = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
 - `QLSAVerifierVFRI4.sol` — Poseidon2 OODS sponge; y=0 guard in _checkCircleFold
 - `QLSAVerifierVFRI5.sol` — compRoot Merkle tree (eliminates per-query O(n_cols)); y=0 guard
-- `QLSAVerifierVFRI6.sol` — off-chain OODS combo (O(1) gas for any n_cols); y=0 guard; 847 tests pass
+- `QLSAVerifierVFRI6.sol` — off-chain OODS combo (O(1) gas for any n_cols); y=0 guard
+- `QLSAVerifierVFRI7.sol` — VFRI6 + `mixRoot(merkleRoot)` before `drawQueries`; cross-proof binding
 - `M31.sol` — field arithmetic library
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
-#### Тесты (актуально 2026-05-22)
+#### Тесты (актуально 2026-05-25)
 - Python: **178 тестов** (без PyO3) / **317** (с PyO3 ext)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
-- TypeScript SDK: 31 тест (jest)
+- TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
 - Solidity/Hardhat: **847 тестов** — все проходят
-- mypy --strict: все 16 файлов `core/ + aggregator/ + sdk/python/` чистые
+- mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
 - Сеть: **Ethereum Sepolia** (2026-05-05)
@@ -163,9 +165,11 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 5. `onchain_commitment` = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]
 
 ### Слой 3 — Верификация
-- BatchRegistryV2.sol: `submitBatchWithNonces()` + nonce registry (replay protection)
-- QLSAVerifierFull.sol: проверяет `onchain_commitment` (Blake2s binding)
-- Merkle root хранится on-chain
+- **BatchRegistryV4.sol** (dual-VFRI7): `submitBatch(merkleRoot, commit10, proof10, hints10, commit8, proof8, hints8)`
+  - Cross-bound roots: `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)`, `boundRoot8 = keccak256(batchRoot ‖ traceRoot10)`
+  - Каждый VFRI7 вызов ≤ 15M gas; calldata ~12.5 KB совокупно
+- `QLSAVerifierVFRI7.sol`: полный FRI протокол с cross-proof binding
+- Merkle root + оба commitment хранятся on-chain (nonce-ordered replay protection)
 
 ---
 
@@ -181,8 +185,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **MVP-3+** | **✅ Done** | **Все 7 AIR circuits → 1 STARK proof (V22) + Merkle root binding** |
 | **V23** | **✅ Done** | **RangeQBatch 8th circuit (az_hat ∈ [0,Q)) + security hardening** |
 | **VFRI4/5/6** | **✅ Done** | **O(1)-gas on-chain verifier; 1298 и 2206 cols ≤ 15M gas** |
-| **BatchRegistryV4** | **✅ Done** | **Dual-VFRI6 registry; full V23 trace coverage; 847 tests** |
-| MVP-5 | ⏳ Next | eval_bary fix (circle domain OODS); cross-proof binding LOG10↔LOG8 |
+| **BatchRegistryV4** | **✅ Done** | **Dual-VFRI7 registry; full V23 trace coverage; 847 tests** |
+| **MVP-5** | **✅ Done** | **VFRI7 cross-proof binding + aggregator/SDK wiring + security audit (2026-05-25)** |
 | MVP-4 | ⏳ Future | RPO256 hash AIR + full V23 OODS wiring (20 queries, blowup 64) |
 
 ---
@@ -231,8 +235,12 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - **History eviction**: `AggregatorNode._history` ограничена 1000 записями, oldest evicted (2026-05-22)
 - **Circle fold y=0 guard**: `if (h.queryPointY == 0) return false` в VFRI4/VFRI5/VFRI6 (2026-05-22)
 - **stark_stwo/target/ в .gitignore**: предотвращает случайный коммит больших Rust артефактов (2026-05-22)
+- **Cross-proof binding (MVP-5)**: `QLSAVerifierVFRI7` mixит `merkleRoot` перед `drawQueries`; `BatchRegistryV4` передаёт `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)` — mixing proofs из разных witnesses ломает Merkle verification (2026-05-25)
+- **ML-DSA key size validation**: `deserialize_public_key` проверяет размер после base64 decode (2026-05-25)
+- **`_validate_senders` / `_as_bytes32` / `_decode_commitment16`**: строгая валидация входных данных в `submit.py` (2026-05-25)
+- **TwoChannel logDomainSize guard**: `require(logDomainSize <= 31)` предотвращает uint256 overflow в `drawQueries` (2026-05-25)
 
-### Таблица рисков (обновлено 2026-05-22)
+### Таблица рисков (обновлено 2026-05-25)
 
 | Риск | Уровень | Статус |
 |------|---------|--------|
@@ -245,7 +253,11 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | Circle fold y=0 — M31.inv panic | Низкий | ✅ Закрыт (y==0 guard в VFRI4/5/6, 2026-05-22) |
 | stark_stwo/target/ не в .gitignore | Низкий | ✅ Закрыт (.gitignore обновлён, 2026-05-22) |
 | .env не имел DEPLOYER_PRIVATE_KEY alias | Баг | ✅ Закрыт (.env + submit.py исправлены, 2026-05-22) |
-| Нет cross-proof binding между LOG=10 и LOG=8 | Средний | Open (tracked MVP-5: unified FRI commitment) |
+| Нет cross-proof binding между LOG=10 и LOG=8 | Средний | ✅ Закрыт (VFRI7: `mixRoot(merkleRoot)` + BatchRegistryV4 cross-bound roots, 2026-05-25) |
+| `deserialize_public_key` принимал любой размер bytes | Средний | ✅ Закрыт (ML-DSA key size validation, 2026-05-25) |
+| Dead code в `gen_mldsa_v23_vfri7_cross_bound_hints` (блок `pass`) | Низкий | ✅ Закрыт (ValueError при разных fold counts, 2026-05-25) |
+| Молчаливое усечение sender bytes в `submit.py` | Средний | ✅ Закрыт (`_validate_senders` + `_as_bytes32` + `_decode_commitment16`, 2026-05-25) |
+| `TwoChannel.drawQueries` overflow при logDomainSize >= 256 | Низкий | ✅ Закрыт (`require(logDomainSize <= 31)`, 2026-05-25) |
 | QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (MVP-4: OODS + 20 queries) |
 | FRI blowup=4 → ~60-бит soundness | Высокий | ✅ Закрыт (blowup=64, 20 queries, 10 pow → 130 bits) |
 | M31 wrap-around soundness gap (mul constraints) | Высокий | ✅ Закрыт (Q-range check AIR, 2026-05-14) |

@@ -58,7 +58,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**Phase 6 complete** (Sepolia testnet live since 2026-05-05). **V23 dual-VFRI6 production pipeline** — 8-component STARK + O(1)-gas on-chain verification.
+**MVP-5 complete** (2026-05-25). **V23 dual-VFRI7 production pipeline with cross-proof binding** — 8-component STARK + O(1)-gas on-chain verification + security audit (2026-05-25).
 
 | Component | Status |
 |-----------|--------|
@@ -66,8 +66,8 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark_stwo/src/mldsa/` — Pure Rust ML-DSA-65 verifier (FIPS 204) | ✅ Done |
 | `stark_stwo/` — Stwo Circle STARK prover (Rust), 130-bit FRI security | ✅ Done |
 | ML-DSA arithmetic AIR circuits (8 components → 1 STARK, **V23**) | ✅ Done |
-| `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI6 hint generators | ✅ Done |
-| `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6**), CM31/QM31/MerkleVerifier | ✅ Done |
+| `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
+| `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
 | Tests — **210 Rust** (non-ignored) + **178 Python** (no PyO3) + **31 TS** + **847 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
@@ -79,9 +79,13 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **QLSAVerifierVFRI4** — VFRI3 + Poseidon2 OODS sponge (O(1) channel for any column count) | ✅ Done |
 | **QLSAVerifierVFRI5** — VFRI4 + composition polynomial Merkle tree (eliminates per-query O(n_cols)) | ✅ Done |
 | **QLSAVerifierVFRI6** — VFRI5 + off-chain OODS combo (O(1) gas for 1298 and 2206 cols alike) | ✅ Done |
-| **BatchRegistryV4** — Dual-VFRI6 registry requiring both LOG=10 + LOG=8 proofs | ✅ Done |
+| **BatchRegistryV4** — Dual-VFRI7 registry requiring both LOG=10 + LOG=8 cross-bound proofs | ✅ Done |
 | **Full V23 dual-VFRI6 E2E** — Both trace groups (3504 cols) verified ≤ 15M gas each; 12.5 KB calldata | ✅ Done |
 | **Security hardening** — MAX_SENDERS cap, y=0 circle-fold guard, .gitignore fixes, history eviction | ✅ Done (2026-05-22) |
+| **QLSAVerifierVFRI7** — VFRI6 + `mixRoot(merkleRoot)` before `drawQueries` (cross-proof binding) | ✅ Done (MVP-5, 2026-05-25) |
+| **BatchRegistryV4 cross-bound** — `boundRoot = keccak256(batchRoot ‖ traceRootOther)` passed to VFRI7 | ✅ Done (2026-05-25) |
+| **Full aggregator + SDK VFRI7 wiring** — Batcher, HTTP API, Python SDK, TypeScript SDK | ✅ Done (2026-05-25) |
+| **Security audit (2026-05-25)** — input validation hardening, dead code fix, defensive Solidity checks | ✅ Done (2026-05-25) |
 
 ---
 
@@ -104,9 +108,9 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ### Layer 3 — Verification (on-chain)
 
-- **BatchRegistryV4** (dual-VFRI6): two independent VFRI6 `verify()` calls — LOG=10 and LOG=8 groups
-- Both proof commitments: `Blake2s(proof[:32] ∥ merkleRoot)[:16]`
-- Each VFRI6 call runs ≤ 15M gas regardless of column count (O(1) in n_cols)
+- **BatchRegistryV4** (dual-VFRI7): two independent VFRI7 `verify()` calls — LOG=10 and LOG=8 groups
+- Cross-proof binding: `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)`, `boundRoot8 = keccak256(batchRoot ‖ traceRoot10)` — FRI query indices depend on the other group's trace commitment
+- Each VFRI7 call runs ≤ 15M gas regardless of column count (O(1) in n_cols)
 - Combined calldata: ~12.5 KB (7.2 KB LOG=10 + 5.3 KB LOG=8)
 - Store `merkle_root` + both commitments on-chain (nonce-ordered replay protection)
 
@@ -191,7 +195,11 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | Private key zeroing in Python is best-effort | Medium | Open (Rust `wipe_bytes` via `zeroize`; Python-side copy unavoidable) |
 | Hash AIR `H(a,b) = a³+b` not cryptographic | Low | ✅ Done (Poseidon2-over-M31, 2026-05-16) |
 | Non-constant last FRI layer (bounded-degree check) | High | ✅ Done (QLSAVerifierVFRI3, 2026-05-19) |
-| No cross-proof binding between LOG=10 and LOG=8 groups | Medium | Open (tracked for MVP-5; adversary could mix unrelated proofs) |
+| No cross-proof binding between LOG=10 and LOG=8 groups | Medium | ✅ Done (VFRI7: `mixRoot(merkleRoot)` before `drawQueries`; BatchRegistryV4 cross-bound roots, 2026-05-25) |
+| `deserialize_public_key` accepted any-size bytes | Medium | ✅ Fixed (ML-DSA key size validation, 2026-05-25) |
+| Dead code in `gen_mldsa_v23_vfri7_cross_bound_hints` (`pass` block) | Low | ✅ Fixed (raises `ValueError` when folds differ, 2026-05-25) |
+| Silent sender truncation in `submit.py` | Medium | ✅ Fixed (`_validate_senders` raises on wrong-size input, 2026-05-25) |
+| `TwoChannel.drawQueries` uint256 overflow (`logDomainSize >= 256`) | Low | ✅ Fixed (`require(logDomainSize <= 31)` guard, 2026-05-25) |
 
 For the full cryptography and security analysis, see `context.md`.
 
@@ -206,9 +214,9 @@ For the full cryptography and security analysis, see `context.md`.
 | On-chain verification | O(1) |
 | Sepolia first batch (4 tx) | 3,234-byte proof, 9.16 s |
 | V23 STARK columns | 3,504 main + 1 preproc (8 components, 1 FRI commitment) |
-| VFRI6 LOG=10 gas (1298 cols, 1 query) | ≤ 15M gas |
-| VFRI6 LOG=8 gas (2206 cols, 1 query) | ≤ 15M gas |
-| Dual-VFRI6 combined calldata | ~12.5 KB |
+| VFRI7 LOG=10 gas (1298 cols, 1 query) | ≤ 15M gas |
+| VFRI7 LOG=8 gas (2206 cols, 1 query) | ≤ 15M gas |
+| Dual-VFRI7 combined calldata | ~12.5 KB |
 | V23 slow test (full witness) | ~95 s (optimized build, `#[ignore]`) |
 
 Benchmarks: `/benchmarks/bench_core.py`, `bench_stark.py`, `bench_poly_circuits.py`, `bench_witnesses.py`.
@@ -223,7 +231,7 @@ QLSA/
 ├── stark/              # Python prover/verifier wrappers V4–V23, witness pipeline
 ├── stark_stwo/         # Stwo Circle STARK prover (Rust), ML-DSA arithmetic circuits
 ├── aggregator/         # Mempool, Batcher, AggregatorNode, HTTP API
-├── contracts/          # Solidity: BatchRegistry(V2/V3/V4), QLSAVerifier(V4–V13/VFRI–VFRI6), CM31/QM31/MerkleVerifier
+├── contracts/          # Solidity: BatchRegistry(V2/V3/V4), QLSAVerifier(V4–V13/VFRI–VFRI7), CM31/QM31/MerkleVerifier
 ├── sdk/python/         # Python SDK: Wallet, LocalClient, HttpClient, WitnessStatus
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
@@ -256,6 +264,7 @@ QLSA/
 | **VFRI3 bridges** | **Generic `gen_vfri3_hints_from_cols` + Poseidon2 + ML-DSA NttBatch VFRI3 bridges; E2E contract stack** | ✅ Done |
 | **V23** | **RangeQBatch 8th component — az_hat ∈ [0,Q) range check closes AzFull soundness gap** | ✅ Done |
 | **Security audit** | **Constant-time Merkle verify, rate-limit thread safety, input validation, Solidity depth guards** | ✅ Done |
+| **MVP-5** | **Cross-proof binding VFRI7 + aggregator/SDK VFRI7 wiring + security audit** | ✅ Done (2026-05-25) |
 | MVP-4 final | RPO256 hash AIR + Yul-optimised Blake2s + full V23 OODS wiring (20 queries, blowup 64) | ⏳ Next |
 
 ---
