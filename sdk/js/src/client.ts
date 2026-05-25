@@ -73,6 +73,9 @@ export class AggregatorClient {
       stark_commitment?: string;
       has_witness?: boolean;
       witness_commitment?: string;
+      has_vfri7?: boolean;
+      vfri7_commitment_log10?: string;
+      vfri7_commitment_log8?: string;
     }>("/batch/run", {});
     if (data.status === "no_batch") return null;
     return this._toBatchStatus(data as Required<typeof data>);
@@ -92,6 +95,9 @@ export class AggregatorClient {
       stark_commitment?: string;
       has_witness?: boolean;
       witness_commitment?: string;
+      has_vfri7?: boolean;
+      vfri7_commitment_log10?: string;
+      vfri7_commitment_log8?: string;
     }>("/batch/flush", {});
     if (data.status === "empty") return null;
     return this._toBatchStatus(data as Required<typeof data>);
@@ -108,13 +114,19 @@ export class AggregatorClient {
         onchain_commitment?: string;
         c_tilde_hex?: string;
         max_norms?: number[];
+        has_vfri7?: boolean;
+        vfri7_commitment_log10?: string;
+        vfri7_commitment_log8?: string;
       }>(`/batch/${batchId}/witness`);
-      if (!data.has_witness) return { hasWitness: false, maxNorms: [] };
+      if (!data.has_witness) return { hasWitness: false, maxNorms: [], hasVfri7: false };
       return {
         hasWitness: true,
         onchainCommitment: data.onchain_commitment,
         cTildeHex: data.c_tilde_hex,
         maxNorms: data.max_norms ?? [],
+        hasVfri7: data.has_vfri7 ?? false,
+        vfri7CommitmentLog10: data.vfri7_commitment_log10,
+        vfri7CommitmentLog8: data.vfri7_commitment_log8,
       };
     } catch {
       return null;
@@ -159,6 +171,9 @@ export class AggregatorClient {
     stark_commitment?: string;
     has_witness?: boolean;
     witness_commitment?: string;
+    has_vfri7?: boolean;
+    vfri7_commitment_log10?: string;
+    vfri7_commitment_log8?: string;
   }): BatchStatus {
     return {
       batchId: data.batch_id,
@@ -168,6 +183,9 @@ export class AggregatorClient {
       starkCommitment: data.stark_commitment,
       hasWitness: data.has_witness ?? false,
       witnessCommitment: data.witness_commitment,
+      hasVfri7: data.has_vfri7 ?? false,
+      vfri7CommitmentLog10: data.vfri7_commitment_log10,
+      vfri7CommitmentLog8: data.vfri7_commitment_log8,
     };
   }
 

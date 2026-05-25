@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
-QLSA Testnet Monitor — polls BatchRegistryV2 for BatchFinalized events.
+QLSA Testnet Monitor — polls BatchRegistryV4 for BatchFinalized events.
+
+BatchRegistryV4 emits:
+  BatchFinalized(bytes32 indexed merkleRoot,
+                 bytes16  indexed commitmentLog10,
+                 bytes16          commitmentLog8,
+                 uint256          timestamp)
 
 Usage:
   python -m testnet.monitor [--poll-interval 15]
 
 Environment (.env):
   RPC_URL          — L2 RPC endpoint
-  REGISTRY_ADDRESS — deployed BatchRegistryV2 address
+  REGISTRY_ADDRESS — deployed BatchRegistryV4 address
 """
 
 from __future__ import annotations
@@ -38,7 +44,12 @@ logger = logging.getLogger("qlsa.monitor")
 
 _REGISTRY_ABI = json.loads("""
 [
-  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":true,"internalType":"bytes8","name":"commitment","type":"bytes8"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BatchFinalized","type":"event"}
+  {"anonymous":false,"inputs":[
+    {"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},
+    {"indexed":true,"internalType":"bytes16","name":"commitmentLog10","type":"bytes16"},
+    {"indexed":false,"internalType":"bytes16","name":"commitmentLog8","type":"bytes16"},
+    {"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}
+  ],"name":"BatchFinalized","type":"event"}
 ]
 """)
 
@@ -80,10 +91,11 @@ def run(poll_interval_s: int = 15) -> None:
                     total_batches += 1
                     args = ev["args"]
                     logger.info(
-                        "[BatchFinalized #%d] root=%s… commitment=%s ts=%d block=%d",
+                        "[BatchFinalized #%d] root=%s… log10=%s log8=%s ts=%d block=%d",
                         total_batches,
                         args["merkleRoot"].hex()[:16],
-                        args["commitment"].hex(),
+                        args["commitmentLog10"].hex(),
+                        args["commitmentLog8"].hex(),
                         args["timestamp"],
                         ev["blockNumber"],
                     )

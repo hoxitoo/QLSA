@@ -18,6 +18,10 @@ export interface WitnessStatus {
   onchainCommitment?: string;  // 32-char hex (16-byte Blake2s binding)
   cTildeHex?: string;          // 96-char hex (48-byte ML-DSA-65 LAMBDA_BYTES)
   maxNorms: number[];
+  // VFRI7 cross-bound ML-DSA V23 proof commitments (MVP-5)
+  hasVfri7: boolean;
+  vfri7CommitmentLog10?: string;  // 32-char hex (16-byte binding, LOG=10 group)
+  vfri7CommitmentLog8?: string;   // 32-char hex (16-byte binding, LOG=8 group)
 }
 
 export interface BatchStatus {
@@ -28,6 +32,10 @@ export interface BatchStatus {
   starkCommitment?: string;
   hasWitness: boolean;
   witnessCommitment?: string;  // 32-char hex (16-byte binding for tx[0])
+  // VFRI7 cross-bound ML-DSA V23 proof commitments (MVP-5)
+  hasVfri7: boolean;
+  vfri7CommitmentLog10?: string;  // 32-char hex (16-byte binding, LOG=10 group)
+  vfri7CommitmentLog8?: string;   // 32-char hex (16-byte binding, LOG=8 group)
 }
 
 export interface NodeStats {
