@@ -270,8 +270,13 @@ def test_prove_witness_signed_tx_returns_witness_status():
     assert isinstance(ws.has_witness, bool)
     assert isinstance(ws.max_norms, list)
     if ws.has_witness:
+        # VFRI7 cross-bound path: onchain_commitment aliases vfri7_commitment_log10
         assert ws.onchain_commitment is not None
         assert len(ws.onchain_commitment) == 32
         int(ws.onchain_commitment, 16)  # valid hex
-        assert ws.c_tilde_hex is not None
-        assert len(ws.c_tilde_hex) == 96
+        assert ws.has_vfri7 is True
+        assert ws.vfri7_commitment_log10 == ws.onchain_commitment
+        assert ws.vfri7_commitment_log8 is not None
+        assert len(ws.vfri7_commitment_log8) == 32
+        # c_tilde_hex is legacy V3/V4 only; VFRI7 path does not populate it
+        assert ws.c_tilde_hex is None
