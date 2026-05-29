@@ -27,25 +27,34 @@ def _batch_status(result: BatchResult) -> BatchStatus:
     )
 
 
-def _prove_witness_local(tx: Transaction) -> WitnessStatus:
-    """Prove an ML-DSA-65 witness for a single transaction (pure local, no mempool)."""
+def _prove_witness_local(tx: Transaction, n_fri_queries: int = 1) -> WitnessStatus:
+    """Prove a VFRI7 cross-bound V23 ML-DSA witness for a single transaction (local, no mempool).
+
+    Uses a zero batch_merkle_root (bytes(32)) since this is a standalone per-tx operation
+    with no associated batch context.  The resulting commitment is therefore bound to the
+    all-zeros root, not a real batch; suitable for capability testing and SDK demos.
+    """
     if tx.signature is None or tx.public_key is None:
-        return WitnessStatus(has_witness=False)
+        return WitnessStatus(has_witness=False, has_vfri7=False)
     try:
-        from stark.prover import prove_mldsa_sig_witness_stark
-        wr = prove_mldsa_sig_witness_stark(
+        from stark.prover import prove_mldsa_sig_vfri7_stark
+        vr = prove_mldsa_sig_vfri7_stark(
             pk=tx.public_key,
             msg=tx.to_bytes(),
             sig=tx.signature,
+            batch_merkle_root=bytes(32),  # standalone: no real batch root available
+            n_queries=n_fri_queries,
         )
         return WitnessStatus(
             has_witness=True,
-            onchain_commitment=wr.onchain_commitment,
-            c_tilde_hex=wr.c_tilde_hex,
-            max_norms=wr.max_norms,
+            onchain_commitment=vr.log10_commitment,  # backward-compat alias
+            has_vfri7=True,
+            vfri7_commitment_log10=vr.log10_commitment,
+            vfri7_commitment_log8=vr.log8_commitment,
+            n_fri_queries=n_fri_queries,
         )
-    except (RuntimeError, ImportError):
-        return WitnessStatus(has_witness=False)
+    except (RuntimeError, ImportError, ValueError):
+        return WitnessStatus(has_witness=False, has_vfri7=False)
 
 
 class LocalClient:
@@ -86,23 +95,26 @@ class LocalClient:
         return _batch_status(result) if result is not None else None
 
     def prove_witness(self, tx: Transaction) -> WitnessStatus:
-        """Generate an ML-DSA-65 arithmetic witness STARK proof for a single transaction.
+        """Generate a VFRI7 cross-bound V23 ML-DSA-65 witness proof for a single transaction.
 
         Does not touch the mempool — purely a local proving operation.
         Requires the PyO3 extension (qlsa_stark_stwo). Returns WitnessStatus
         with has_witness=False if the extension is not available or the
         transaction is unsigned.
         """
-        return _prove_witness_local(tx)
+        return _prove_witness_local(tx, n_fri_queries=self._node.n_fri_queries)
 
     def stats(self) -> NodeStats:
         s = self._node.stats()
+        n = self._node.n_fri_queries
         return NodeStats(
             transactions_received=s.transactions_received,
             transactions_batched=s.transactions_batched,
             batches_created=s.batches_created,
             proofs_generated=s.proofs_generated,
             pending=self._node.pending_count(),
+            n_fri_queries=n,
+            fri_security_bits=6 * n + 10,
         )
 
 
@@ -221,6 +233,8 @@ class HttpClient:
             batches_created=data["batches_created"],
             proofs_generated=data["proofs_generated"],
             pending=data["pending"],
+            n_fri_queries=data.get("n_fri_queries", 1),
+            fri_security_bits=data.get("fri_security_bits", 16),
         )
 
     def health(self) -> bool:

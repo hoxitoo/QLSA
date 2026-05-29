@@ -283,8 +283,12 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
     node: AggregatorNode = request.app.state.node
     for result in node.history():
         if result.batch.batch_id == batch_id:
+            n = node.n_fri_queries
             if not result.has_witness:
-                return {"batch_id": batch_id, "has_witness": False, "has_vfri7": False}
+                return {
+                    "batch_id": batch_id, "has_witness": False, "has_vfri7": False,
+                    "n_fri_queries": n, "fri_security_bits": 6 * n + 10,
+                }
             return {
                 "batch_id": batch_id,
                 "has_witness": True,
@@ -294,6 +298,8 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
                 "has_vfri7": result.has_vfri7,
                 "vfri7_commitment_log10": result.vfri7_commitment_log10,
                 "vfri7_commitment_log8": result.vfri7_commitment_log8,
+                "n_fri_queries": n,
+                "fri_security_bits": 6 * n + 10,
             }
     raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
 

@@ -12,12 +12,18 @@ class SubmitResult:
 
 @dataclass
 class WitnessStatus:
-    """Result of an ML-DSA-65 arithmetic witness STARK proof."""
+    """Result of an ML-DSA-65 arithmetic witness STARK proof (VFRI7)."""
 
     has_witness: bool
-    onchain_commitment: str | None = None  # 32-char hex (16-byte Blake2s binding)
-    c_tilde_hex: str | None = None         # 96-char hex (48-byte ML-DSA-65 LAMBDA_BYTES)
+    # Legacy V3/V4 fields (kept for backward compatibility; None when VFRI7 is used).
+    onchain_commitment: str | None = None  # 32-char hex — mapped to vfri7_commitment_log10
+    c_tilde_hex: str | None = None         # 96-char hex — not available in VFRI7 path
     max_norms: list[int] = field(default_factory=list)
+    # VFRI7 cross-bound fields (MVP-5)
+    has_vfri7: bool = False
+    vfri7_commitment_log10: str | None = None  # 32-char hex
+    vfri7_commitment_log8:  str | None = None  # 32-char hex
+    n_fri_queries: int = 0  # FRI queries used; 0 = extension not available
 
 
 @dataclass
@@ -42,3 +48,5 @@ class NodeStats:
     batches_created: int
     proofs_generated: int
     pending: int
+    n_fri_queries: int = 1          # configured FRI queries per proof group
+    fri_security_bits: int = 16     # 6 × n_fri_queries + 10

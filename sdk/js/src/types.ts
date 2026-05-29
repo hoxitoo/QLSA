@@ -15,13 +15,15 @@ export interface SubmitResult {
 
 export interface WitnessStatus {
   hasWitness: boolean;
-  onchainCommitment?: string;  // 32-char hex (16-byte Blake2s binding)
-  cTildeHex?: string;          // 96-char hex (48-byte ML-DSA-65 LAMBDA_BYTES)
-  maxNorms: number[];
+  onchainCommitment?: string;  // 32-char hex — alias for vfri7CommitmentLog10 (backward compat)
+  cTildeHex?: string;          // 96-char hex — legacy V3/V4 path only; undefined for VFRI7
+  maxNorms: number[];          // legacy V3/V4 path only; empty for VFRI7
   // VFRI7 cross-bound ML-DSA V23 proof commitments (MVP-5)
   hasVfri7: boolean;
   vfri7CommitmentLog10?: string;  // 32-char hex (16-byte binding, LOG=10 group)
   vfri7CommitmentLog8?: string;   // 32-char hex (16-byte binding, LOG=8 group)
+  nFriQueries: number;            // FRI queries used; 0 = extension not available
+  friSecurityBits: number;        // 6 × nFriQueries + 10
 }
 
 export interface BatchStatus {
@@ -44,4 +46,6 @@ export interface NodeStats {
   batchesCreated: number;
   proofsGenerated: number;
   pending: number;
+  nFriQueries: number;      // configured FRI queries per proof group
+  friSecurityBits: number;  // 6 × nFriQueries + 10
 }

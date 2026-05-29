@@ -117,8 +117,16 @@ export class AggregatorClient {
         has_vfri7?: boolean;
         vfri7_commitment_log10?: string;
         vfri7_commitment_log8?: string;
+        n_fri_queries?: number;
+        fri_security_bits?: number;
       }>(`/batch/${batchId}/witness`);
-      if (!data.has_witness) return { hasWitness: false, maxNorms: [], hasVfri7: false };
+      if (!data.has_witness) {
+        return {
+          hasWitness: false, maxNorms: [], hasVfri7: false,
+          nFriQueries: data.n_fri_queries ?? 0,
+          friSecurityBits: data.fri_security_bits ?? 0,
+        };
+      }
       return {
         hasWitness: true,
         onchainCommitment: data.onchain_commitment,
@@ -127,6 +135,8 @@ export class AggregatorClient {
         hasVfri7: data.has_vfri7 ?? false,
         vfri7CommitmentLog10: data.vfri7_commitment_log10,
         vfri7CommitmentLog8: data.vfri7_commitment_log8,
+        nFriQueries: data.n_fri_queries ?? 0,
+        friSecurityBits: data.fri_security_bits ?? 0,
       };
     } catch {
       return null;
@@ -141,6 +151,8 @@ export class AggregatorClient {
       batches_created: number;
       proofs_generated: number;
       pending: number;
+      n_fri_queries?: number;
+      fri_security_bits?: number;
     }>("/stats");
     return {
       transactionsReceived: data.transactions_received,
@@ -148,6 +160,8 @@ export class AggregatorClient {
       batchesCreated: data.batches_created,
       proofsGenerated: data.proofs_generated,
       pending: data.pending,
+      nFriQueries: data.n_fri_queries ?? 1,
+      friSecurityBits: data.fri_security_bits ?? 16,
     };
   }
 
