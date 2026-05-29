@@ -258,6 +258,7 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | Dead code в `gen_mldsa_v23_vfri7_cross_bound_hints` (блок `pass`) | Низкий | ✅ Закрыт (ValueError при разных fold counts, 2026-05-25) |
 | Молчаливое усечение sender bytes в `submit.py` | Средний | ✅ Закрыт (`_validate_senders` + `_as_bytes32` + `_decode_commitment16`, 2026-05-25) |
 | `TwoChannel.drawQueries` overflow при logDomainSize >= 256 | Низкий | ✅ Закрыт (`require(logDomainSize <= 31)`, 2026-05-25) |
+| n_queries=1 on-chain → 16-bit soundness (газовый лимит) | Высокий | Open (n конфигурируемо через N_FRI_QUERIES env var; gas opt деferred MVP-4) |
 | QLSAVerifierFull — Blake2s binding (не полный FRI) | Критично | Partial (MVP-4: OODS + 20 queries) |
 | FRI blowup=4 → ~60-бит soundness | Высокий | ✅ Закрыт (blowup=64, 20 queries, 10 pow → 130 bits) |
 | M31 wrap-around soundness gap (mul constraints) | Высокий | ✅ Закрыт (Q-range check AIR, 2026-05-14) |
@@ -274,6 +275,37 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | bytes(private_key) — иммутабельная копия в Python | Средний | Open (Rust wipe_bytes; Python-side copy неизбежна) |
 | H(a,b) = a³+b — не крипто-стойкая | Низкий | ✅ Done (Poseidon2-over-M31, 2026-05-16) |
 | tx_hash усекается до 31 бита для M31 | Низкий | Open |
+
+---
+
+## Конкурентный ландшафт (обновлено 2026-05-29)
+
+### Quantus (май 2026)
+
+**Статус**: опубликовали research report *"The State of Quantum: What Crypto Can't Afford to Ignore"* (27.05.2026).
+
+**Их тезис**: ML-DSA-87 даёт 7187 байт на транзакцию (74× больше ECDSA) → без архитектурных изменений блокчейн не масштабируется.
+
+**Их решение**: новый L1 с PQ из коробки. Технический стек: Plonky2 + STARK-style proof aggregation + Poseidon2 + Wormhole Addresses.
+
+**Сравнение с QLSA**:
+
+| Аспект | Quantus | QLSA |
+|--------|---------|------|
+| Архитектура | Новый L1 (bootstrap сообщества с нуля) | Aggregation layer поверх существующих сетей |
+| Доказательная система | Plonky2 | Stwo Circle STARK |
+| OODS hash | Poseidon2 | Poseidon2-over-M31 (идентично) |
+| ML-DSA вариант | ML-DSA-87 | ML-DSA-65 (FIPS 204) |
+| Статус | Research report / whitepaper | Working prototype, Sepolia testnet live |
+| Барьер входа | Высокий (новый L1, нет liquidity) | Низкий (L2 на Ethereum, без хард-форка) |
+
+**Вывод**: Quantus подтверждает правильность тезиса QLSA и выбора технического стека (STARK + Poseidon2). Ключевое преимущество QLSA — не нужен новый L1; агрегационный слой совместим с существующей инфраструктурой Ethereum.
+
+### Ключевые упоминания (внешние источники)
+- Quantus, *"The State of Quantum: What Crypto Can't Afford to Ignore"*, 27.05.2026
+- ForkLog, Владимир Слипер, «В Quantus указали на неготовность крипторынка к квантовой угрозе», 28.05.2026
+- IBM Quantum (май 2026): квантовые вычисления выходят из лабораторной стадии
+- BIP-360: предложение по миграции биткоина к PQ-защите (Pay-to-Merkle-Root)
 
 ---
 
@@ -294,6 +326,7 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - Батч: до 3000 транзакций по умолчанию
 - Деплой: Ethereum Sepolia (testnet)
 - TraceLocationAllocator: `default()` для компонентов без preproc; `new_with_preprocessed_columns(&[pc_is_init_uh()])` когда UseHintBatchV2 включён
+- `n_fri_queries`: конфигурируемо через `N_FRI_QUERIES` env var (default=1 → 16-bit on-chain soundness, gas-safe); `security_bits = 6 × n + 10`; n=20 → 130 bits но ~300M gas (deferred MVP-4)
 
 ---
 

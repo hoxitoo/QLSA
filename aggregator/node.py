@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 
@@ -47,13 +48,20 @@ class AggregatorNode:
         min_batch_size: int = 1,
         max_batch_size: int = 3000,
         mempool_capacity: int = 3000,
+        n_fri_queries: int | None = None,
     ) -> None:
+        # Allow override from env (e.g. N_FRI_QUERIES=3 for 28-bit on-chain soundness).
+        # Default 1 is gas-safe for testnet; production target is 20 (requires gas optimisation).
+        if n_fri_queries is None:
+            n_fri_queries = int(os.environ.get("N_FRI_QUERIES", "1"))
         self.mempool = Mempool(max_size=mempool_capacity)
         self.batcher = Batcher(
             self.mempool,
             min_batch_size=min_batch_size,
             max_batch_size=max_batch_size,
+            n_fri_queries=n_fri_queries,
         )
+        self.n_fri_queries = n_fri_queries
         self._stats = NodeStats()
         self._history: list[BatchResult] = []
         self._lock = threading.Lock()

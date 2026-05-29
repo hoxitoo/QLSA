@@ -88,15 +88,21 @@ class Batcher:
         min_batch_size: int = 1,
         max_batch_size: int = 3000,
         algorithm: str = DEFAULT_ALGORITHM,
+        n_fri_queries: int = 1,
     ) -> None:
         if min_batch_size < 1:
             raise ValueError("min_batch_size must be at least 1")
         if max_batch_size < min_batch_size:
             raise ValueError("max_batch_size must be >= min_batch_size")
+        if n_fri_queries < 1 or n_fri_queries > 64:
+            raise ValueError(f"n_fri_queries must be in [1, 64], got {n_fri_queries}")
         self.mempool = mempool
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
         self.algorithm = algorithm
+        self.n_fri_queries = n_fri_queries
+        # Security level: log_blowup(6) × n_fri_queries + pow_bits(10)
+        # n=1 → 16 bits (demo/testnet), n=3 → 28 bits, n=20 → 130 bits (but ~300M gas).
 
     def try_batch(self, prove_witnesses: bool = False) -> BatchResult | None:
         """Create a batch if the mempool has enough transactions.
@@ -190,7 +196,7 @@ class Batcher:
                         msg=tx0.to_bytes(),
                         sig=tx0.signature,
                         batch_merkle_root=result.merkle_root_onchain,
-                        n_queries=1,
+                        n_queries=self.n_fri_queries,
                     )
                     result.vfri7_proof_log10      = vr.log10_proof
                     result.vfri7_commitment_log10 = vr.log10_commitment

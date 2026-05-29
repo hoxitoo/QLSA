@@ -402,3 +402,51 @@ class TestAggregatorNode:
         assert s.batches_created == 3
         assert s.transactions_batched == 6
         assert s.transactions_received == 6
+
+    def test_n_fri_queries_default_is_one(self):
+        node = AggregatorNode()
+        assert node.n_fri_queries == 1
+        assert node.batcher.n_fri_queries == 1
+
+    def test_n_fri_queries_constructor_override(self):
+        node = AggregatorNode(n_fri_queries=3)
+        assert node.n_fri_queries == 3
+        assert node.batcher.n_fri_queries == 3
+
+    def test_n_fri_queries_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("N_FRI_QUERIES", "5")
+        node = AggregatorNode()
+        assert node.n_fri_queries == 5
+        assert node.batcher.n_fri_queries == 5
+
+    def test_n_fri_queries_env_ignored_when_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("N_FRI_QUERIES", "5")
+        node = AggregatorNode(n_fri_queries=2)
+        assert node.n_fri_queries == 2
+
+
+class TestBatcherNFriQueries:
+    def test_default_is_one(self):
+        mp = Mempool()
+        b = Batcher(mp)
+        assert b.n_fri_queries == 1
+
+    def test_custom_value(self):
+        mp = Mempool()
+        b = Batcher(mp, n_fri_queries=4)
+        assert b.n_fri_queries == 4
+
+    def test_zero_raises(self):
+        mp = Mempool()
+        with pytest.raises(ValueError, match="n_fri_queries must be in"):
+            Batcher(mp, n_fri_queries=0)
+
+    def test_over_max_raises(self):
+        mp = Mempool()
+        with pytest.raises(ValueError, match="n_fri_queries must be in"):
+            Batcher(mp, n_fri_queries=65)
+
+    def test_boundary_values_accepted(self):
+        mp = Mempool()
+        Batcher(mp, n_fri_queries=1)
+        Batcher(mp, n_fri_queries=64)

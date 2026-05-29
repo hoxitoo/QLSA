@@ -11,9 +11,10 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > This codebase is a **research prototype / testnet demonstrator**.
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
-> - `LOG_BLOWUP=6` → blowup=64, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit FRI soundness
-> - On-chain FRI verifier: QLSAVerifierVFRI3 completes K-round FRI + non-constant last-layer polynomial check (bounded-degree); RPO256 hash AIR pending
-> - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 is MVP-4
+> - Off-chain STARK proof: `LOG_BLOWUP=6`, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit soundness
+> - On-chain verifier (VFRI7) spot-checks `n_queries` hints per call. Default `n_queries=1` → **16-bit on-chain soundness** (6×1+10). Gas-efficient for testnet; production target is n=3–5 (28–40 bits) pending gas optimization.
+> - Full 130-bit on-chain soundness (n=20) requires ~300M gas per group — exceeds mainnet block limit; solution deferred to MVP-4 (recursive batching or PoW nonce verification on-chain).
+> - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 hash AIR is MVP-4
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
 
@@ -192,6 +193,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | CM31.fromBytes8LE no M31 range check | Medium | ✅ Fixed (`require(a < P && b < P)`, 2026-05-20) |
 | treeDepth upper bound missing in V11/V12/V13 | Low | ✅ Fixed (`> 30` guard added, 2026-05-20) |
 | API rate limiting | Medium | ✅ Done (100 tx/min, 20 batch ops/min per IP) |
+| On-chain n_queries=1 → 16-bit soundness (gas constraint) | High | Open (gas optimisation deferred to MVP-4; n configurable via `N_FRI_QUERIES` env var) |
 | Private key zeroing in Python is best-effort | Medium | Open (Rust `wipe_bytes` via `zeroize`; Python-side copy unavoidable) |
 | Hash AIR `H(a,b) = a³+b` not cryptographic | Low | ✅ Done (Poseidon2-over-M31, 2026-05-16) |
 | Non-constant last FRI layer (bounded-degree check) | High | ✅ Done (QLSAVerifierVFRI3, 2026-05-19) |
@@ -321,6 +323,18 @@ PQ adoption is inevitable, but gradual.
 - Quantum threat: "harvest now, decrypt later" is active
 - Stwo deployed on Starknet Mainnet (November 2025)
 - PQ migration window is open — but narrowing
+
+### External Validation (May 2026)
+
+Quantus published *"The State of Quantum: What Crypto Can't Afford to Ignore"* (May 27, 2026), independently confirming the same problem QLSA solves:
+
+> *"A standard ECDSA transaction carries roughly 97 bytes of signature and public key. The same transaction using ML-DSA-87 carries almost 7187 bytes — a 74× increase that would sharply minimise the number of transactions per block without architectural changes."*
+
+Their proposed solution: **STARK-style proof aggregation + Poseidon2** to move verification off-chain.
+
+This is exactly QLSA's architecture — Circle STARK (Stwo) + Poseidon2 OODS sponge + O(1) on-chain verification. The key architectural difference: Quantus builds a new L1 blockchain requiring bootstrap from scratch; QLSA is a **drop-in aggregation layer** on top of existing chains (Ethereum, no hard-fork required).
+
+Source: Quantus, *"The State of Quantum: What Crypto Can't Afford to Ignore"*, May 27, 2026.
 
 ---
 

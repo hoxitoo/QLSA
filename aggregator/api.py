@@ -200,12 +200,15 @@ def health() -> dict[str, str]:
 def stats(request: Request) -> dict[str, Any]:
     node: AggregatorNode = request.app.state.node
     s = node.stats()
+    n = node.n_fri_queries
     return {
         "transactions_received": s.transactions_received,
         "transactions_batched": s.transactions_batched,
         "batches_created": s.batches_created,
         "proofs_generated": s.proofs_generated,
         "pending": node.pending_count(),
+        "n_fri_queries": n,
+        "fri_security_bits": 6 * n + 10,  # log_blowup(6) × n + pow_bits(10)
     }
 
 
