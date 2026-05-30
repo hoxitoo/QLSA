@@ -52,6 +52,7 @@ def _prove_witness_local(tx: Transaction, n_fri_queries: int = 1) -> WitnessStat
             vfri7_commitment_log10=vr.log10_commitment,
             vfri7_commitment_log8=vr.log8_commitment,
             n_fri_queries=n_fri_queries,
+            fri_security_bits=6 * n_fri_queries + 10,
         )
     except (RuntimeError, ImportError, ValueError):
         return WitnessStatus(has_witness=False, has_vfri7=False)
@@ -103,6 +104,13 @@ class LocalClient:
         transaction is unsigned.
         """
         return _prove_witness_local(tx, n_fri_queries=self._node.n_fri_queries)
+
+    def get_batch(self, batch_id: str) -> BatchStatus | None:
+        """Return the BatchStatus for a given batch_id, or None if not found."""
+        for result in self._node.history():
+            if result.batch.batch_id == batch_id:
+                return _batch_status(result)
+        return None
 
     def stats(self) -> NodeStats:
         s = self._node.stats()
@@ -213,14 +221,35 @@ class HttpClient:
                 f"Aggregator /batch/flush response missing field: {exc}. Got: {list(data)}"
             ) from exc
 
-    def prove_witness(self, tx: Transaction) -> WitnessStatus:
+    def get_batch(self, batch_id: str) -> BatchStatus | None:
+        """Return the BatchStatus for a given batch_id, or None if not found (HTTP 404)."""
+        httpx = self._httpx()
+        resp = httpx.get(f"{self._base_url}/batch/{batch_id}", timeout=self._timeout)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        return BatchStatus(
+            batch_id=data["batch_id"],
+            tx_count=data["tx_count"],
+            merkle_root=data["merkle_root"],
+            is_proven=data["is_proven"],
+            stark_commitment=data.get("stark_commitment"),
+            has_witness=data.get("has_witness", False),
+            witness_commitment=data.get("witness_commitment"),
+            has_vfri7=data.get("has_vfri7", False),
+            vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
+            vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
+        )
+
+    def prove_witness(self, tx: Transaction, n_fri_queries: int = 1) -> WitnessStatus:
         """Generate an ML-DSA-65 arithmetic witness STARK proof for a single transaction.
 
         Runs locally (does not call the remote aggregator). Requires the PyO3
         extension (qlsa_stark_stwo). Returns WitnessStatus with has_witness=False
         if the extension is unavailable or the transaction is unsigned.
         """
-        return _prove_witness_local(tx)
+        return _prove_witness_local(tx, n_fri_queries=n_fri_queries)
 
     def stats(self) -> NodeStats:
         httpx = self._httpx()

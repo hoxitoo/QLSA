@@ -23,7 +23,8 @@ class WitnessStatus:
     has_vfri7: bool = False
     vfri7_commitment_log10: str | None = None  # 32-char hex
     vfri7_commitment_log8:  str | None = None  # 32-char hex
-    n_fri_queries: int = 0  # FRI queries used; 0 = extension not available
+    n_fri_queries: int = 0     # FRI queries used; 0 = extension not available
+    fri_security_bits: int = 0 # 6 × n_fri_queries + 10; 0 = extension not available
 
 
 @dataclass

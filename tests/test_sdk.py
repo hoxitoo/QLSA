@@ -201,6 +201,32 @@ def test_local_client_stats_initial_state():
     assert stats.pending == 0
 
 
+def test_local_client_stats_fri_fields():
+    client = LocalClient()
+    stats = client.stats()
+    assert isinstance(stats.n_fri_queries, int) and stats.n_fri_queries >= 1
+    assert stats.fri_security_bits == 6 * stats.n_fri_queries + 10
+
+
+def test_local_client_get_batch_returns_status():
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1, nonce=0)
+        client = LocalClient()
+        client.submit(tx)
+        status = client.flush()
+    assert status is not None
+    found = client.get_batch(status.batch_id)
+    assert found is not None
+    assert found.batch_id == status.batch_id
+    assert found.tx_count == status.tx_count
+    assert found.is_proven == status.is_proven
+
+
+def test_local_client_get_batch_unknown_returns_none():
+    client = LocalClient()
+    assert client.get_batch("nonexistent-batch-id") is None
+
+
 # ── BatchStatus witness fields ────────────────────────────────────────────────
 
 def test_batch_status_has_witness_false_by_default():
@@ -280,3 +306,6 @@ def test_prove_witness_signed_tx_returns_witness_status():
         assert len(ws.vfri7_commitment_log8) == 32
         # c_tilde_hex is legacy V3/V4 only; VFRI7 path does not populate it
         assert ws.c_tilde_hex is None
+        # FRI security fields
+        assert ws.n_fri_queries >= 1
+        assert ws.fri_security_bits == 6 * ws.n_fri_queries + 10

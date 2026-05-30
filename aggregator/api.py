@@ -272,6 +272,30 @@ def batch_run(
     }
 
 
+@app.get("/batch/{batch_id}")
+def batch_status(batch_id: str, request: Request) -> dict[str, Any]:
+    """Return status for a previously created batch.
+
+    Returns 404 if the batch_id is unknown to this node.
+    """
+    node: AggregatorNode = request.app.state.node
+    for result in node.history():
+        if result.batch.batch_id == batch_id:
+            return {
+                "batch_id": batch_id,
+                "tx_count": len(result.batch.transactions),
+                "merkle_root": result.batch.merkle_root.hex(),
+                "is_proven": result.is_proven,
+                "stark_commitment": result.commitment,
+                "has_witness": result.has_witness,
+                "witness_commitment": result.witness_commitment,
+                "has_vfri7": result.has_vfri7,
+                "vfri7_commitment_log10": result.vfri7_commitment_log10,
+                "vfri7_commitment_log8": result.vfri7_commitment_log8,
+            }
+    raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+
+
 @app.get("/batch/{batch_id}/witness")
 def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
     """Return witness proof metadata for a previously created batch.
