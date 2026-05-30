@@ -75,7 +75,7 @@ def test_builder_produces_signed_transaction():
 def test_builder_multiple_transactions():
     with Wallet.generate() as wallet:
         builder = TransactionBuilder(wallet)
-        txs = [builder.build(recipient="c" * 64, amount=i, nonce=i) for i in range(5)]
+        txs = [builder.build(recipient="c" * 64, amount=i + 1, nonce=i) for i in range(5)]
     assert all(tx.signature is not None for tx in txs)
     assert [tx.nonce for tx in txs] == list(range(5))
 

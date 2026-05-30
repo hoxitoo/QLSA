@@ -57,6 +57,11 @@ def signed_payload() -> dict:
 @pytest.fixture()
 def client() -> "TestClient":
     from aggregator.api import app
+    import aggregator.api as api_mod
+    with api_mod._rate_lock:
+        api_mod._tx_windows.clear()
+        api_mod._batch_windows.clear()
+        api_mod._read_windows.clear()
     with TestClient(app) as c:
         yield c
 
