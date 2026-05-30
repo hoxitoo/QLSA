@@ -87,7 +87,8 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **BatchRegistryV4 cross-bound** — `boundRoot = keccak256(batchRoot ‖ traceRootOther)` passed to VFRI7 | ✅ Done (2026-05-25) |
 | **Full aggregator + SDK VFRI7 wiring** — Batcher, HTTP API, Python SDK, TypeScript SDK | ✅ Done (2026-05-25) |
 | **Security audit (2026-05-25)** — input validation hardening, dead code fix, defensive Solidity checks | ✅ Done (2026-05-25) |
-| **Security audit (2026-05-30)** — TRUSTED_PROXIES env config, amount≥1 validation, dead code removal, GET /batch/{id}, fri_security_bits SDK field, exception safety in submit.py | ✅ Done (2026-05-30) |
+| **Security audit (2026-05-30 round-1)** — TRUSTED_PROXIES env config, amount≥1 validation, dead code removal, GET /batch/{id}, fri_security_bits SDK field, exception safety in submit.py | ✅ Done (2026-05-30) |
+| **Security + code audit (2026-05-30 round-2)** — IP validation, hex normalization, GET rate limiting, UUID batch_id validation, pubkey size check, deque history, O(1) batch index, N_FRI_QUERIES env guard | ✅ Done (2026-05-30) |
 
 ---
 
@@ -211,6 +212,16 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | No `GET /batch/{id}` endpoint — clients could not query batch status without re-proving | Low | ✅ Fixed (endpoint added to HTTP API, 2026-05-30) |
 | `WitnessStatus.fri_security_bits` missing from Python SDK | Low | ✅ Fixed (field added: `6 × n_fri_queries + 10`, 2026-05-30) |
 | `fastapi`/`httpx` duplicated in both `requirements-api.txt` and `requirements-dev.txt` | Low | ✅ Fixed (`-r requirements-api.txt` reference, 2026-05-30) |
+| `TRUSTED_PROXIES` env value not IP-validated — malformed token added to whitelist | Medium | ✅ Fixed (`ipaddress.ip_address()` + warning+skip, 2026-05-30) |
+| `public_key`/`signature` not normalized to lowercase in API validators | Low | ✅ Fixed (`.lower()` added, matching sender/recipient, 2026-05-30) |
+| GET `/batch/*` endpoints unrate-limited — O(n) history scan DoS vector | Medium | ✅ Fixed (200 req/min per IP, 2026-05-30) |
+| `batch_id` accepted any string — no UUID format validation | Low | ✅ Fixed (`uuid.UUID()` guard, HTTP 400 on bad format, 2026-05-30) |
+| `Transaction.public_key` not size-validated in `__post_init__` | Medium | ✅ Fixed (validates against ML-DSA sizes {1312, 1952, 2592} B, 2026-05-30) |
+| `create_batch()` algorithm not validated before first `verify()` call | Low | ✅ Fixed (early check at function entry, 2026-05-30) |
+| `node._history` list slice eviction — new list allocated every eviction cycle | Medium | ✅ Fixed (`deque(maxlen=1000)` + O(1) `_batch_index` dict, 2026-05-30) |
+| `N_FRI_QUERIES` env var unchecked — crash on non-integer value at startup | Medium | ✅ Fixed (`try/except ValueError` + range `[1, 64]` check, 2026-05-30) |
+| `batcher.py` used root logger — module-level filtering impossible | Low | ✅ Fixed (`logging.getLogger(__name__)`, 2026-05-30) |
+| `HttpClient.submit()` missing `KeyError` guard on response parsing | Low | ✅ Fixed (`try/except KeyError` matching pattern of `run_cycle`/`flush`, 2026-05-30) |
 
 For the full cryptography and security analysis, see `context.md`.
 

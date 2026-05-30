@@ -7,7 +7,8 @@
 - QLSAVerifierVFRI7: `mixRoot(merkleRoot)` перед `drawQueries`; BatchRegistryV4 использует cross-bound roots
 - Aggregator, HTTP API, Python SDK, TypeScript SDK — обновлены под VFRI7 dual-commitment
 - Проведён аудит безопасности + code review (2026-05-25); 5 новых findings — все устранены
-- Проведён повторный аудит безопасности + code review (2026-05-30); 8 новых findings — все устранены
+- Проведён аудит безопасности + code review (2026-05-30 round-1); 8 новых findings — все устранены
+- Проведён аудит безопасности + code review (2026-05-30 round-2); 11 новых findings — все устранены
 
 ### Что готово
 
@@ -251,6 +252,16 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - **GET /batch/{batch_id} endpoint**: новый endpoint позволяет SDK/клиентам опросить статус батча без повторного доказательства (2026-05-30)
 - **WitnessStatus.fri_security_bits**: поле добавлено в Python SDK (parity с TypeScript SDK); вычисляется как `6 × n_fri_queries + 10` (2026-05-30)
 - **requirements-dev.txt deduplicated**: дубликаты `fastapi` / `httpx` заменены на `-r requirements-api.txt` (2026-05-30)
+- **TRUSTED_PROXIES IP validation**: `ipaddress.ip_address()` проверяет каждый токен; невалидные — warning+skip (2026-05-30)
+- **public_key/signature normalize**: API-validators возвращают `.lower()` для hex-полей — консистентность с sender/recipient (2026-05-30)
+- **GET /batch/* rate limiting**: 200 req/min per IP; устраняет O(n) history-scan DoS вектор (2026-05-30)
+- **batch_id UUID validation**: `uuid.UUID(batch_id)` guard, HTTP 400 на невалидный формат (2026-05-30)
+- **Transaction.public_key size validation**: `__post_init__` проверяет размер против ML-DSA {1312,1952,2592} байт (2026-05-30)
+- **create_batch() algorithm validation**: ранняя проверка до первого `verify()` вызова (2026-05-30)
+- **node._history → deque + _batch_index**: `deque(maxlen=1000)` устраняет slice allocation; dict обеспечивает O(1) lookup (2026-05-30)
+- **N_FRI_QUERIES env validation**: try/except ValueError + range [1,64] check при инициализации узла (2026-05-30)
+- **batcher.py module logger**: заменён root logger на `logging.getLogger(__name__)` (2026-05-30)
+- **HttpClient.submit() KeyError guard**: защита от серверных ответов без поля `accepted` (2026-05-30)
 
 ### Таблица рисков (обновлено 2026-05-30)
 
@@ -295,6 +306,16 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | Нет `GET /batch/{id}` endpoint — нельзя получить статус батча без доказательства | Низкий | ✅ Закрыт (endpoint добавлен, 2026-05-30) |
 | `WitnessStatus.fri_security_bits` отсутствовало в Python SDK | Низкий | ✅ Закрыт (поле добавлено, 2026-05-30) |
 | Дублирование fastapi/httpx в requirements-dev.txt | Низкий | ✅ Закрыт (-r requirements-api.txt, 2026-05-30) |
+| TRUSTED_PROXIES IP не валидировался — невалидный токен добавлялся в whitelist | Средний | ✅ Закрыт (ipaddress.ip_address() + warning, 2026-05-30) |
+| public_key / signature в API не нормализовались к lowercase | Низкий | ✅ Закрыт (.lower() в validators, 2026-05-30) |
+| GET /batch/* endpoints не rate-limited — DoS через O(n) history scan | Средний | ✅ Закрыт (200 req/min limit, 2026-05-30) |
+| batch_id принимал любую строку — не валидировался как UUID | Низкий | ✅ Закрыт (uuid.UUID() guard, HTTP 400, 2026-05-30) |
+| Transaction.public_key не проверялся на ML-DSA размер в `__post_init__` | Средний | ✅ Закрыт (size check против {1312,1952,2592}, 2026-05-30) |
+| create_batch() algorithm не валидировался — ошибка появлялась на первом verify | Низкий | ✅ Закрыт (ранняя проверка, 2026-05-30) |
+| node._history — slice eviction создавал новую list при каждом evict (memory + GC pressure) | Средний | ✅ Закрыт (deque(maxlen=1000) + _batch_index dict, 2026-05-30) |
+| N_FRI_QUERIES env без обработки ошибок — crash при нечисловом значении | Средний | ✅ Закрыт (try/except + range [1,64], 2026-05-30) |
+| batcher.py использовал root logger — нельзя фильтровать по модулю | Низкий | ✅ Закрыт (module logger, 2026-05-30) |
+| HttpClient.submit() KeyError при ответе без поля accepted | Низкий | ✅ Закрыт (try/except guard, 2026-05-30) |
 
 ---
 
