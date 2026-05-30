@@ -136,3 +136,11 @@ def test_recipient_wrong_length_raises():
     with pytest.raises(ValueError, match="recipient"):
         Transaction(sender="a" * 64, recipient="ab" * 10, amount=1, nonce=0, public_key=pub)
 
+
+def test_invalid_pubkey_size_raises():
+    pub, priv = generate_keypair()
+    addr = derive_address(pub)
+    wipe_key(priv)
+    with pytest.raises(ValueError, match="ML-DSA"):
+        Transaction(sender=addr, recipient="b" * 64, amount=1, nonce=0, public_key=b"\x01" * 10)
+

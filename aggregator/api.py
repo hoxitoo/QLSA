@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import threading
 import time
+import uuid as _uuid_mod
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -25,21 +27,44 @@ from core.transaction import Transaction
 
 _TX_LIMIT = 100          # max POST /transactions per IP per minute
 _BATCH_LIMIT = 20        # max POST /batch/* per IP per minute
+_READ_LIMIT = 200        # max GET /batch/* per IP per minute
 _WINDOW_SECS = 60.0
 _EVICT_EVERY = 500       # evict stale entries every N calls to avoid unbounded growth
 
 # {ip: deque[timestamp]}  — one deque per IP per bucket
 _tx_windows: dict[str, deque[float]] = {}
 _batch_windows: dict[str, deque[float]] = {}
+_read_windows: dict[str, deque[float]] = {}
 _rate_lock = threading.Lock()
 _rate_call_count = 0
 
+
+def _parse_trusted_proxies() -> frozenset[str]:
+    """Build the trusted-proxy set from the TRUSTED_PROXIES env var.
+
+    Loopback addresses are always included.  Each comma-separated entry is
+    validated with ipaddress.ip_address(); invalid entries are skipped with
+    a warning so a misconfigured env var does not silently block all traffic.
+    """
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    base: set[str] = {"127.0.0.1", "::1"}
+    raw = os.environ.get("TRUSTED_PROXIES", "")
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            ipaddress.ip_address(token)
+            base.add(token)
+        except ValueError:
+            _logger.warning("TRUSTED_PROXIES: ignoring invalid IP address %r", token)
+    return frozenset(base)
+
+
 # IPs that route through trusted reverse proxies (read X-Forwarded-For).
 # Always includes loopback; extend via TRUSTED_PROXIES env var (comma-separated IPs).
-_TRUSTED_PROXIES: frozenset[str] = frozenset(
-    {"127.0.0.1", "::1"}
-    | {ip.strip() for ip in os.environ.get("TRUSTED_PROXIES", "").split(",") if ip.strip()}
-)
+_TRUSTED_PROXIES: frozenset[str] = _parse_trusted_proxies()
 
 
 def _get_client_ip(request: Request) -> str:
@@ -75,9 +100,10 @@ def _check_rate(windows: dict[str, deque[float]], ip: str, limit: int) -> bool:
     with _rate_lock:
         _rate_call_count += 1
         if _rate_call_count >= _EVICT_EVERY:
-            # Evict both window dicts so neither grows unboundedly.
+            # Evict all window dicts so none grows unboundedly.
             _evict_stale(_tx_windows, cutoff)
             _evict_stale(_batch_windows, cutoff)
+            _evict_stale(_read_windows, cutoff)
             _rate_call_count = 0
         dq = windows.setdefault(ip, deque())
         while dq and dq[0] < cutoff:
@@ -100,11 +126,17 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     status_code=429,
                     content={"detail": "rate limit exceeded: max 100 transaction submissions per minute"},
                 )
-        elif method == "POST" and (path.startswith("/batch/")):
+        elif method == "POST" and path.startswith("/batch/"):
             if not _check_rate(_batch_windows, ip, _BATCH_LIMIT):
                 return JSONResponse(
                     status_code=429,
                     content={"detail": "rate limit exceeded: max 20 batch operations per minute"},
+                )
+        elif method == "GET" and path.startswith("/batch/"):
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
                 )
 
         return await call_next(request)
@@ -118,6 +150,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="QLSA Aggregator", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(_RateLimitMiddleware)
+
+
+def _check_batch_id(batch_id: str) -> None:
+    """Raise HTTP 400 if batch_id is not a valid UUID."""
+    try:
+        _uuid_mod.UUID(batch_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="batch_id must be a valid UUID")
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -154,7 +194,7 @@ class TxPayload(BaseModel):
                 f"public_key length {len(b)} B is not a valid ML-DSA key size "
                 "(expected 1312, 1952, or 2592 bytes)"
             )
-        return v
+        return v.lower()
 
     @field_validator("signature")
     @classmethod
@@ -169,7 +209,7 @@ class TxPayload(BaseModel):
                 f"signature length {len(b)} B is not a valid ML-DSA signature size "
                 "(expected 2420, 3309, or 4627 bytes)"
             )
-        return v
+        return v.lower()
 
     @field_validator("amount", "nonce")
     @classmethod
@@ -281,56 +321,60 @@ def batch_run(
 def batch_status(batch_id: str, request: Request) -> dict[str, Any]:
     """Return status for a previously created batch.
 
+    Returns 400 if batch_id is not a valid UUID.
     Returns 404 if the batch_id is unknown to this node.
     """
+    _check_batch_id(batch_id)
     node: AggregatorNode = request.app.state.node
-    for result in node.history():
-        if result.batch.batch_id == batch_id:
-            return {
-                "batch_id": batch_id,
-                "tx_count": len(result.batch.transactions),
-                "merkle_root": result.batch.merkle_root.hex(),
-                "is_proven": result.is_proven,
-                "stark_commitment": result.commitment,
-                "has_witness": result.has_witness,
-                "witness_commitment": result.witness_commitment,
-                "has_vfri7": result.has_vfri7,
-                "vfri7_commitment_log10": result.vfri7_commitment_log10,
-                "vfri7_commitment_log8": result.vfri7_commitment_log8,
-            }
-    raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+    result = node.get_batch(batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+    return {
+        "batch_id": batch_id,
+        "tx_count": len(result.batch.transactions),
+        "merkle_root": result.batch.merkle_root.hex(),
+        "is_proven": result.is_proven,
+        "stark_commitment": result.commitment,
+        "has_witness": result.has_witness,
+        "witness_commitment": result.witness_commitment,
+        "has_vfri7": result.has_vfri7,
+        "vfri7_commitment_log10": result.vfri7_commitment_log10,
+        "vfri7_commitment_log8": result.vfri7_commitment_log8,
+    }
 
 
 @app.get("/batch/{batch_id}/witness")
 def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
     """Return witness proof metadata for a previously created batch.
 
+    Returns 400 if batch_id is not a valid UUID.
     Returns 404 if the batch_id is unknown to this node.
     Returns has_witness=false if the batch exists but was created without
     prove_witnesses=true.
     """
+    _check_batch_id(batch_id)
     node: AggregatorNode = request.app.state.node
-    for result in node.history():
-        if result.batch.batch_id == batch_id:
-            n = node.n_fri_queries
-            if not result.has_witness:
-                return {
-                    "batch_id": batch_id, "has_witness": False, "has_vfri7": False,
-                    "n_fri_queries": n, "fri_security_bits": 6 * n + 10,
-                }
-            return {
-                "batch_id": batch_id,
-                "has_witness": True,
-                "onchain_commitment": result.witness_commitment,
-                "c_tilde_hex": result.witness_c_tilde_hex,
-                "max_norms": result.witness_max_norms,
-                "has_vfri7": result.has_vfri7,
-                "vfri7_commitment_log10": result.vfri7_commitment_log10,
-                "vfri7_commitment_log8": result.vfri7_commitment_log8,
-                "n_fri_queries": n,
-                "fri_security_bits": 6 * n + 10,
-            }
-    raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+    result = node.get_batch(batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+    n = node.n_fri_queries
+    if not result.has_witness:
+        return {
+            "batch_id": batch_id, "has_witness": False, "has_vfri7": False,
+            "n_fri_queries": n, "fri_security_bits": 6 * n + 10,
+        }
+    return {
+        "batch_id": batch_id,
+        "has_witness": True,
+        "onchain_commitment": result.witness_commitment,
+        "c_tilde_hex": result.witness_c_tilde_hex,
+        "max_norms": result.witness_max_norms,
+        "has_vfri7": result.has_vfri7,
+        "vfri7_commitment_log10": result.vfri7_commitment_log10,
+        "vfri7_commitment_log8": result.vfri7_commitment_log8,
+        "n_fri_queries": n,
+        "fri_security_bits": 6 * n + 10,
+    }
 
 @app.post("/batch/flush")
 def batch_flush(

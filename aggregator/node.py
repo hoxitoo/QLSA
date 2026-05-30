@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 
 from core.transaction import Transaction
@@ -53,7 +54,17 @@ class AggregatorNode:
         # Allow override from env (e.g. N_FRI_QUERIES=3 for 28-bit on-chain soundness).
         # Default 1 is gas-safe for testnet; production target is 20 (requires gas optimisation).
         if n_fri_queries is None:
-            n_fri_queries = int(os.environ.get("N_FRI_QUERIES", "1"))
+            raw = os.environ.get("N_FRI_QUERIES", "1")
+            try:
+                n_fri_queries = int(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"N_FRI_QUERIES must be an integer, got {raw!r}"
+                ) from exc
+            if not (1 <= n_fri_queries <= 64):
+                raise ValueError(
+                    f"N_FRI_QUERIES must be in [1, 64], got {n_fri_queries}"
+                )
         self.mempool = Mempool(max_size=mempool_capacity)
         self.batcher = Batcher(
             self.mempool,
@@ -63,7 +74,8 @@ class AggregatorNode:
         )
         self.n_fri_queries = n_fri_queries
         self._stats = NodeStats()
-        self._history: list[BatchResult] = []
+        self._history: deque[BatchResult] = deque(maxlen=self._MAX_HISTORY)
+        self._batch_index: dict[str, BatchResult] = {}
         self._lock = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -110,9 +122,14 @@ class AggregatorNode:
             )
 
     def history(self) -> list[BatchResult]:
-        """Return a snapshot of all BatchResults produced so far."""
+        """Return a snapshot of all BatchResults produced so far (ordered oldest→newest)."""
         with self._lock:
             return list(self._history)
+
+    def get_batch(self, batch_id: str) -> BatchResult | None:
+        """O(1) lookup of a BatchResult by batch_id. Returns None if not found."""
+        with self._lock:
+            return self._batch_index.get(batch_id)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
@@ -126,9 +143,13 @@ class AggregatorNode:
             self._stats.transactions_batched += n
             if result.is_proven:
                 self._stats.proofs_generated += 1
+            # When the deque is at capacity the oldest entry will be evicted on
+            # append — remove it from the index first to keep them in sync.
+            if len(self._history) == self._MAX_HISTORY:
+                evicted = self._history[0]
+                self._batch_index.pop(evicted.batch.batch_id, None)
             self._history.append(result)
-            if len(self._history) > self._MAX_HISTORY:
-                self._history = self._history[-self._MAX_HISTORY :]
+            self._batch_index[result.batch.batch_id] = result
         logger.info(
             "batch created: id=%s txs=%d proven=%s",
             result.batch.batch_id[:8],

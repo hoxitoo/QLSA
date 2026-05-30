@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+logger = logging.getLogger(__name__)
+
 from core.batch import Batch, InvalidSignatureError, BatchSizeError, create_batch
 from core.keys import DEFAULT_ALGORITHM
 from core.transaction import Transaction
@@ -153,12 +155,12 @@ class Batcher:
         valid_txs = []
         for tx in txs:
             if tx.signature is None:
-                logging.warning("batcher: dropping unsigned tx %s", tx.tx_hash().hex()[:16])
+                logger.warning("batcher: dropping unsigned tx %s", tx.tx_hash().hex()[:16])
                 continue
             if sig_verify(tx.to_bytes(), tx.signature, tx.public_key, self.algorithm):
                 valid_txs.append(tx)
             else:
-                logging.warning("batcher: dropping tx with invalid signature %s", tx.tx_hash().hex()[:16])
+                logger.warning("batcher: dropping tx with invalid signature %s", tx.tx_hash().hex()[:16])
 
         if not valid_txs:
             return None
@@ -166,7 +168,7 @@ class Batcher:
         try:
             batch = create_batch(valid_txs, algorithm=self.algorithm)
         except (InvalidSignatureError, BatchSizeError) as exc:
-            logging.error("batcher: create_batch failed after pre-filter: %s", exc)
+            logger.error("batcher: create_batch failed after pre-filter: %s", exc)
             # Return valid transactions to front of mempool so they are not lost.
             self.mempool.prepend_batch(valid_txs)
             return None
@@ -182,9 +184,9 @@ class Batcher:
             result.proof = pr.proof
             result.commitment = pr.commitment
         except RuntimeError as exc:
-            logging.warning("STARK proving skipped: %s", exc)
+            logger.warning("STARK proving skipped: %s", exc)
         except Exception as exc:
-            logging.error("Unexpected error during STARK proving: %s", exc, exc_info=True)
+            logger.error("Unexpected error during STARK proving: %s", exc, exc_info=True)
 
         if prove_witnesses and batch.transactions:
             tx0 = batch.transactions[0]
@@ -206,10 +208,10 @@ class Batcher:
                     result.vfri7_hints_log8       = vr.log8_query_hints
                     result.witness_commitment     = vr.log10_commitment
                 except (RuntimeError, ImportError) as exc:
-                    logging.warning("VFRI7 witness proof skipped: %s", exc)
+                    logger.warning("VFRI7 witness proof skipped: %s", exc)
                 except ValueError as exc:
-                    logging.warning("ML-DSA signature invalid for VFRI7 proving: %s", exc)
+                    logger.warning("ML-DSA signature invalid for VFRI7 proving: %s", exc)
                 except Exception as exc:
-                    logging.error("Unexpected error during VFRI7 proving: %s", exc, exc_info=True)
+                    logger.error("Unexpected error during VFRI7 proving: %s", exc, exc_info=True)
 
         return result

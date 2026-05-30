@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 
-from core.keys import DEFAULT_ALGORITHM
+from core.keys import DEFAULT_ALGORITHM, SUPPORTED_ALGORITHMS
 from core.merkle import build_merkle_tree, get_merkle_root
 from core.signing import verify
 from core.transaction import Transaction
@@ -44,9 +44,14 @@ def create_batch(
 ) -> Batch:
     """
     Validate all signatures, build a Merkle tree of tx hashes, return a Batch.
+    Raises ValueError if algorithm is not a supported ML-DSA variant.
     Raises InvalidSignatureError on the first invalid/missing signature.
     Raises BatchSizeError if the list is empty or exceeds MAX_BATCH_SIZE.
     """
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        raise ValueError(
+            f"Unsupported algorithm {algorithm!r}. Choose from {SUPPORTED_ALGORITHMS}"
+        )
     n = len(transactions)
     if n < MIN_BATCH_SIZE:
         raise BatchSizeError(f"Batch must contain at least {MIN_BATCH_SIZE} transaction(s)")

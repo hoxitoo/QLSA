@@ -4,6 +4,11 @@ import hashlib
 import struct
 from dataclasses import dataclass, field
 
+# FIPS 204 §5.1 — ML-DSA public key byte lengths (44→1312, 65→1952, 87→2592).
+# Kept in sync with core/keys.py._PUBKEY_SIZES; duplicated here to avoid a
+# circular import between core.transaction and core.keys.
+_VALID_PUBKEY_SIZES: frozenset[int] = frozenset({1312, 1952, 2592})
+
 
 @dataclass
 class Transaction:
@@ -33,6 +38,11 @@ class Transaction:
             raise ValueError("recipient must be a 64-char hex address")
         if not self.public_key:
             raise ValueError("public_key must not be empty")
+        if len(self.public_key) not in _VALID_PUBKEY_SIZES:
+            raise ValueError(
+                f"public_key length {len(self.public_key)} is not a valid ML-DSA "
+                f"public key size (expected one of {sorted(_VALID_PUBKEY_SIZES)} bytes)"
+            )
 
     def to_bytes(self) -> bytes:
         """Deterministic serialization of the signable fields (no signature)."""

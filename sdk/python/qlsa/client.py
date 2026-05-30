@@ -165,11 +165,16 @@ class HttpClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        return SubmitResult(
-            accepted=data["accepted"],
-            error=data.get("error"),
-            mempool_size=data.get("mempool_size", 0),
-        )
+        try:
+            return SubmitResult(
+                accepted=data["accepted"],
+                error=data.get("error"),
+                mempool_size=data.get("mempool_size", 0),
+            )
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Aggregator /transactions response missing field: {exc}. Got: {list(data)}"
+            ) from exc
 
     def run_cycle(self) -> BatchStatus | None:
         httpx = self._httpx()
