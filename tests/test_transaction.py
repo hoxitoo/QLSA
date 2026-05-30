@@ -58,22 +58,29 @@ def test_tx_hash_changes_with_nonce():
 def test_negative_amount_raises():
     pub, priv = generate_keypair()
     wipe_key(priv)
-    with pytest.raises(ValueError, match="non-negative"):
+    with pytest.raises(ValueError, match="positive"):
         Transaction(sender="a" * 64, recipient="b" * 64, amount=-1, nonce=0, public_key=pub)
+
+
+def test_zero_amount_raises():
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    with pytest.raises(ValueError, match="positive"):
+        Transaction(sender="a" * 64, recipient="b" * 64, amount=0, nonce=0, public_key=pub)
 
 
 def test_negative_nonce_raises():
     pub, priv = generate_keypair()
     wipe_key(priv)
     with pytest.raises(ValueError, match="non-negative"):
-        Transaction(sender="a" * 64, recipient="b" * 64, amount=0, nonce=-1, public_key=pub)
+        Transaction(sender="a" * 64, recipient="b" * 64, amount=1, nonce=-1, public_key=pub)
 
 
 def test_invalid_sender_raises():
     pub, priv = generate_keypair()
     wipe_key(priv)
     with pytest.raises(ValueError, match="sender"):
-        Transaction(sender="not-an-address", recipient="b" * 64, amount=0, nonce=0, public_key=pub)
+        Transaction(sender="not-an-address", recipient="b" * 64, amount=1, nonce=0, public_key=pub)
 
 
 def test_amount_at_uint64_max_is_valid():
@@ -102,7 +109,7 @@ def test_nonce_at_uint64_max_is_valid():
     tx = Transaction(
         sender="a" * 64,
         recipient="b" * 64,
-        amount=0,
+        amount=1,
         nonce=(1 << 64) - 1,
         public_key=pub,
     )
@@ -113,19 +120,19 @@ def test_nonce_exceeds_uint64_raises():
     pub, priv = generate_keypair()
     wipe_key(priv)
     with pytest.raises(ValueError, match="uint64"):
-        Transaction(sender="a" * 64, recipient="b" * 64, amount=0, nonce=1 << 64, public_key=pub)
+        Transaction(sender="a" * 64, recipient="b" * 64, amount=1, nonce=1 << 64, public_key=pub)
 
 
 def test_invalid_recipient_raises():
     pub, priv = generate_keypair()
     wipe_key(priv)
     with pytest.raises(ValueError, match="recipient"):
-        Transaction(sender="a" * 64, recipient="not-an-address", amount=0, nonce=0, public_key=pub)
+        Transaction(sender="a" * 64, recipient="not-an-address", amount=1, nonce=0, public_key=pub)
 
 
 def test_recipient_wrong_length_raises():
     pub, priv = generate_keypair()
     wipe_key(priv)
     with pytest.raises(ValueError, match="recipient"):
-        Transaction(sender="a" * 64, recipient="ab" * 10, amount=0, nonce=0, public_key=pub)
+        Transaction(sender="a" * 64, recipient="ab" * 10, amount=1, nonce=0, public_key=pub)
 

@@ -126,21 +126,3 @@ def test_merkle_root_onchain_is_32_bytes():
     assert onchain == batch.merkle_root[:32]
 
 
-def test_stark_commitment_onchain_raises_when_not_set():
-    txs, privs = _make_batch_txs(2)
-    batch = create_batch(txs)
-    _wipe_all(privs)
-    assert batch.stark_commitment is None
-    with pytest.raises(ValueError, match="stark_commitment not set"):
-        batch.stark_commitment_onchain()
-
-
-def test_stark_commitment_onchain_decodes_hex():
-    txs, privs = _make_batch_txs(2)
-    batch = create_batch(txs)
-    _wipe_all(privs)
-    batch.stark_commitment = "aabbccdd"  # 8 hex chars = 4 bytes (M31 field element)
-    result = batch.stark_commitment_onchain()
-    assert isinstance(result, bytes)
-    assert len(result) == 4
-    assert result == bytes.fromhex("aabbccdd")

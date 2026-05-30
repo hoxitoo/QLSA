@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import deque
@@ -34,7 +35,11 @@ _rate_lock = threading.Lock()
 _rate_call_count = 0
 
 # IPs that route through trusted reverse proxies (read X-Forwarded-For).
-_TRUSTED_PROXIES: frozenset[str] = frozenset({"127.0.0.1", "::1"})
+# Always includes loopback; extend via TRUSTED_PROXIES env var (comma-separated IPs).
+_TRUSTED_PROXIES: frozenset[str] = frozenset(
+    {"127.0.0.1", "::1"}
+    | {ip.strip() for ip in os.environ.get("TRUSTED_PROXIES", "").split(",") if ip.strip()}
+)
 
 
 def _get_client_ip(request: Request) -> str:

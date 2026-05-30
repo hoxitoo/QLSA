@@ -37,22 +37,6 @@ class Batch:
         """
         return self.merkle_root[:32]
 
-    def stark_commitment_onchain(self) -> bytes:
-        """Decode the hex stark_commitment to 4 raw bytes for Solidity bytes4.
-        Raises ValueError if stark_commitment is not set or malformed.
-        """
-        if self.stark_commitment is None:
-            raise ValueError("stark_commitment not set — call prove_batch() first")
-        if len(self.stark_commitment) != 8:
-            raise ValueError(
-                f"stark_commitment must be 8 hex chars (4 bytes), "
-                f"got {len(self.stark_commitment)}"
-            )
-        try:
-            return bytes.fromhex(self.stark_commitment)
-        except ValueError as exc:
-            raise ValueError(f"stark_commitment is not valid hex: {exc}") from exc
-
 
 def create_batch(
     transactions: list[Transaction],

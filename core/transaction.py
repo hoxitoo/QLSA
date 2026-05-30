@@ -19,8 +19,8 @@ class Transaction:
     _UINT64_MAX = (1 << 64) - 1
 
     def __post_init__(self) -> None:
-        if self.amount < 0:
-            raise ValueError("amount must be non-negative")
+        if self.amount < 1:
+            raise ValueError("amount must be positive (at least 1)")
         if self.amount > self._UINT64_MAX:
             raise ValueError("amount must fit in uint64")
         if self.nonce < 0:

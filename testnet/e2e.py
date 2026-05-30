@@ -123,6 +123,9 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1) -> int:
     # trace commitment, preventing adversarial proof mixing.
     logger.info("Generating VFRI7 cross-bound V23 ML-DSA STARK proofs for tx[0]…")
     tx0 = txs[0]
+    if tx0.signature is None:
+        logger.error("tx[0] has no signature — _make_transactions failed to sign")
+        return 1
     batch_merkle_root = batch.merkle_root[:32]
     t0 = time.monotonic()
     try:
