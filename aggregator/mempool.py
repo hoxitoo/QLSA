@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 
 from core.transaction import Transaction
+
+logger = logging.getLogger(__name__)
 
 
 MAX_MEMPOOL_SIZE = 3000
@@ -65,12 +68,20 @@ class Mempool:
 
         Used by the batcher to return valid transactions that could not be batched
         (e.g. batch creation failed) so they are included in the next cycle.
-        Silently drops transactions if the mempool is at capacity.
+        Drops transactions silently if the mempool is at capacity and logs a warning.
         """
+        dropped = 0
         with self._lock:
             for tx in reversed(txs):
                 if len(self._txs) < self.max_size:
                     self._txs.appendleft(tx)
+                else:
+                    dropped += 1
+        if dropped:
+            logger.warning(
+                "prepend_batch: dropped %d tx(s) — mempool full (capacity=%d)",
+                dropped, self.max_size,
+            )
 
     def peek(self, n: int) -> list[Transaction]:
         """Return up to *n* transactions without removing them."""

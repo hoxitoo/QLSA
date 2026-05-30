@@ -77,10 +77,14 @@ def _make_transactions(n: int) -> list[Transaction]:
     return txs
 
 
-def run(n_txs: int = 8, dry_run: bool = False) -> int:
+def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1) -> int:
     """Run the full E2E flow. Returns exit code (0 = success)."""
+    # Security: log_blowup(6) × n_queries + pow_bits(10)
+    # n=1 → 16-bit (demo); n=3 → 28-bit; n=20 → 130-bit (but ~300M gas — not feasible on mainnet).
+    security_bits = 6 * n_queries + 10
     logger.info("=== QLSA Phase 6 — E2E Testnet Demo ===")
-    logger.info("Transactions: %d | Dry-run: %s", n_txs, dry_run)
+    logger.info("Transactions: %d | Dry-run: %s | FRI queries: %d (%d-bit on-chain soundness)",
+                n_txs, dry_run, n_queries, security_bits)
 
     # ── Step 1: Check PyO3 extension ─────────────────────────────────────────
     try:
@@ -119,6 +123,9 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
     # trace commitment, preventing adversarial proof mixing.
     logger.info("Generating VFRI7 cross-bound V23 ML-DSA STARK proofs for tx[0]…")
     tx0 = txs[0]
+    if tx0.signature is None:
+        logger.error("tx[0] has no signature — _make_transactions failed to sign")
+        return 1
     batch_merkle_root = batch.merkle_root[:32]
     t0 = time.monotonic()
     try:
@@ -127,7 +134,7 @@ def run(n_txs: int = 8, dry_run: bool = False) -> int:
             msg=tx0.to_bytes(),
             sig=tx0.signature,
             batch_merkle_root=batch_merkle_root,
-            n_queries=1,
+            n_queries=n_queries,
         )
         elapsed_v = time.monotonic() - t0
         logger.info(
@@ -205,9 +212,18 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="QLSA Phase 6 E2E demo")
     p.add_argument("--txs", type=int, default=8, help="Number of transactions (default: 8)")
     p.add_argument("--dry-run", action="store_true", help="Skip on-chain submission")
+    p.add_argument(
+        "--n-queries", type=int, default=1,
+        metavar="N",
+        help=(
+            "FRI queries per proof group (default: 1 = 16-bit on-chain soundness, gas-safe). "
+            "Security = 6×N+10 bits. n=3 → 28 bits; n=20 → 130 bits "
+            "(WARNING: n≥4 may exceed 15M gas on mainnet)."
+        ),
+    )
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    sys.exit(run(n_txs=args.txs, dry_run=args.dry_run))
+    sys.exit(run(n_txs=args.txs, dry_run=args.dry_run, n_queries=args.n_queries))

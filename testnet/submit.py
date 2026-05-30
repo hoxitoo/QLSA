@@ -215,15 +215,16 @@ class OnchainSubmitter:
         logger.info("waiting for confirmation (timeout=%ds)…", self.confirm_timeout_s)
         deadline = time.monotonic() + self.confirm_timeout_s
         while time.monotonic() < deadline:
+            receipt = None
             try:
                 receipt = self.w3.eth.get_transaction_receipt(tx_hash)
-                if receipt is not None:
-                    if receipt["status"] == 0:
-                        raise RuntimeError(f"tx reverted: {tx_hash}")
-                    break
             except Exception as exc:
                 if "not found" not in str(exc).lower():
                     raise
+            if receipt is not None:
+                if receipt["status"] == 0:
+                    raise RuntimeError(f"tx reverted: {tx_hash}")
+                break
             time.sleep(2)
         else:
             raise RuntimeError(f"tx not confirmed within {self.confirm_timeout_s}s: {tx_hash}")
@@ -381,15 +382,16 @@ class OnchainSubmitterV4:
         logger.info("waiting for confirmation (timeout=%ds)…", self.confirm_timeout_s)
         deadline = time.monotonic() + self.confirm_timeout_s
         while time.monotonic() < deadline:
+            receipt = None
             try:
                 receipt = self.w3.eth.get_transaction_receipt(tx_hash)
-                if receipt is not None:
-                    if receipt["status"] == 0:
-                        raise RuntimeError(f"tx reverted: {tx_hash}")
-                    break
             except Exception as exc:
                 if "not found" not in str(exc).lower():
                     raise
+            if receipt is not None:
+                if receipt["status"] == 0:
+                    raise RuntimeError(f"tx reverted: {tx_hash}")
+                break
             time.sleep(2)
         else:
             raise RuntimeError(f"tx not confirmed within {self.confirm_timeout_s}s: {tx_hash}")

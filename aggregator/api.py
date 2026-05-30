@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import deque
@@ -34,7 +35,11 @@ _rate_lock = threading.Lock()
 _rate_call_count = 0
 
 # IPs that route through trusted reverse proxies (read X-Forwarded-For).
-_TRUSTED_PROXIES: frozenset[str] = frozenset({"127.0.0.1", "::1"})
+# Always includes loopback; extend via TRUSTED_PROXIES env var (comma-separated IPs).
+_TRUSTED_PROXIES: frozenset[str] = frozenset(
+    {"127.0.0.1", "::1"}
+    | {ip.strip() for ip in os.environ.get("TRUSTED_PROXIES", "").split(",") if ip.strip()}
+)
 
 
 def _get_client_ip(request: Request) -> str:
@@ -200,12 +205,15 @@ def health() -> dict[str, str]:
 def stats(request: Request) -> dict[str, Any]:
     node: AggregatorNode = request.app.state.node
     s = node.stats()
+    n = node.n_fri_queries
     return {
         "transactions_received": s.transactions_received,
         "transactions_batched": s.transactions_batched,
         "batches_created": s.batches_created,
         "proofs_generated": s.proofs_generated,
         "pending": node.pending_count(),
+        "n_fri_queries": n,
+        "fri_security_bits": 6 * n + 10,  # log_blowup(6) × n + pow_bits(10)
     }
 
 
@@ -269,6 +277,30 @@ def batch_run(
     }
 
 
+@app.get("/batch/{batch_id}")
+def batch_status(batch_id: str, request: Request) -> dict[str, Any]:
+    """Return status for a previously created batch.
+
+    Returns 404 if the batch_id is unknown to this node.
+    """
+    node: AggregatorNode = request.app.state.node
+    for result in node.history():
+        if result.batch.batch_id == batch_id:
+            return {
+                "batch_id": batch_id,
+                "tx_count": len(result.batch.transactions),
+                "merkle_root": result.batch.merkle_root.hex(),
+                "is_proven": result.is_proven,
+                "stark_commitment": result.commitment,
+                "has_witness": result.has_witness,
+                "witness_commitment": result.witness_commitment,
+                "has_vfri7": result.has_vfri7,
+                "vfri7_commitment_log10": result.vfri7_commitment_log10,
+                "vfri7_commitment_log8": result.vfri7_commitment_log8,
+            }
+    raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+
+
 @app.get("/batch/{batch_id}/witness")
 def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
     """Return witness proof metadata for a previously created batch.
@@ -280,8 +312,12 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
     node: AggregatorNode = request.app.state.node
     for result in node.history():
         if result.batch.batch_id == batch_id:
+            n = node.n_fri_queries
             if not result.has_witness:
-                return {"batch_id": batch_id, "has_witness": False, "has_vfri7": False}
+                return {
+                    "batch_id": batch_id, "has_witness": False, "has_vfri7": False,
+                    "n_fri_queries": n, "fri_security_bits": 6 * n + 10,
+                }
             return {
                 "batch_id": batch_id,
                 "has_witness": True,
@@ -291,6 +327,8 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
                 "has_vfri7": result.has_vfri7,
                 "vfri7_commitment_log10": result.vfri7_commitment_log10,
                 "vfri7_commitment_log8": result.vfri7_commitment_log8,
+                "n_fri_queries": n,
+                "fri_security_bits": 6 * n + 10,
             }
     raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
 

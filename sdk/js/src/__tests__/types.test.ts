@@ -87,8 +87,10 @@ describe("BatchStatus", () => {
 });
 
 describe("WitnessStatus", () => {
-  it("no-witness status has empty maxNorms and no vfri7", () => {
-    const ws: WitnessStatus = { hasWitness: false, maxNorms: [], hasVfri7: false };
+  it("no-witness status has empty maxNorms, no vfri7, zero security fields", () => {
+    const ws: WitnessStatus = {
+      hasWitness: false, maxNorms: [], hasVfri7: false, nFriQueries: 0, friSecurityBits: 0,
+    };
     expect(ws.hasWitness).toBe(false);
     expect(ws.maxNorms).toHaveLength(0);
     expect(ws.onchainCommitment).toBeUndefined();
@@ -96,46 +98,62 @@ describe("WitnessStatus", () => {
     expect(ws.hasVfri7).toBe(false);
     expect(ws.vfri7CommitmentLog10).toBeUndefined();
     expect(ws.vfri7CommitmentLog8).toBeUndefined();
+    expect(ws.nFriQueries).toBe(0);
+    expect(ws.friSecurityBits).toBe(0);
   });
 
-  it("full witness status carries all fields", () => {
+  it("full vfri7 witness status carries dual commitment + security fields", () => {
     const ws: WitnessStatus = {
       hasWitness: true,
       onchainCommitment: "a".repeat(32),
-      cTildeHex: "b".repeat(96),
-      maxNorms: [123_456, 234_567, 345_678, 456_789, 500_000],
-      hasVfri7: false,
-    };
-    expect(ws.hasWitness).toBe(true);
-    expect(ws.onchainCommitment).toHaveLength(32);
-    expect(ws.cTildeHex).toHaveLength(96);
-    expect(ws.maxNorms).toHaveLength(5);
-    expect(ws.hasVfri7).toBe(false);
-  });
-
-  it("vfri7 witness status carries dual commitment fields", () => {
-    const ws: WitnessStatus = {
-      hasWitness: true,
       maxNorms: [],
       hasVfri7: true,
       vfri7CommitmentLog10: "d".repeat(32),
       vfri7CommitmentLog8: "e".repeat(32),
+      nFriQueries: 1,
+      friSecurityBits: 16,
     };
+    expect(ws.hasWitness).toBe(true);
     expect(ws.hasVfri7).toBe(true);
     expect(ws.vfri7CommitmentLog10).toHaveLength(32);
     expect(ws.vfri7CommitmentLog8).toHaveLength(32);
+    expect(ws.nFriQueries).toBe(1);
+    expect(ws.friSecurityBits).toBe(16);
+  });
+
+  it("security bits formula: 6×n+10", () => {
+    const cases: Array<[number, number]> = [[1, 16], [3, 28], [20, 130]];
+    for (const [n, bits] of cases) {
+      const ws: WitnessStatus = {
+        hasWitness: true, maxNorms: [], hasVfri7: true,
+        nFriQueries: n, friSecurityBits: bits,
+      };
+      expect(ws.friSecurityBits).toBe(6 * ws.nFriQueries + 10);
+    }
   });
 });
 
 describe("NodeStats", () => {
-  it("stats shape is correct", () => {
+  it("stats shape includes FRI security fields", () => {
     const s: NodeStats = {
       transactionsReceived: 10,
       transactionsBatched: 8,
       batchesCreated: 2,
       proofsGenerated: 2,
       pending: 2,
+      nFriQueries: 1,
+      friSecurityBits: 16,
     };
     expect(s.proofsGenerated).toBe(2);
+    expect(s.nFriQueries).toBe(1);
+    expect(s.friSecurityBits).toBe(16);
+  });
+
+  it("stats security bits formula matches n_fri_queries", () => {
+    const s: NodeStats = {
+      transactionsReceived: 0, transactionsBatched: 0, batchesCreated: 0,
+      proofsGenerated: 0, pending: 0, nFriQueries: 3, friSecurityBits: 28,
+    };
+    expect(s.friSecurityBits).toBe(6 * s.nFriQueries + 10);
   });
 });

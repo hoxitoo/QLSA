@@ -87,6 +87,14 @@ class TestStats:
         assert data["proofs_generated"] == 0
         assert data["pending"] == 0
 
+    def test_stats_include_fri_security_fields(self, client):
+        data = client.get("/stats").json()
+        assert "n_fri_queries" in data
+        assert "fri_security_bits" in data
+        n = data["n_fri_queries"]
+        assert isinstance(n, int) and n >= 1
+        assert data["fri_security_bits"] == 6 * n + 10
+
     def test_stats_increment_after_submit(self, client, signed_payload):
         client.post("/transactions", json=signed_payload)
         resp = client.get("/stats")
@@ -282,6 +290,41 @@ class TestBatchFlush:
         assert stats["batches_created"] == 1
 
 
+# ── GET /batch/{batch_id} ────────────────────────────────────────────────────
+
+class TestBatchStatus:
+    def test_unknown_batch_returns_404(self, client):
+        resp = client.get("/batch/nonexistent-batch-id")
+        assert resp.status_code == 404
+
+    def test_known_batch_returns_200(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_id = client.post("/batch/flush").json()["batch_id"]
+        resp = client.get(f"/batch/{batch_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["batch_id"] == batch_id
+        assert data["tx_count"] == 1
+        assert isinstance(data["is_proven"], bool)
+        assert isinstance(data["has_witness"], bool)
+        assert isinstance(data["has_vfri7"], bool)
+
+    def test_batch_status_merkle_root_present(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_id = client.post("/batch/flush").json()["batch_id"]
+        data = client.get(f"/batch/{batch_id}").json()
+        assert isinstance(data["merkle_root"], str)
+        assert len(data["merkle_root"]) == 128  # SHA3-512 → 64 bytes → 128 hex chars
+
+    def test_batch_and_witness_endpoints_agree(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_id = client.post("/batch/flush").json()["batch_id"]
+        status = client.get(f"/batch/{batch_id}").json()
+        witness = client.get(f"/batch/{batch_id}/witness").json()
+        assert status["has_witness"] == witness["has_witness"]
+        assert status["has_vfri7"] == witness["has_vfri7"]
+
+
 # ── GET /batch/{batch_id}/witness ─────────────────────────────────────────────
 
 class TestBatchWitness:
@@ -300,6 +343,16 @@ class TestBatchWitness:
         assert data["batch_id"] == batch_id
         assert data["has_witness"] is False
         assert data["has_vfri7"] is False
+
+    def test_witness_includes_fri_security_fields(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_id = client.post("/batch/flush").json()["batch_id"]
+        data = client.get(f"/batch/{batch_id}/witness").json()
+        assert "n_fri_queries" in data
+        assert "fri_security_bits" in data
+        n = data["n_fri_queries"]
+        assert isinstance(n, int) and n >= 1
+        assert data["fri_security_bits"] == 6 * n + 10
 
     def test_witness_endpoint_returns_correct_batch_id(self, client, signed_payload):
         client.post("/transactions", json=signed_payload)

@@ -11,9 +11,10 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > This codebase is a **research prototype / testnet demonstrator**.
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
-> - `LOG_BLOWUP=6` → blowup=64, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit FRI soundness
-> - On-chain FRI verifier: QLSAVerifierVFRI3 completes K-round FRI + non-constant last-layer polynomial check (bounded-degree); RPO256 hash AIR pending
-> - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 is MVP-4
+> - Off-chain STARK proof: `LOG_BLOWUP=6`, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit soundness
+> - On-chain verifier (VFRI7) spot-checks `n_queries` hints per call. Default `n_queries=1` → **16-bit on-chain soundness** (6×1+10). Gas-efficient for testnet; production target is n=3–5 (28–40 bits) pending gas optimization.
+> - Full 130-bit on-chain soundness (n=20) requires ~300M gas per group — exceeds mainnet block limit; solution deferred to MVP-4 (recursive batching or PoW nonce verification on-chain).
+> - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 hash AIR is MVP-4
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
 
@@ -58,7 +59,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**MVP-5 complete** (2026-05-25). **V23 dual-VFRI7 production pipeline with cross-proof binding** — 8-component STARK + O(1)-gas on-chain verification + security audit (2026-05-25).
+**MVP-5 complete** (2026-05-25). **V23 dual-VFRI7 production pipeline with cross-proof binding** — 8-component STARK + O(1)-gas on-chain verification + security audit (2026-05-30).
 
 | Component | Status |
 |-----------|--------|
@@ -69,7 +70,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** (non-ignored) + **178 Python** (no PyO3) + **31 TS** + **847 Hardhat** | ✅ Done |
+| Tests — **210 Rust** (non-ignored) + **~186 Python** (no PyO3) + **31 TS** + **847 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V22** — All 7 ML-DSA circuits in 1 STARK + Merkle root Fiat-Shamir binding | ✅ Done |
@@ -86,6 +87,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **BatchRegistryV4 cross-bound** — `boundRoot = keccak256(batchRoot ‖ traceRootOther)` passed to VFRI7 | ✅ Done (2026-05-25) |
 | **Full aggregator + SDK VFRI7 wiring** — Batcher, HTTP API, Python SDK, TypeScript SDK | ✅ Done (2026-05-25) |
 | **Security audit (2026-05-25)** — input validation hardening, dead code fix, defensive Solidity checks | ✅ Done (2026-05-25) |
+| **Security audit (2026-05-30)** — TRUSTED_PROXIES env config, amount≥1 validation, dead code removal, GET /batch/{id}, fri_security_bits SDK field, exception safety in submit.py | ✅ Done (2026-05-30) |
 
 ---
 
@@ -192,6 +194,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | CM31.fromBytes8LE no M31 range check | Medium | ✅ Fixed (`require(a < P && b < P)`, 2026-05-20) |
 | treeDepth upper bound missing in V11/V12/V13 | Low | ✅ Fixed (`> 30` guard added, 2026-05-20) |
 | API rate limiting | Medium | ✅ Done (100 tx/min, 20 batch ops/min per IP) |
+| On-chain n_queries=1 → 16-bit soundness (gas constraint) | High | Open (gas optimisation deferred to MVP-4; n configurable via `N_FRI_QUERIES` env var) |
 | Private key zeroing in Python is best-effort | Medium | Open (Rust `wipe_bytes` via `zeroize`; Python-side copy unavoidable) |
 | Hash AIR `H(a,b) = a³+b` not cryptographic | Low | ✅ Done (Poseidon2-over-M31, 2026-05-16) |
 | Non-constant last FRI layer (bounded-degree check) | High | ✅ Done (QLSAVerifierVFRI3, 2026-05-19) |
@@ -200,6 +203,14 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | Dead code in `gen_mldsa_v23_vfri7_cross_bound_hints` (`pass` block) | Low | ✅ Fixed (raises `ValueError` when folds differ, 2026-05-25) |
 | Silent sender truncation in `submit.py` | Medium | ✅ Fixed (`_validate_senders` raises on wrong-size input, 2026-05-25) |
 | `TwoChannel.drawQueries` uint256 overflow (`logDomainSize >= 256`) | Low | ✅ Fixed (`require(logDomainSize <= 31)` guard, 2026-05-25) |
+| `TRUSTED_PROXIES` hardcoded — operators could not add their own reverse proxy without code change | Medium | ✅ Fixed (configurable via `TRUSTED_PROXIES` env var, 2026-05-30) |
+| `Transaction.amount = 0` accepted by SDK but rejected by API — silent mismatch | Medium | ✅ Fixed (`amount ≥ 1` enforced in `__post_init__`, 2026-05-30) |
+| `Mempool.prepend_batch()` silently dropped transactions when full | Medium | ✅ Fixed (`logging.warning` on drop, 2026-05-30) |
+| `Batch.stark_commitment_onchain()` dead code — always raised `ValueError` with real commitments | Bug | ✅ Fixed (method removed, 2026-05-30) |
+| `wait_and_verify` caught all `Exception` — masked real network errors | Medium | ✅ Fixed (only "not found" suppressed, 2026-05-30) |
+| No `GET /batch/{id}` endpoint — clients could not query batch status without re-proving | Low | ✅ Fixed (endpoint added to HTTP API, 2026-05-30) |
+| `WitnessStatus.fri_security_bits` missing from Python SDK | Low | ✅ Fixed (field added: `6 × n_fri_queries + 10`, 2026-05-30) |
+| `fastapi`/`httpx` duplicated in both `requirements-api.txt` and `requirements-dev.txt` | Low | ✅ Fixed (`-r requirements-api.txt` reference, 2026-05-30) |
 
 For the full cryptography and security analysis, see `context.md`.
 
@@ -321,6 +332,18 @@ PQ adoption is inevitable, but gradual.
 - Quantum threat: "harvest now, decrypt later" is active
 - Stwo deployed on Starknet Mainnet (November 2025)
 - PQ migration window is open — but narrowing
+
+### External Validation (May 2026)
+
+Quantus published *"The State of Quantum: What Crypto Can't Afford to Ignore"* (May 27, 2026), independently confirming the same problem QLSA solves:
+
+> *"A standard ECDSA transaction carries roughly 97 bytes of signature and public key. The same transaction using ML-DSA-87 carries almost 7187 bytes — a 74× increase that would sharply minimise the number of transactions per block without architectural changes."*
+
+Their proposed solution: **STARK-style proof aggregation + Poseidon2** to move verification off-chain.
+
+This is exactly QLSA's architecture — Circle STARK (Stwo) + Poseidon2 OODS sponge + O(1) on-chain verification. The key architectural difference: Quantus builds a new L1 blockchain requiring bootstrap from scratch; QLSA is a **drop-in aggregation layer** on top of existing chains (Ethereum, no hard-fork required).
+
+Source: Quantus, *"The State of Quantum: What Crypto Can't Afford to Ignore"*, May 27, 2026.
 
 ---
 
