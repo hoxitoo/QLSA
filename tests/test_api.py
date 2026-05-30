@@ -293,8 +293,13 @@ class TestBatchFlush:
 # ── GET /batch/{batch_id} ────────────────────────────────────────────────────
 
 class TestBatchStatus:
+    def test_invalid_batch_id_returns_400(self, client):
+        resp = client.get("/batch/not-a-uuid")
+        assert resp.status_code == 400
+
     def test_unknown_batch_returns_404(self, client):
-        resp = client.get("/batch/nonexistent-batch-id")
+        import uuid
+        resp = client.get(f"/batch/{uuid.uuid4()}")
         assert resp.status_code == 404
 
     def test_known_batch_returns_200(self, client, signed_payload):
@@ -328,8 +333,13 @@ class TestBatchStatus:
 # ── GET /batch/{batch_id}/witness ─────────────────────────────────────────────
 
 class TestBatchWitness:
+    def test_invalid_batch_id_returns_400(self, client):
+        resp = client.get("/batch/not-a-uuid/witness")
+        assert resp.status_code == 400
+
     def test_unknown_batch_returns_404(self, client):
-        resp = client.get("/batch/nonexistent-batch-id/witness")
+        import uuid
+        resp = client.get(f"/batch/{uuid.uuid4()}/witness")
         assert resp.status_code == 404
 
     def test_batch_without_witness_returns_has_witness_false(self, client, signed_payload):
@@ -407,8 +417,26 @@ class TestRateLimit:
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
 
-    def test_get_endpoints_not_rate_limited(self, client):
+    def test_health_stats_not_rate_limited(self, client):
         """GET /health and /stats are never rate-limited."""
         for _ in range(50):
             assert client.get("/health").status_code == 200
             assert client.get("/stats").status_code == 200
+
+    def test_get_batch_rate_limit_enforced(self, client, signed_payload):
+        """201st GET /batch/* from same IP within window returns 429."""
+        import aggregator.api as api_mod
+
+        with api_mod._rate_lock:
+            api_mod._read_windows.clear()
+
+        import uuid
+        fake_id = str(uuid.uuid4())
+        for _ in range(200):
+            resp = client.get(f"/batch/{fake_id}")
+            # 404 is expected; only 429 would indicate rate limiting
+            assert resp.status_code in (404, 200)
+
+        resp = client.get(f"/batch/{fake_id}")
+        assert resp.status_code == 429
+        assert "rate limit" in resp.json()["detail"]

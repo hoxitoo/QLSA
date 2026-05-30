@@ -126,3 +126,10 @@ def test_merkle_root_onchain_is_32_bytes():
     assert onchain == batch.merkle_root[:32]
 
 
+def test_invalid_algorithm_raises():
+    txs, privs = _make_batch_txs(2)
+    _wipe_all(privs)
+    with pytest.raises(ValueError, match="Unsupported algorithm"):
+        create_batch(txs, algorithm="RSA-2048")
+
+
