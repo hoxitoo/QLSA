@@ -1,12 +1,13 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-05-25)
+## Статус (обновлено 2026-05-30)
 
 - Фаза: **MVP-5 завершён** (2026-05-25) + **V23 dual-VFRI7 production pipeline с cross-proof binding**
 - Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4 — завершены полностью
 - QLSAVerifierVFRI7: `mixRoot(merkleRoot)` перед `drawQueries`; BatchRegistryV4 использует cross-bound roots
 - Aggregator, HTTP API, Python SDK, TypeScript SDK — обновлены под VFRI7 dual-commitment
 - Проведён аудит безопасности + code review (2026-05-25); 5 новых findings — все устранены
+- Проведён повторный аудит безопасности + code review (2026-05-30); 8 новых findings — все устранены
 
 ### Что готово
 
@@ -15,13 +16,16 @@
 - `core/signing.py` — sign / verify через liboqs
 - `core/transaction.py` — Transaction dataclass, детерминированная сериализация, tx_hash
 - `core/merkle.py` — SHA3-512 Merkle tree, build / root / proof / verify
-- `core/batch.py` — create_batch, merkle_root_onchain(), stark_commitment_onchain()
+- `core/batch.py` — create_batch, merkle_root_onchain()
 - `aggregator/` — Mempool (thread-safe), Batcher (min_batch_size, force_batch), AggregatorNode
-- `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`
+- `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`, `GET /batch/{batch_id}`
   - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min)
   - `AggregatorNode._history` capped at 1000 entries (evict oldest) — memory-safe for long-running nodes
+  - `TRUSTED_PROXIES` конфигурируется через одноимённую env var (по умолчанию: 127.0.0.1, ::1)
 - `sdk/python/qlsa/` — Wallet, LocalClient, HttpClient, WitnessStatus, BatchStatus
-  - `prove_witness(tx)` — локальный ML-DSA witness без обращения к серверу
+  - `prove_witness(tx, n_fri_queries=1)` — локальный ML-DSA witness без обращения к серверу
+  - `get_batch(batch_id)` — получить BatchStatus по ID (LocalClient и HttpClient)
+  - `WitnessStatus.fri_security_bits` — вычисляется как `6 × n_fri_queries + 10`
 - `sdk/js/src/` — TypeScript SDK: AggregatorClient, types
 
 #### STARK / Rust
@@ -101,8 +105,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `M31.sol` — field arithmetic library
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
-#### Тесты (актуально 2026-05-25)
-- Python: **178 тестов** (без PyO3) / **317** (с PyO3 ext)
+#### Тесты (актуально 2026-05-30)
+- Python: **~186 тестов** (без PyO3) / **~325** (с PyO3 ext)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
 - Solidity/Hardhat: **847 тестов** — все проходят
@@ -239,8 +243,16 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - **ML-DSA key size validation**: `deserialize_public_key` проверяет размер после base64 decode (2026-05-25)
 - **`_validate_senders` / `_as_bytes32` / `_decode_commitment16`**: строгая валидация входных данных в `submit.py` (2026-05-25)
 - **TwoChannel logDomainSize guard**: `require(logDomainSize <= 31)` предотвращает uint256 overflow в `drawQueries` (2026-05-25)
+- **TRUSTED_PROXIES configurable**: `_TRUSTED_PROXIES` в `aggregator/api.py` читается из env var — операторы могут добавлять reverse proxy без изменения кода (2026-05-30)
+- **amount ≥ 1 validation**: `Transaction.__post_init__` отклоняет `amount=0` — устраняет тихое несоответствие между SDK и API (2026-05-30)
+- **prepend_batch logging**: `Mempool.prepend_batch()` логирует warning при потере транзакций из-за переполнения (2026-05-30)
+- **Dead code removal**: `Batch.stark_commitment_onchain()` удалён — всегда поднимал ValueError с реальными commitments (ожидал 8 hex символов, реальные — 32) (2026-05-30)
+- **`wait_and_verify` exception safety**: `testnet/submit.py` — разделено получение receipt и проверка revert; только "not found" исключения перехватываются (2026-05-30)
+- **GET /batch/{batch_id} endpoint**: новый endpoint позволяет SDK/клиентам опросить статус батча без повторного доказательства (2026-05-30)
+- **WitnessStatus.fri_security_bits**: поле добавлено в Python SDK (parity с TypeScript SDK); вычисляется как `6 × n_fri_queries + 10` (2026-05-30)
+- **requirements-dev.txt deduplicated**: дубликаты `fastapi` / `httpx` заменены на `-r requirements-api.txt` (2026-05-30)
 
-### Таблица рисков (обновлено 2026-05-25)
+### Таблица рисков (обновлено 2026-05-30)
 
 | Риск | Уровень | Статус |
 |------|---------|--------|
@@ -275,6 +287,14 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | bytes(private_key) — иммутабельная копия в Python | Средний | Open (Rust wipe_bytes; Python-side copy неизбежна) |
 | H(a,b) = a³+b — не крипто-стойкая | Низкий | ✅ Done (Poseidon2-over-M31, 2026-05-16) |
 | tx_hash усекается до 31 бита для M31 | Низкий | Open |
+| `TRUSTED_PROXIES` hardcoded — операторы не могли добавить свои reverse proxy | Средний | ✅ Закрыт (env var конфигурация, 2026-05-30) |
+| `Transaction.amount = 0` принималось SDK, отклонялось API — тихое несоответствие | Средний | ✅ Закрыт (amount ≥ 1 в `__post_init__`, 2026-05-30) |
+| `Mempool.prepend_batch()` молча дропал транзакции при переполнении | Средний | ✅ Закрыт (logging.warning при drop, 2026-05-30) |
+| `Batch.stark_commitment_onchain()` dead code — всегда ValueError с реальными данными | Баг | ✅ Закрыт (метод удалён, 2026-05-30) |
+| `wait_and_verify` перехватывал все Exception — маскировал сетевые ошибки | Средний | ✅ Закрыт (только "not found" перехватывается, 2026-05-30) |
+| Нет `GET /batch/{id}` endpoint — нельзя получить статус батча без доказательства | Низкий | ✅ Закрыт (endpoint добавлен, 2026-05-30) |
+| `WitnessStatus.fri_security_bits` отсутствовало в Python SDK | Низкий | ✅ Закрыт (поле добавлено, 2026-05-30) |
+| Дублирование fastapi/httpx в requirements-dev.txt | Низкий | ✅ Закрыт (-r requirements-api.txt, 2026-05-30) |
 
 ---
 
