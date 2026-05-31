@@ -56,6 +56,11 @@ describe("AggregatorClient _validateTransaction", () => {
     await expect(client.submit(bad)).rejects.toThrow(RangeError);
   });
 
+  it("rejects zero amount (backend requires at least 1)", async () => {
+    const bad = { ...validTx, amount: 0 };
+    await expect(client.submit(bad)).rejects.toThrow(RangeError);
+  });
+
   it("rejects negative nonce", async () => {
     const bad = { ...validTx, nonce: -1 };
     await expect(client.submit(bad)).rejects.toThrow(RangeError);
@@ -137,6 +142,36 @@ describe("AggregatorClient _toBatchStatus", () => {
     expect(status.hasVfri7).toBe(true);
     expect(status.vfri7CommitmentLog10).toBe("c".repeat(32));
     expect(status.vfri7CommitmentLog8).toBe("d".repeat(32));
+  });
+});
+
+describe("AggregatorClient getBatch", () => {
+  it("getBatch returns null on network error (unknown host)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    const result = await client.getBatch("00000000-0000-0000-0000-000000000001");
+    expect(result).toBeNull();
+  });
+
+  it("getBatch is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getBatch).toBe("function");
+  });
+
+  it("getBatch maps a response through _toBatchStatus (smoke via _toBatchStatus)", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    // @ts-expect-error accessing private for test
+    const status = client._toBatchStatus({
+      batch_id: "deadbeef-0000-0000-0000-000000000001",
+      tx_count: 2,
+      merkle_root: "a".repeat(128),
+      is_proven: false,
+      has_witness: false,
+      has_vfri7: false,
+    });
+    expect(status.batchId).toBe("deadbeef-0000-0000-0000-000000000001");
+    expect(status.txCount).toBe(2);
+    expect(status.hasWitness).toBe(false);
+    expect(status.hasVfri7).toBe(false);
   });
 });
 

@@ -156,6 +156,11 @@ class TestSubmitTransaction:
         resp = client.post("/transactions", json=bad)
         assert resp.status_code == 422
 
+    def test_zero_amount_rejected(self, client, signed_payload):
+        bad = dict(signed_payload, amount=0)
+        resp = client.post("/transactions", json=bad)
+        assert resp.status_code == 422
+
     def test_negative_nonce_rejected(self, client, signed_payload):
         bad = dict(signed_payload, nonce=-1)
         resp = client.post("/transactions", json=bad)

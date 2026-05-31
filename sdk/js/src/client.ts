@@ -13,8 +13,8 @@ function _validateTransaction(tx: TransactionPayload): void {
     throw new TypeError("sender must be a 64-character hex string");
   if (!tx.recipient || tx.recipient.length !== 64 || !HEX_RE.test(tx.recipient))
     throw new TypeError("recipient must be a 64-character hex string");
-  if (!Number.isInteger(tx.amount) || tx.amount < 0)
-    throw new RangeError("amount must be a non-negative integer");
+  if (!Number.isInteger(tx.amount) || tx.amount < 1)
+    throw new RangeError("amount must be a positive integer (at least 1)");
   if (!Number.isInteger(tx.nonce) || tx.nonce < 0)
     throw new RangeError("nonce must be a non-negative integer");
   if (!tx.publicKey || !HEX_RE.test(tx.publicKey))
@@ -138,6 +138,30 @@ export class AggregatorClient {
         nFriQueries: data.n_fri_queries ?? 0,
         friSecurityBits: data.fri_security_bits ?? 0,
       };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Retrieve the status of a specific batch by ID.
+   * Returns null if the batch is not found (HTTP 404) or the ID is invalid.
+   */
+  async getBatch(batchId: string): Promise<BatchStatus | null> {
+    try {
+      const data = await this._get<{
+        batch_id: string;
+        tx_count: number;
+        merkle_root: string;
+        is_proven: boolean;
+        stark_commitment?: string;
+        has_witness?: boolean;
+        witness_commitment?: string;
+        has_vfri7?: boolean;
+        vfri7_commitment_log10?: string;
+        vfri7_commitment_log8?: string;
+      }>(`/batch/${batchId}`);
+      return this._toBatchStatus(data);
     } catch {
       return null;
     }
