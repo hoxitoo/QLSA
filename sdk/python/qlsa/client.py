@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from core.transaction import Transaction
@@ -135,23 +134,41 @@ class HttpClient:
 
         client = HttpClient("http://localhost:8000")
         result = client.submit(signed_tx)
+
+    For testing, pass an ``httpx.Client`` with an ASGI transport::
+
+        import httpx
+        from aggregator.api import app
+        transport = httpx.ASGITransport(app=app)
+        http = httpx.Client(transport=transport, base_url="http://test")
+        client = HttpClient("http://test", _client=http)
     """
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 30.0,
+        *,
+        _client: Any = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._client: Any = _client  # injected httpx.Client (for testing / custom transports)
 
-    def _httpx(self) -> Any:
+    def _get_client(self) -> Any:
+        """Return the httpx.Client to use, creating a default one if not injected."""
+        if self._client is not None:
+            return self._client
         try:
             import httpx
-            return httpx
+            return httpx.Client(timeout=self._timeout)
         except ImportError as exc:
             raise ImportError("httpx is required for HttpClient: pip install httpx") from exc
 
     def submit(self, tx: Transaction) -> SubmitResult:
         if tx.signature is None:
             return SubmitResult(accepted=False, error="transaction is unsigned")
-        httpx = self._httpx()
+        client = self._get_client()
         payload = {
             "sender": tx.sender,
             "recipient": tx.recipient,
@@ -160,9 +177,7 @@ class HttpClient:
             "public_key": tx.public_key.hex(),
             "signature": tx.signature.hex(),
         }
-        resp = httpx.post(
-            f"{self._base_url}/transactions", json=payload, timeout=self._timeout
-        )
+        resp = client.post(f"{self._base_url}/transactions", json=payload)
         resp.raise_for_status()
         data = resp.json()
         try:
@@ -177,50 +192,28 @@ class HttpClient:
             ) from exc
 
     def run_cycle(self) -> BatchStatus | None:
-        httpx = self._httpx()
-        resp = httpx.post(f"{self._base_url}/batch/run", timeout=self._timeout)
+        client = self._get_client()
+        resp = client.post(f"{self._base_url}/batch/run")
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "no_batch":
             return None
         try:
-            return BatchStatus(
-                batch_id=data["batch_id"],
-                tx_count=data["tx_count"],
-                merkle_root=data["merkle_root"],
-                is_proven=data["is_proven"],
-                stark_commitment=data.get("stark_commitment"),
-                has_witness=data.get("has_witness", False),
-                witness_commitment=data.get("witness_commitment"),
-                has_vfri7=data.get("has_vfri7", False),
-                vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
-                vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
-            )
+            return self._parse_batch_status(data)
         except KeyError as exc:
             raise RuntimeError(
                 f"Aggregator /batch/run response missing field: {exc}. Got: {list(data)}"
             ) from exc
 
     def flush(self) -> BatchStatus | None:
-        httpx = self._httpx()
-        resp = httpx.post(f"{self._base_url}/batch/flush", timeout=self._timeout)
+        client = self._get_client()
+        resp = client.post(f"{self._base_url}/batch/flush")
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "empty":
             return None
         try:
-            return BatchStatus(
-                batch_id=data["batch_id"],
-                tx_count=data["tx_count"],
-                merkle_root=data["merkle_root"],
-                is_proven=data["is_proven"],
-                stark_commitment=data.get("stark_commitment"),
-                has_witness=data.get("has_witness", False),
-                witness_commitment=data.get("witness_commitment"),
-                has_vfri7=data.get("has_vfri7", False),
-                vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
-                vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
-            )
+            return self._parse_batch_status(data)
         except KeyError as exc:
             raise RuntimeError(
                 f"Aggregator /batch/flush response missing field: {exc}. Got: {list(data)}"
@@ -228,24 +221,12 @@ class HttpClient:
 
     def get_batch(self, batch_id: str) -> BatchStatus | None:
         """Return the BatchStatus for a given batch_id, or None if not found (HTTP 404)."""
-        httpx = self._httpx()
-        resp = httpx.get(f"{self._base_url}/batch/{batch_id}", timeout=self._timeout)
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/batch/{batch_id}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        data = resp.json()
-        return BatchStatus(
-            batch_id=data["batch_id"],
-            tx_count=data["tx_count"],
-            merkle_root=data["merkle_root"],
-            is_proven=data["is_proven"],
-            stark_commitment=data.get("stark_commitment"),
-            has_witness=data.get("has_witness", False),
-            witness_commitment=data.get("witness_commitment"),
-            has_vfri7=data.get("has_vfri7", False),
-            vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
-            vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
-        )
+        return self._parse_batch_status(resp.json())
 
     def prove_witness(self, tx: Transaction, n_fri_queries: int = 1) -> WitnessStatus:
         """Generate an ML-DSA-65 arithmetic witness STARK proof for a single transaction.
@@ -257,8 +238,8 @@ class HttpClient:
         return _prove_witness_local(tx, n_fri_queries=n_fri_queries)
 
     def stats(self) -> NodeStats:
-        httpx = self._httpx()
-        resp = httpx.get(f"{self._base_url}/stats", timeout=self._timeout)
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/stats")
         resp.raise_for_status()
         data = resp.json()
         return NodeStats(
@@ -272,9 +253,24 @@ class HttpClient:
         )
 
     def health(self) -> bool:
-        httpx = self._httpx()
         try:
-            resp = httpx.get(f"{self._base_url}/health", timeout=self._timeout)
+            client = self._get_client()
+            resp = client.get(f"{self._base_url}/health")
             return bool(resp.is_success)
         except Exception:
             return False
+
+    @staticmethod
+    def _parse_batch_status(data: dict[str, Any]) -> BatchStatus:
+        return BatchStatus(
+            batch_id=data["batch_id"],
+            tx_count=data["tx_count"],
+            merkle_root=data["merkle_root"],
+            is_proven=data["is_proven"],
+            stark_commitment=data.get("stark_commitment"),
+            has_witness=data.get("has_witness", False),
+            witness_commitment=data.get("witness_commitment"),
+            has_vfri7=data.get("has_vfri7", False),
+            vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
+            vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
+        )
