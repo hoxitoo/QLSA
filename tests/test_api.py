@@ -57,6 +57,11 @@ def signed_payload() -> dict:
 @pytest.fixture()
 def client() -> "TestClient":
     from aggregator.api import app
+    import aggregator.api as api_mod
+    with api_mod._rate_lock:
+        api_mod._tx_windows.clear()
+        api_mod._batch_windows.clear()
+        api_mod._read_windows.clear()
     with TestClient(app) as c:
         yield c
 
@@ -148,6 +153,11 @@ class TestSubmitTransaction:
 
     def test_negative_amount_rejected(self, client, signed_payload):
         bad = dict(signed_payload, amount=-1)
+        resp = client.post("/transactions", json=bad)
+        assert resp.status_code == 422
+
+    def test_zero_amount_rejected(self, client, signed_payload):
+        bad = dict(signed_payload, amount=0)
         resp = client.post("/transactions", json=bad)
         assert resp.status_code == 422
 

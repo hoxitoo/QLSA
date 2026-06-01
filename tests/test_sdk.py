@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from core.keys import derive_address, generate_keypair, wipe_key
@@ -11,6 +12,30 @@ from sdk.python.qlsa import (
     Wallet,
     WitnessStatus,
 )
+from sdk.python.qlsa.client import HttpClient
+
+
+# ── HttpClient helpers ────────────────────────────────────────────────────────
+
+@pytest.fixture()
+def http_client():
+    """HttpClient wired to the in-process FastAPI app via TestClient.
+
+    starlette.testclient.TestClient is itself an httpx.Client, so it can be
+    injected directly as the _client transport — no real TCP socket needed.
+    The TestClient is used as a context manager so the FastAPI lifespan
+    (which sets app.state.node) runs before any request.
+    Rate-limit windows are cleared per-test to prevent cross-test accumulation.
+    """
+    from starlette.testclient import TestClient
+    from aggregator.api import app
+    import aggregator.api as api_mod
+    with api_mod._rate_lock:
+        api_mod._tx_windows.clear()
+        api_mod._batch_windows.clear()
+        api_mod._read_windows.clear()
+    with TestClient(app, base_url="http://test") as tc:
+        yield HttpClient("http://test", _client=tc)
 
 
 # ── Wallet ────────────────────────────────────────────────────────────────────
@@ -75,7 +100,7 @@ def test_builder_produces_signed_transaction():
 def test_builder_multiple_transactions():
     with Wallet.generate() as wallet:
         builder = TransactionBuilder(wallet)
-        txs = [builder.build(recipient="c" * 64, amount=i, nonce=i) for i in range(5)]
+        txs = [builder.build(recipient="c" * 64, amount=i + 1, nonce=i) for i in range(5)]
     assert all(tx.signature is not None for tx in txs)
     assert [tx.nonce for tx in txs] == list(range(5))
 
@@ -309,3 +334,107 @@ def test_prove_witness_signed_tx_returns_witness_status():
         # FRI security fields
         assert ws.n_fri_queries >= 1
         assert ws.fri_security_bits == 6 * ws.n_fri_queries + 10
+
+
+# ── HttpClient ────────────────────────────────────────────────────────────────
+
+def test_http_client_health(http_client: HttpClient):
+    assert http_client.health() is True
+
+
+def test_http_client_stats_initial_state(http_client: HttpClient):
+    stats = http_client.stats()
+    assert isinstance(stats, NodeStats)
+    assert stats.transactions_received == 0
+    assert stats.pending == 0
+    assert stats.batches_created == 0
+
+
+def test_http_client_submit_signed_tx(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="d" * 64, amount=10, nonce=0)
+        result = http_client.submit(tx)
+    assert isinstance(result, SubmitResult)
+    assert result.accepted is True
+    assert result.error is None
+    assert result.mempool_size == 1
+
+
+def test_http_client_submit_unsigned_tx_rejected(http_client: HttpClient):
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    tx = Transaction(
+        sender=derive_address(pub),
+        recipient="f" * 64,
+        amount=1,
+        nonce=0,
+        public_key=pub,
+    )
+    result = http_client.submit(tx)
+    assert result.accepted is False
+    assert result.error is not None
+
+
+def test_http_client_flush_empty_returns_none(http_client: HttpClient):
+    assert http_client.flush() is None
+
+
+def test_http_client_flush_creates_batch(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=5, nonce=0)
+        http_client.submit(tx)
+        status = http_client.flush()
+    assert isinstance(status, BatchStatus)
+    assert status.tx_count == 1
+    assert len(status.merkle_root) == 128
+    assert status.batch_id != ""
+    assert isinstance(status.is_proven, bool)
+
+
+def test_http_client_run_cycle_empty_returns_none(http_client: HttpClient):
+    assert http_client.run_cycle() is None
+
+
+def test_http_client_get_batch_returns_status(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1, nonce=0)
+        http_client.submit(tx)
+        flushed = http_client.flush()
+    assert flushed is not None
+    found = http_client.get_batch(flushed.batch_id)
+    assert found is not None
+    assert found.batch_id == flushed.batch_id
+    assert found.tx_count == flushed.tx_count
+
+
+def test_http_client_get_batch_unknown_returns_none(http_client: HttpClient):
+    import uuid
+    assert http_client.get_batch(str(uuid.uuid4())) is None
+
+
+def test_http_client_stats_tracks_submissions(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        for i in range(3):
+            http_client.submit(builder.build(recipient="23" * 32, amount=1, nonce=i))
+        http_client.flush()
+    stats = http_client.stats()
+    assert stats.transactions_received == 3
+    assert stats.transactions_batched == 3
+    assert stats.batches_created == 1
+    assert stats.pending == 0
+
+
+def test_http_client_prove_witness_unsigned_returns_no_witness(http_client: HttpClient):
+    pub, priv = generate_keypair()
+    wipe_key(priv)
+    tx = Transaction(
+        sender=derive_address(pub),
+        recipient="f" * 64,
+        amount=1,
+        nonce=0,
+        public_key=pub,
+    )
+    ws = http_client.prove_witness(tx)
+    assert isinstance(ws, WitnessStatus)
+    assert ws.has_witness is False
