@@ -107,6 +107,36 @@ class TestStats:
         assert resp.json()["pending"] == 1
 
 
+# ── GET /node/config ─────────────────────────────────────────────────────────
+
+class TestNodeConfig:
+    def test_returns_200(self, client):
+        resp = client.get("/node/config")
+        assert resp.status_code == 200
+
+    def test_contains_required_fields(self, client):
+        data = client.get("/node/config").json()
+        for key in ("n_fri_queries", "fri_security_bits", "min_batch_size",
+                    "max_batch_size", "mempool_capacity", "version"):
+            assert key in data, f"missing field: {key}"
+
+    def test_fri_security_bits_formula(self, client):
+        data = client.get("/node/config").json()
+        n = data["n_fri_queries"]
+        assert data["fri_security_bits"] == 6 * n + 10
+
+    def test_batch_size_ordering(self, client):
+        data = client.get("/node/config").json()
+        assert data["min_batch_size"] >= 1
+        assert data["max_batch_size"] >= data["min_batch_size"]
+        assert data["mempool_capacity"] >= data["max_batch_size"]
+
+    def test_version_is_string(self, client):
+        data = client.get("/node/config").json()
+        assert isinstance(data["version"], str)
+        assert len(data["version"]) > 0
+
+
 # ── POST /transactions ────────────────────────────────────────────────────────
 
 class TestSubmitTransaction:

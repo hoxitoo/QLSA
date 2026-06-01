@@ -49,3 +49,12 @@ export interface NodeStats {
   nFriQueries: number;      // configured FRI queries per proof group
   friSecurityBits: number;  // 6 × nFriQueries + 10
 }
+
+export interface NodeConfig {
+  nFriQueries: number;      // FRI queries per proof group (on-chain security parameter)
+  friSecurityBits: number;  // 6 × nFriQueries + 10
+  minBatchSize: number;     // minimum transactions required to create a batch
+  maxBatchSize: number;     // maximum transactions per batch
+  mempoolCapacity: number;  // maximum transactions held in the mempool
+  version: string;          // aggregator API version
+}

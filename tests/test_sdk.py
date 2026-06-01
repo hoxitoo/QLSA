@@ -6,6 +6,7 @@ from core.transaction import Transaction
 from sdk.python.qlsa import (
     BatchStatus,
     LocalClient,
+    NodeConfig,
     NodeStats,
     SubmitResult,
     TransactionBuilder,
@@ -233,6 +234,30 @@ def test_local_client_stats_fri_fields():
     assert stats.fri_security_bits == 6 * stats.n_fri_queries + 10
 
 
+def test_local_client_node_config_returns_config():
+    client = LocalClient()
+    cfg = client.node_config()
+    assert isinstance(cfg, NodeConfig)
+    assert cfg.n_fri_queries >= 1
+    assert cfg.fri_security_bits == 6 * cfg.n_fri_queries + 10
+    assert cfg.min_batch_size >= 1
+    assert cfg.max_batch_size >= cfg.min_batch_size
+    assert cfg.mempool_capacity >= cfg.max_batch_size
+
+
+def test_local_client_node_config_custom_params():
+    from aggregator.node import AggregatorNode
+    node = AggregatorNode(min_batch_size=5, max_batch_size=100,
+                          mempool_capacity=500, n_fri_queries=3)
+    client = LocalClient(node=node)
+    cfg = client.node_config()
+    assert cfg.n_fri_queries == 3
+    assert cfg.fri_security_bits == 28
+    assert cfg.min_batch_size == 5
+    assert cfg.max_batch_size == 100
+    assert cfg.mempool_capacity == 500
+
+
 def test_local_client_get_batch_returns_status():
     with Wallet.generate() as wallet:
         tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1, nonce=0)
@@ -438,3 +463,14 @@ def test_http_client_prove_witness_unsigned_returns_no_witness(http_client: Http
     ws = http_client.prove_witness(tx)
     assert isinstance(ws, WitnessStatus)
     assert ws.has_witness is False
+
+
+def test_http_client_node_config(http_client: HttpClient):
+    cfg = http_client.node_config()
+    assert isinstance(cfg, NodeConfig)
+    assert cfg.n_fri_queries >= 1
+    assert cfg.fri_security_bits == 6 * cfg.n_fri_queries + 10
+    assert cfg.min_batch_size >= 1
+    assert cfg.max_batch_size >= cfg.min_batch_size
+    assert cfg.mempool_capacity >= cfg.max_batch_size
+    assert isinstance(cfg.version, str) and len(cfg.version) > 0

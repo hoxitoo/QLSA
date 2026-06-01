@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@jest/globals";
 import type {
   BatchStatus,
+  NodeConfig,
   NodeStats,
   SubmitResult,
   TransactionPayload,
@@ -155,5 +156,42 @@ describe("NodeStats", () => {
       proofsGenerated: 0, pending: 0, nFriQueries: 3, friSecurityBits: 28,
     };
     expect(s.friSecurityBits).toBe(6 * s.nFriQueries + 10);
+  });
+});
+
+describe("NodeConfig", () => {
+  it("accepts a valid config object", () => {
+    const cfg: NodeConfig = {
+      nFriQueries: 1,
+      friSecurityBits: 16,
+      minBatchSize: 1,
+      maxBatchSize: 3000,
+      mempoolCapacity: 3000,
+      version: "0.1.0",
+    };
+    expect(cfg.nFriQueries).toBe(1);
+    expect(cfg.friSecurityBits).toBe(16);
+    expect(cfg.minBatchSize).toBeLessThanOrEqual(cfg.maxBatchSize);
+    expect(cfg.maxBatchSize).toBeLessThanOrEqual(cfg.mempoolCapacity);
+  });
+
+  it("security bits formula: 6×n+10", () => {
+    const cases: Array<[number, number]> = [[1, 16], [3, 28], [5, 40], [20, 130]];
+    for (const [n, bits] of cases) {
+      const cfg: NodeConfig = {
+        nFriQueries: n, friSecurityBits: bits,
+        minBatchSize: 1, maxBatchSize: 100, mempoolCapacity: 100, version: "0.1.0",
+      };
+      expect(cfg.friSecurityBits).toBe(6 * cfg.nFriQueries + 10);
+    }
+  });
+
+  it("version is a non-empty string", () => {
+    const cfg: NodeConfig = {
+      nFriQueries: 3, friSecurityBits: 28,
+      minBatchSize: 1, maxBatchSize: 100, mempoolCapacity: 100, version: "0.1.0",
+    };
+    expect(typeof cfg.version).toBe("string");
+    expect(cfg.version.length).toBeGreaterThan(0);
   });
 });

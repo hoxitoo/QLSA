@@ -194,3 +194,16 @@ describe("AggregatorClient stats FRI security fields", () => {
     void client; // suppress unused var
   });
 });
+
+describe("AggregatorClient getNodeConfig", () => {
+  it("getNodeConfig is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getNodeConfig).toBe("function");
+  });
+
+  it("getNodeConfig returns null on network error (unknown host)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    // getNodeConfig throws on HTTP error (unlike getBatch which returns null)
+    await expect(client.getNodeConfig()).rejects.toThrow();
+  });
+});

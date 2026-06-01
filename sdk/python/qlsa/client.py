@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 from core.transaction import Transaction
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
-from .models import BatchStatus, NodeStats, SubmitResult, WitnessStatus
+from .models import BatchStatus, NodeConfig, NodeStats, SubmitResult, WitnessStatus
 
 if TYPE_CHECKING:
     from aggregator.batcher import BatchResult
@@ -122,6 +122,17 @@ class LocalClient:
             pending=self._node.pending_count(),
             n_fri_queries=n,
             fri_security_bits=6 * n + 10,
+        )
+
+    def node_config(self) -> NodeConfig:
+        """Return static node configuration (security level, batch size limits)."""
+        n = self._node.n_fri_queries
+        return NodeConfig(
+            n_fri_queries=n,
+            fri_security_bits=6 * n + 10,
+            min_batch_size=self._node.batcher.min_batch_size,
+            max_batch_size=self._node.batcher.max_batch_size,
+            mempool_capacity=self._node.mempool.max_size,
         )
 
 
@@ -250,6 +261,21 @@ class HttpClient:
             pending=data["pending"],
             n_fri_queries=data.get("n_fri_queries", 1),
             fri_security_bits=data.get("fri_security_bits", 16),
+        )
+
+    def node_config(self) -> NodeConfig:
+        """Return static node configuration (security level, batch size limits)."""
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/node/config")
+        resp.raise_for_status()
+        data = resp.json()
+        return NodeConfig(
+            n_fri_queries=data["n_fri_queries"],
+            fri_security_bits=data["fri_security_bits"],
+            min_batch_size=data["min_batch_size"],
+            max_batch_size=data["max_batch_size"],
+            mempool_capacity=data["mempool_capacity"],
+            version=data.get("version", "0.1.0"),
         )
 
     def health(self) -> bool:

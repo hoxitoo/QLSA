@@ -1,5 +1,6 @@
 import type {
   BatchStatus,
+  NodeConfig,
   NodeStats,
   SubmitResult,
   TransactionPayload,
@@ -165,6 +166,26 @@ export class AggregatorClient {
     } catch {
       return null;
     }
+  }
+
+  /** Retrieve static node configuration (security level, batch size limits). */
+  async getNodeConfig(): Promise<NodeConfig> {
+    const data = await this._get<{
+      n_fri_queries: number;
+      fri_security_bits: number;
+      min_batch_size: number;
+      max_batch_size: number;
+      mempool_capacity: number;
+      version: string;
+    }>("/node/config");
+    return {
+      nFriQueries: data.n_fri_queries,
+      friSecurityBits: data.fri_security_bits,
+      minBatchSize: data.min_batch_size,
+      maxBatchSize: data.max_batch_size,
+      mempoolCapacity: data.mempool_capacity,
+      version: data.version,
+    };
   }
 
   /** Retrieve aggregator node statistics. */

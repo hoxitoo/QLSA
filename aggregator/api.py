@@ -241,6 +241,25 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/node/config")
+def node_config(request: Request) -> dict[str, Any]:
+    """Return static node configuration parameters.
+
+    Useful for operators and SDK clients to discover the security level
+    and batch size limits the node was started with.
+    """
+    node: AggregatorNode = request.app.state.node
+    n = node.n_fri_queries
+    return {
+        "n_fri_queries": n,
+        "fri_security_bits": 6 * n + 10,
+        "min_batch_size": node.batcher.min_batch_size,
+        "max_batch_size": node.batcher.max_batch_size,
+        "mempool_capacity": node.mempool.max_size,
+        "version": request.app.version,
+    }
+
+
 @app.get("/stats")
 def stats(request: Request) -> dict[str, Any]:
     node: AggregatorNode = request.app.state.node
