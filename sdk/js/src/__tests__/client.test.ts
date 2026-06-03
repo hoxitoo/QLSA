@@ -207,3 +207,21 @@ describe("AggregatorClient getNodeConfig", () => {
     await expect(client.getNodeConfig()).rejects.toThrow();
   });
 });
+
+describe("AggregatorClient getWitnessStatus", () => {
+  it("getWitnessStatus is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getWitnessStatus).toBe("function");
+  });
+
+  it("getWitnessStatus returns null on network error (unknown host)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    const result = await client.getWitnessStatus("some-batch-id");
+    expect(result).toBeNull();
+  });
+
+  it("getWitnessStatus returns null on HTTP error (unknown host with bad id)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    expect(await client.getWitnessStatus("00000000-0000-0000-0000-000000000000")).toBeNull();
+  });
+});

@@ -70,7 +70,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** (non-ignored) + **~225 Python** (no PyO3) + **36 TS** + **847 Hardhat** | ✅ Done |
+| Tests — **210 Rust** (non-ignored) + **~234 Python** (no PyO3) + **39 TS** + **847 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V22** — All 7 ML-DSA circuits in 1 STARK + Merkle root Fiat-Shamir binding | ✅ Done |
@@ -90,6 +90,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **Security audit (2026-05-30 round-1)** — TRUSTED_PROXIES env config, amount≥1 validation, dead code removal, GET /batch/{id}, fri_security_bits SDK field, exception safety in submit.py | ✅ Done (2026-05-30) |
 | **Security + code audit (2026-05-30 round-2)** — IP validation, hex normalization, GET rate limiting, UUID batch_id validation, pubkey size check, deque history, O(1) batch index, N_FRI_QUERIES env guard | ✅ Done (2026-05-30) |
 | **SDK + API audit (2026-06-03)** — `GET /node/config` endpoint + NodeConfig model (Python + TS), `prove_witnesses` param in HttpClient/TS SDK, Docker env var documentation (`N_FRI_QUERIES`, `TRUSTED_PROXIES`), DI-based HttpClient testing | ✅ Done (2026-06-03) |
+| **SDK enhancements (2026-06-03)** — `get_witness_status()` in LocalClient + HttpClient (mirrors TS SDK), `LocalClient.health()` API parity, `TransactionBuilder` auto-nonce counter (`start_nonce`, `next_nonce`), `getWitnessStatus` TS tests | ✅ Done (2026-06-03) |
 
 ---
 

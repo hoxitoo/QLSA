@@ -106,6 +106,48 @@ def test_builder_multiple_transactions():
     assert [tx.nonce for tx in txs] == list(range(5))
 
 
+def test_builder_auto_nonce_increments():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        txs = [builder.build(recipient="f" * 64, amount=1) for _ in range(4)]
+    assert [tx.nonce for tx in txs] == [0, 1, 2, 3]
+    assert builder.next_nonce == 4
+
+
+def test_builder_auto_nonce_start_nonce():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet, start_nonce=10)
+        tx0 = builder.build(recipient="aa" * 32, amount=1)
+        tx1 = builder.build(recipient="bb" * 32, amount=1)
+    assert tx0.nonce == 10
+    assert tx1.nonce == 11
+    assert builder.next_nonce == 12
+
+
+def test_builder_explicit_nonce_does_not_advance_counter():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        builder.build(recipient="cc" * 32, amount=1)  # nonce=0, counter → 1
+        tx = builder.build(recipient="dd" * 32, amount=1, nonce=99)
+    assert tx.nonce == 99
+    assert builder.next_nonce == 1  # counter unchanged by explicit nonce
+
+
+def test_builder_mixed_auto_and_explicit_nonce():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        t0 = builder.build(recipient="11" * 32, amount=1)          # auto → 0
+        t1 = builder.build(recipient="22" * 32, amount=1, nonce=5)  # explicit 5
+        t2 = builder.build(recipient="33" * 32, amount=1)          # auto → 1
+    assert [t0.nonce, t1.nonce, t2.nonce] == [0, 5, 1]
+
+
+# ── LocalClient.health ────────────────────────────────────────────────────────
+
+def test_local_client_health_returns_true():
+    assert LocalClient().health() is True
+
+
 # ── LocalClient.submit ────────────────────────────────────────────────────────
 
 def test_local_client_submit_signed_tx():

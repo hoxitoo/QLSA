@@ -136,6 +136,10 @@ class LocalClient:
             fri_security_bits=6 * n + 10,
         )
 
+    def health(self) -> bool:
+        """Always True for an in-process node — included for API parity with HttpClient."""
+        return True
+
     def stats(self) -> NodeStats:
         s = self._node.stats()
         n = self._node.n_fri_queries
