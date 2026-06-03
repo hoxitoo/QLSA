@@ -455,6 +455,7 @@ class TestRateLimit:
         resp = client.post("/transactions", json=signed_payload)
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
+        assert resp.headers.get("Retry-After") == "60"
 
     def test_batch_rate_limit_enforced(self, client, signed_payload):
         """21st POST /batch/flush from same IP within window returns 429."""
@@ -473,6 +474,7 @@ class TestRateLimit:
         resp = client.post("/batch/flush")
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
+        assert resp.headers.get("Retry-After") == "60"
 
     def test_health_stats_not_rate_limited(self, client):
         """GET /health and /stats are never rate-limited."""
@@ -497,3 +499,4 @@ class TestRateLimit:
         resp = client.get(f"/batch/{fake_id}")
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
+        assert resp.headers.get("Retry-After") == "60"

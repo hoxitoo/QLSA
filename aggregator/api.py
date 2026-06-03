@@ -124,18 +124,21 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
             if not _check_rate(_tx_windows, ip, _TX_LIMIT):
                 return JSONResponse(
                     status_code=429,
+                    headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 100 transaction submissions per minute"},
                 )
         elif method == "POST" and path.startswith("/batch/"):
             if not _check_rate(_batch_windows, ip, _BATCH_LIMIT):
                 return JSONResponse(
                     status_code=429,
+                    headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 20 batch operations per minute"},
                 )
         elif method == "GET" and path.startswith("/batch/"):
             if not _check_rate(_read_windows, ip, _READ_LIMIT):
                 return JSONResponse(
                     status_code=429,
+                    headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
                 )
 
