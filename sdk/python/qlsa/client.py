@@ -256,7 +256,7 @@ class HttpClient:
         }
         resp = client.post(f"{self._base_url}/transactions", json=payload)
         resp.raise_for_status()
-        data = resp.json()
+        data = self._decode_json(resp, "/transactions")
         try:
             return SubmitResult(
                 accepted=data["accepted"],
@@ -273,7 +273,7 @@ class HttpClient:
         params = {"prove_witnesses": "true"} if prove_witnesses else {}
         resp = client.post(f"{self._base_url}/batch/run", params=params)
         resp.raise_for_status()
-        data = resp.json()
+        data = self._decode_json(resp, "/batch/run")
         if data.get("status") == "no_batch":
             return None
         try:
@@ -288,7 +288,7 @@ class HttpClient:
         params = {"prove_witnesses": "true"} if prove_witnesses else {}
         resp = client.post(f"{self._base_url}/batch/flush", params=params)
         resp.raise_for_status()
-        data = resp.json()
+        data = self._decode_json(resp, "/batch/flush")
         if data.get("status") == "empty":
             return None
         try:
@@ -305,7 +305,7 @@ class HttpClient:
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        return self._parse_batch_status(resp.json())
+        return self._parse_batch_status(self._decode_json(resp, f"/batch/{batch_id}"))
 
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a batch, or None if not found (HTTP 404)."""
@@ -314,7 +314,7 @@ class HttpClient:
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        data = resp.json()
+        data = self._decode_json(resp, f"/batch/{batch_id}/witness")
         if not data.get("has_witness", False):
             return WitnessStatus(
                 has_witness=False,
@@ -347,7 +347,7 @@ class HttpClient:
         client = self._get_client()
         resp = client.get(f"{self._base_url}/stats")
         resp.raise_for_status()
-        data = resp.json()
+        data = self._decode_json(resp, "/stats")
         return NodeStats(
             transactions_received=data["transactions_received"],
             transactions_batched=data["transactions_batched"],
@@ -363,7 +363,7 @@ class HttpClient:
         client = self._get_client()
         resp = client.get(f"{self._base_url}/node/config")
         resp.raise_for_status()
-        data = resp.json()
+        data = self._decode_json(resp, "/node/config")
         return NodeConfig(
             n_fri_queries=data["n_fri_queries"],
             fri_security_bits=data["fri_security_bits"],
@@ -380,6 +380,23 @@ class HttpClient:
             return bool(resp.is_success)
         except Exception:
             return False
+
+    @staticmethod
+    def _decode_json(resp: Any, endpoint: str) -> Any:
+        """Decode a response body as JSON, raising RuntimeError on parse failure.
+
+        Protects callers from json.JSONDecodeError when a proxy or gateway
+        returns an HTML error page with a 2xx-but-wrong-content-type response
+        (rare but observable behind nginx/cloudflare during restarts).
+        """
+        import json as _json
+        try:
+            return resp.json()
+        except _json.JSONDecodeError as exc:
+            preview = resp.text[:200].replace("\n", " ")
+            raise RuntimeError(
+                f"Aggregator {endpoint} returned non-JSON body: {preview!r}"
+            ) from exc
 
     @staticmethod
     def _parse_batch_status(data: dict[str, Any]) -> BatchStatus:
