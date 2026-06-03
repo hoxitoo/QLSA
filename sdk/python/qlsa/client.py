@@ -202,9 +202,10 @@ class HttpClient:
                 f"Aggregator /transactions response missing field: {exc}. Got: {list(data)}"
             ) from exc
 
-    def run_cycle(self) -> BatchStatus | None:
+    def run_cycle(self, prove_witnesses: bool = False) -> BatchStatus | None:
         client = self._get_client()
-        resp = client.post(f"{self._base_url}/batch/run")
+        params = {"prove_witnesses": "true"} if prove_witnesses else {}
+        resp = client.post(f"{self._base_url}/batch/run", params=params)
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "no_batch":
@@ -216,9 +217,10 @@ class HttpClient:
                 f"Aggregator /batch/run response missing field: {exc}. Got: {list(data)}"
             ) from exc
 
-    def flush(self) -> BatchStatus | None:
+    def flush(self, prove_witnesses: bool = False) -> BatchStatus | None:
         client = self._get_client()
-        resp = client.post(f"{self._base_url}/batch/flush")
+        params = {"prove_witnesses": "true"} if prove_witnesses else {}
+        resp = client.post(f"{self._base_url}/batch/flush", params=params)
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "empty":

@@ -420,6 +420,26 @@ def test_http_client_run_cycle_empty_returns_none(http_client: HttpClient):
     assert http_client.run_cycle() is None
 
 
+def test_http_client_run_cycle_prove_witnesses_param_accepted(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ef" * 32, amount=1, nonce=0)
+        http_client.submit(tx)
+    status = http_client.run_cycle(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+    assert isinstance(status.has_vfri7, bool)
+
+
+def test_http_client_flush_prove_witnesses_param_accepted(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=5, nonce=0)
+        http_client.submit(tx)
+    status = http_client.flush(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+    assert isinstance(status.has_vfri7, bool)
+
+
 def test_http_client_get_batch_returns_status(http_client: HttpClient):
     with Wallet.generate() as wallet:
         tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1, nonce=0)
