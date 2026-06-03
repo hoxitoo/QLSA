@@ -111,6 +111,31 @@ class LocalClient:
                 return _batch_status(result)
         return None
 
+    def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
+        """Return the WitnessStatus for a given batch_id, or None if not found."""
+        result = self._node.get_batch(batch_id)
+        if result is None:
+            return None
+        n = self._node.n_fri_queries
+        if not result.has_witness:
+            return WitnessStatus(
+                has_witness=False,
+                has_vfri7=False,
+                n_fri_queries=n,
+                fri_security_bits=6 * n + 10,
+            )
+        return WitnessStatus(
+            has_witness=True,
+            onchain_commitment=result.witness_commitment,
+            c_tilde_hex=result.witness_c_tilde_hex,
+            max_norms=result.witness_max_norms or [],
+            has_vfri7=result.has_vfri7,
+            vfri7_commitment_log10=result.vfri7_commitment_log10,
+            vfri7_commitment_log8=result.vfri7_commitment_log8,
+            n_fri_queries=n,
+            fri_security_bits=6 * n + 10,
+        )
+
     def stats(self) -> NodeStats:
         s = self._node.stats()
         n = self._node.n_fri_queries
@@ -240,6 +265,33 @@ class HttpClient:
             return None
         resp.raise_for_status()
         return self._parse_batch_status(resp.json())
+
+    def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
+        """Return the WitnessStatus for a batch, or None if not found (HTTP 404)."""
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/batch/{batch_id}/witness")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("has_witness", False):
+            return WitnessStatus(
+                has_witness=False,
+                has_vfri7=False,
+                n_fri_queries=data.get("n_fri_queries", 0),
+                fri_security_bits=data.get("fri_security_bits", 0),
+            )
+        return WitnessStatus(
+            has_witness=True,
+            onchain_commitment=data.get("onchain_commitment"),
+            c_tilde_hex=data.get("c_tilde_hex"),
+            max_norms=data.get("max_norms") or [],
+            has_vfri7=data.get("has_vfri7", False),
+            vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
+            vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
+            n_fri_queries=data.get("n_fri_queries", 0),
+            fri_security_bits=data.get("fri_security_bits", 0),
+        )
 
     def prove_witness(self, tx: Transaction, n_fri_queries: int = 1) -> WitnessStatus:
         """Generate an ML-DSA-65 arithmetic witness STARK proof for a single transaction.
