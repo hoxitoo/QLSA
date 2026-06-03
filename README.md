@@ -70,7 +70,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** (non-ignored) + **~234 Python** (no PyO3) + **39 TS** + **847 Hardhat** | ✅ Done |
+| Tests — **210 Rust** (non-ignored) + **~237 Python** (no PyO3) + **39 TS** + **847 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V22** — All 7 ML-DSA circuits in 1 STARK + Merkle root Fiat-Shamir binding | ✅ Done |

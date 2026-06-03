@@ -104,6 +104,10 @@ class LocalClient:
         """
         return _prove_witness_local(tx, n_fri_queries=self._node.n_fri_queries)
 
+    def history(self) -> list[BatchStatus]:
+        """Return all BatchStatus objects produced by this node (oldest → newest)."""
+        return [_batch_status(r) for r in self._node.history()]
+
     def get_batch(self, batch_id: str) -> BatchStatus | None:
         """Return the BatchStatus for a given batch_id, or None if not found."""
         for result in self._node.history():

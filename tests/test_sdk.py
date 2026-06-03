@@ -106,6 +106,13 @@ def test_builder_multiple_transactions():
     assert [tx.nonce for tx in txs] == list(range(5))
 
 
+def test_wallet_public_key_hex_is_hex_string():
+    with Wallet.generate() as wallet:
+        assert isinstance(wallet.public_key_hex, str)
+        assert all(c in "0123456789abcdef" for c in wallet.public_key_hex)
+        assert wallet.public_key_hex == wallet.public_key.hex()
+
+
 def test_builder_auto_nonce_increments():
     with Wallet.generate() as wallet:
         builder = TransactionBuilder(wallet)
@@ -146,6 +153,24 @@ def test_builder_mixed_auto_and_explicit_nonce():
 
 def test_local_client_health_returns_true():
     assert LocalClient().health() is True
+
+
+def test_local_client_history_empty_initially():
+    assert LocalClient().history() == []
+
+
+def test_local_client_history_accumulates_batches():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        client.submit(builder.build(recipient="11" * 32, amount=1))
+        client.flush()
+        client.submit(builder.build(recipient="22" * 32, amount=1))
+        client.flush()
+    history = client.history()
+    assert len(history) == 2
+    assert all(isinstance(b, BatchStatus) for b in history)
+    assert history[0].batch_id != history[1].batch_id
 
 
 # ── LocalClient.submit ────────────────────────────────────────────────────────
