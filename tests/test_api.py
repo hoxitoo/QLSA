@@ -206,6 +206,23 @@ class TestSubmitTransaction:
         resp = client.post("/transactions", json=bad)
         assert resp.status_code == 422
 
+    def test_sender_pubkey_mismatch_rejected(self, client, signed_payload):
+        """A mismatched sender address causes signature verification to fail.
+
+        The sender is part of the signed payload (to_bytes), so substituting a
+        different sender address makes the original signature invalid — the check
+        fires at signature verification, not at the sender-pubkey equality check.
+        """
+        pub2, priv2 = generate_keypair()
+        bad_sender = derive_address(pub2)  # address from a different key
+        wipe_key(priv2)
+        bad = dict(signed_payload, sender=bad_sender)
+        resp = client.post("/transactions", json=bad)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accepted"] is False
+        assert data["error"] is not None
+
 
 # ── POST /batch/run ───────────────────────────────────────────────────────────
 
