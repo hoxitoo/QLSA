@@ -6,6 +6,7 @@ from core.transaction import Transaction
 from sdk.python.qlsa import (
     BatchStatus,
     LocalClient,
+    NodeConfig,
     NodeStats,
     SubmitResult,
     TransactionBuilder,
@@ -103,6 +104,73 @@ def test_builder_multiple_transactions():
         txs = [builder.build(recipient="c" * 64, amount=i + 1, nonce=i) for i in range(5)]
     assert all(tx.signature is not None for tx in txs)
     assert [tx.nonce for tx in txs] == list(range(5))
+
+
+def test_wallet_public_key_hex_is_hex_string():
+    with Wallet.generate() as wallet:
+        assert isinstance(wallet.public_key_hex, str)
+        assert all(c in "0123456789abcdef" for c in wallet.public_key_hex)
+        assert wallet.public_key_hex == wallet.public_key.hex()
+
+
+def test_builder_auto_nonce_increments():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        txs = [builder.build(recipient="f" * 64, amount=1) for _ in range(4)]
+    assert [tx.nonce for tx in txs] == [0, 1, 2, 3]
+    assert builder.next_nonce == 4
+
+
+def test_builder_auto_nonce_start_nonce():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet, start_nonce=10)
+        tx0 = builder.build(recipient="aa" * 32, amount=1)
+        tx1 = builder.build(recipient="bb" * 32, amount=1)
+    assert tx0.nonce == 10
+    assert tx1.nonce == 11
+    assert builder.next_nonce == 12
+
+
+def test_builder_explicit_nonce_does_not_advance_counter():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        builder.build(recipient="cc" * 32, amount=1)  # nonce=0, counter → 1
+        tx = builder.build(recipient="dd" * 32, amount=1, nonce=99)
+    assert tx.nonce == 99
+    assert builder.next_nonce == 1  # counter unchanged by explicit nonce
+
+
+def test_builder_mixed_auto_and_explicit_nonce():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        t0 = builder.build(recipient="11" * 32, amount=1)          # auto → 0
+        t1 = builder.build(recipient="22" * 32, amount=1, nonce=5)  # explicit 5
+        t2 = builder.build(recipient="33" * 32, amount=1)          # auto → 1
+    assert [t0.nonce, t1.nonce, t2.nonce] == [0, 5, 1]
+
+
+# ── LocalClient.health ────────────────────────────────────────────────────────
+
+def test_local_client_health_returns_true():
+    assert LocalClient().health() is True
+
+
+def test_local_client_history_empty_initially():
+    assert LocalClient().history() == []
+
+
+def test_local_client_history_accumulates_batches():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        client.submit(builder.build(recipient="11" * 32, amount=1))
+        client.flush()
+        client.submit(builder.build(recipient="22" * 32, amount=1))
+        client.flush()
+    history = client.history()
+    assert len(history) == 2
+    assert all(isinstance(b, BatchStatus) for b in history)
+    assert history[0].batch_id != history[1].batch_id
 
 
 # ── LocalClient.submit ────────────────────────────────────────────────────────
@@ -231,6 +299,30 @@ def test_local_client_stats_fri_fields():
     stats = client.stats()
     assert isinstance(stats.n_fri_queries, int) and stats.n_fri_queries >= 1
     assert stats.fri_security_bits == 6 * stats.n_fri_queries + 10
+
+
+def test_local_client_node_config_returns_config():
+    client = LocalClient()
+    cfg = client.node_config()
+    assert isinstance(cfg, NodeConfig)
+    assert cfg.n_fri_queries >= 1
+    assert cfg.fri_security_bits == 6 * cfg.n_fri_queries + 10
+    assert cfg.min_batch_size >= 1
+    assert cfg.max_batch_size >= cfg.min_batch_size
+    assert cfg.mempool_capacity >= cfg.max_batch_size
+
+
+def test_local_client_node_config_custom_params():
+    from aggregator.node import AggregatorNode
+    node = AggregatorNode(min_batch_size=5, max_batch_size=100,
+                          mempool_capacity=500, n_fri_queries=3)
+    client = LocalClient(node=node)
+    cfg = client.node_config()
+    assert cfg.n_fri_queries == 3
+    assert cfg.fri_security_bits == 28
+    assert cfg.min_batch_size == 5
+    assert cfg.max_batch_size == 100
+    assert cfg.mempool_capacity == 500
 
 
 def test_local_client_get_batch_returns_status():
@@ -395,6 +487,26 @@ def test_http_client_run_cycle_empty_returns_none(http_client: HttpClient):
     assert http_client.run_cycle() is None
 
 
+def test_http_client_run_cycle_prove_witnesses_param_accepted(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ef" * 32, amount=1, nonce=0)
+        http_client.submit(tx)
+    status = http_client.run_cycle(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+    assert isinstance(status.has_vfri7, bool)
+
+
+def test_http_client_flush_prove_witnesses_param_accepted(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=5, nonce=0)
+        http_client.submit(tx)
+    status = http_client.flush(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+    assert isinstance(status.has_vfri7, bool)
+
+
 def test_http_client_get_batch_returns_status(http_client: HttpClient):
     with Wallet.generate() as wallet:
         tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1, nonce=0)
@@ -438,3 +550,80 @@ def test_http_client_prove_witness_unsigned_returns_no_witness(http_client: Http
     ws = http_client.prove_witness(tx)
     assert isinstance(ws, WitnessStatus)
     assert ws.has_witness is False
+
+
+def test_http_client_node_config(http_client: HttpClient):
+    cfg = http_client.node_config()
+    assert isinstance(cfg, NodeConfig)
+    assert cfg.n_fri_queries >= 1
+    assert cfg.fri_security_bits == 6 * cfg.n_fri_queries + 10
+    assert cfg.min_batch_size >= 1
+    assert cfg.max_batch_size >= cfg.min_batch_size
+    assert cfg.mempool_capacity >= cfg.max_batch_size
+    assert isinstance(cfg.version, str) and len(cfg.version) > 0
+
+
+def test_http_client_run_cycle_prove_witnesses_param_accepted(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ef" * 32, amount=1, nonce=0)
+        http_client.submit(tx)
+    status = http_client.run_cycle(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+    assert isinstance(status.has_vfri7, bool)
+
+
+def test_http_client_flush_prove_witnesses_param_accepted(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=5, nonce=0)
+        http_client.submit(tx)
+    status = http_client.flush(prove_witnesses=True)
+    assert status is not None
+    assert isinstance(status.has_witness, bool)
+    assert isinstance(status.has_vfri7, bool)
+
+
+# ── LocalClient.get_witness_status ───────────────────────────────────────────
+
+def test_local_client_get_witness_status_unknown_batch_returns_none():
+    client = LocalClient()
+    assert client.get_witness_status("00000000-0000-0000-0000-000000000000") is None
+
+
+def test_local_client_get_witness_status_no_witness():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cc" * 32, amount=1, nonce=0)
+        client.submit(tx)
+    batch = client.flush(prove_witnesses=False)
+    assert batch is not None
+    ws = client.get_witness_status(batch.batch_id)
+    assert isinstance(ws, WitnessStatus)
+    assert ws.has_witness is False
+    assert ws.n_fri_queries >= 1
+
+
+# ── HttpClient.get_witness_status ────────────────────────────────────────────
+
+def test_http_client_context_manager_closes_connection(http_client: HttpClient):
+    with http_client:
+        assert http_client.health() is True
+    assert http_client._owned_client is None  # close() was called
+
+
+def test_http_client_get_witness_status_unknown_returns_none(http_client: HttpClient):
+    result = http_client.get_witness_status("00000000-0000-0000-0000-000000000000")
+    assert result is None
+
+
+def test_http_client_get_witness_status_no_witness(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="dd" * 32, amount=2, nonce=0)
+        http_client.submit(tx)
+    batch = http_client.flush(prove_witnesses=False)
+    assert batch is not None
+    ws = http_client.get_witness_status(batch.batch_id)
+    assert isinstance(ws, WitnessStatus)
+    assert ws.has_witness is False
+    assert ws.n_fri_queries >= 1
+    assert ws.fri_security_bits == 6 * ws.n_fri_queries + 10

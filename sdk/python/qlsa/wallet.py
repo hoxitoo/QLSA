@@ -34,6 +34,11 @@ class Wallet:
             _private_key=priv,
         )
 
+    @property
+    def public_key_hex(self) -> str:
+        """Hex-encoded public key (convenient for display and HTTP payloads)."""
+        return self.public_key.hex()
+
     def sign_transaction(self, tx: Transaction) -> Transaction:
         """Sign *tx* in-place and return it."""
         tx.signature = sign(tx.to_bytes(), self._private_key, self.algorithm)

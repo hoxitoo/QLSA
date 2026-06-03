@@ -107,6 +107,36 @@ class TestStats:
         assert resp.json()["pending"] == 1
 
 
+# ── GET /node/config ─────────────────────────────────────────────────────────
+
+class TestNodeConfig:
+    def test_returns_200(self, client):
+        resp = client.get("/node/config")
+        assert resp.status_code == 200
+
+    def test_contains_required_fields(self, client):
+        data = client.get("/node/config").json()
+        for key in ("n_fri_queries", "fri_security_bits", "min_batch_size",
+                    "max_batch_size", "mempool_capacity", "version"):
+            assert key in data, f"missing field: {key}"
+
+    def test_fri_security_bits_formula(self, client):
+        data = client.get("/node/config").json()
+        n = data["n_fri_queries"]
+        assert data["fri_security_bits"] == 6 * n + 10
+
+    def test_batch_size_ordering(self, client):
+        data = client.get("/node/config").json()
+        assert data["min_batch_size"] >= 1
+        assert data["max_batch_size"] >= data["min_batch_size"]
+        assert data["mempool_capacity"] >= data["max_batch_size"]
+
+    def test_version_is_string(self, client):
+        data = client.get("/node/config").json()
+        assert isinstance(data["version"], str)
+        assert len(data["version"]) > 0
+
+
 # ── POST /transactions ────────────────────────────────────────────────────────
 
 class TestSubmitTransaction:
@@ -175,6 +205,23 @@ class TestSubmitTransaction:
         bad = dict(signed_payload, signature="ZZZZ")
         resp = client.post("/transactions", json=bad)
         assert resp.status_code == 422
+
+    def test_sender_pubkey_mismatch_rejected(self, client, signed_payload):
+        """A mismatched sender address causes signature verification to fail.
+
+        The sender is part of the signed payload (to_bytes), so substituting a
+        different sender address makes the original signature invalid — the check
+        fires at signature verification, not at the sender-pubkey equality check.
+        """
+        pub2, priv2 = generate_keypair()
+        bad_sender = derive_address(pub2)  # address from a different key
+        wipe_key(priv2)
+        bad = dict(signed_payload, sender=bad_sender)
+        resp = client.post("/transactions", json=bad)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accepted"] is False
+        assert data["error"] is not None
 
 
 # ── POST /batch/run ───────────────────────────────────────────────────────────
@@ -408,6 +455,7 @@ class TestRateLimit:
         resp = client.post("/transactions", json=signed_payload)
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
+        assert resp.headers.get("Retry-After") == "60"
 
     def test_batch_rate_limit_enforced(self, client, signed_payload):
         """21st POST /batch/flush from same IP within window returns 429."""
@@ -426,6 +474,7 @@ class TestRateLimit:
         resp = client.post("/batch/flush")
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
+        assert resp.headers.get("Retry-After") == "60"
 
     def test_health_stats_not_rate_limited(self, client):
         """GET /health and /stats are never rate-limited."""
@@ -450,3 +499,4 @@ class TestRateLimit:
         resp = client.get(f"/batch/{fake_id}")
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
+        assert resp.headers.get("Retry-After") == "60"

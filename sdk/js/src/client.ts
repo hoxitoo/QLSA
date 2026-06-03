@@ -1,5 +1,6 @@
 import type {
   BatchStatus,
+  NodeConfig,
   NodeStats,
   SubmitResult,
   TransactionPayload,
@@ -62,8 +63,10 @@ export class AggregatorClient {
   /**
    * Attempt to create a batch (respects the node's min_batch_size).
    * Returns null if there are not enough pending transactions.
+   * @param proveWitnesses  When true, request VFRI7 witness generation (requires PyO3 ext).
    */
-  async runCycle(): Promise<BatchStatus | null> {
+  async runCycle(proveWitnesses = false): Promise<BatchStatus | null> {
+    const path = proveWitnesses ? "/batch/run?prove_witnesses=true" : "/batch/run";
     const data = await this._post<{
       status: string;
       batch_id?: string;
@@ -76,7 +79,7 @@ export class AggregatorClient {
       has_vfri7?: boolean;
       vfri7_commitment_log10?: string;
       vfri7_commitment_log8?: string;
-    }>("/batch/run", {});
+    }>(path, {});
     if (data.status === "no_batch") return null;
     return this._toBatchStatus(data as Required<typeof data>);
   }
@@ -84,8 +87,10 @@ export class AggregatorClient {
   /**
    * Force a batch from whatever is in the mempool.
    * Returns null if the mempool is empty.
+   * @param proveWitnesses  When true, request VFRI7 witness generation (requires PyO3 ext).
    */
-  async flush(): Promise<BatchStatus | null> {
+  async flush(proveWitnesses = false): Promise<BatchStatus | null> {
+    const path = proveWitnesses ? "/batch/flush?prove_witnesses=true" : "/batch/flush";
     const data = await this._post<{
       status: string;
       batch_id?: string;
@@ -98,7 +103,7 @@ export class AggregatorClient {
       has_vfri7?: boolean;
       vfri7_commitment_log10?: string;
       vfri7_commitment_log8?: string;
-    }>("/batch/flush", {});
+    }>(path, {});
     if (data.status === "empty") return null;
     return this._toBatchStatus(data as Required<typeof data>);
   }
@@ -165,6 +170,26 @@ export class AggregatorClient {
     } catch {
       return null;
     }
+  }
+
+  /** Retrieve static node configuration (security level, batch size limits). */
+  async getNodeConfig(): Promise<NodeConfig> {
+    const data = await this._get<{
+      n_fri_queries: number;
+      fri_security_bits: number;
+      min_batch_size: number;
+      max_batch_size: number;
+      mempool_capacity: number;
+      version: string;
+    }>("/node/config");
+    return {
+      nFriQueries: data.n_fri_queries,
+      friSecurityBits: data.fri_security_bits,
+      minBatchSize: data.min_batch_size,
+      maxBatchSize: data.max_batch_size,
+      mempoolCapacity: data.mempool_capacity,
+      version: data.version,
+    };
   }
 
   /** Retrieve aggregator node statistics. */

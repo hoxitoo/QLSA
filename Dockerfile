@@ -30,6 +30,20 @@ ENV PYTHONUNBUFFERED=1
 ENV AGGREGATOR_HOST=0.0.0.0
 ENV AGGREGATOR_PORT=8080
 
+# ── Security / node configuration ──────────────────────────────────────────
+# N_FRI_QUERIES: FRI queries per proof group.
+#   1  → 16-bit on-chain soundness  (default, gas-safe for testnet)
+#   3  → 28-bit on-chain soundness  (~45 M gas, safe within 2 txs at 15 M each)
+#   5  → 40-bit on-chain soundness  (~75 M gas)
+#   20 → 130-bit on-chain soundness (~300 M gas, exceeds mainnet block limit)
+ENV N_FRI_QUERIES=1
+
+# TRUSTED_PROXIES: comma-separated IPs of trusted reverse proxies.
+# The rightmost X-Forwarded-For entry from these IPs is used for rate limiting.
+# Default: 127.0.0.1,::1 (loopback only — safe for direct deployments).
+# Example for a single nginx proxy at 10.0.0.1: TRUSTED_PROXIES=10.0.0.1
+ENV TRUSTED_PROXIES=127.0.0.1,::1
+
 EXPOSE 8080
 
 CMD ["uvicorn", "aggregator.api:app", \

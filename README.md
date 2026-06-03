@@ -70,7 +70,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** (non-ignored) + **~186 Python** (no PyO3) + **31 TS** + **847 Hardhat** | ✅ Done |
+| Tests — **210 Rust** (non-ignored) + **239 Python** (no PyO3) + **39 TS** + **847 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V22** — All 7 ML-DSA circuits in 1 STARK + Merkle root Fiat-Shamir binding | ✅ Done |
@@ -89,6 +89,9 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **Security audit (2026-05-25)** — input validation hardening, dead code fix, defensive Solidity checks | ✅ Done (2026-05-25) |
 | **Security audit (2026-05-30 round-1)** — TRUSTED_PROXIES env config, amount≥1 validation, dead code removal, GET /batch/{id}, fri_security_bits SDK field, exception safety in submit.py | ✅ Done (2026-05-30) |
 | **Security + code audit (2026-05-30 round-2)** — IP validation, hex normalization, GET rate limiting, UUID batch_id validation, pubkey size check, deque history, O(1) batch index, N_FRI_QUERIES env guard | ✅ Done (2026-05-30) |
+| **SDK + API audit (2026-06-03)** — `GET /node/config` endpoint + NodeConfig model (Python + TS), `prove_witnesses` param in HttpClient/TS SDK, Docker env var documentation (`N_FRI_QUERIES`, `TRUSTED_PROXIES`), DI-based HttpClient testing | ✅ Done (2026-06-03) |
+| **SDK enhancements (2026-06-03)** — `get_witness_status()` in LocalClient + HttpClient (mirrors TS SDK), `LocalClient.health()` API parity, `TransactionBuilder` auto-nonce counter (`start_nonce`, `next_nonce`), `getWitnessStatus` TS tests | ✅ Done (2026-06-03) |
+| **Code audit (2026-06-03)** — `HttpClient._decode_json()` guards all 7 JSON call-sites against proxy HTML responses (JSONDecodeError → RuntimeError with preview); `testnet/e2e.py` sender_key no longer redundantly recomputes SHA3-256 | ✅ Done (2026-06-03) |
 
 ---
 
@@ -222,6 +225,11 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `N_FRI_QUERIES` env var unchecked — crash on non-integer value at startup | Medium | ✅ Fixed (`try/except ValueError` + range `[1, 64]` check, 2026-05-30) |
 | `batcher.py` used root logger — module-level filtering impossible | Low | ✅ Fixed (`logging.getLogger(__name__)`, 2026-05-30) |
 | `HttpClient.submit()` missing `KeyError` guard on response parsing | Low | ✅ Fixed (`try/except KeyError` matching pattern of `run_cycle`/`flush`, 2026-05-30) |
+| No `GET /node/config` endpoint — clients had to hard-code n_fri_queries / batch size limits | Low | ✅ Fixed (endpoint + `NodeConfig` model in Python SDK, TypeScript SDK, 2026-06-03) |
+| `HttpClient.run_cycle/flush` ignored `prove_witnesses` param — always sent without flag | Low | ✅ Fixed (`?prove_witnesses=true` query param forwarded; same fix in TypeScript SDK, 2026-06-03) |
+| `Dockerfile` had no env var documentation — operators unaware of `N_FRI_QUERIES`/`TRUSTED_PROXIES` | Low | ✅ Fixed (documented `ENV` defaults with security trade-off comments; `docker-compose.yml` pass-through, 2026-06-03) |
+| `HttpClient` all JSON call-sites — unhandled `json.JSONDecodeError` when proxy returns HTML body with 2xx status | Medium | ✅ Fixed (`_decode_json()` static method wraps `resp.json()`, raises `RuntimeError` with 200-char preview, 2026-06-03) |
+| `testnet/e2e.py` redundant SHA3-256 recomputation — `sender_key` re-derived via `hashlib` though already in `tx.sender` | Low | ✅ Fixed (`bytes.fromhex(tx.sender)`, removed `import hashlib`, 2026-06-03) |
 
 For the full cryptography and security analysis, see `context.md`.
 
@@ -258,7 +266,7 @@ QLSA/
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
 ├── testnet/            # e2e.py, deploy.sh, submit.py, monitor.py (Sepolia)
-├── tests/              # 178 Python tests (no PyO3) + 317 with PyO3 ext (pytest)
+├── tests/              # 239 Python tests (no PyO3) + ~325 with PyO3 ext (pytest)
 ├── context.md          # Technical decisions, architecture log, security risk table
 └── README.md
 ```

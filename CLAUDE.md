@@ -569,6 +569,8 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 - **c_tilde Fiat-Shamir binding**: ML-DSA challenge bytes mixed into channel before Tree0 commit (V19+)
 - **Merkle root Fiat-Shamir binding**: batch Merkle root mixed into channel after c_tilde (V22) — proof is cryptographically specific to one batch
 - **Cross-proof binding** (MVP-5 Priority 2): `QLSAVerifierVFRI7` mixes `merkleRoot` before `drawQueries`. `BatchRegistryV4` passes `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)` / `boundRoot8 = keccak256(batchRoot ‖ traceRoot10)` — mixing proofs from different witnesses fails Merkle verification
+- **`HttpClient._decode_json()`** (2026-06-03): all 7 `resp.json()` call-sites in `HttpClient` wrapped; `json.JSONDecodeError` → `RuntimeError` with endpoint name + 200-char body preview — proxy/CDN HTML error pages no longer cause unhandled exceptions
+- **`testnet/e2e.py` sender_key** (2026-06-03): eliminated redundant `hashlib.sha3_256(tx.public_key).digest()` — `tx.sender` already contains this value as hex; `import hashlib` removed
 
 ## CI Pipeline
 

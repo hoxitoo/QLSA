@@ -12,6 +12,11 @@ services:
     environment:
       - AGGREGATOR_HOST=0.0.0.0
       - AGGREGATOR_PORT=8080
+      # FRI queries per proof group — controls on-chain security level vs gas cost.
+      # 1 = 16-bit (testnet default), 3 = 28-bit, 5 = 40-bit. See Dockerfile for details.
+      - N_FRI_QUERIES=${N_FRI_QUERIES:-1}
+      # Trusted reverse proxy IPs for X-Forwarded-For rate limiting (comma-separated).
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.1,::1}
     volumes:
       # Mount the pre-built Stwo binary so the aggregator can call the prover.
       # Build it with: cd stark_stwo && cargo +nightly-2025-07-01 build --release

@@ -51,3 +51,18 @@ class NodeStats:
     pending: int
     n_fri_queries: int = 1          # configured FRI queries per proof group
     fri_security_bits: int = 16     # 6 × n_fri_queries + 10
+
+
+@dataclass
+class NodeConfig:
+    """Static configuration parameters of the aggregator node.
+
+    Retrieved from GET /node/config. Useful for discovering the security
+    level and batch size limits without inspecting environment variables.
+    """
+    n_fri_queries: int       # FRI queries per proof group (on-chain security parameter)
+    fri_security_bits: int   # 6 × n_fri_queries + 10
+    min_batch_size: int      # minimum transactions required to create a batch
+    max_batch_size: int      # maximum transactions per batch
+    mempool_capacity: int    # maximum transactions held in the mempool
+    version: str = "0.1.0"  # aggregator API version

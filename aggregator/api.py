@@ -124,18 +124,21 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
             if not _check_rate(_tx_windows, ip, _TX_LIMIT):
                 return JSONResponse(
                     status_code=429,
+                    headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 100 transaction submissions per minute"},
                 )
         elif method == "POST" and path.startswith("/batch/"):
             if not _check_rate(_batch_windows, ip, _BATCH_LIMIT):
                 return JSONResponse(
                     status_code=429,
+                    headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 20 batch operations per minute"},
                 )
         elif method == "GET" and path.startswith("/batch/"):
             if not _check_rate(_read_windows, ip, _READ_LIMIT):
                 return JSONResponse(
                     status_code=429,
+                    headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
                 )
 
@@ -239,6 +242,25 @@ class SubmitResponse(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/node/config")
+def node_config(request: Request) -> dict[str, Any]:
+    """Return static node configuration parameters.
+
+    Useful for operators and SDK clients to discover the security level
+    and batch size limits the node was started with.
+    """
+    node: AggregatorNode = request.app.state.node
+    n = node.n_fri_queries
+    return {
+        "n_fri_queries": n,
+        "fri_security_bits": 6 * n + 10,
+        "min_batch_size": node.batcher.min_batch_size,
+        "max_batch_size": node.batcher.max_batch_size,
+        "mempool_capacity": node.mempool.max_size,
+        "version": request.app.version,
+    }
 
 
 @app.get("/stats")

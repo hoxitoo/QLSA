@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-05-30)
+## Статус (обновлено 2026-06-03)
 
 - Фаза: **MVP-5 завершён** (2026-05-25) + **V23 dual-VFRI7 production pipeline с cross-proof binding**
 - Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4 — завершены полностью
@@ -9,6 +9,7 @@
 - Проведён аудит безопасности + code review (2026-05-25); 5 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-1); 8 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-2); 11 новых findings — все устранены
+- Проведён аудит безопасности + code review (2026-06-03); 2 новых findings — все устранены
 
 ### Что готово
 
@@ -106,8 +107,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `M31.sol` — field arithmetic library
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
-#### Тесты (актуально 2026-05-30)
-- Python: **~186 тестов** (без PyO3) / **~325** (с PyO3 ext)
+#### Тесты (актуально 2026-06-03)
+- Python: **239 тестов** (без PyO3) / **~325** (с PyO3 ext)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
 - Solidity/Hardhat: **847 тестов** — все проходят
@@ -262,6 +263,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - **N_FRI_QUERIES env validation**: try/except ValueError + range [1,64] check при инициализации узла (2026-05-30)
 - **batcher.py module logger**: заменён root logger на `logging.getLogger(__name__)` (2026-05-30)
 - **HttpClient.submit() KeyError guard**: защита от серверных ответов без поля `accepted` (2026-05-30)
+- **`HttpClient._decode_json()`**: обёртка `resp.json()` перехватывает `json.JSONDecodeError` — nginx/cloudflare могут вернуть HTML body с 2xx при рестарте; все 7 call-сайтов обновлены (2026-06-03)
+- **`testnet/e2e.py` sender_key**: дублировал вычисление SHA3-256(public_key) через `hashlib`, хотя `tx.sender` уже содержит это значение как hex; удалён лишний `import hashlib` (2026-06-03)
 
 ### Таблица рисков (обновлено 2026-05-30)
 
@@ -316,6 +319,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | N_FRI_QUERIES env без обработки ошибок — crash при нечисловом значении | Средний | ✅ Закрыт (try/except + range [1,64], 2026-05-30) |
 | batcher.py использовал root logger — нельзя фильтровать по модулю | Низкий | ✅ Закрыт (module logger, 2026-05-30) |
 | HttpClient.submit() KeyError при ответе без поля accepted | Низкий | ✅ Закрыт (try/except guard, 2026-05-30) |
+| `HttpClient` все методы — `json.JSONDecodeError` при HTML ответе от proxy с 2xx статусом | Средний | ✅ Закрыт (`_decode_json()` static method, все 7 call-сайтов, 2026-06-03) |
+| `testnet/e2e.py` повторно вычислял `sender_key` через `hashlib.sha3_256()` — `tx.sender` уже содержит это значение | Низкий | ✅ Закрыт (`bytes.fromhex(tx.sender)` + удалён импорт, 2026-06-03) |
 
 ---
 
