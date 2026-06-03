@@ -605,6 +605,12 @@ def test_local_client_get_witness_status_no_witness():
 
 # ── HttpClient.get_witness_status ────────────────────────────────────────────
 
+def test_http_client_context_manager_closes_connection(http_client: HttpClient):
+    with http_client:
+        assert http_client.health() is True
+    assert http_client._owned_client is None  # close() was called
+
+
 def test_http_client_get_witness_status_unknown_returns_none(http_client: HttpClient):
     result = http_client.get_witness_status("00000000-0000-0000-0000-000000000000")
     assert result is None

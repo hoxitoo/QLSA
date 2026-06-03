@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from core.transaction import Transaction
@@ -174,18 +175,25 @@ class HttpClient:
 
     Requires ``httpx`` (install via ``pip install httpx``).
 
-    Example::
+    Use as a context manager to ensure the connection pool is closed::
+
+        with HttpClient("http://localhost:8000") as client:
+            result = client.submit(signed_tx)
+
+    Or call ``close()`` explicitly when done::
 
         client = HttpClient("http://localhost:8000")
-        result = client.submit(signed_tx)
+        try:
+            result = client.submit(signed_tx)
+        finally:
+            client.close()
 
-    For testing, pass an ``httpx.Client`` with an ASGI transport::
+    For testing, inject an ``httpx.Client`` or ``starlette.testclient.TestClient``::
 
-        import httpx
+        from starlette.testclient import TestClient
         from aggregator.api import app
-        transport = httpx.ASGITransport(app=app)
-        http = httpx.Client(transport=transport, base_url="http://test")
-        client = HttpClient("http://test", _client=http)
+        with TestClient(app, base_url="http://test") as tc:
+            client = HttpClient("http://test", _client=tc)
     """
 
     def __init__(
@@ -197,17 +205,42 @@ class HttpClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        self._client: Any = _client  # injected httpx.Client (for testing / custom transports)
+        self._client: Any = _client  # injected client (tests / custom transports)
+        self._owned_client: Any = None  # lazily created; closed by close() / __exit__
+
+    def close(self) -> None:
+        """Close the underlying HTTP connection pool (if owned by this client)."""
+        if self._owned_client is not None:
+            self._owned_client.close()
+            self._owned_client = None
+
+    def __enter__(self) -> HttpClient:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def _get_client(self) -> Any:
-        """Return the httpx.Client to use, creating a default one if not injected."""
+        """Return the httpx.Client to use.
+
+        If a client was injected at construction time it is returned as-is.
+        Otherwise a single httpx.Client is created lazily and reused across
+        all requests (connection pooling), then closed by close() / __exit__.
+        """
         if self._client is not None:
             return self._client
-        try:
-            import httpx
-            return httpx.Client(timeout=self._timeout)
-        except ImportError as exc:
-            raise ImportError("httpx is required for HttpClient: pip install httpx") from exc
+        if self._owned_client is None:
+            try:
+                import httpx
+                self._owned_client = httpx.Client(timeout=self._timeout)
+            except ImportError as exc:
+                raise ImportError("httpx is required for HttpClient: pip install httpx") from exc
+        return self._owned_client
 
     def submit(self, tx: Transaction) -> SubmitResult:
         if tx.signature is None:
