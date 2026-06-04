@@ -264,3 +264,31 @@ describe("AggregatorClient listBatches", () => {
     await expect(client.listBatches()).rejects.toThrow();
   });
 });
+
+describe("AggregatorClient waitForBatch", () => {
+  it("waitForBatch is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.waitForBatch).toBe("function");
+  });
+
+  it("waitForBatch throws immediately when timeoutMs <= 0", async () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    await expect(
+      client.waitForBatch("abc", { timeoutMs: 0 }),
+    ).rejects.toThrow("timeoutMs must be positive");
+  });
+
+  it("waitForBatch throws immediately when pollIntervalMs <= 0", async () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    await expect(
+      client.waitForBatch("abc", { timeoutMs: 100, pollIntervalMs: 0 }),
+    ).rejects.toThrow("pollIntervalMs must be positive");
+  });
+
+  it("waitForBatch throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(
+      client.waitForBatch("some-id", { timeoutMs: 500, pollIntervalMs: 100 }),
+    ).rejects.toThrow();
+  });
+});

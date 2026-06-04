@@ -105,9 +105,16 @@ class LocalClient:
         """
         return _prove_witness_local(tx, n_fri_queries=self._node.n_fri_queries)
 
-    def history(self) -> list[BatchStatus]:
-        """Return all BatchStatus objects produced by this node (oldest → newest)."""
-        return [_batch_status(r) for r in self._node.history()]
+    def history(self, limit: int | None = None) -> list[BatchStatus]:
+        """Return BatchStatus objects produced by this node (oldest → newest).
+
+        If *limit* is given, return only the last *limit* entries (still
+        ordered oldest → newest within that slice).
+        """
+        results = [_batch_status(r) for r in self._node.history()]
+        if limit is not None:
+            return results[-limit:]
+        return results
 
     def get_batch(self, batch_id: str) -> BatchStatus | None:
         """Return the BatchStatus for a given batch_id, or None if not found."""
@@ -357,6 +364,39 @@ class HttpClient:
         resp.raise_for_status()
         data = self._decode_json(resp, "/batches")
         return [self._parse_batch_status(b) for b in data.get("batches", [])]
+
+    def wait_for_batch(
+        self,
+        batch_id: str,
+        *,
+        timeout: float = 60.0,
+        poll_interval: float = 2.0,
+    ) -> BatchStatus:
+        """Poll ``GET /batch/{id}`` until the batch appears or timeout is reached.
+
+        Returns the ``BatchStatus`` as soon as the batch is found.
+        Raises ``TimeoutError`` if the batch is not found within *timeout* seconds.
+        Re-raises any non-404 HTTP error immediately so callers detect outages.
+
+        Typical use: call ``flush()`` on a remote node and then poll for the
+        resulting batch when you need to wait for proof generation to finish.
+        """
+        import time
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.get_batch(batch_id)
+            if status is not None:
+                return status
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Batch {batch_id!r} not found after {timeout:.1f} s"
+                )
+            time.sleep(min(poll_interval, remaining))
 
     def stats(self) -> NodeStats:
         client = self._get_client()

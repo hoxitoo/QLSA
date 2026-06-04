@@ -53,3 +53,16 @@ class TransactionBuilder:
     def next_nonce(self) -> int:
         """The nonce that will be used by the next auto-nonce call to build()."""
         return self._nonce
+
+    def reset_nonce(self, n: int = 0) -> None:
+        """Reset the internal auto-nonce counter to *n*.
+
+        Useful when the server-side nonce has been reset or when you want
+        to reuse the same builder for a new sequence of transactions.
+
+            builder.reset_nonce()         # back to 0
+            builder.reset_nonce(n=100)    # start from 100
+        """
+        if not isinstance(n, int) or n < 0:
+            raise TypeError("nonce must be a non-negative integer")
+        self._nonce = n

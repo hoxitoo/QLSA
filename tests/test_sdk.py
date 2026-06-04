@@ -149,6 +149,68 @@ def test_builder_mixed_auto_and_explicit_nonce():
     assert [t0.nonce, t1.nonce, t2.nonce] == [0, 5, 1]
 
 
+def test_builder_reset_nonce_defaults_to_zero():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet, start_nonce=7)
+        assert builder.next_nonce == 7
+        builder.reset_nonce()
+        assert builder.next_nonce == 0
+
+
+def test_builder_reset_nonce_custom_value():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        builder.build(recipient="aa" * 32, amount=1)  # counter → 1
+        builder.reset_nonce(42)
+        assert builder.next_nonce == 42
+        tx = builder.build(recipient="bb" * 32, amount=1)
+    assert tx.nonce == 42
+    assert builder.next_nonce == 43
+
+
+def test_builder_reset_nonce_invalid_raises():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        with pytest.raises(TypeError):
+            builder.reset_nonce(-1)
+        with pytest.raises(TypeError):
+            builder.reset_nonce("five")  # type: ignore[arg-type]
+
+
+# ── Wallet._wiped flag ────────────────────────────────────────────────────────
+
+def test_wallet_is_wiped_false_before_wipe():
+    wallet = Wallet.generate()
+    assert wallet.is_wiped is False
+    wallet.wipe()
+
+
+def test_wallet_is_wiped_true_after_wipe():
+    wallet = Wallet.generate()
+    wallet.wipe()
+    assert wallet.is_wiped is True
+
+
+def test_wallet_sign_after_wipe_raises_value_error():
+    wallet = Wallet.generate()
+    tx = Transaction(
+        sender=wallet.address,
+        recipient="a" * 64,
+        amount=1,
+        nonce=0,
+        public_key=wallet.public_key,
+    )
+    wallet.wipe()
+    with pytest.raises(ValueError, match="wiped"):
+        wallet.sign_transaction(tx)
+
+
+def test_wallet_context_manager_sets_wiped_flag():
+    with Wallet.generate() as wallet:
+        assert wallet.is_wiped is False
+    assert wallet.is_wiped is True
+
+
 # ── LocalClient.health ────────────────────────────────────────────────────────
 
 def test_local_client_health_returns_true():
@@ -171,6 +233,22 @@ def test_local_client_history_accumulates_batches():
     assert len(history) == 2
     assert all(isinstance(b, BatchStatus) for b in history)
     assert history[0].batch_id != history[1].batch_id
+
+
+def test_local_client_history_limit_slices_newest():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        for i in range(4):
+            client.submit(builder.build(recipient="33" * 32, amount=i + 1))
+            client.flush()
+    full = client.history()
+    limited = client.history(limit=2)
+    assert len(full) == 4
+    assert len(limited) == 2
+    # history() returns oldest-first; limit slices the newest N
+    assert limited[0].batch_id == full[-2].batch_id
+    assert limited[1].batch_id == full[-1].batch_id
 
 
 # ── LocalClient.submit ────────────────────────────────────────────────────────
@@ -672,3 +750,32 @@ def test_http_client_history_invalid_limit_raises(http_client: HttpClient):
         http_client.history(limit=0)
     with pytest.raises(ValueError):
         http_client.history(limit=201)
+
+
+# ── HttpClient.wait_for_batch ─────────────────────────────────────────────────
+
+def test_http_client_wait_for_batch_immediate(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=1, nonce=0)
+        http_client.submit(tx)
+    batch = http_client.flush()
+    assert batch is not None
+    result = http_client.wait_for_batch(batch.batch_id)
+    assert isinstance(result, BatchStatus)
+    assert result.batch_id == batch.batch_id
+
+
+def test_http_client_wait_for_batch_timeout_raises(http_client: HttpClient):
+    import uuid
+    with pytest.raises(TimeoutError):
+        http_client.wait_for_batch(str(uuid.uuid4()), timeout=0.1, poll_interval=0.05)
+
+
+def test_http_client_wait_for_batch_invalid_timeout_raises(http_client: HttpClient):
+    with pytest.raises(ValueError):
+        http_client.wait_for_batch("any-id", timeout=0)
+
+
+def test_http_client_wait_for_batch_invalid_poll_interval_raises(http_client: HttpClient):
+    with pytest.raises(ValueError):
+        http_client.wait_for_batch("any-id", poll_interval=0)

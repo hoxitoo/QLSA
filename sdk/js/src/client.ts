@@ -266,6 +266,31 @@ export class AggregatorClient {
     }
   }
 
+  /**
+   * Poll GET /batch/{id} until the batch is found or the timeout is reached.
+   * Throws {@link Error} if the batch is not found within `timeoutMs`.
+   */
+  async waitForBatch(
+    batchId: string,
+    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  ): Promise<BatchStatus> {
+    const { timeoutMs = 60_000, pollIntervalMs = 2_000 } = options;
+    if (timeoutMs <= 0) throw new Error("timeoutMs must be positive");
+    if (pollIntervalMs <= 0) throw new Error("pollIntervalMs must be positive");
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const status = await this.getBatch(batchId);
+      if (status !== null) return status;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`Batch ${batchId} not found after ${timeoutMs} ms`);
+      }
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(pollIntervalMs, remaining)),
+      );
+    }
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────
 
   private _toBatchStatus(data: {
