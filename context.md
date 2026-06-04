@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-03)
+## Статус (обновлено 2026-06-04)
 
 - Фаза: **MVP-5 завершён** (2026-05-25) + **V23 dual-VFRI7 production pipeline с cross-proof binding**
 - Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4 — завершены полностью
@@ -10,6 +10,7 @@
 - Проведён аудит безопасности + code review (2026-05-30 round-1); 8 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-2); 11 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-06-03); 2 новых findings — все устранены
+- SDK расширен (2026-06-04): `Wallet.is_wiped` + знак после wipe, `TransactionBuilder.reset_nonce()`, `HttpClient.wait_for_batch()`, `AggregatorClient.waitForBatch()`, `GET /batches`
 
 ### Что готово
 
@@ -28,7 +29,14 @@
   - `prove_witness(tx, n_fri_queries=1)` — локальный ML-DSA witness без обращения к серверу
   - `get_batch(batch_id)` — получить BatchStatus по ID (LocalClient и HttpClient)
   - `WitnessStatus.fri_security_bits` — вычисляется как `6 × n_fri_queries + 10`
-- `sdk/js/src/` — TypeScript SDK: AggregatorClient, types
+  - `Wallet.is_wiped` + ValueError при `sign_transaction()` после `wipe()`
+  - `TransactionBuilder.reset_nonce(n=0)` — сбросить auto-nonce счётчик
+  - `HttpClient.wait_for_batch(batch_id, timeout, poll_interval)` — polling до появления батча
+  - `HttpClient.history(limit)` — список батчей (newest-first, limit 1–200)
+- `sdk/js/src/` — TypeScript SDK: AggregatorClient, AggregatorHttpError, types
+  - `AggregatorClient.waitForBatch(batchId, {timeoutMs, pollIntervalMs})` — polling helper
+  - `AggregatorClient.listBatches(limit)` — список батчей
+  - `AggregatorHttpError` — типизированная ошибка с `status: number`
 
 #### STARK / Rust
 - `stark_stwo/src/mldsa/` — чистый Rust ML-DSA-65 верификатор (FIPS 204 Algorithm 3)
@@ -108,7 +116,7 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
 #### Тесты (актуально 2026-06-03)
-- Python: **239 тестов** (без PyO3) / **~325** (с PyO3 ext)
+- Python: **266 тестов** (без PyO3) / **~352** (с PyO3 ext)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
 - Solidity/Hardhat: **847 тестов** — все проходят

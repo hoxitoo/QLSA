@@ -137,9 +137,10 @@ Fiat-Shamir transcript: `c_tilde` → `merkle_root` → Tree0 → Tree1 → fing
 - `GET /stats`, `GET /health`
 
 ### `sdk/python/qlsa/`
-- `Wallet` — generate ML-DSA-65 keypair, sign transactions, context manager wipes key
-- `LocalClient` — in-process, `.submit()`, `.run_cycle()`, `.flush()`, `.prove_witness(tx)`
-- `HttpClient` — HTTP, same API, `.prove_witness()` runs locally (no server call)
+- `Wallet` — generate ML-DSA-65 keypair, sign transactions, context manager wipes key; `is_wiped` property; `sign_transaction()` raises `ValueError` after `wipe()`
+- `LocalClient` — in-process, `.submit()`, `.run_cycle()`, `.flush()`, `.prove_witness(tx)`, `.history(limit=None)`
+- `HttpClient` — HTTP, same API, `.prove_witness()` runs locally; `.history(limit=50)` (newest-first, 1–200); `.wait_for_batch(batch_id, *, timeout=60.0, poll_interval=2.0)` polling helper
+- `TransactionBuilder` — auto-nonce counter with `.next_nonce` and `.reset_nonce(n=0)`
 - `WitnessStatus` — `has_witness`, `onchain_commitment`, `c_tilde_hex`, `max_norms`
 - `BatchStatus` — `is_proven`, `has_witness`, `witness_commitment`
 
@@ -571,6 +572,7 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 - **Cross-proof binding** (MVP-5 Priority 2): `QLSAVerifierVFRI7` mixes `merkleRoot` before `drawQueries`. `BatchRegistryV4` passes `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)` / `boundRoot8 = keccak256(batchRoot ‖ traceRoot10)` — mixing proofs from different witnesses fails Merkle verification
 - **`HttpClient._decode_json()`** (2026-06-03): all 7 `resp.json()` call-sites in `HttpClient` wrapped; `json.JSONDecodeError` → `RuntimeError` with endpoint name + 200-char body preview — proxy/CDN HTML error pages no longer cause unhandled exceptions
 - **`testnet/e2e.py` sender_key** (2026-06-03): eliminated redundant `hashlib.sha3_256(tx.public_key).digest()` — `tx.sender` already contains this value as hex; `import hashlib` removed
+- **`Wallet._wiped` flag** (2026-06-04): `sign_transaction()` raises `ValueError` with clear message after `wipe()` — callers discover misuse at the call-site rather than receiving a signing failure from zeroed key material; `is_wiped` property exposes the flag for introspection
 
 ## CI Pipeline
 
