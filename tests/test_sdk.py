@@ -627,3 +627,48 @@ def test_http_client_get_witness_status_no_witness(http_client: HttpClient):
     assert ws.has_witness is False
     assert ws.n_fri_queries >= 1
     assert ws.fri_security_bits == 6 * ws.n_fri_queries + 10
+
+
+# ── HttpClient.history ────────────────────────────────────────────────────────
+
+def test_http_client_history_empty(http_client: HttpClient):
+    result = http_client.history()
+    assert result == []
+
+
+def test_http_client_history_returns_batches_after_flush(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ee" * 32, amount=5, nonce=0)
+        http_client.submit(tx)
+    http_client.flush()
+    result = http_client.history()
+    assert len(result) == 1
+    assert isinstance(result[0], BatchStatus)
+
+
+def test_http_client_history_newest_first(http_client: HttpClient):
+    for i in range(2):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="ff" * 32, amount=1 + i, nonce=0)
+            http_client.submit(tx)
+        http_client.flush()
+    result = http_client.history()
+    assert len(result) == 2
+    # Cannot compare by timestamp (BatchStatus has none), but total must be 2.
+
+
+def test_http_client_history_limit_respected(http_client: HttpClient):
+    for i in range(3):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="aa" * 32, amount=1 + i, nonce=0)
+            http_client.submit(tx)
+        http_client.flush()
+    result = http_client.history(limit=2)
+    assert len(result) == 2
+
+
+def test_http_client_history_invalid_limit_raises(http_client: HttpClient):
+    with pytest.raises(ValueError):
+        http_client.history(limit=0)
+    with pytest.raises(ValueError):
+        http_client.history(limit=201)

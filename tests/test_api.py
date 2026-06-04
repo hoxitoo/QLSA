@@ -500,3 +500,74 @@ class TestRateLimit:
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
         assert resp.headers.get("Retry-After") == "60"
+
+
+# ── GET /batches ──────────────────────────────────────────────────────────────
+
+class TestListBatches:
+    def test_empty_node_returns_empty_list(self, client):
+        resp = client.get("/batches")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["batches"] == []
+        assert data["total"] == 0
+
+    def test_returns_batch_after_flush(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        resp = client.get("/batches")
+        data = resp.json()
+        assert data["total"] == 1
+        assert len(data["batches"]) == 1
+
+    def test_batch_fields_present(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        b = client.get("/batches").json()["batches"][0]
+        for field in ("batch_id", "tx_count", "merkle_root", "is_proven",
+                      "has_witness", "has_vfri7"):
+            assert field in b, f"missing field: {field}"
+
+    def test_newest_first_ordering(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        id1 = client.post("/batch/flush").json()["batch_id"]
+        client.post("/transactions", json=signed_payload)
+        id2 = client.post("/batch/flush").json()["batch_id"]
+        data = client.get("/batches").json()
+        assert data["total"] == 2
+        ids = [b["batch_id"] for b in data["batches"]]
+        assert ids[0] == id2
+        assert ids[1] == id1
+
+    def test_limit_caps_returned_count(self, client, signed_payload):
+        for _ in range(3):
+            client.post("/transactions", json=signed_payload)
+            client.post("/batch/flush")
+        data = client.get("/batches", params={"limit": 2}).json()
+        assert len(data["batches"]) == 2
+        assert data["total"] == 3
+
+    def test_limit_zero_rejected_with_422(self, client):
+        assert client.get("/batches", params={"limit": 0}).status_code == 422
+
+    def test_limit_201_rejected_with_422(self, client):
+        assert client.get("/batches", params={"limit": 201}).status_code == 422
+
+    def test_limit_200_accepted(self, client):
+        assert client.get("/batches", params={"limit": 200}).status_code == 200
+
+    def test_limit_1_accepted(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        data = client.get("/batches", params={"limit": 1}).json()
+        assert len(data["batches"]) == 1
+
+    def test_rate_limited_after_200_reads(self, client):
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._read_windows.clear()
+        for _ in range(200):
+            assert client.get("/batches").status_code == 200
+        resp = client.get("/batches")
+        assert resp.status_code == 429
+        assert resp.headers.get("Retry-After") == "60"

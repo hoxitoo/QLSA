@@ -343,6 +343,21 @@ class HttpClient:
         """
         return _prove_witness_local(tx, n_fri_queries=n_fri_queries)
 
+    def history(self, limit: int = 50) -> list[BatchStatus]:
+        """Return recent batches from the aggregator (newest first).
+
+        ``limit`` caps the number returned (1–200). Raises ``ValueError`` for
+        out-of-range values; the server enforces the same bound and returns
+        HTTP 422 for values outside [1, 200].
+        """
+        if not 1 <= limit <= 200:
+            raise ValueError(f"limit must be between 1 and 200, got {limit}")
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/batches", params={"limit": limit})
+        resp.raise_for_status()
+        data = self._decode_json(resp, "/batches")
+        return [self._parse_batch_status(b) for b in data.get("batches", [])]
+
     def stats(self) -> NodeStats:
         client = self._get_client()
         resp = client.get(f"{self._base_url}/stats")

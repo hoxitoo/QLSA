@@ -58,3 +58,11 @@ export interface NodeConfig {
   mempoolCapacity: number;  // maximum transactions held in the mempool
   version: string;          // aggregator API version
 }
+
+/** Response from GET /batches (via AggregatorClient.listBatches). */
+export interface BatchListResult {
+  /** Recent batches, newest first (up to `limit` items). */
+  batches: BatchStatus[];
+  /** Total number of batches held in the node's in-memory history. */
+  total: number;
+}

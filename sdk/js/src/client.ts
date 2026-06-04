@@ -1,4 +1,5 @@
 import type {
+  BatchListResult,
   BatchStatus,
   NodeConfig,
   NodeStats,
@@ -6,6 +7,17 @@ import type {
   TransactionPayload,
   WitnessStatus,
 } from "./types.js";
+
+/**
+ * Thrown by AggregatorClient when the server returns a non-2xx HTTP response.
+ * Callers can inspect `status` to distinguish 404 (not found) from 5xx errors.
+ */
+export class AggregatorHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "AggregatorHttpError";
+  }
+}
 
 const HEX_RE = /^[0-9a-fA-F]+$/;
 
@@ -143,14 +155,16 @@ export class AggregatorClient {
         nFriQueries: data.n_fri_queries ?? 0,
         friSecurityBits: data.fri_security_bits ?? 0,
       };
-    } catch {
-      return null;
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && (e.status === 404 || e.status === 400)) return null;
+      throw e;
     }
   }
 
   /**
    * Retrieve the status of a specific batch by ID.
-   * Returns null if the batch is not found (HTTP 404) or the ID is invalid.
+   * Returns null if the batch is not found (HTTP 404) or the ID is invalid (HTTP 400).
+   * Re-throws on network errors and server errors (5xx) so callers detect outages.
    */
   async getBatch(batchId: string): Promise<BatchStatus | null> {
     try {
@@ -167,9 +181,37 @@ export class AggregatorClient {
         vfri7_commitment_log8?: string;
       }>(`/batch/${batchId}`);
       return this._toBatchStatus(data);
-    } catch {
-      return null;
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && (e.status === 404 || e.status === 400)) return null;
+      throw e;
     }
+  }
+
+  /**
+   * Return recent batches from the aggregator, newest first.
+   *
+   * @param limit  Maximum number of batches to return (1–200, default 50).
+   */
+  async listBatches(limit = 50): Promise<BatchListResult> {
+    const data = await this._get<{
+      batches: Array<{
+        batch_id: string;
+        tx_count: number;
+        merkle_root: string;
+        is_proven: boolean;
+        stark_commitment?: string;
+        has_witness?: boolean;
+        witness_commitment?: string;
+        has_vfri7?: boolean;
+        vfri7_commitment_log10?: string;
+        vfri7_commitment_log8?: string;
+      }>;
+      total: number;
+    }>(`/batches?limit=${limit}`);
+    return {
+      batches: data.batches.map(b => this._toBatchStatus(b)),
+      total: data.total,
+    };
   }
 
   /** Retrieve static node configuration (security level, batch size limits). */
@@ -271,11 +313,23 @@ export class AggregatorClient {
         signal: controller.signal,
         ...init,
       });
+      // Read body as text once — avoids double-consumption when both the error
+      // branch and the JSON parse branch need the body.
+      const text = await res.text().catch(() => "");
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
+        throw new AggregatorHttpError(
+          res.status,
+          `HTTP ${res.status} ${res.statusText}: ${text}`,
+        );
       }
-      return (await res.json()) as T;
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        // Proxy/CDN returned HTML with 2xx (e.g. nginx restart page).
+        throw new Error(
+          `Aggregator ${path} returned non-JSON body: ${text.slice(0, 200)}`,
+        );
+      }
     } finally {
       clearTimeout(timer);
     }

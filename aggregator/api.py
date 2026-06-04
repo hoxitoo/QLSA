@@ -141,6 +141,13 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
                 )
+        elif method == "GET" and path == "/batches":
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
+                )
 
         return await call_next(request)
 
@@ -276,6 +283,39 @@ def stats(request: Request) -> dict[str, Any]:
         "pending": node.pending_count(),
         "n_fri_queries": n,
         "fri_security_bits": 6 * n + 10,  # log_blowup(6) × n + pow_bits(10)
+    }
+
+
+@app.get("/batches")
+def list_batches(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Return recent batches, newest first.
+
+    ``limit`` caps the number returned (1–200, default 50). ``total`` is the
+    count of all batches held in the node's in-memory history (up to 1 000).
+    """
+    node: AggregatorNode = request.app.state.node
+    results = node.history()          # oldest → newest; thread-safe snapshot
+    sliced = results[-limit:][::-1]   # take newest N, then reverse to newest-first
+    return {
+        "batches": [
+            {
+                "batch_id": r.batch.batch_id,
+                "tx_count": len(r.batch.transactions),
+                "merkle_root": r.batch.merkle_root.hex(),
+                "is_proven": r.is_proven,
+                "stark_commitment": r.commitment,
+                "has_witness": r.has_witness,
+                "witness_commitment": r.witness_commitment,
+                "has_vfri7": r.has_vfri7,
+                "vfri7_commitment_log10": r.vfri7_commitment_log10,
+                "vfri7_commitment_log8": r.vfri7_commitment_log8,
+            }
+            for r in sliced
+        ],
+        "total": len(results),
     }
 
 

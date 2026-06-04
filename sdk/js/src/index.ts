@@ -1,5 +1,6 @@
-export { AggregatorClient } from "./client.js";
+export { AggregatorClient, AggregatorHttpError } from "./client.js";
 export type {
+  BatchListResult,
   BatchStatus,
   NodeConfig,
   NodeStats,

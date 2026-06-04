@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@jest/globals";
-import { AggregatorClient } from "../client.js";
+import { AggregatorClient, AggregatorHttpError } from "../client.js";
+import type { BatchListResult } from "../types.js";
 
 describe("AggregatorClient constructor", () => {
   it("strips trailing slash from baseUrl", () => {
@@ -146,10 +147,11 @@ describe("AggregatorClient _toBatchStatus", () => {
 });
 
 describe("AggregatorClient getBatch", () => {
-  it("getBatch returns null on network error (unknown host)", async () => {
+  it("getBatch throws on network error (connection refused)", async () => {
     const client = new AggregatorClient("http://localhost:19999", 200);
-    const result = await client.getBatch("00000000-0000-0000-0000-000000000001");
-    expect(result).toBeNull();
+    await expect(
+      client.getBatch("00000000-0000-0000-0000-000000000001"),
+    ).rejects.toThrow();
   });
 
   it("getBatch is a method on the client", () => {
@@ -214,14 +216,51 @@ describe("AggregatorClient getWitnessStatus", () => {
     expect(typeof client.getWitnessStatus).toBe("function");
   });
 
-  it("getWitnessStatus returns null on network error (unknown host)", async () => {
+  it("getWitnessStatus throws on network error (connection refused)", async () => {
     const client = new AggregatorClient("http://localhost:19999", 200);
-    const result = await client.getWitnessStatus("some-batch-id");
-    expect(result).toBeNull();
+    await expect(client.getWitnessStatus("some-batch-id")).rejects.toThrow();
   });
 
-  it("getWitnessStatus returns null on HTTP error (unknown host with bad id)", async () => {
+  it("getWitnessStatus throws on network error with valid-format id", async () => {
     const client = new AggregatorClient("http://localhost:19999", 200);
-    expect(await client.getWitnessStatus("00000000-0000-0000-0000-000000000000")).toBeNull();
+    await expect(
+      client.getWitnessStatus("00000000-0000-0000-0000-000000000000"),
+    ).rejects.toThrow();
+  });
+});
+
+describe("AggregatorHttpError", () => {
+  it("is exported from the package", () => {
+    expect(typeof AggregatorHttpError).toBe("function");
+  });
+
+  it("carries the HTTP status code", () => {
+    const err = new AggregatorHttpError(404, "not found");
+    expect(err.status).toBe(404);
+    expect(err.message).toBe("not found");
+    expect(err.name).toBe("AggregatorHttpError");
+  });
+
+  it("is an instance of Error", () => {
+    const err = new AggregatorHttpError(500, "server error");
+    expect(err instanceof Error).toBe(true);
+  });
+});
+
+describe("AggregatorClient listBatches", () => {
+  it("listBatches is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.listBatches).toBe("function");
+  });
+
+  it("BatchListResult type has expected shape", () => {
+    const result: BatchListResult = { batches: [], total: 0 };
+    expect(result.batches).toEqual([]);
+    expect(result.total).toBe(0);
+  });
+
+  it("listBatches throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.listBatches()).rejects.toThrow();
   });
 });
