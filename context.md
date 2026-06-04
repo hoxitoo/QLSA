@@ -11,6 +11,7 @@
 - Проведён аудит безопасности + code review (2026-05-30 round-2); 11 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-06-03); 2 новых findings — все устранены
 - SDK расширен (2026-06-04): `Wallet.is_wiped` + знак после wipe, `TransactionBuilder.reset_nonce()`, `HttpClient.wait_for_batch()`, `AggregatorClient.waitForBatch()`, `GET /batches`
+- Transaction tracking (2026-06-04): `GET /transaction/{tx_hash}`, `TransactionStatus`, `get_transaction()` в Python + TS SDK; `tx_hash` в SubmitResult/SubmitResponse
 
 ### Что готово
 
@@ -21,10 +22,12 @@
 - `core/merkle.py` — SHA3-512 Merkle tree, build / root / proof / verify
 - `core/batch.py` — create_batch, merkle_root_onchain()
 - `aggregator/` — Mempool (thread-safe), Batcher (min_batch_size, force_batch), AggregatorNode
-- `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`, `GET /batch/{batch_id}`
-  - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min)
+- `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`, `GET /batch/{batch_id}`, `GET /batches`, `GET /transaction/{tx_hash}`
+  - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min, 200 reads/min)
   - `AggregatorNode._history` capped at 1000 entries (evict oldest) — memory-safe for long-running nodes
   - `TRUSTED_PROXIES` конфигурируется через одноимённую env var (по умолчанию: 127.0.0.1, ::1)
+  - `Mempool._tx_hashes` — O(1) pending-status lookup by tx_hash
+  - `AggregatorNode._tx_to_batch` — O(1) batched-status lookup by tx_hash (evicted with batch)
 - `sdk/python/qlsa/` — Wallet, LocalClient, HttpClient, WitnessStatus, BatchStatus
   - `prove_witness(tx, n_fri_queries=1)` — локальный ML-DSA witness без обращения к серверу
   - `get_batch(batch_id)` — получить BatchStatus по ID (LocalClient и HttpClient)
@@ -33,10 +36,15 @@
   - `TransactionBuilder.reset_nonce(n=0)` — сбросить auto-nonce счётчик
   - `HttpClient.wait_for_batch(batch_id, timeout, poll_interval)` — polling до появления батча
   - `HttpClient.history(limit)` — список батчей (newest-first, limit 1–200)
+  - `LocalClient/HttpClient.get_transaction(tx_hash)` → `TransactionStatus` (pending/batched/unknown)
+  - `SubmitResult.tx_hash` — 64-char hex hash, set when accepted=True
+  - `TransactionStatus(tx_hash, status, batch_id?)` — новый датакласс
 - `sdk/js/src/` — TypeScript SDK: AggregatorClient, AggregatorHttpError, types
   - `AggregatorClient.waitForBatch(batchId, {timeoutMs, pollIntervalMs})` — polling helper
   - `AggregatorClient.listBatches(limit)` — список батчей
+  - `AggregatorClient.getTransaction(txHash)` → `TransactionStatus`
   - `AggregatorHttpError` — типизированная ошибка с `status: number`
+  - `SubmitResult.txHash` — 64-char hex hash from `/transactions` response
 
 #### STARK / Rust
 - `stark_stwo/src/mldsa/` — чистый Rust ML-DSA-65 верификатор (FIPS 204 Algorithm 3)
@@ -116,7 +124,7 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
 #### Тесты (актуально 2026-06-03)
-- Python: **266 тестов** (без PyO3) / **~352** (с PyO3 ext)
+- Python: **282 тестов** (без PyO3) / **~368** (с PyO3 ext)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
 - Solidity/Hardhat: **847 тестов** — все проходят

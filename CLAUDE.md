@@ -131,18 +131,24 @@ Fiat-Shamir transcript: `c_tilde` → `merkle_root` → Tree0 → Tree1 → fing
 - `Batcher.force_batch(prove_witnesses=False)` — ignores `min_batch_size`
 
 ### `aggregator/api.py`
-- `POST /transactions` — submit signed tx (validates signature at ingestion)
+- `POST /transactions` — submit signed tx; response includes `tx_hash` (64-char hex) when accepted
 - `POST /batch/run?prove_witnesses=false` — respects min_batch_size
 - `POST /batch/flush?prove_witnesses=false` — forces batch from mempool
-- `GET /stats`, `GET /health`
+- `GET /stats`, `GET /health`, `GET /node/config`
+- `GET /batches?limit=50` — list recent batches, newest-first (1–200)
+- `GET /batch/{batch_id}` — batch status by UUID
+- `GET /batch/{batch_id}/witness` — witness/proof status
+- `GET /transaction/{tx_hash}` — tx lifecycle status: `"pending"` (in mempool), `"batched"` (batch_id set), 404 if unknown
 
 ### `sdk/python/qlsa/`
 - `Wallet` — generate ML-DSA-65 keypair, sign transactions, context manager wipes key; `is_wiped` property; `sign_transaction()` raises `ValueError` after `wipe()`
-- `LocalClient` — in-process, `.submit()`, `.run_cycle()`, `.flush()`, `.prove_witness(tx)`, `.history(limit=None)`
-- `HttpClient` — HTTP, same API, `.prove_witness()` runs locally; `.history(limit=50)` (newest-first, 1–200); `.wait_for_batch(batch_id, *, timeout=60.0, poll_interval=2.0)` polling helper
+- `LocalClient` — in-process, `.submit()`, `.run_cycle()`, `.flush()`, `.prove_witness(tx)`, `.history(limit=None)`, `.get_transaction(tx_hash)`
+- `HttpClient` — HTTP, same API, `.prove_witness()` runs locally; `.history(limit=50)` (newest-first, 1–200); `.wait_for_batch(batch_id, *, timeout=60.0, poll_interval=2.0)` polling helper; `.get_transaction(tx_hash)`
 - `TransactionBuilder` — auto-nonce counter with `.next_nonce` and `.reset_nonce(n=0)`
 - `WitnessStatus` — `has_witness`, `onchain_commitment`, `c_tilde_hex`, `max_norms`
 - `BatchStatus` — `is_proven`, `has_witness`, `witness_commitment`
+- `TransactionStatus` — `tx_hash`, `status` ("pending"|"batched"|"unknown"), `batch_id?`
+- `SubmitResult.tx_hash` — set when `accepted=True`
 
 ## Serialization Note
 
