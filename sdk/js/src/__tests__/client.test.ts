@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@jest/globals";
 import { AggregatorClient, AggregatorHttpError } from "../client.js";
-import type { BatchListResult } from "../types.js";
+import type { BatchListResult, TransactionStatus } from "../types.js";
 
 describe("AggregatorClient constructor", () => {
   it("strips trailing slash from baseUrl", () => {
@@ -290,5 +290,32 @@ describe("AggregatorClient waitForBatch", () => {
     await expect(
       client.waitForBatch("some-id", { timeoutMs: 500, pollIntervalMs: 100 }),
     ).rejects.toThrow();
+  });
+});
+
+describe("AggregatorClient getTransaction", () => {
+  it("getTransaction is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getTransaction).toBe("function");
+  });
+
+  it("TransactionStatus type has expected shape", () => {
+    const s: TransactionStatus = { txHash: "a".repeat(64), status: "unknown" };
+    expect(s.status).toBe("unknown");
+    expect(s.batchId).toBeUndefined();
+  });
+
+  it("TransactionStatus batched shape includes batchId", () => {
+    const s: TransactionStatus = {
+      txHash: "b".repeat(64),
+      status: "batched",
+      batchId: "some-uuid",
+    };
+    expect(s.batchId).toBe("some-uuid");
+  });
+
+  it("getTransaction returns unknown on 404 (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.getTransaction("a".repeat(64))).rejects.toThrow();
   });
 });

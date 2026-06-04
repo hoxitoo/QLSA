@@ -6,5 +6,6 @@ export type {
   NodeStats,
   SubmitResult,
   TransactionPayload,
+  TransactionStatus,
   WitnessStatus,
 } from "./types.js";

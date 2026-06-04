@@ -11,6 +11,22 @@ export interface SubmitResult {
   accepted: boolean;
   mempoolSize: number;
   error?: string;
+  /** 64-char hex SHA3-256 hash; set when accepted is true. */
+  txHash?: string;
+}
+
+/**
+ * Lifecycle status of a submitted transaction.
+ *
+ * `status` is one of:
+ * - `"pending"`  — in the mempool, not yet batched
+ * - `"batched"`  — included in a batch; `batchId` is set
+ * - `"unknown"`  — not found in mempool or recent history
+ */
+export interface TransactionStatus {
+  txHash: string;
+  status: "pending" | "batched" | "unknown";
+  batchId?: string;
 }
 
 export interface WitnessStatus {

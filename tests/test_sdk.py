@@ -10,6 +10,7 @@ from sdk.python.qlsa import (
     NodeStats,
     SubmitResult,
     TransactionBuilder,
+    TransactionStatus,
     Wallet,
     WitnessStatus,
 )
@@ -779,3 +780,92 @@ def test_http_client_wait_for_batch_invalid_timeout_raises(http_client: HttpClie
 def test_http_client_wait_for_batch_invalid_poll_interval_raises(http_client: HttpClient):
     with pytest.raises(ValueError):
         http_client.wait_for_batch("any-id", poll_interval=0)
+
+
+# ── SubmitResult.tx_hash ──────────────────────────────────────────────────────
+
+def test_local_client_submit_returns_tx_hash():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=1)
+        result = client.submit(tx)
+    assert result.accepted is True
+    assert result.tx_hash is not None
+    assert len(result.tx_hash) == 64
+    assert result.tx_hash == tx.tx_hash().hex()
+
+
+def test_http_client_submit_returns_tx_hash(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1)
+        result = http_client.submit(tx)
+    assert result.accepted is True
+    assert result.tx_hash is not None
+    assert len(result.tx_hash) == 64
+
+
+# ── LocalClient.get_transaction ───────────────────────────────────────────────
+
+def test_local_client_get_transaction_unknown():
+    client = LocalClient()
+    status = client.get_transaction("a" * 64)
+    assert isinstance(status, TransactionStatus)
+    assert status.status == "unknown"
+    assert status.batch_id is None
+
+
+def test_local_client_get_transaction_pending():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="11" * 32, amount=1)
+        client.submit(tx)
+    tx_hash = tx.tx_hash().hex()
+    status = client.get_transaction(tx_hash)
+    assert status.status == "pending"
+    assert status.batch_id is None
+
+
+def test_local_client_get_transaction_batched():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="22" * 32, amount=1)
+        client.submit(tx)
+    tx_hash = tx.tx_hash().hex()
+    batch = client.flush()
+    assert batch is not None
+    status = client.get_transaction(tx_hash)
+    assert status.status == "batched"
+    assert status.batch_id == batch.batch_id
+
+
+# ── HttpClient.get_transaction ────────────────────────────────────────────────
+
+def test_http_client_get_transaction_unknown(http_client: HttpClient):
+    status = http_client.get_transaction("b" * 64)
+    assert isinstance(status, TransactionStatus)
+    assert status.status == "unknown"
+
+
+def test_http_client_get_transaction_pending(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="33" * 32, amount=1)
+        result = http_client.submit(tx)
+    assert result.tx_hash is not None
+    status = http_client.get_transaction(result.tx_hash)
+    assert status.status == "pending"
+
+
+def test_http_client_get_transaction_batched(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="44" * 32, amount=1)
+        result = http_client.submit(tx)
+    assert result.tx_hash is not None
+    http_client.flush()
+    status = http_client.get_transaction(result.tx_hash)
+    assert status.status == "batched"
+    assert status.batch_id is not None
+
+
+def test_http_client_get_transaction_invalid_hash(http_client: HttpClient):
+    with pytest.raises(Exception):
+        http_client.get_transaction("not-a-valid-hash")

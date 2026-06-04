@@ -24,6 +24,7 @@ class Mempool:
             raise ValueError("max_size must be at least 1")
         self.max_size = max_size
         self._txs: deque[Transaction] = deque()
+        self._tx_hashes: set[str] = set()
         self._lock = threading.Lock()
 
     def add(self, tx: Transaction) -> None:
@@ -40,6 +41,7 @@ class Mempool:
                     f"Mempool is full ({self.max_size} transactions)"
                 )
             self._txs.append(tx)
+            self._tx_hashes.add(tx.tx_hash().hex())
 
     def drain(self, n: int) -> list[Transaction]:
         """Remove and return up to *n* transactions (FIFO order)."""
@@ -47,7 +49,10 @@ class Mempool:
             return []
         with self._lock:
             count = min(n, len(self._txs))
-            return [self._txs.popleft() for _ in range(count)]
+            txs = [self._txs.popleft() for _ in range(count)]
+            for tx in txs:
+                self._tx_hashes.discard(tx.tx_hash().hex())
+            return txs
 
     def drain_if_ready(self, min_n: int, max_n: int) -> list[Transaction]:
         """Atomically drain up to *max_n* txs only if at least *min_n* are present.
@@ -61,7 +66,10 @@ class Mempool:
             if len(self._txs) < min_n:
                 return []
             count = min(max_n, len(self._txs))
-            return [self._txs.popleft() for _ in range(count)]
+            txs = [self._txs.popleft() for _ in range(count)]
+            for tx in txs:
+                self._tx_hashes.discard(tx.tx_hash().hex())
+            return txs
 
     def prepend_batch(self, txs: list[Transaction]) -> None:
         """Re-insert transactions at the front of the queue (LIFO recovery).
@@ -75,6 +83,7 @@ class Mempool:
             for tx in reversed(txs):
                 if len(self._txs) < self.max_size:
                     self._txs.appendleft(tx)
+                    self._tx_hashes.add(tx.tx_hash().hex())
                 else:
                     dropped += 1
         if dropped:
@@ -94,6 +103,12 @@ class Mempool:
         with self._lock:
             return len(self._txs)
 
+    def contains(self, tx_hash_hex: str) -> bool:
+        """Return True if a transaction with this hash is currently pending."""
+        with self._lock:
+            return tx_hash_hex in self._tx_hashes
+
     def clear(self) -> None:
         with self._lock:
             self._txs.clear()
+            self._tx_hashes.clear()

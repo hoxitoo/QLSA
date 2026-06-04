@@ -8,6 +8,21 @@ class SubmitResult:
     accepted: bool
     error: str | None = None
     mempool_size: int = 0
+    tx_hash: str | None = None  # hex; set when accepted=True
+
+
+@dataclass
+class TransactionStatus:
+    """Status of a submitted transaction.
+
+    ``status`` is one of:
+    - ``"pending"``  — in mempool, not yet batched
+    - ``"batched"``  — included in a batch; ``batch_id`` is set
+    - ``"unknown"``  — not found in mempool or recent history
+    """
+    tx_hash: str
+    status: str
+    batch_id: str | None = None
 
 
 @dataclass

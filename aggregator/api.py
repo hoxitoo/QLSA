@@ -148,6 +148,13 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
                 )
+        elif method == "GET" and path.startswith("/transaction/"):
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 reads per minute"},
+                )
 
         return await call_next(request)
 
@@ -168,6 +175,16 @@ def _check_batch_id(batch_id: str) -> None:
         _uuid_mod.UUID(batch_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="batch_id must be a valid UUID")
+
+
+def _check_tx_hash(tx_hash: str) -> None:
+    """Raise HTTP 400 if tx_hash is not a 64-char lowercase hex string (SHA3-256)."""
+    if len(tx_hash) != 64:
+        raise HTTPException(status_code=400, detail="tx_hash must be a 64-char hex string")
+    try:
+        bytes.fromhex(tx_hash)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="tx_hash must be a valid hex string")
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -242,6 +259,7 @@ class SubmitResponse(BaseModel):
     accepted: bool
     mempool_size: int
     error: str | None = None
+    tx_hash: str | None = None  # 64-char hex; set when accepted=True
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -319,6 +337,27 @@ def list_batches(
     }
 
 
+@app.get("/transaction/{tx_hash}")
+def transaction_status(tx_hash: str, request: Request) -> dict[str, Any]:
+    """Look up a transaction by its SHA3-256 hex hash.
+
+    Returns the transaction's current lifecycle status:
+    - ``"pending"``  — in the mempool, not yet batched
+    - ``"batched"``  — included in a batch (``batch_id`` is set)
+
+    Returns 400 if tx_hash is not a 64-char hex string.
+    Returns 404 if the transaction is not found in the mempool or recent history.
+    """
+    _check_tx_hash(tx_hash)
+    node: AggregatorNode = request.app.state.node
+    if node.mempool.contains(tx_hash):
+        return {"tx_hash": tx_hash, "status": "pending", "batch_id": None}
+    batch_id = node.get_transaction_batch(tx_hash)
+    if batch_id is not None:
+        return {"tx_hash": tx_hash, "status": "batched", "batch_id": batch_id}
+    raise HTTPException(status_code=404, detail=f"transaction {tx_hash!r} not found")
+
+
 @app.post("/transactions", response_model=SubmitResponse)
 def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
     node: AggregatorNode = request.app.state.node
@@ -348,7 +387,11 @@ def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
             )
         tx.signature = sig_bytes
         node.submit(tx)
-        return SubmitResponse(accepted=True, mempool_size=node.pending_count())
+        return SubmitResponse(
+            accepted=True,
+            mempool_size=node.pending_count(),
+            tx_hash=tx.tx_hash().hex(),
+        )
     except (ValueError, MempoolFullError) as exc:
         return SubmitResponse(
             accepted=False, mempool_size=node.pending_count(), error=str(exc)

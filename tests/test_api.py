@@ -571,3 +571,74 @@ class TestListBatches:
         resp = client.get("/batches")
         assert resp.status_code == 429
         assert resp.headers.get("Retry-After") == "60"
+
+
+# ── GET /transaction/{tx_hash} ────────────────────────────────────────────────
+
+class TestTransactionStatus:
+    def test_unknown_tx_returns_404(self, client):
+        resp = client.get(f"/transaction/{'a' * 64}")
+        assert resp.status_code == 404
+
+    def test_invalid_hash_returns_400(self, client):
+        resp = client.get("/transaction/not-a-valid-hash")
+        assert resp.status_code == 400
+
+    def test_invalid_hash_too_short_returns_400(self, client):
+        resp = client.get("/transaction/deadbeef")
+        assert resp.status_code == 400
+
+    def test_pending_tx_returns_pending(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        # Compute tx_hash from the payload
+        from core.transaction import Transaction
+        tx = Transaction(
+            sender=signed_payload["sender"],
+            recipient=signed_payload["recipient"],
+            amount=signed_payload["amount"],
+            nonce=signed_payload["nonce"],
+            public_key=bytes.fromhex(signed_payload["public_key"]),
+        )
+        tx_hash = tx.tx_hash().hex()
+        resp = client.get(f"/transaction/{tx_hash}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "pending"
+        assert data["tx_hash"] == tx_hash
+        assert data["batch_id"] is None
+
+    def test_batched_tx_returns_batched_with_batch_id(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_resp = client.post("/batch/flush")
+        batch_id = batch_resp.json()["batch_id"]
+        # Compute tx_hash
+        from core.transaction import Transaction
+        tx = Transaction(
+            sender=signed_payload["sender"],
+            recipient=signed_payload["recipient"],
+            amount=signed_payload["amount"],
+            nonce=signed_payload["nonce"],
+            public_key=bytes.fromhex(signed_payload["public_key"]),
+        )
+        tx_hash = tx.tx_hash().hex()
+        resp = client.get(f"/transaction/{tx_hash}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "batched"
+        assert data["batch_id"] == batch_id
+
+    def test_submit_response_includes_tx_hash(self, client, signed_payload):
+        resp = client.post("/transactions", json=signed_payload)
+        data = resp.json()
+        assert data["accepted"] is True
+        assert "tx_hash" in data
+        assert len(data["tx_hash"]) == 64
+
+    def test_rate_limited(self, client):
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._read_windows.clear()
+        for _ in range(200):
+            assert client.get(f"/transaction/{'b' * 64}").status_code in (200, 404)
+        resp = client.get(f"/transaction/{'b' * 64}")
+        assert resp.status_code == 429

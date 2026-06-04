@@ -5,6 +5,7 @@ import type {
   NodeStats,
   SubmitResult,
   TransactionPayload,
+  TransactionStatus,
   WitnessStatus,
 } from "./types.js";
 
@@ -64,11 +65,13 @@ export class AggregatorClient {
       accepted: boolean;
       mempool_size: number;
       error?: string;
+      tx_hash?: string;
     }>("/transactions", body);
     return {
       accepted: data.accepted,
       mempoolSize: data.mempool_size,
       error: data.error,
+      txHash: data.tx_hash,
     };
   }
 
@@ -212,6 +215,34 @@ export class AggregatorClient {
       batches: data.batches.map(b => this._toBatchStatus(b)),
       total: data.total,
     };
+  }
+
+  /**
+   * Look up a transaction by its 64-char hex SHA3-256 hash.
+   *
+   * Returns a {@link TransactionStatus} with `status` set to:
+   * - `"pending"`  — in the mempool, not yet batched
+   * - `"batched"`  — included in a batch; `batchId` is set
+   * - `"unknown"`  — not found in the mempool or recent history (404 → unknown)
+   */
+  async getTransaction(txHash: string): Promise<TransactionStatus> {
+    try {
+      const data = await this._get<{
+        tx_hash: string;
+        status: "pending" | "batched";
+        batch_id?: string;
+      }>(`/transaction/${txHash}`);
+      return {
+        txHash: data.tx_hash,
+        status: data.status,
+        batchId: data.batch_id,
+      };
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && e.status === 404) {
+        return { txHash, status: "unknown" };
+      }
+      throw e;
+    }
   }
 
   /** Retrieve static node configuration (security level, batch size limits). */

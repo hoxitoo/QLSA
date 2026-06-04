@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from core.transaction import Transaction
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
-from .models import BatchStatus, NodeConfig, NodeStats, SubmitResult, WitnessStatus
+from .models import BatchStatus, NodeConfig, NodeStats, SubmitResult, TransactionStatus, WitnessStatus
 
 if TYPE_CHECKING:
     from aggregator.batcher import BatchResult
@@ -77,7 +77,11 @@ class LocalClient:
         """Add a signed transaction to the mempool."""
         try:
             self._node.submit(tx)
-            return SubmitResult(accepted=True, mempool_size=self._node.pending_count())
+            return SubmitResult(
+                accepted=True,
+                mempool_size=self._node.pending_count(),
+                tx_hash=tx.tx_hash().hex(),
+            )
         except (ValueError, MempoolFullError) as exc:
             return SubmitResult(
                 accepted=False,
@@ -122,6 +126,19 @@ class LocalClient:
             if result.batch.batch_id == batch_id:
                 return _batch_status(result)
         return None
+
+    def get_transaction(self, tx_hash: str) -> TransactionStatus:
+        """Return the status of a transaction by its hex hash.
+
+        ``status`` is ``"pending"`` (in mempool), ``"batched"`` (found in history),
+        or ``"unknown"`` (not found).
+        """
+        if self._node.mempool.contains(tx_hash):
+            return TransactionStatus(tx_hash=tx_hash, status="pending")
+        batch_id = self._node.get_transaction_batch(tx_hash)
+        if batch_id is not None:
+            return TransactionStatus(tx_hash=tx_hash, status="batched", batch_id=batch_id)
+        return TransactionStatus(tx_hash=tx_hash, status="unknown")
 
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a given batch_id, or None if not found."""
@@ -269,6 +286,7 @@ class HttpClient:
                 accepted=data["accepted"],
                 error=data.get("error"),
                 mempool_size=data.get("mempool_size", 0),
+                tx_hash=data.get("tx_hash"),
             )
         except KeyError as exc:
             raise RuntimeError(
@@ -313,6 +331,24 @@ class HttpClient:
             return None
         resp.raise_for_status()
         return self._parse_batch_status(self._decode_json(resp, f"/batch/{batch_id}"))
+
+    def get_transaction(self, tx_hash: str) -> TransactionStatus:
+        """Return the status of a transaction by its 64-char hex hash.
+
+        ``status`` is ``"pending"``, ``"batched"``, or ``"unknown"``.
+        Raises ``RuntimeError`` on unexpected HTTP errors.
+        """
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/transaction/{tx_hash}")
+        if resp.status_code == 404:
+            return TransactionStatus(tx_hash=tx_hash, status="unknown")
+        resp.raise_for_status()
+        data = self._decode_json(resp, f"/transaction/{tx_hash}")
+        return TransactionStatus(
+            tx_hash=data.get("tx_hash", tx_hash),
+            status=data["status"],
+            batch_id=data.get("batch_id"),
+        )
 
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a batch, or None if not found (HTTP 404)."""
