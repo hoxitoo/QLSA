@@ -70,7 +70,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** (non-ignored) + **282 Python** (no PyO3) + **53 TS** + **847 Hardhat** | ✅ Done |
+| Tests — **210 Rust** (non-ignored) + **304 Python** (no PyO3) + **58 TS** + **847 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V22** — All 7 ML-DSA circuits in 1 STARK + Merkle root Fiat-Shamir binding | ✅ Done |
@@ -94,6 +94,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **Code audit (2026-06-03)** — `HttpClient._decode_json()` guards all 7 JSON call-sites against proxy HTML responses (JSONDecodeError → RuntimeError with preview); `testnet/e2e.py` sender_key no longer redundantly recomputes SHA3-256 | ✅ Done (2026-06-03) |
 | **SDK enhancements (2026-06-04)** — `Wallet.is_wiped` + ValueError after wipe; `TransactionBuilder.reset_nonce(n=0)`; `HttpClient.wait_for_batch()` / `AggregatorClient.waitForBatch()` polling helpers; `GET /batches` + `history(limit)` list endpoint (newest-first, 1–200) | ✅ Done (2026-06-04) |
 | **Transaction tracking (2026-06-04)** — `GET /transaction/{tx_hash}` (pending/batched/404); `TransactionStatus` in Python + TS SDK; `tx_hash` field in submit responses; O(1) Mempool hash set + AggregatorNode tx-to-batch index | ✅ Done (2026-06-04) |
+| **Mempool visibility (2026-06-05)** — `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` in Python + TS; fix `LocalClient.get_batch()` O(n)→O(1) | ✅ Done (2026-06-05) |
 
 ---
 
@@ -268,7 +269,7 @@ QLSA/
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
 ├── testnet/            # e2e.py, deploy.sh, submit.py, monitor.py (Sepolia)
-├── tests/              # 282 Python tests (no PyO3) + ~368 with PyO3 ext (pytest)
+├── tests/              # 304 Python tests (no PyO3) + ~390 with PyO3 ext (pytest)
 ├── context.md          # Technical decisions, architecture log, security risk table
 └── README.md
 ```

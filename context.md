@@ -12,6 +12,7 @@
 - Проведён аудит безопасности + code review (2026-06-03); 2 новых findings — все устранены
 - SDK расширен (2026-06-04): `Wallet.is_wiped` + знак после wipe, `TransactionBuilder.reset_nonce()`, `HttpClient.wait_for_batch()`, `AggregatorClient.waitForBatch()`, `GET /batches`
 - Transaction tracking (2026-06-04): `GET /transaction/{tx_hash}`, `TransactionStatus`, `get_transaction()` в Python + TS SDK; `tx_hash` в SubmitResult/SubmitResponse
+- Mempool visibility (2026-06-05): `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` Python + TS; fix `LocalClient.get_batch()` O(n)→O(1)
 
 ### Что готово
 
@@ -124,7 +125,7 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
 #### Тесты (актуально 2026-06-03)
-- Python: **282 тестов** (без PyO3) / **~368** (с PyO3 ext)
+- Python: **304 тестов** (без PyO3) / **~390** (с PyO3 ext)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
 - Solidity/Hardhat: **847 тестов** — все проходят
