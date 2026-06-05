@@ -2,6 +2,7 @@ export { AggregatorClient, AggregatorHttpError } from "./client.js";
 export type {
   BatchListResult,
   BatchStatus,
+  MempoolStatus,
   NodeConfig,
   NodeStats,
   SubmitResult,

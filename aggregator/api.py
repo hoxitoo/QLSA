@@ -155,6 +155,13 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 reads per minute"},
                 )
+        elif method == "GET" and path == "/mempool":
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 reads per minute"},
+                )
 
         return await call_next(request)
 
@@ -356,6 +363,45 @@ def transaction_status(tx_hash: str, request: Request) -> dict[str, Any]:
     if batch_id is not None:
         return {"tx_hash": tx_hash, "status": "batched", "batch_id": batch_id}
     raise HTTPException(status_code=404, detail=f"transaction {tx_hash!r} not found")
+
+
+@app.get("/mempool")
+def mempool_status(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Return a snapshot of the current mempool.
+
+    ``size`` is the current number of pending transactions.
+    ``capacity`` is the maximum size configured for this node.
+    ``tx_hashes`` contains the first ``min(size, limit)`` pending transaction
+    hashes in FIFO (submission) order.
+    """
+    node: AggregatorNode = request.app.state.node
+    return {
+        "size": node.mempool.size(),
+        "capacity": node.mempool.max_size,
+        "tx_hashes": node.mempool.peek_hashes(limit),
+    }
+
+
+@app.get("/batch/{batch_id}/transactions")
+def batch_transactions(batch_id: str, request: Request) -> dict[str, Any]:
+    """Return the ordered list of transaction hashes in a batch.
+
+    Returns 400 if batch_id is not a valid UUID.
+    Returns 404 if the batch is not found in recent history.
+    """
+    _check_batch_id(batch_id)
+    node: AggregatorNode = request.app.state.node
+    result = node.get_batch(batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+    return {
+        "batch_id": batch_id,
+        "tx_count": len(result.batch.transactions),
+        "tx_hashes": [tx.tx_hash().hex() for tx in result.batch.transactions],
+    }
 
 
 @app.post("/transactions", response_model=SubmitResponse)

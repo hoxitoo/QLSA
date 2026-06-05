@@ -82,3 +82,13 @@ export interface BatchListResult {
   /** Total number of batches held in the node's in-memory history. */
   total: number;
 }
+
+/** Snapshot of the aggregator mempool (GET /mempool). */
+export interface MempoolStatus {
+  /** Current number of pending transactions. */
+  size: number;
+  /** Maximum mempool capacity configured on this node. */
+  capacity: number;
+  /** First `min(size, limit)` pending tx hashes in FIFO order (64-char hex). */
+  txHashes: string[];
+}

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from core.transaction import Transaction
 from aggregator.mempool import MempoolFullError
 from aggregator.node import AggregatorNode
-from .models import BatchStatus, NodeConfig, NodeStats, SubmitResult, TransactionStatus, WitnessStatus
+from .models import BatchStatus, MempoolStatus, NodeConfig, NodeStats, SubmitResult, TransactionStatus, WitnessStatus
 
 if TYPE_CHECKING:
     from aggregator.batcher import BatchResult
@@ -122,10 +122,8 @@ class LocalClient:
 
     def get_batch(self, batch_id: str) -> BatchStatus | None:
         """Return the BatchStatus for a given batch_id, or None if not found."""
-        for result in self._node.history():
-            if result.batch.batch_id == batch_id:
-                return _batch_status(result)
-        return None
+        result = self._node.get_batch(batch_id)
+        return _batch_status(result) if result is not None else None
 
     def get_transaction(self, tx_hash: str) -> TransactionStatus:
         """Return the status of a transaction by its hex hash.
@@ -139,6 +137,27 @@ class LocalClient:
         if batch_id is not None:
             return TransactionStatus(tx_hash=tx_hash, status="batched", batch_id=batch_id)
         return TransactionStatus(tx_hash=tx_hash, status="unknown")
+
+    def get_mempool(self, limit: int = 100) -> MempoolStatus:
+        """Return a snapshot of the current mempool state.
+
+        *limit* caps the number of tx_hashes returned (1–1000).
+        Raises ``ValueError`` if *limit* is out of range.
+        """
+        if not (1 <= limit <= 1000):
+            raise ValueError("limit must be between 1 and 1000")
+        return MempoolStatus(
+            size=self._node.mempool.size(),
+            capacity=self._node.mempool.max_size,
+            tx_hashes=self._node.mempool.peek_hashes(limit),
+        )
+
+    def get_batch_transactions(self, batch_id: str) -> list[str] | None:
+        """Return the ordered list of tx hashes in a batch, or None if not found."""
+        result = self._node.get_batch(batch_id)
+        if result is None:
+            return None
+        return [tx.tx_hash().hex() for tx in result.batch.transactions]
 
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a given batch_id, or None if not found."""
@@ -349,6 +368,34 @@ class HttpClient:
             status=data["status"],
             batch_id=data.get("batch_id"),
         )
+
+    def get_mempool(self, limit: int = 100) -> MempoolStatus:
+        """Return a snapshot of the current mempool state.
+
+        *limit* caps the number of tx_hashes returned (1–1000).
+        Raises ``ValueError`` if *limit* is out of range.
+        """
+        if not (1 <= limit <= 1000):
+            raise ValueError("limit must be between 1 and 1000")
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/mempool?limit={limit}")
+        resp.raise_for_status()
+        data = self._decode_json(resp, "/mempool")
+        return MempoolStatus(
+            size=data["size"],
+            capacity=data["capacity"],
+            tx_hashes=data.get("tx_hashes", []),
+        )
+
+    def get_batch_transactions(self, batch_id: str) -> list[str] | None:
+        """Return the ordered list of tx hashes in a batch, or None if not found (HTTP 404)."""
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/batch/{batch_id}/transactions")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = self._decode_json(resp, f"/batch/{batch_id}/transactions")
+        return data["tx_hashes"]
 
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a batch, or None if not found (HTTP 404)."""

@@ -4,6 +4,18 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class MempoolStatus:
+    """Snapshot of the aggregator mempool.
+
+    ``tx_hashes`` contains the first ``min(size, limit)`` pending transaction
+    hashes in FIFO (submission) order.
+    """
+    size: int
+    capacity: int
+    tx_hashes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SubmitResult:
     accepted: bool
     error: str | None = None

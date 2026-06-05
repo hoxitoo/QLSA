@@ -99,6 +99,13 @@ class Mempool:
         with self._lock:
             return list(self._txs)[:n]
 
+    def peek_hashes(self, n: int) -> list[str]:
+        """Return up to *n* pending tx hashes (FIFO order) without removing them."""
+        if n < 1:
+            return []
+        with self._lock:
+            return [tx.tx_hash().hex() for tx in list(self._txs)[:n]]
+
     def size(self) -> int:
         with self._lock:
             return len(self._txs)

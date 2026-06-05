@@ -642,3 +642,108 @@ class TestTransactionStatus:
             assert client.get(f"/transaction/{'b' * 64}").status_code in (200, 404)
         resp = client.get(f"/transaction/{'b' * 64}")
         assert resp.status_code == 429
+
+
+# ── GET /mempool ──────────────────────────────────────────────────────────────
+
+class TestMempoolStatus:
+    def test_empty_mempool(self, client):
+        resp = client.get("/mempool")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["size"] == 0
+        assert data["capacity"] > 0
+        assert data["tx_hashes"] == []
+
+    def test_pending_tx_appears_in_mempool(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        resp = client.get("/mempool")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["size"] == 1
+        assert len(data["tx_hashes"]) == 1
+
+    def test_limit_param_caps_hashes(self, client, signed_payload):
+        # Submit same tx twice (idempotent — second goes in too with different nonce? No,
+        # same tx → same hash, same mempool entry. Use fresh payload.)
+        from core.keys import generate_keypair, wipe_key, derive_address
+        from core.signing import sign as _sign
+        from core.transaction import Transaction
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._tx_windows.clear()
+        pub, priv = generate_keypair()
+        addr = derive_address(pub)
+        txs = []
+        for i in range(3):
+            tx = Transaction(sender=addr, recipient="b" * 64, amount=i + 1, nonce=i, public_key=pub)
+            tx.signature = _sign(tx.to_bytes(), priv)
+            txs.append(tx)
+        wipe_key(priv)
+        for tx in txs:
+            client.post("/transactions", json={
+                "sender": addr, "recipient": "b" * 64, "amount": tx.amount,
+                "nonce": tx.nonce, "public_key": pub.hex(), "signature": tx.signature.hex(),
+            })
+        resp = client.get("/mempool?limit=2")
+        data = resp.json()
+        assert data["size"] == 3
+        assert len(data["tx_hashes"]) == 2
+
+    def test_limit_zero_rejected(self, client):
+        resp = client.get("/mempool?limit=0")
+        assert resp.status_code == 422
+
+    def test_limit_1001_rejected(self, client):
+        resp = client.get("/mempool?limit=1001")
+        assert resp.status_code == 422
+
+    def test_rate_limited(self, client):
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._read_windows.clear()
+        for _ in range(200):
+            assert client.get("/mempool").status_code == 200
+        assert client.get("/mempool").status_code == 429
+
+
+# ── GET /batch/{batch_id}/transactions ───────────────────────────────────────
+
+class TestBatchTransactions:
+    def test_unknown_batch_returns_404(self, client):
+        import uuid
+        resp = client.get(f"/batch/{uuid.uuid4()}/transactions")
+        assert resp.status_code == 404
+
+    def test_invalid_batch_id_returns_400(self, client):
+        resp = client.get("/batch/not-a-uuid/transactions")
+        assert resp.status_code == 400
+
+    def test_returns_tx_hashes_in_order(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_resp = client.post("/batch/flush")
+        batch_id = batch_resp.json()["batch_id"]
+        resp = client.get(f"/batch/{batch_id}/transactions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["batch_id"] == batch_id
+        assert data["tx_count"] == 1
+        assert len(data["tx_hashes"]) == 1
+        assert len(data["tx_hashes"][0]) == 64
+
+    def test_tx_hash_matches_transaction(self, client, signed_payload):
+        from core.transaction import Transaction
+        client.post("/transactions", json=signed_payload)
+        batch_resp = client.post("/batch/flush")
+        batch_id = batch_resp.json()["batch_id"]
+        resp = client.get(f"/batch/{batch_id}/transactions")
+        tx_hashes = resp.json()["tx_hashes"]
+        # compute expected hash from payload
+        tx = Transaction(
+            sender=signed_payload["sender"],
+            recipient=signed_payload["recipient"],
+            amount=signed_payload["amount"],
+            nonce=signed_payload["nonce"],
+            public_key=bytes.fromhex(signed_payload["public_key"]),
+        )
+        assert tx.tx_hash().hex() in tx_hashes

@@ -1,6 +1,7 @@
 import type {
   BatchListResult,
   BatchStatus,
+  MempoolStatus,
   NodeConfig,
   NodeStats,
   SubmitResult,
@@ -240,6 +241,45 @@ export class AggregatorClient {
     } catch (e) {
       if (e instanceof AggregatorHttpError && e.status === 404) {
         return { txHash, status: "unknown" };
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Return a snapshot of the current mempool.
+   *
+   * `limit` (1–1000) caps how many tx hashes are returned (default 100).
+   */
+  async getMempool(limit = 100): Promise<MempoolStatus> {
+    const data = await this._get<{
+      size: number;
+      capacity: number;
+      tx_hashes: string[];
+    }>(`/mempool?limit=${limit}`);
+    return {
+      size: data.size,
+      capacity: data.capacity,
+      txHashes: data.tx_hashes,
+    };
+  }
+
+  /**
+   * Return the ordered list of transaction hashes in a batch, or `null` if not found.
+   *
+   * Returns `null` on HTTP 404 (batch not in recent history).
+   */
+  async getBatchTransactions(batchId: string): Promise<string[] | null> {
+    try {
+      const data = await this._get<{
+        batch_id: string;
+        tx_count: number;
+        tx_hashes: string[];
+      }>(`/batch/${batchId}/transactions`);
+      return data.tx_hashes;
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && (e.status === 404 || e.status === 400)) {
+        return null;
       }
       throw e;
     }

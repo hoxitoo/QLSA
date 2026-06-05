@@ -319,3 +319,33 @@ describe("AggregatorClient getTransaction", () => {
     await expect(client.getTransaction("a".repeat(64))).rejects.toThrow();
   });
 });
+
+describe("AggregatorClient getMempool", () => {
+  it("getMempool is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getMempool).toBe("function");
+  });
+
+  it("MempoolStatus type has expected shape", () => {
+    const ms: import("../types.js").MempoolStatus = { size: 0, capacity: 3000, txHashes: [] };
+    expect(ms.size).toBe(0);
+    expect(ms.txHashes).toEqual([]);
+  });
+
+  it("getMempool throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.getMempool()).rejects.toThrow();
+  });
+});
+
+describe("AggregatorClient getBatchTransactions", () => {
+  it("getBatchTransactions is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getBatchTransactions).toBe("function");
+  });
+
+  it("getBatchTransactions throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.getBatchTransactions("some-id")).rejects.toThrow();
+  });
+});
