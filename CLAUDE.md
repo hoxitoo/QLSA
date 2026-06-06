@@ -25,7 +25,7 @@ benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_wit
 ## Key Commands
 
 ```bash
-# Run all Python tests (~317 passing when PyO3 ext installed)
+# Run all Python tests (~487 passing when PyO3 ext installed; ~354 without PyO3)
 pytest tests/ -v
 
 # Run only tests that do NOT need the PyO3 extension
@@ -586,6 +586,7 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 - **`testnet/e2e.py` sender_key** (2026-06-03): eliminated redundant `hashlib.sha3_256(tx.public_key).digest()` — `tx.sender` already contains this value as hex; `import hashlib` removed
 - **`Wallet._wiped` flag** (2026-06-04): `sign_transaction()` raises `ValueError` with clear message after `wipe()` — callers discover misuse at the call-site rather than receiving a signing failure from zeroed key material; `is_wiped` property exposes the flag for introspection
 - **Mempool deduplication** (2026-06-05): `Mempool.add()` raises `DuplicateTxError` if the same `tx_hash` is already pending — prevents batches from containing duplicate transactions; duplicate submissions return `accepted=False` to the caller
+- **Bandit B104 nosec** (2026-06-06): `aggregator/__main__.py:32` — `# nosec B104` on the `"0.0.0.0"` default; binding all interfaces is intentional for a server entry point, address is runtime-configurable via `--host`/`HOST`
 
 ## CI Pipeline
 

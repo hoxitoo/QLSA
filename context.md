@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-04)
+## Статус (обновлено 2026-06-06)
 
 - Фаза: **MVP-5 завершён** (2026-05-25) + **V23 dual-VFRI7 production pipeline с cross-proof binding**
 - Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4 — завершены полностью
@@ -14,6 +14,7 @@
 - Transaction tracking (2026-06-04): `GET /transaction/{tx_hash}`, `TransactionStatus`, `get_transaction()` в Python + TS SDK; `tx_hash` в SubmitResult/SubmitResponse
 - Mempool visibility (2026-06-05): `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` Python + TS; fix `LocalClient.get_batch()` O(n)→O(1)
 - Code quality (2026-06-05): `DuplicateTxError` mempool deduplication; mypy clean; `python -m aggregator` entry point; `py.typed` PEP 561 marker
+- CI fix (2026-06-06): `aggregator/__main__.py` — bandit B104 false positive suppressed (`# nosec B104`) для intentional `0.0.0.0` bind (конфигурируется через `--host`/`HOST`)
 
 ### Что готово
 
@@ -125,10 +126,10 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `M31.sol` — field arithmetic library
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
-#### Тесты (актуально 2026-06-03)
-- Python: **304 тестов** (без PyO3) / **~390** (с PyO3 ext)
+#### Тесты (актуально 2026-06-06)
+- Python: **~354 тестов** (без PyO3) / **487** (с PyO3 ext, из CI лога)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
-- TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
+- TypeScript SDK: **~71 тестов** (jest; +13 новых для waitForBatch/getTransaction/getMempool/getBatchTransactions)
 - Solidity/Hardhat: **847 тестов** — все проходят
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
