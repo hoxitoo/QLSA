@@ -4,6 +4,7 @@ import type {
   MempoolStatus,
   NodeConfig,
   NodeStats,
+  SenderTxHistory,
   SubmitResult,
   TransactionPayload,
   TransactionStatus,
@@ -194,9 +195,12 @@ export class AggregatorClient {
   /**
    * Return recent batches from the aggregator, newest first.
    *
-   * @param limit  Maximum number of batches to return (1–200, default 50).
+   * @param limit   Maximum number of batches to return (1–200, default 50).
+   * @param proven  When set, filter to only proven (`true`) or unproven (`false`) batches.
    */
-  async listBatches(limit = 50): Promise<BatchListResult> {
+  async listBatches(limit = 50, proven?: boolean): Promise<BatchListResult> {
+    let path = `/batches?limit=${limit}`;
+    if (proven !== undefined) path += `&proven=${proven}`;
     const data = await this._get<{
       batches: Array<{
         batch_id: string;
@@ -211,10 +215,33 @@ export class AggregatorClient {
         vfri7_commitment_log8?: string;
       }>;
       total: number;
-    }>(`/batches?limit=${limit}`);
+    }>(path);
     return {
       batches: data.batches.map(b => this._toBatchStatus(b)),
       total: data.total,
+    };
+  }
+
+  /**
+   * Return the transaction history for a sender address (pending + batched, newest-first).
+   *
+   * @param sender  64-char hex address (SHA3-256 of the public key).
+   * @param limit   Maximum number of tx hashes to return (1–1000, default 100).
+   */
+  async getAddressTransactions(sender: string, limit = 100): Promise<SenderTxHistory> {
+    const data = await this._get<{
+      sender: string;
+      tx_hashes: string[];
+      pending_count: number;
+      total: number;
+      limit: number;
+    }>(`/address/${sender}/transactions?limit=${limit}`);
+    return {
+      sender: data.sender,
+      txHashes: data.tx_hashes,
+      pendingCount: data.pending_count,
+      total: data.total,
+      limit: data.limit,
     };
   }
 

@@ -5,6 +5,7 @@ export type {
   MempoolStatus,
   NodeConfig,
   NodeStats,
+  SenderTxHistory,
   SubmitResult,
   TransactionPayload,
   TransactionStatus,

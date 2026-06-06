@@ -771,3 +771,102 @@ class TestBatchTransactions:
             public_key=bytes.fromhex(signed_payload["public_key"]),
         )
         assert tx.tx_hash().hex() in tx_hashes
+
+
+# ── GET /batches?proven=... ───────────────────────────────────────────────────
+
+class TestBatchFilter:
+    def test_proven_filter_false_includes_unproven(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        r = client.get("/batches?proven=false")
+        assert r.status_code == 200
+        data = r.json()
+        assert all(not b["is_proven"] for b in data["batches"])
+
+    def test_proven_filter_true_excludes_unproven(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        r = client.get("/batches?proven=true")
+        assert r.status_code == 200
+        data = r.json()
+        assert all(b["is_proven"] for b in data["batches"])
+
+    def test_no_filter_returns_all(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        r_all = client.get("/batches")
+        r_false = client.get("/batches?proven=false")
+        assert r_all.json()["total"] >= r_false.json()["total"]
+
+    def test_total_reflects_filtered_count(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        r_all = client.get("/batches")
+        r_proven = client.get("/batches?proven=true")
+        r_not_proven = client.get("/batches?proven=false")
+        # proven + unproven should sum to total
+        assert (
+            r_proven.json()["total"] + r_not_proven.json()["total"]
+            == r_all.json()["total"]
+        )
+
+
+# ── GET /address/{sender}/transactions ────────────────────────────────────────
+
+class TestSenderTransactions:
+    def test_unknown_sender_returns_empty(self, client):
+        sender = "a" * 64
+        r = client.get(f"/address/{sender}/transactions")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["tx_hashes"] == []
+        assert data["pending_count"] == 0
+        assert data["total"] == 0
+
+    def test_pending_tx_appears(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        sender = signed_payload["sender"]
+        r = client.get(f"/address/{sender}/transactions")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["pending_count"] == 1
+        assert len(data["tx_hashes"]) == 1
+
+    def test_batched_tx_appears(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        sender = signed_payload["sender"]
+        r = client.get(f"/address/{sender}/transactions")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["pending_count"] == 0
+        assert len(data["tx_hashes"]) == 1
+
+    def test_invalid_sender_returns_400(self, client):
+        r = client.get("/address/not-a-valid-sender/transactions")
+        assert r.status_code == 400
+
+    def test_limit_param(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        sender = signed_payload["sender"]
+        r = client.get(f"/address/{sender}/transactions?limit=1")
+        assert r.status_code == 200
+        assert len(r.json()["tx_hashes"]) <= 1
+
+    def test_sender_field_in_response(self, client, signed_payload):
+        sender = signed_payload["sender"]
+        r = client.get(f"/address/{sender}/transactions")
+        assert r.status_code == 200
+        assert r.json()["sender"] == sender.lower()
+
+    def test_limit_zero_rejected(self, client):
+        sender = "b" * 64
+        r = client.get(f"/address/{sender}/transactions?limit=0")
+        assert r.status_code == 422
+
+    def test_limit_1001_rejected(self, client):
+        sender = "c" * 64
+        r = client.get(f"/address/{sender}/transactions?limit=1001")
+        assert r.status_code == 422

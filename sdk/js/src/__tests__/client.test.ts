@@ -349,3 +349,43 @@ describe("AggregatorClient getBatchTransactions", () => {
     await expect(client.getBatchTransactions("some-id")).rejects.toThrow();
   });
 });
+
+describe("AggregatorClient getAddressTransactions", () => {
+  it("getAddressTransactions is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getAddressTransactions).toBe("function");
+  });
+
+  it("getAddressTransactions throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.getAddressTransactions("a".repeat(64))).rejects.toThrow();
+  });
+
+  it("SenderTxHistory type has expected shape", () => {
+    const result: import("../types.js").SenderTxHistory = {
+      sender: "a".repeat(64),
+      txHashes: [],
+      pendingCount: 0,
+      total: 0,
+      limit: 100,
+    };
+    expect(result.sender).toBe("a".repeat(64));
+    expect(result.txHashes).toEqual([]);
+    expect(result.pendingCount).toBe(0);
+    expect(result.total).toBe(0);
+    expect(result.limit).toBe(100);
+  });
+});
+
+describe("AggregatorClient listBatches proven filter", () => {
+  it("listBatches accepts proven=true parameter (smoke)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    // The method should call the right path — it will throw on network error
+    await expect(client.listBatches(50, true)).rejects.toThrow();
+  });
+
+  it("listBatches accepts proven=false parameter (smoke)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.listBatches(50, false)).rejects.toThrow();
+  });
+});
