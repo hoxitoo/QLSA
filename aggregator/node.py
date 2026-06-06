@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from core.transaction import Transaction
 from aggregator.batcher import BatchResult, Batcher
-from aggregator.mempool import Mempool
+from aggregator.mempool import DuplicateTxError, Mempool
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from aggregator.mempool import MempoolFullError
+from aggregator.mempool import DuplicateTxError, MempoolFullError
 from aggregator.node import AggregatorNode
 from core.keys import derive_address
 from core.signing import verify as sig_verify
@@ -437,6 +437,12 @@ def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
             accepted=True,
             mempool_size=node.pending_count(),
             tx_hash=tx.tx_hash().hex(),
+        )
+    except DuplicateTxError:
+        return SubmitResponse(
+            accepted=False,
+            mempool_size=node.pending_count(),
+            error="duplicate transaction: already in mempool",
         )
     except (ValueError, MempoolFullError) as exc:
         return SubmitResponse(

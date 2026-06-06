@@ -275,6 +275,18 @@ def test_local_client_submit_increments_mempool():
             assert r.mempool_size == i + 1
 
 
+def test_local_client_submit_duplicate_rejected():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cc" * 32, amount=1)
+        r1 = client.submit(tx)
+        r2 = client.submit(tx)  # same tx again
+    assert r1.accepted is True
+    assert r2.accepted is False
+    assert r2.error is not None and "duplicate" in r2.error
+    assert r2.mempool_size == 1  # only one copy in the pool
+
+
 def test_local_client_submit_unsigned_tx_rejected():
     pub, priv = generate_keypair()
     wipe_key(priv)

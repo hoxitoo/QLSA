@@ -4,7 +4,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from core.transaction import Transaction
-from aggregator.mempool import MempoolFullError
+from aggregator.mempool import DuplicateTxError, MempoolFullError
 from aggregator.node import AggregatorNode
 from .models import BatchStatus, MempoolStatus, NodeConfig, NodeStats, SubmitResult, TransactionStatus, WitnessStatus
 
@@ -81,6 +81,12 @@ class LocalClient:
                 accepted=True,
                 mempool_size=self._node.pending_count(),
                 tx_hash=tx.tx_hash().hex(),
+            )
+        except DuplicateTxError:
+            return SubmitResult(
+                accepted=False,
+                error="duplicate transaction: already in mempool",
+                mempool_size=self._node.pending_count(),
             )
         except (ValueError, MempoolFullError) as exc:
             return SubmitResult(
@@ -395,7 +401,7 @@ class HttpClient:
             return None
         resp.raise_for_status()
         data = self._decode_json(resp, f"/batch/{batch_id}/transactions")
-        return data["tx_hashes"]
+        return list(data["tx_hashes"])
 
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a batch, or None if not found (HTTP 404)."""

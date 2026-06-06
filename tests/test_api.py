@@ -54,6 +54,22 @@ def signed_payload() -> dict:
     }
 
 
+def _make_payloads(n: int) -> list[dict]:
+    """Generate *n* distinct signed transaction payloads (unique sender per tx)."""
+    payloads = []
+    for i in range(n):
+        pub, priv = generate_keypair()
+        addr = derive_address(pub)
+        tx = Transaction(sender=addr, recipient="b" * 64, amount=i + 1, nonce=0, public_key=pub)
+        sig = sign(tx.to_bytes(), priv)
+        wipe_key(priv)
+        payloads.append({
+            "sender": addr, "recipient": "b" * 64, "amount": i + 1, "nonce": 0,
+            "public_key": pub.hex(), "signature": sig.hex(),
+        })
+    return payloads
+
+
 @pytest.fixture()
 def client() -> "TestClient":
     from aggregator.api import app
@@ -150,9 +166,17 @@ class TestSubmitTransaction:
 
     def test_mempool_size_increments(self, client, signed_payload):
         r1 = client.post("/transactions", json=signed_payload)
-        r2 = client.post("/transactions", json=signed_payload)
         assert r1.json()["mempool_size"] == 1
-        assert r2.json()["mempool_size"] == 2
+        assert r1.json()["accepted"] is True
+
+    def test_duplicate_tx_rejected(self, client, signed_payload):
+        r1 = client.post("/transactions", json=signed_payload)
+        r2 = client.post("/transactions", json=signed_payload)
+        assert r1.json()["accepted"] is True
+        assert r2.json()["accepted"] is False
+        assert "duplicate" in r2.json()["error"]
+        # mempool still has only 1 entry
+        assert r2.json()["mempool_size"] == 1
 
     def test_invalid_signature_rejected(self, client, signed_payload):
         # Correct ML-DSA-65 signature length (3309 bytes) but wrong content —
@@ -307,15 +331,15 @@ class TestBatchFlush:
         assert isinstance(data["is_proven"], bool)
         assert "has_witness" in data
 
-    def test_flush_drains_mempool(self, client, signed_payload):
-        for _ in range(3):
-            client.post("/transactions", json=signed_payload)
+    def test_flush_drains_mempool(self, client):
+        for p in _make_payloads(3):
+            client.post("/transactions", json=p)
         client.post("/batch/flush")
         assert client.get("/stats").json()["pending"] == 0
 
-    def test_flush_batches_all_pending(self, client, signed_payload):
-        for _ in range(5):
-            client.post("/transactions", json=signed_payload)
+    def test_flush_batches_all_pending(self, client):
+        for p in _make_payloads(5):
+            client.post("/transactions", json=p)
         resp = client.post("/batch/flush")
         assert resp.json()["tx_count"] == 5
 
@@ -338,9 +362,9 @@ class TestBatchFlush:
         assert "vfri7_commitment_log10" in data
         assert "vfri7_commitment_log8" in data
 
-    def test_flush_updates_stats(self, client, signed_payload):
-        for _ in range(2):
-            client.post("/transactions", json=signed_payload)
+    def test_flush_updates_stats(self, client):
+        for p in _make_payloads(2):
+            client.post("/transactions", json=p)
         client.post("/batch/flush")
         stats = client.get("/stats").json()
         assert stats["transactions_batched"] == 2
@@ -539,9 +563,9 @@ class TestListBatches:
         assert ids[0] == id2
         assert ids[1] == id1
 
-    def test_limit_caps_returned_count(self, client, signed_payload):
-        for _ in range(3):
-            client.post("/transactions", json=signed_payload)
+    def test_limit_caps_returned_count(self, client):
+        for p in _make_payloads(3):
+            client.post("/transactions", json=p)
             client.post("/batch/flush")
         data = client.get("/batches", params={"limit": 2}).json()
         assert len(data["batches"]) == 2

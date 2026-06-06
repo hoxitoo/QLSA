@@ -16,6 +16,10 @@ class MempoolFullError(Exception):
     """Raised when the mempool has reached its capacity."""
 
 
+class DuplicateTxError(Exception):
+    """Raised when a transaction with the same hash is already in the mempool."""
+
+
 class Mempool:
     """Thread-safe FIFO pool of pending signed transactions."""
 
@@ -35,13 +39,18 @@ class Mempool:
         """
         if tx.signature is None:
             raise ValueError("Transaction must be signed before adding to mempool")
+        tx_hash = tx.tx_hash().hex()
         with self._lock:
+            if tx_hash in self._tx_hashes:
+                raise DuplicateTxError(
+                    f"transaction {tx_hash[:16]}… is already in the mempool"
+                )
             if len(self._txs) >= self.max_size:
                 raise MempoolFullError(
                     f"Mempool is full ({self.max_size} transactions)"
                 )
             self._txs.append(tx)
-            self._tx_hashes.add(tx.tx_hash().hex())
+            self._tx_hashes.add(tx_hash)
 
     def drain(self, n: int) -> list[Transaction]:
         """Remove and return up to *n* transactions (FIFO order)."""
