@@ -95,6 +95,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **SDK enhancements (2026-06-04)** — `Wallet.is_wiped` + ValueError after wipe; `TransactionBuilder.reset_nonce(n=0)`; `HttpClient.wait_for_batch()` / `AggregatorClient.waitForBatch()` polling helpers; `GET /batches` + `history(limit)` list endpoint (newest-first, 1–200) | ✅ Done (2026-06-04) |
 | **Transaction tracking (2026-06-04)** — `GET /transaction/{tx_hash}` (pending/batched/404); `TransactionStatus` in Python + TS SDK; `tx_hash` field in submit responses; O(1) Mempool hash set + AggregatorNode tx-to-batch index | ✅ Done (2026-06-04) |
 | **Mempool visibility (2026-06-05)** — `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` in Python + TS; fix `LocalClient.get_batch()` O(n)→O(1) | ✅ Done (2026-06-05) |
+| **Deduplication + quality (2026-06-05)** — `DuplicateTxError` prevents duplicate tx_hashes in mempool; mypy clean; `aggregator/__main__.py` (`python -m aggregator`); `sdk/python/qlsa/py.typed` PEP 561 marker | ✅ Done (2026-06-05) |
 
 ---
 
