@@ -29,7 +29,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--host",
-        default=os.environ.get("HOST", "0.0.0.0"),
+        default=os.environ.get("HOST", "0.0.0.0"),  # nosec B104
         help="Bind address (default: 0.0.0.0, env: HOST)",
     )
     parser.add_argument(
