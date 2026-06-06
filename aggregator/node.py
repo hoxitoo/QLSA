@@ -77,6 +77,7 @@ class AggregatorNode:
         self._history: deque[BatchResult] = deque(maxlen=self._MAX_HISTORY)
         self._batch_index: dict[str, BatchResult] = {}
         self._tx_to_batch: dict[str, str] = {}  # tx_hash_hex → batch_id
+        self._sender_txs: dict[str, deque[str]] = {}  # sender_hex → deque[tx_hash_hex]
         self._lock = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -137,10 +138,22 @@ class AggregatorNode:
         with self._lock:
             return self._tx_to_batch.get(tx_hash_hex)
 
+    def get_sender_transactions(self, sender_hex: str, limit: int = 100) -> list[str]:
+        """Return batched tx_hashes for *sender_hex*, newest-first, up to *limit*.
+
+        Thread-safe.  Returns an empty list if the sender has no recorded batched
+        transactions.
+        """
+        with self._lock:
+            dq = self._sender_txs.get(sender_hex, deque())
+            return list(reversed(dq))[:limit]
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     # Keep at most this many BatchResults in memory; oldest are evicted first.
     _MAX_HISTORY = 1000
+    # Per-sender tx_hash ring buffer size.
+    _MAX_SENDER_HISTORY: int = 500
 
     def _record(self, result: BatchResult) -> None:
         n = len(result.batch.transactions)
@@ -159,7 +172,12 @@ class AggregatorNode:
             self._history.append(result)
             self._batch_index[result.batch.batch_id] = result
             for tx in result.batch.transactions:
-                self._tx_to_batch[tx.tx_hash().hex()] = result.batch.batch_id
+                tx_hash_hex = tx.tx_hash().hex()
+                self._tx_to_batch[tx_hash_hex] = result.batch.batch_id
+                sender = tx.sender
+                if sender not in self._sender_txs:
+                    self._sender_txs[sender] = deque(maxlen=self._MAX_SENDER_HISTORY)
+                self._sender_txs[sender].append(tx_hash_hex)
         logger.info(
             "batch created: id=%s txs=%d proven=%s",
             result.batch.batch_id[:8],
