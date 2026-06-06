@@ -25,7 +25,7 @@ benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_wit
 ## Key Commands
 
 ```bash
-# Run all Python tests (~317 passing when PyO3 ext installed)
+# Run all Python tests (~487 passing when PyO3 ext installed; ~354 without PyO3)
 pytest tests/ -v
 
 # Run only tests that do NOT need the PyO3 extension
@@ -131,17 +131,30 @@ Fiat-Shamir transcript: `c_tilde` → `merkle_root` → Tree0 → Tree1 → fing
 - `Batcher.force_batch(prove_witnesses=False)` — ignores `min_batch_size`
 
 ### `aggregator/api.py`
-- `POST /transactions` — submit signed tx (validates signature at ingestion)
+- `POST /transactions` — submit signed tx; response includes `tx_hash` (64-char hex) when accepted
 - `POST /batch/run?prove_witnesses=false` — respects min_batch_size
 - `POST /batch/flush?prove_witnesses=false` — forces batch from mempool
-- `GET /stats`, `GET /health`
+- `GET /stats`, `GET /health`, `GET /node/config`
+- `GET /batches?limit=50` — list recent batches, newest-first (1–200)
+- `GET /batch/{batch_id}` — batch status by UUID
+- `GET /batch/{batch_id}/witness` — witness/proof status
+- `GET /batch/{batch_id}/transactions` — ordered list of tx hashes in batch; 404 if not found
+- `GET /transaction/{tx_hash}` — tx lifecycle status: `"pending"` (in mempool), `"batched"` (batch_id set), 404 if unknown
+- `GET /mempool?limit=100` — current size, capacity, first N pending tx hashes (FIFO)
+- Rate limiting: 100 tx/min, 20 batch ops/min, 200 reads/min (shared across read endpoints)
+- `python -m aggregator [--host HOST] [--port PORT] [--reload]` — start the HTTP server
 
 ### `sdk/python/qlsa/`
-- `Wallet` — generate ML-DSA-65 keypair, sign transactions, context manager wipes key
-- `LocalClient` — in-process, `.submit()`, `.run_cycle()`, `.flush()`, `.prove_witness(tx)`
-- `HttpClient` — HTTP, same API, `.prove_witness()` runs locally (no server call)
+- `Wallet` — generate ML-DSA-65 keypair, sign transactions, context manager wipes key; `is_wiped` property; `sign_transaction()` raises `ValueError` after `wipe()`
+- `LocalClient` — in-process, `.submit()`, `.run_cycle()`, `.flush()`, `.prove_witness(tx)`, `.history(limit=None)`, `.get_transaction(tx_hash)`, `.get_mempool(limit=100)`, `.get_batch_transactions(batch_id)`
+- `HttpClient` — HTTP, same API, `.prove_witness()` runs locally; `.history(limit=50)` (newest-first, 1–200); `.wait_for_batch(batch_id, *, timeout=60.0, poll_interval=2.0)` polling helper; `.get_transaction(tx_hash)`, `.get_mempool(limit=100)`, `.get_batch_transactions(batch_id)`
+- `TransactionBuilder` — auto-nonce counter with `.next_nonce` and `.reset_nonce(n=0)`
 - `WitnessStatus` — `has_witness`, `onchain_commitment`, `c_tilde_hex`, `max_norms`
 - `BatchStatus` — `is_proven`, `has_witness`, `witness_commitment`
+- `TransactionStatus` — `tx_hash`, `status` ("pending"|"batched"|"unknown"), `batch_id?`
+- `MempoolStatus` — `size`, `capacity`, `tx_hashes`
+- `SubmitResult.tx_hash` — set when `accepted=True`
+- PEP 561 compliant (`py.typed` marker included)
 
 ## Serialization Note
 
@@ -571,6 +584,9 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 - **Cross-proof binding** (MVP-5 Priority 2): `QLSAVerifierVFRI7` mixes `merkleRoot` before `drawQueries`. `BatchRegistryV4` passes `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)` / `boundRoot8 = keccak256(batchRoot ‖ traceRoot10)` — mixing proofs from different witnesses fails Merkle verification
 - **`HttpClient._decode_json()`** (2026-06-03): all 7 `resp.json()` call-sites in `HttpClient` wrapped; `json.JSONDecodeError` → `RuntimeError` with endpoint name + 200-char body preview — proxy/CDN HTML error pages no longer cause unhandled exceptions
 - **`testnet/e2e.py` sender_key** (2026-06-03): eliminated redundant `hashlib.sha3_256(tx.public_key).digest()` — `tx.sender` already contains this value as hex; `import hashlib` removed
+- **`Wallet._wiped` flag** (2026-06-04): `sign_transaction()` raises `ValueError` with clear message after `wipe()` — callers discover misuse at the call-site rather than receiving a signing failure from zeroed key material; `is_wiped` property exposes the flag for introspection
+- **Mempool deduplication** (2026-06-05): `Mempool.add()` raises `DuplicateTxError` if the same `tx_hash` is already pending — prevents batches from containing duplicate transactions; duplicate submissions return `accepted=False` to the caller
+- **Bandit B104 nosec** (2026-06-06): `aggregator/__main__.py:32` — `# nosec B104` on the `"0.0.0.0"` default; binding all interfaces is intentional for a server entry point, address is runtime-configurable via `--host`/`HOST`
 
 ## CI Pipeline
 

@@ -6,10 +6,12 @@ from core.transaction import Transaction
 from sdk.python.qlsa import (
     BatchStatus,
     LocalClient,
+    MempoolStatus,
     NodeConfig,
     NodeStats,
     SubmitResult,
     TransactionBuilder,
+    TransactionStatus,
     Wallet,
     WitnessStatus,
 )
@@ -149,6 +151,68 @@ def test_builder_mixed_auto_and_explicit_nonce():
     assert [t0.nonce, t1.nonce, t2.nonce] == [0, 5, 1]
 
 
+def test_builder_reset_nonce_defaults_to_zero():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet, start_nonce=7)
+        assert builder.next_nonce == 7
+        builder.reset_nonce()
+        assert builder.next_nonce == 0
+
+
+def test_builder_reset_nonce_custom_value():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        builder.build(recipient="aa" * 32, amount=1)  # counter → 1
+        builder.reset_nonce(42)
+        assert builder.next_nonce == 42
+        tx = builder.build(recipient="bb" * 32, amount=1)
+    assert tx.nonce == 42
+    assert builder.next_nonce == 43
+
+
+def test_builder_reset_nonce_invalid_raises():
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        with pytest.raises(TypeError):
+            builder.reset_nonce(-1)
+        with pytest.raises(TypeError):
+            builder.reset_nonce("five")  # type: ignore[arg-type]
+
+
+# ── Wallet._wiped flag ────────────────────────────────────────────────────────
+
+def test_wallet_is_wiped_false_before_wipe():
+    wallet = Wallet.generate()
+    assert wallet.is_wiped is False
+    wallet.wipe()
+
+
+def test_wallet_is_wiped_true_after_wipe():
+    wallet = Wallet.generate()
+    wallet.wipe()
+    assert wallet.is_wiped is True
+
+
+def test_wallet_sign_after_wipe_raises_value_error():
+    wallet = Wallet.generate()
+    tx = Transaction(
+        sender=wallet.address,
+        recipient="a" * 64,
+        amount=1,
+        nonce=0,
+        public_key=wallet.public_key,
+    )
+    wallet.wipe()
+    with pytest.raises(ValueError, match="wiped"):
+        wallet.sign_transaction(tx)
+
+
+def test_wallet_context_manager_sets_wiped_flag():
+    with Wallet.generate() as wallet:
+        assert wallet.is_wiped is False
+    assert wallet.is_wiped is True
+
+
 # ── LocalClient.health ────────────────────────────────────────────────────────
 
 def test_local_client_health_returns_true():
@@ -173,6 +237,22 @@ def test_local_client_history_accumulates_batches():
     assert history[0].batch_id != history[1].batch_id
 
 
+def test_local_client_history_limit_slices_newest():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        for i in range(4):
+            client.submit(builder.build(recipient="33" * 32, amount=i + 1))
+            client.flush()
+    full = client.history()
+    limited = client.history(limit=2)
+    assert len(full) == 4
+    assert len(limited) == 2
+    # history() returns oldest-first; limit slices the newest N
+    assert limited[0].batch_id == full[-2].batch_id
+    assert limited[1].batch_id == full[-1].batch_id
+
+
 # ── LocalClient.submit ────────────────────────────────────────────────────────
 
 def test_local_client_submit_signed_tx():
@@ -193,6 +273,18 @@ def test_local_client_submit_increments_mempool():
         for i in range(3):
             r = client.submit(builder.build(recipient="e" * 64, amount=1, nonce=i))
             assert r.mempool_size == i + 1
+
+
+def test_local_client_submit_duplicate_rejected():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cc" * 32, amount=1)
+        r1 = client.submit(tx)
+        r2 = client.submit(tx)  # same tx again
+    assert r1.accepted is True
+    assert r2.accepted is False
+    assert r2.error is not None and "duplicate" in r2.error
+    assert r2.mempool_size == 1  # only one copy in the pool
 
 
 def test_local_client_submit_unsigned_tx_rejected():
@@ -627,3 +719,292 @@ def test_http_client_get_witness_status_no_witness(http_client: HttpClient):
     assert ws.has_witness is False
     assert ws.n_fri_queries >= 1
     assert ws.fri_security_bits == 6 * ws.n_fri_queries + 10
+
+
+# ── HttpClient.history ────────────────────────────────────────────────────────
+
+def test_http_client_history_empty(http_client: HttpClient):
+    result = http_client.history()
+    assert result == []
+
+
+def test_http_client_history_returns_batches_after_flush(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ee" * 32, amount=5, nonce=0)
+        http_client.submit(tx)
+    http_client.flush()
+    result = http_client.history()
+    assert len(result) == 1
+    assert isinstance(result[0], BatchStatus)
+
+
+def test_http_client_history_newest_first(http_client: HttpClient):
+    for i in range(2):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="ff" * 32, amount=1 + i, nonce=0)
+            http_client.submit(tx)
+        http_client.flush()
+    result = http_client.history()
+    assert len(result) == 2
+    # Cannot compare by timestamp (BatchStatus has none), but total must be 2.
+
+
+def test_http_client_history_limit_respected(http_client: HttpClient):
+    for i in range(3):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="aa" * 32, amount=1 + i, nonce=0)
+            http_client.submit(tx)
+        http_client.flush()
+    result = http_client.history(limit=2)
+    assert len(result) == 2
+
+
+def test_http_client_history_invalid_limit_raises(http_client: HttpClient):
+    with pytest.raises(ValueError):
+        http_client.history(limit=0)
+    with pytest.raises(ValueError):
+        http_client.history(limit=201)
+
+
+# ── HttpClient.wait_for_batch ─────────────────────────────────────────────────
+
+def test_http_client_wait_for_batch_immediate(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=1, nonce=0)
+        http_client.submit(tx)
+    batch = http_client.flush()
+    assert batch is not None
+    result = http_client.wait_for_batch(batch.batch_id)
+    assert isinstance(result, BatchStatus)
+    assert result.batch_id == batch.batch_id
+
+
+def test_http_client_wait_for_batch_timeout_raises(http_client: HttpClient):
+    import uuid
+    with pytest.raises(TimeoutError):
+        http_client.wait_for_batch(str(uuid.uuid4()), timeout=0.1, poll_interval=0.05)
+
+
+def test_http_client_wait_for_batch_invalid_timeout_raises(http_client: HttpClient):
+    with pytest.raises(ValueError):
+        http_client.wait_for_batch("any-id", timeout=0)
+
+
+def test_http_client_wait_for_batch_invalid_poll_interval_raises(http_client: HttpClient):
+    with pytest.raises(ValueError):
+        http_client.wait_for_batch("any-id", poll_interval=0)
+
+
+# ── SubmitResult.tx_hash ──────────────────────────────────────────────────────
+
+def test_local_client_submit_returns_tx_hash():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="ab" * 32, amount=1)
+        result = client.submit(tx)
+    assert result.accepted is True
+    assert result.tx_hash is not None
+    assert len(result.tx_hash) == 64
+    assert result.tx_hash == tx.tx_hash().hex()
+
+
+def test_http_client_submit_returns_tx_hash(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="cd" * 32, amount=1)
+        result = http_client.submit(tx)
+    assert result.accepted is True
+    assert result.tx_hash is not None
+    assert len(result.tx_hash) == 64
+
+
+# ── LocalClient.get_transaction ───────────────────────────────────────────────
+
+def test_local_client_get_transaction_unknown():
+    client = LocalClient()
+    status = client.get_transaction("a" * 64)
+    assert isinstance(status, TransactionStatus)
+    assert status.status == "unknown"
+    assert status.batch_id is None
+
+
+def test_local_client_get_transaction_pending():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="11" * 32, amount=1)
+        client.submit(tx)
+    tx_hash = tx.tx_hash().hex()
+    status = client.get_transaction(tx_hash)
+    assert status.status == "pending"
+    assert status.batch_id is None
+
+
+def test_local_client_get_transaction_batched():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="22" * 32, amount=1)
+        client.submit(tx)
+    tx_hash = tx.tx_hash().hex()
+    batch = client.flush()
+    assert batch is not None
+    status = client.get_transaction(tx_hash)
+    assert status.status == "batched"
+    assert status.batch_id == batch.batch_id
+
+
+# ── HttpClient.get_transaction ────────────────────────────────────────────────
+
+def test_http_client_get_transaction_unknown(http_client: HttpClient):
+    status = http_client.get_transaction("b" * 64)
+    assert isinstance(status, TransactionStatus)
+    assert status.status == "unknown"
+
+
+def test_http_client_get_transaction_pending(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="33" * 32, amount=1)
+        result = http_client.submit(tx)
+    assert result.tx_hash is not None
+    status = http_client.get_transaction(result.tx_hash)
+    assert status.status == "pending"
+
+
+def test_http_client_get_transaction_batched(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="44" * 32, amount=1)
+        result = http_client.submit(tx)
+    assert result.tx_hash is not None
+    http_client.flush()
+    status = http_client.get_transaction(result.tx_hash)
+    assert status.status == "batched"
+    assert status.batch_id is not None
+
+
+def test_http_client_get_transaction_invalid_hash(http_client: HttpClient):
+    with pytest.raises(Exception):
+        http_client.get_transaction("not-a-valid-hash")
+
+
+# ── LocalClient.get_batch O(1) regression ────────────────────────────────────
+
+def test_local_client_get_batch_uses_index():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="55" * 32, amount=1)
+        client.submit(tx)
+    batch = client.flush()
+    assert batch is not None
+    result = client.get_batch(batch.batch_id)
+    assert result is not None
+    assert result.batch_id == batch.batch_id
+    # unknown batch returns None
+    assert client.get_batch("00000000-0000-0000-0000-000000000000") is None
+
+
+# ── LocalClient.get_mempool ───────────────────────────────────────────────────
+
+def test_local_client_get_mempool_empty():
+    client = LocalClient()
+    ms = client.get_mempool()
+    assert isinstance(ms, MempoolStatus)
+    assert ms.size == 0
+    assert ms.capacity > 0
+    assert ms.tx_hashes == []
+
+
+def test_local_client_get_mempool_pending():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="66" * 32, amount=1)
+        client.submit(tx)
+    ms = client.get_mempool()
+    assert ms.size == 1
+    assert len(ms.tx_hashes) == 1
+    assert ms.tx_hashes[0] == tx.tx_hash().hex()
+
+
+def test_local_client_get_mempool_limit():
+    client = LocalClient()
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        for i in range(3):
+            client.submit(builder.build(recipient="77" * 32, amount=i + 1))
+    ms = client.get_mempool(limit=2)
+    assert ms.size == 3
+    assert len(ms.tx_hashes) == 2  # capped by limit
+
+
+def test_local_client_get_mempool_invalid_limit():
+    client = LocalClient()
+    with pytest.raises(ValueError):
+        client.get_mempool(limit=0)
+    with pytest.raises(ValueError):
+        client.get_mempool(limit=1001)
+
+
+# ── LocalClient.get_batch_transactions ───────────────────────────────────────
+
+def test_local_client_get_batch_transactions_unknown():
+    client = LocalClient()
+    result = client.get_batch_transactions("00000000-0000-0000-0000-000000000000")
+    assert result is None
+
+
+def test_local_client_get_batch_transactions_returns_hashes():
+    client = LocalClient()
+    hashes = []
+    with Wallet.generate() as wallet:
+        builder = TransactionBuilder(wallet)
+        for i in range(3):
+            tx = builder.build(recipient="88" * 32, amount=i + 1)
+            client.submit(tx)
+            hashes.append(tx.tx_hash().hex())
+    batch = client.flush()
+    assert batch is not None
+    result = client.get_batch_transactions(batch.batch_id)
+    assert result is not None
+    assert len(result) == 3
+    assert result == hashes
+
+
+# ── HttpClient.get_mempool ────────────────────────────────────────────────────
+
+def test_http_client_get_mempool_empty(http_client: HttpClient):
+    ms = http_client.get_mempool()
+    assert isinstance(ms, MempoolStatus)
+    assert ms.size == 0
+    assert ms.tx_hashes == []
+
+
+def test_http_client_get_mempool_pending(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="99" * 32, amount=1)
+        result = http_client.submit(tx)
+    assert result.tx_hash is not None
+    ms = http_client.get_mempool()
+    assert ms.size == 1
+    assert result.tx_hash in ms.tx_hashes
+
+
+def test_http_client_get_mempool_invalid_limit(http_client: HttpClient):
+    with pytest.raises(ValueError):
+        http_client.get_mempool(limit=0)
+
+
+# ── HttpClient.get_batch_transactions ────────────────────────────────────────
+
+def test_http_client_get_batch_transactions_unknown(http_client: HttpClient):
+    import uuid
+    result = http_client.get_batch_transactions(str(uuid.uuid4()))
+    assert result is None
+
+
+def test_http_client_get_batch_transactions_returns_hashes(http_client: HttpClient):
+    with Wallet.generate() as wallet:
+        tx = TransactionBuilder(wallet).build(recipient="aa" * 32, amount=1)
+        sub = http_client.submit(tx)
+    assert sub.tx_hash is not None
+    batch = http_client.flush()
+    assert batch is not None
+    hashes = http_client.get_batch_transactions(batch.batch_id)
+    assert hashes is not None
+    assert sub.tx_hash in hashes

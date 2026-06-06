@@ -4,10 +4,37 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class MempoolStatus:
+    """Snapshot of the aggregator mempool.
+
+    ``tx_hashes`` contains the first ``min(size, limit)`` pending transaction
+    hashes in FIFO (submission) order.
+    """
+    size: int
+    capacity: int
+    tx_hashes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SubmitResult:
     accepted: bool
     error: str | None = None
     mempool_size: int = 0
+    tx_hash: str | None = None  # hex; set when accepted=True
+
+
+@dataclass
+class TransactionStatus:
+    """Status of a submitted transaction.
+
+    ``status`` is one of:
+    - ``"pending"``  — in mempool, not yet batched
+    - ``"batched"``  — included in a batch; ``batch_id`` is set
+    - ``"unknown"``  — not found in mempool or recent history
+    """
+    tx_hash: str
+    status: str
+    batch_id: str | None = None
 
 
 @dataclass

@@ -11,6 +11,22 @@ export interface SubmitResult {
   accepted: boolean;
   mempoolSize: number;
   error?: string;
+  /** 64-char hex SHA3-256 hash; set when accepted is true. */
+  txHash?: string;
+}
+
+/**
+ * Lifecycle status of a submitted transaction.
+ *
+ * `status` is one of:
+ * - `"pending"`  — in the mempool, not yet batched
+ * - `"batched"`  — included in a batch; `batchId` is set
+ * - `"unknown"`  — not found in mempool or recent history
+ */
+export interface TransactionStatus {
+  txHash: string;
+  status: "pending" | "batched" | "unknown";
+  batchId?: string;
 }
 
 export interface WitnessStatus {
@@ -57,4 +73,22 @@ export interface NodeConfig {
   maxBatchSize: number;     // maximum transactions per batch
   mempoolCapacity: number;  // maximum transactions held in the mempool
   version: string;          // aggregator API version
+}
+
+/** Response from GET /batches (via AggregatorClient.listBatches). */
+export interface BatchListResult {
+  /** Recent batches, newest first (up to `limit` items). */
+  batches: BatchStatus[];
+  /** Total number of batches held in the node's in-memory history. */
+  total: number;
+}
+
+/** Snapshot of the aggregator mempool (GET /mempool). */
+export interface MempoolStatus {
+  /** Current number of pending transactions. */
+  size: number;
+  /** Maximum mempool capacity configured on this node. */
+  capacity: number;
+  /** First `min(size, limit)` pending tx hashes in FIFO order (64-char hex). */
+  txHashes: string[];
 }

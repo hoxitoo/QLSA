@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@jest/globals";
-import { AggregatorClient } from "../client.js";
+import { AggregatorClient, AggregatorHttpError } from "../client.js";
+import type { BatchListResult, TransactionStatus } from "../types.js";
 
 describe("AggregatorClient constructor", () => {
   it("strips trailing slash from baseUrl", () => {
@@ -146,10 +147,11 @@ describe("AggregatorClient _toBatchStatus", () => {
 });
 
 describe("AggregatorClient getBatch", () => {
-  it("getBatch returns null on network error (unknown host)", async () => {
+  it("getBatch throws on network error (connection refused)", async () => {
     const client = new AggregatorClient("http://localhost:19999", 200);
-    const result = await client.getBatch("00000000-0000-0000-0000-000000000001");
-    expect(result).toBeNull();
+    await expect(
+      client.getBatch("00000000-0000-0000-0000-000000000001"),
+    ).rejects.toThrow();
   });
 
   it("getBatch is a method on the client", () => {
@@ -214,14 +216,136 @@ describe("AggregatorClient getWitnessStatus", () => {
     expect(typeof client.getWitnessStatus).toBe("function");
   });
 
-  it("getWitnessStatus returns null on network error (unknown host)", async () => {
+  it("getWitnessStatus throws on network error (connection refused)", async () => {
     const client = new AggregatorClient("http://localhost:19999", 200);
-    const result = await client.getWitnessStatus("some-batch-id");
-    expect(result).toBeNull();
+    await expect(client.getWitnessStatus("some-batch-id")).rejects.toThrow();
   });
 
-  it("getWitnessStatus returns null on HTTP error (unknown host with bad id)", async () => {
+  it("getWitnessStatus throws on network error with valid-format id", async () => {
     const client = new AggregatorClient("http://localhost:19999", 200);
-    expect(await client.getWitnessStatus("00000000-0000-0000-0000-000000000000")).toBeNull();
+    await expect(
+      client.getWitnessStatus("00000000-0000-0000-0000-000000000000"),
+    ).rejects.toThrow();
+  });
+});
+
+describe("AggregatorHttpError", () => {
+  it("is exported from the package", () => {
+    expect(typeof AggregatorHttpError).toBe("function");
+  });
+
+  it("carries the HTTP status code", () => {
+    const err = new AggregatorHttpError(404, "not found");
+    expect(err.status).toBe(404);
+    expect(err.message).toBe("not found");
+    expect(err.name).toBe("AggregatorHttpError");
+  });
+
+  it("is an instance of Error", () => {
+    const err = new AggregatorHttpError(500, "server error");
+    expect(err instanceof Error).toBe(true);
+  });
+});
+
+describe("AggregatorClient listBatches", () => {
+  it("listBatches is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.listBatches).toBe("function");
+  });
+
+  it("BatchListResult type has expected shape", () => {
+    const result: BatchListResult = { batches: [], total: 0 };
+    expect(result.batches).toEqual([]);
+    expect(result.total).toBe(0);
+  });
+
+  it("listBatches throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.listBatches()).rejects.toThrow();
+  });
+});
+
+describe("AggregatorClient waitForBatch", () => {
+  it("waitForBatch is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.waitForBatch).toBe("function");
+  });
+
+  it("waitForBatch throws immediately when timeoutMs <= 0", async () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    await expect(
+      client.waitForBatch("abc", { timeoutMs: 0 }),
+    ).rejects.toThrow("timeoutMs must be positive");
+  });
+
+  it("waitForBatch throws immediately when pollIntervalMs <= 0", async () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    await expect(
+      client.waitForBatch("abc", { timeoutMs: 100, pollIntervalMs: 0 }),
+    ).rejects.toThrow("pollIntervalMs must be positive");
+  });
+
+  it("waitForBatch throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(
+      client.waitForBatch("some-id", { timeoutMs: 500, pollIntervalMs: 100 }),
+    ).rejects.toThrow();
+  });
+});
+
+describe("AggregatorClient getTransaction", () => {
+  it("getTransaction is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getTransaction).toBe("function");
+  });
+
+  it("TransactionStatus type has expected shape", () => {
+    const s: TransactionStatus = { txHash: "a".repeat(64), status: "unknown" };
+    expect(s.status).toBe("unknown");
+    expect(s.batchId).toBeUndefined();
+  });
+
+  it("TransactionStatus batched shape includes batchId", () => {
+    const s: TransactionStatus = {
+      txHash: "b".repeat(64),
+      status: "batched",
+      batchId: "some-uuid",
+    };
+    expect(s.batchId).toBe("some-uuid");
+  });
+
+  it("getTransaction returns unknown on 404 (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.getTransaction("a".repeat(64))).rejects.toThrow();
+  });
+});
+
+describe("AggregatorClient getMempool", () => {
+  it("getMempool is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getMempool).toBe("function");
+  });
+
+  it("MempoolStatus type has expected shape", () => {
+    const ms: import("../types.js").MempoolStatus = { size: 0, capacity: 3000, txHashes: [] };
+    expect(ms.size).toBe(0);
+    expect(ms.txHashes).toEqual([]);
+  });
+
+  it("getMempool throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.getMempool()).rejects.toThrow();
+  });
+});
+
+describe("AggregatorClient getBatchTransactions", () => {
+  it("getBatchTransactions is a method on the client", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    expect(typeof client.getBatchTransactions).toBe("function");
+  });
+
+  it("getBatchTransactions throws on network error (connection refused)", async () => {
+    const client = new AggregatorClient("http://localhost:19999", 200);
+    await expect(client.getBatchTransactions("some-id")).rejects.toThrow();
   });
 });

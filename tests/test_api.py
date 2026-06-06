@@ -54,6 +54,22 @@ def signed_payload() -> dict:
     }
 
 
+def _make_payloads(n: int) -> list[dict]:
+    """Generate *n* distinct signed transaction payloads (unique sender per tx)."""
+    payloads = []
+    for i in range(n):
+        pub, priv = generate_keypair()
+        addr = derive_address(pub)
+        tx = Transaction(sender=addr, recipient="b" * 64, amount=i + 1, nonce=0, public_key=pub)
+        sig = sign(tx.to_bytes(), priv)
+        wipe_key(priv)
+        payloads.append({
+            "sender": addr, "recipient": "b" * 64, "amount": i + 1, "nonce": 0,
+            "public_key": pub.hex(), "signature": sig.hex(),
+        })
+    return payloads
+
+
 @pytest.fixture()
 def client() -> "TestClient":
     from aggregator.api import app
@@ -150,9 +166,17 @@ class TestSubmitTransaction:
 
     def test_mempool_size_increments(self, client, signed_payload):
         r1 = client.post("/transactions", json=signed_payload)
-        r2 = client.post("/transactions", json=signed_payload)
         assert r1.json()["mempool_size"] == 1
-        assert r2.json()["mempool_size"] == 2
+        assert r1.json()["accepted"] is True
+
+    def test_duplicate_tx_rejected(self, client, signed_payload):
+        r1 = client.post("/transactions", json=signed_payload)
+        r2 = client.post("/transactions", json=signed_payload)
+        assert r1.json()["accepted"] is True
+        assert r2.json()["accepted"] is False
+        assert "duplicate" in r2.json()["error"]
+        # mempool still has only 1 entry
+        assert r2.json()["mempool_size"] == 1
 
     def test_invalid_signature_rejected(self, client, signed_payload):
         # Correct ML-DSA-65 signature length (3309 bytes) but wrong content —
@@ -307,15 +331,15 @@ class TestBatchFlush:
         assert isinstance(data["is_proven"], bool)
         assert "has_witness" in data
 
-    def test_flush_drains_mempool(self, client, signed_payload):
-        for _ in range(3):
-            client.post("/transactions", json=signed_payload)
+    def test_flush_drains_mempool(self, client):
+        for p in _make_payloads(3):
+            client.post("/transactions", json=p)
         client.post("/batch/flush")
         assert client.get("/stats").json()["pending"] == 0
 
-    def test_flush_batches_all_pending(self, client, signed_payload):
-        for _ in range(5):
-            client.post("/transactions", json=signed_payload)
+    def test_flush_batches_all_pending(self, client):
+        for p in _make_payloads(5):
+            client.post("/transactions", json=p)
         resp = client.post("/batch/flush")
         assert resp.json()["tx_count"] == 5
 
@@ -338,9 +362,9 @@ class TestBatchFlush:
         assert "vfri7_commitment_log10" in data
         assert "vfri7_commitment_log8" in data
 
-    def test_flush_updates_stats(self, client, signed_payload):
-        for _ in range(2):
-            client.post("/transactions", json=signed_payload)
+    def test_flush_updates_stats(self, client):
+        for p in _make_payloads(2):
+            client.post("/transactions", json=p)
         client.post("/batch/flush")
         stats = client.get("/stats").json()
         assert stats["transactions_batched"] == 2
@@ -500,3 +524,250 @@ class TestRateLimit:
         assert resp.status_code == 429
         assert "rate limit" in resp.json()["detail"]
         assert resp.headers.get("Retry-After") == "60"
+
+
+# ── GET /batches ──────────────────────────────────────────────────────────────
+
+class TestListBatches:
+    def test_empty_node_returns_empty_list(self, client):
+        resp = client.get("/batches")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["batches"] == []
+        assert data["total"] == 0
+
+    def test_returns_batch_after_flush(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        resp = client.get("/batches")
+        data = resp.json()
+        assert data["total"] == 1
+        assert len(data["batches"]) == 1
+
+    def test_batch_fields_present(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        b = client.get("/batches").json()["batches"][0]
+        for field in ("batch_id", "tx_count", "merkle_root", "is_proven",
+                      "has_witness", "has_vfri7"):
+            assert field in b, f"missing field: {field}"
+
+    def test_newest_first_ordering(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        id1 = client.post("/batch/flush").json()["batch_id"]
+        client.post("/transactions", json=signed_payload)
+        id2 = client.post("/batch/flush").json()["batch_id"]
+        data = client.get("/batches").json()
+        assert data["total"] == 2
+        ids = [b["batch_id"] for b in data["batches"]]
+        assert ids[0] == id2
+        assert ids[1] == id1
+
+    def test_limit_caps_returned_count(self, client):
+        for p in _make_payloads(3):
+            client.post("/transactions", json=p)
+            client.post("/batch/flush")
+        data = client.get("/batches", params={"limit": 2}).json()
+        assert len(data["batches"]) == 2
+        assert data["total"] == 3
+
+    def test_limit_zero_rejected_with_422(self, client):
+        assert client.get("/batches", params={"limit": 0}).status_code == 422
+
+    def test_limit_201_rejected_with_422(self, client):
+        assert client.get("/batches", params={"limit": 201}).status_code == 422
+
+    def test_limit_200_accepted(self, client):
+        assert client.get("/batches", params={"limit": 200}).status_code == 200
+
+    def test_limit_1_accepted(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        client.post("/batch/flush")
+        data = client.get("/batches", params={"limit": 1}).json()
+        assert len(data["batches"]) == 1
+
+    def test_rate_limited_after_200_reads(self, client):
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._read_windows.clear()
+        for _ in range(200):
+            assert client.get("/batches").status_code == 200
+        resp = client.get("/batches")
+        assert resp.status_code == 429
+        assert resp.headers.get("Retry-After") == "60"
+
+
+# ── GET /transaction/{tx_hash} ────────────────────────────────────────────────
+
+class TestTransactionStatus:
+    def test_unknown_tx_returns_404(self, client):
+        resp = client.get(f"/transaction/{'a' * 64}")
+        assert resp.status_code == 404
+
+    def test_invalid_hash_returns_400(self, client):
+        resp = client.get("/transaction/not-a-valid-hash")
+        assert resp.status_code == 400
+
+    def test_invalid_hash_too_short_returns_400(self, client):
+        resp = client.get("/transaction/deadbeef")
+        assert resp.status_code == 400
+
+    def test_pending_tx_returns_pending(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        # Compute tx_hash from the payload
+        from core.transaction import Transaction
+        tx = Transaction(
+            sender=signed_payload["sender"],
+            recipient=signed_payload["recipient"],
+            amount=signed_payload["amount"],
+            nonce=signed_payload["nonce"],
+            public_key=bytes.fromhex(signed_payload["public_key"]),
+        )
+        tx_hash = tx.tx_hash().hex()
+        resp = client.get(f"/transaction/{tx_hash}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "pending"
+        assert data["tx_hash"] == tx_hash
+        assert data["batch_id"] is None
+
+    def test_batched_tx_returns_batched_with_batch_id(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_resp = client.post("/batch/flush")
+        batch_id = batch_resp.json()["batch_id"]
+        # Compute tx_hash
+        from core.transaction import Transaction
+        tx = Transaction(
+            sender=signed_payload["sender"],
+            recipient=signed_payload["recipient"],
+            amount=signed_payload["amount"],
+            nonce=signed_payload["nonce"],
+            public_key=bytes.fromhex(signed_payload["public_key"]),
+        )
+        tx_hash = tx.tx_hash().hex()
+        resp = client.get(f"/transaction/{tx_hash}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "batched"
+        assert data["batch_id"] == batch_id
+
+    def test_submit_response_includes_tx_hash(self, client, signed_payload):
+        resp = client.post("/transactions", json=signed_payload)
+        data = resp.json()
+        assert data["accepted"] is True
+        assert "tx_hash" in data
+        assert len(data["tx_hash"]) == 64
+
+    def test_rate_limited(self, client):
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._read_windows.clear()
+        for _ in range(200):
+            assert client.get(f"/transaction/{'b' * 64}").status_code in (200, 404)
+        resp = client.get(f"/transaction/{'b' * 64}")
+        assert resp.status_code == 429
+
+
+# ── GET /mempool ──────────────────────────────────────────────────────────────
+
+class TestMempoolStatus:
+    def test_empty_mempool(self, client):
+        resp = client.get("/mempool")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["size"] == 0
+        assert data["capacity"] > 0
+        assert data["tx_hashes"] == []
+
+    def test_pending_tx_appears_in_mempool(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        resp = client.get("/mempool")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["size"] == 1
+        assert len(data["tx_hashes"]) == 1
+
+    def test_limit_param_caps_hashes(self, client, signed_payload):
+        # Submit same tx twice (idempotent — second goes in too with different nonce? No,
+        # same tx → same hash, same mempool entry. Use fresh payload.)
+        from core.keys import generate_keypair, wipe_key, derive_address
+        from core.signing import sign as _sign
+        from core.transaction import Transaction
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._tx_windows.clear()
+        pub, priv = generate_keypair()
+        addr = derive_address(pub)
+        txs = []
+        for i in range(3):
+            tx = Transaction(sender=addr, recipient="b" * 64, amount=i + 1, nonce=i, public_key=pub)
+            tx.signature = _sign(tx.to_bytes(), priv)
+            txs.append(tx)
+        wipe_key(priv)
+        for tx in txs:
+            client.post("/transactions", json={
+                "sender": addr, "recipient": "b" * 64, "amount": tx.amount,
+                "nonce": tx.nonce, "public_key": pub.hex(), "signature": tx.signature.hex(),
+            })
+        resp = client.get("/mempool?limit=2")
+        data = resp.json()
+        assert data["size"] == 3
+        assert len(data["tx_hashes"]) == 2
+
+    def test_limit_zero_rejected(self, client):
+        resp = client.get("/mempool?limit=0")
+        assert resp.status_code == 422
+
+    def test_limit_1001_rejected(self, client):
+        resp = client.get("/mempool?limit=1001")
+        assert resp.status_code == 422
+
+    def test_rate_limited(self, client):
+        import aggregator.api as api_mod
+        with api_mod._rate_lock:
+            api_mod._read_windows.clear()
+        for _ in range(200):
+            assert client.get("/mempool").status_code == 200
+        assert client.get("/mempool").status_code == 429
+
+
+# ── GET /batch/{batch_id}/transactions ───────────────────────────────────────
+
+class TestBatchTransactions:
+    def test_unknown_batch_returns_404(self, client):
+        import uuid
+        resp = client.get(f"/batch/{uuid.uuid4()}/transactions")
+        assert resp.status_code == 404
+
+    def test_invalid_batch_id_returns_400(self, client):
+        resp = client.get("/batch/not-a-uuid/transactions")
+        assert resp.status_code == 400
+
+    def test_returns_tx_hashes_in_order(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        batch_resp = client.post("/batch/flush")
+        batch_id = batch_resp.json()["batch_id"]
+        resp = client.get(f"/batch/{batch_id}/transactions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["batch_id"] == batch_id
+        assert data["tx_count"] == 1
+        assert len(data["tx_hashes"]) == 1
+        assert len(data["tx_hashes"][0]) == 64
+
+    def test_tx_hash_matches_transaction(self, client, signed_payload):
+        from core.transaction import Transaction
+        client.post("/transactions", json=signed_payload)
+        batch_resp = client.post("/batch/flush")
+        batch_id = batch_resp.json()["batch_id"]
+        resp = client.get(f"/batch/{batch_id}/transactions")
+        tx_hashes = resp.json()["tx_hashes"]
+        # compute expected hash from payload
+        tx = Transaction(
+            sender=signed_payload["sender"],
+            recipient=signed_payload["recipient"],
+            amount=signed_payload["amount"],
+            nonce=signed_payload["nonce"],
+            public_key=bytes.fromhex(signed_payload["public_key"]),
+        )
+        assert tx.tx_hash().hex() in tx_hashes

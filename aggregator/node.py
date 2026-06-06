@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from core.transaction import Transaction
 from aggregator.batcher import BatchResult, Batcher
-from aggregator.mempool import Mempool
+from aggregator.mempool import DuplicateTxError, Mempool
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ class AggregatorNode:
         self._stats = NodeStats()
         self._history: deque[BatchResult] = deque(maxlen=self._MAX_HISTORY)
         self._batch_index: dict[str, BatchResult] = {}
+        self._tx_to_batch: dict[str, str] = {}  # tx_hash_hex → batch_id
         self._lock = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -131,6 +132,11 @@ class AggregatorNode:
         with self._lock:
             return self._batch_index.get(batch_id)
 
+    def get_transaction_batch(self, tx_hash_hex: str) -> str | None:
+        """Return the batch_id that contains this tx, or None if not found in history."""
+        with self._lock:
+            return self._tx_to_batch.get(tx_hash_hex)
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     # Keep at most this many BatchResults in memory; oldest are evicted first.
@@ -148,8 +154,12 @@ class AggregatorNode:
             if len(self._history) == self._MAX_HISTORY:
                 evicted = self._history[0]
                 self._batch_index.pop(evicted.batch.batch_id, None)
+                for tx in evicted.batch.transactions:
+                    self._tx_to_batch.pop(tx.tx_hash().hex(), None)
             self._history.append(result)
             self._batch_index[result.batch.batch_id] = result
+            for tx in result.batch.transactions:
+                self._tx_to_batch[tx.tx_hash().hex()] = result.batch.batch_id
         logger.info(
             "batch created: id=%s txs=%d proven=%s",
             result.batch.batch_id[:8],

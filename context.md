@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-03)
+## Статус (обновлено 2026-06-06)
 
 - Фаза: **MVP-5 завершён** (2026-05-25) + **V23 dual-VFRI7 production pipeline с cross-proof binding**
 - Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4 — завершены полностью
@@ -10,6 +10,11 @@
 - Проведён аудит безопасности + code review (2026-05-30 round-1); 8 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-2); 11 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-06-03); 2 новых findings — все устранены
+- SDK расширен (2026-06-04): `Wallet.is_wiped` + знак после wipe, `TransactionBuilder.reset_nonce()`, `HttpClient.wait_for_batch()`, `AggregatorClient.waitForBatch()`, `GET /batches`
+- Transaction tracking (2026-06-04): `GET /transaction/{tx_hash}`, `TransactionStatus`, `get_transaction()` в Python + TS SDK; `tx_hash` в SubmitResult/SubmitResponse
+- Mempool visibility (2026-06-05): `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` Python + TS; fix `LocalClient.get_batch()` O(n)→O(1)
+- Code quality (2026-06-05): `DuplicateTxError` mempool deduplication; mypy clean; `python -m aggregator` entry point; `py.typed` PEP 561 marker
+- CI fix (2026-06-06): `aggregator/__main__.py` — bandit B104 false positive suppressed (`# nosec B104`) для intentional `0.0.0.0` bind (конфигурируется через `--host`/`HOST`)
 
 ### Что готово
 
@@ -20,15 +25,29 @@
 - `core/merkle.py` — SHA3-512 Merkle tree, build / root / proof / verify
 - `core/batch.py` — create_batch, merkle_root_onchain()
 - `aggregator/` — Mempool (thread-safe), Batcher (min_batch_size, force_batch), AggregatorNode
-- `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`, `GET /batch/{batch_id}`
-  - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min)
+- `aggregator/api.py` — HTTP API (FastAPI): `/transactions`, `/batch/run`, `/batch/flush`, `/stats`, `/health`, `GET /batch/{batch_id}`, `GET /batches`, `GET /transaction/{tx_hash}`
+  - Rate limiting: per-IP sliding-window (100 tx/min, 20 batch ops/min, 200 reads/min)
   - `AggregatorNode._history` capped at 1000 entries (evict oldest) — memory-safe for long-running nodes
   - `TRUSTED_PROXIES` конфигурируется через одноимённую env var (по умолчанию: 127.0.0.1, ::1)
+  - `Mempool._tx_hashes` — O(1) pending-status lookup by tx_hash
+  - `AggregatorNode._tx_to_batch` — O(1) batched-status lookup by tx_hash (evicted with batch)
 - `sdk/python/qlsa/` — Wallet, LocalClient, HttpClient, WitnessStatus, BatchStatus
   - `prove_witness(tx, n_fri_queries=1)` — локальный ML-DSA witness без обращения к серверу
   - `get_batch(batch_id)` — получить BatchStatus по ID (LocalClient и HttpClient)
   - `WitnessStatus.fri_security_bits` — вычисляется как `6 × n_fri_queries + 10`
-- `sdk/js/src/` — TypeScript SDK: AggregatorClient, types
+  - `Wallet.is_wiped` + ValueError при `sign_transaction()` после `wipe()`
+  - `TransactionBuilder.reset_nonce(n=0)` — сбросить auto-nonce счётчик
+  - `HttpClient.wait_for_batch(batch_id, timeout, poll_interval)` — polling до появления батча
+  - `HttpClient.history(limit)` — список батчей (newest-first, limit 1–200)
+  - `LocalClient/HttpClient.get_transaction(tx_hash)` → `TransactionStatus` (pending/batched/unknown)
+  - `SubmitResult.tx_hash` — 64-char hex hash, set when accepted=True
+  - `TransactionStatus(tx_hash, status, batch_id?)` — новый датакласс
+- `sdk/js/src/` — TypeScript SDK: AggregatorClient, AggregatorHttpError, types
+  - `AggregatorClient.waitForBatch(batchId, {timeoutMs, pollIntervalMs})` — polling helper
+  - `AggregatorClient.listBatches(limit)` — список батчей
+  - `AggregatorClient.getTransaction(txHash)` → `TransactionStatus`
+  - `AggregatorHttpError` — типизированная ошибка с `status: number`
+  - `SubmitResult.txHash` — 64-char hex hash from `/transactions` response
 
 #### STARK / Rust
 - `stark_stwo/src/mldsa/` — чистый Rust ML-DSA-65 верификатор (FIPS 204 Algorithm 3)
@@ -107,10 +126,10 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `M31.sol` — field arithmetic library
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
-#### Тесты (актуально 2026-06-03)
-- Python: **239 тестов** (без PyO3) / **~325** (с PyO3 ext)
+#### Тесты (актуально 2026-06-06)
+- Python: **~354 тестов** (без PyO3) / **487** (с PyO3 ext, из CI лога)
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
-- TypeScript SDK: **25 тестов** (jest; обновлены для VFRI7 dual-commitment fields)
+- TypeScript SDK: **~71 тестов** (jest; +13 новых для waitForBatch/getTransaction/getMempool/getBatchTransactions)
 - Solidity/Hardhat: **847 тестов** — все проходят
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 

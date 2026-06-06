@@ -4,9 +4,9 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from core.transaction import Transaction
-from aggregator.mempool import MempoolFullError
+from aggregator.mempool import DuplicateTxError, MempoolFullError
 from aggregator.node import AggregatorNode
-from .models import BatchStatus, NodeConfig, NodeStats, SubmitResult, WitnessStatus
+from .models import BatchStatus, MempoolStatus, NodeConfig, NodeStats, SubmitResult, TransactionStatus, WitnessStatus
 
 if TYPE_CHECKING:
     from aggregator.batcher import BatchResult
@@ -77,7 +77,17 @@ class LocalClient:
         """Add a signed transaction to the mempool."""
         try:
             self._node.submit(tx)
-            return SubmitResult(accepted=True, mempool_size=self._node.pending_count())
+            return SubmitResult(
+                accepted=True,
+                mempool_size=self._node.pending_count(),
+                tx_hash=tx.tx_hash().hex(),
+            )
+        except DuplicateTxError:
+            return SubmitResult(
+                accepted=False,
+                error="duplicate transaction: already in mempool",
+                mempool_size=self._node.pending_count(),
+            )
         except (ValueError, MempoolFullError) as exc:
             return SubmitResult(
                 accepted=False,
@@ -105,16 +115,55 @@ class LocalClient:
         """
         return _prove_witness_local(tx, n_fri_queries=self._node.n_fri_queries)
 
-    def history(self) -> list[BatchStatus]:
-        """Return all BatchStatus objects produced by this node (oldest → newest)."""
-        return [_batch_status(r) for r in self._node.history()]
+    def history(self, limit: int | None = None) -> list[BatchStatus]:
+        """Return BatchStatus objects produced by this node (oldest → newest).
+
+        If *limit* is given, return only the last *limit* entries (still
+        ordered oldest → newest within that slice).
+        """
+        results = [_batch_status(r) for r in self._node.history()]
+        if limit is not None:
+            return results[-limit:]
+        return results
 
     def get_batch(self, batch_id: str) -> BatchStatus | None:
         """Return the BatchStatus for a given batch_id, or None if not found."""
-        for result in self._node.history():
-            if result.batch.batch_id == batch_id:
-                return _batch_status(result)
-        return None
+        result = self._node.get_batch(batch_id)
+        return _batch_status(result) if result is not None else None
+
+    def get_transaction(self, tx_hash: str) -> TransactionStatus:
+        """Return the status of a transaction by its hex hash.
+
+        ``status`` is ``"pending"`` (in mempool), ``"batched"`` (found in history),
+        or ``"unknown"`` (not found).
+        """
+        if self._node.mempool.contains(tx_hash):
+            return TransactionStatus(tx_hash=tx_hash, status="pending")
+        batch_id = self._node.get_transaction_batch(tx_hash)
+        if batch_id is not None:
+            return TransactionStatus(tx_hash=tx_hash, status="batched", batch_id=batch_id)
+        return TransactionStatus(tx_hash=tx_hash, status="unknown")
+
+    def get_mempool(self, limit: int = 100) -> MempoolStatus:
+        """Return a snapshot of the current mempool state.
+
+        *limit* caps the number of tx_hashes returned (1–1000).
+        Raises ``ValueError`` if *limit* is out of range.
+        """
+        if not (1 <= limit <= 1000):
+            raise ValueError("limit must be between 1 and 1000")
+        return MempoolStatus(
+            size=self._node.mempool.size(),
+            capacity=self._node.mempool.max_size,
+            tx_hashes=self._node.mempool.peek_hashes(limit),
+        )
+
+    def get_batch_transactions(self, batch_id: str) -> list[str] | None:
+        """Return the ordered list of tx hashes in a batch, or None if not found."""
+        result = self._node.get_batch(batch_id)
+        if result is None:
+            return None
+        return [tx.tx_hash().hex() for tx in result.batch.transactions]
 
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a given batch_id, or None if not found."""
@@ -262,6 +311,7 @@ class HttpClient:
                 accepted=data["accepted"],
                 error=data.get("error"),
                 mempool_size=data.get("mempool_size", 0),
+                tx_hash=data.get("tx_hash"),
             )
         except KeyError as exc:
             raise RuntimeError(
@@ -307,6 +357,52 @@ class HttpClient:
         resp.raise_for_status()
         return self._parse_batch_status(self._decode_json(resp, f"/batch/{batch_id}"))
 
+    def get_transaction(self, tx_hash: str) -> TransactionStatus:
+        """Return the status of a transaction by its 64-char hex hash.
+
+        ``status`` is ``"pending"``, ``"batched"``, or ``"unknown"``.
+        Raises ``RuntimeError`` on unexpected HTTP errors.
+        """
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/transaction/{tx_hash}")
+        if resp.status_code == 404:
+            return TransactionStatus(tx_hash=tx_hash, status="unknown")
+        resp.raise_for_status()
+        data = self._decode_json(resp, f"/transaction/{tx_hash}")
+        return TransactionStatus(
+            tx_hash=data.get("tx_hash", tx_hash),
+            status=data["status"],
+            batch_id=data.get("batch_id"),
+        )
+
+    def get_mempool(self, limit: int = 100) -> MempoolStatus:
+        """Return a snapshot of the current mempool state.
+
+        *limit* caps the number of tx_hashes returned (1–1000).
+        Raises ``ValueError`` if *limit* is out of range.
+        """
+        if not (1 <= limit <= 1000):
+            raise ValueError("limit must be between 1 and 1000")
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/mempool?limit={limit}")
+        resp.raise_for_status()
+        data = self._decode_json(resp, "/mempool")
+        return MempoolStatus(
+            size=data["size"],
+            capacity=data["capacity"],
+            tx_hashes=data.get("tx_hashes", []),
+        )
+
+    def get_batch_transactions(self, batch_id: str) -> list[str] | None:
+        """Return the ordered list of tx hashes in a batch, or None if not found (HTTP 404)."""
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/batch/{batch_id}/transactions")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = self._decode_json(resp, f"/batch/{batch_id}/transactions")
+        return list(data["tx_hashes"])
+
     def get_witness_status(self, batch_id: str) -> WitnessStatus | None:
         """Return the WitnessStatus for a batch, or None if not found (HTTP 404)."""
         client = self._get_client()
@@ -342,6 +438,54 @@ class HttpClient:
         if the extension is unavailable or the transaction is unsigned.
         """
         return _prove_witness_local(tx, n_fri_queries=n_fri_queries)
+
+    def history(self, limit: int = 50) -> list[BatchStatus]:
+        """Return recent batches from the aggregator (newest first).
+
+        ``limit`` caps the number returned (1–200). Raises ``ValueError`` for
+        out-of-range values; the server enforces the same bound and returns
+        HTTP 422 for values outside [1, 200].
+        """
+        if not 1 <= limit <= 200:
+            raise ValueError(f"limit must be between 1 and 200, got {limit}")
+        client = self._get_client()
+        resp = client.get(f"{self._base_url}/batches", params={"limit": limit})
+        resp.raise_for_status()
+        data = self._decode_json(resp, "/batches")
+        return [self._parse_batch_status(b) for b in data.get("batches", [])]
+
+    def wait_for_batch(
+        self,
+        batch_id: str,
+        *,
+        timeout: float = 60.0,
+        poll_interval: float = 2.0,
+    ) -> BatchStatus:
+        """Poll ``GET /batch/{id}`` until the batch appears or timeout is reached.
+
+        Returns the ``BatchStatus`` as soon as the batch is found.
+        Raises ``TimeoutError`` if the batch is not found within *timeout* seconds.
+        Re-raises any non-404 HTTP error immediately so callers detect outages.
+
+        Typical use: call ``flush()`` on a remote node and then poll for the
+        resulting batch when you need to wait for proof generation to finish.
+        """
+        import time
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.get_batch(batch_id)
+            if status is not None:
+                return status
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Batch {batch_id!r} not found after {timeout:.1f} s"
+                )
+            time.sleep(min(poll_interval, remaining))
 
     def stats(self) -> NodeStats:
         client = self._get_client()

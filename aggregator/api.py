@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from aggregator.mempool import MempoolFullError
+from aggregator.mempool import DuplicateTxError, MempoolFullError
 from aggregator.node import AggregatorNode
 from core.keys import derive_address
 from core.signing import verify as sig_verify
@@ -141,6 +141,27 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
                 )
+        elif method == "GET" and path == "/batches":
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 batch reads per minute"},
+                )
+        elif method == "GET" and path.startswith("/transaction/"):
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 reads per minute"},
+                )
+        elif method == "GET" and path == "/mempool":
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 reads per minute"},
+                )
 
         return await call_next(request)
 
@@ -161,6 +182,16 @@ def _check_batch_id(batch_id: str) -> None:
         _uuid_mod.UUID(batch_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="batch_id must be a valid UUID")
+
+
+def _check_tx_hash(tx_hash: str) -> None:
+    """Raise HTTP 400 if tx_hash is not a 64-char lowercase hex string (SHA3-256)."""
+    if len(tx_hash) != 64:
+        raise HTTPException(status_code=400, detail="tx_hash must be a 64-char hex string")
+    try:
+        bytes.fromhex(tx_hash)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="tx_hash must be a valid hex string")
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -235,6 +266,7 @@ class SubmitResponse(BaseModel):
     accepted: bool
     mempool_size: int
     error: str | None = None
+    tx_hash: str | None = None  # 64-char hex; set when accepted=True
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -279,6 +311,99 @@ def stats(request: Request) -> dict[str, Any]:
     }
 
 
+@app.get("/batches")
+def list_batches(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Return recent batches, newest first.
+
+    ``limit`` caps the number returned (1–200, default 50). ``total`` is the
+    count of all batches held in the node's in-memory history (up to 1 000).
+    """
+    node: AggregatorNode = request.app.state.node
+    results = node.history()          # oldest → newest; thread-safe snapshot
+    sliced = results[-limit:][::-1]   # take newest N, then reverse to newest-first
+    return {
+        "batches": [
+            {
+                "batch_id": r.batch.batch_id,
+                "tx_count": len(r.batch.transactions),
+                "merkle_root": r.batch.merkle_root.hex(),
+                "is_proven": r.is_proven,
+                "stark_commitment": r.commitment,
+                "has_witness": r.has_witness,
+                "witness_commitment": r.witness_commitment,
+                "has_vfri7": r.has_vfri7,
+                "vfri7_commitment_log10": r.vfri7_commitment_log10,
+                "vfri7_commitment_log8": r.vfri7_commitment_log8,
+            }
+            for r in sliced
+        ],
+        "total": len(results),
+    }
+
+
+@app.get("/transaction/{tx_hash}")
+def transaction_status(tx_hash: str, request: Request) -> dict[str, Any]:
+    """Look up a transaction by its SHA3-256 hex hash.
+
+    Returns the transaction's current lifecycle status:
+    - ``"pending"``  — in the mempool, not yet batched
+    - ``"batched"``  — included in a batch (``batch_id`` is set)
+
+    Returns 400 if tx_hash is not a 64-char hex string.
+    Returns 404 if the transaction is not found in the mempool or recent history.
+    """
+    _check_tx_hash(tx_hash)
+    node: AggregatorNode = request.app.state.node
+    if node.mempool.contains(tx_hash):
+        return {"tx_hash": tx_hash, "status": "pending", "batch_id": None}
+    batch_id = node.get_transaction_batch(tx_hash)
+    if batch_id is not None:
+        return {"tx_hash": tx_hash, "status": "batched", "batch_id": batch_id}
+    raise HTTPException(status_code=404, detail=f"transaction {tx_hash!r} not found")
+
+
+@app.get("/mempool")
+def mempool_status(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Return a snapshot of the current mempool.
+
+    ``size`` is the current number of pending transactions.
+    ``capacity`` is the maximum size configured for this node.
+    ``tx_hashes`` contains the first ``min(size, limit)`` pending transaction
+    hashes in FIFO (submission) order.
+    """
+    node: AggregatorNode = request.app.state.node
+    return {
+        "size": node.mempool.size(),
+        "capacity": node.mempool.max_size,
+        "tx_hashes": node.mempool.peek_hashes(limit),
+    }
+
+
+@app.get("/batch/{batch_id}/transactions")
+def batch_transactions(batch_id: str, request: Request) -> dict[str, Any]:
+    """Return the ordered list of transaction hashes in a batch.
+
+    Returns 400 if batch_id is not a valid UUID.
+    Returns 404 if the batch is not found in recent history.
+    """
+    _check_batch_id(batch_id)
+    node: AggregatorNode = request.app.state.node
+    result = node.get_batch(batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"batch {batch_id!r} not found")
+    return {
+        "batch_id": batch_id,
+        "tx_count": len(result.batch.transactions),
+        "tx_hashes": [tx.tx_hash().hex() for tx in result.batch.transactions],
+    }
+
+
 @app.post("/transactions", response_model=SubmitResponse)
 def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
     node: AggregatorNode = request.app.state.node
@@ -308,7 +433,17 @@ def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
             )
         tx.signature = sig_bytes
         node.submit(tx)
-        return SubmitResponse(accepted=True, mempool_size=node.pending_count())
+        return SubmitResponse(
+            accepted=True,
+            mempool_size=node.pending_count(),
+            tx_hash=tx.tx_hash().hex(),
+        )
+    except DuplicateTxError:
+        return SubmitResponse(
+            accepted=False,
+            mempool_size=node.pending_count(),
+            error="duplicate transaction: already in mempool",
+        )
     except (ValueError, MempoolFullError) as exc:
         return SubmitResponse(
             accepted=False, mempool_size=node.pending_count(), error=str(exc)

@@ -70,7 +70,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** (non-ignored) + **239 Python** (no PyO3) + **39 TS** + **847 Hardhat** | ✅ Done |
+| Tests — **210 Rust** (non-ignored) + **~354 Python** (no PyO3) / **487** (with PyO3) + **~71 TS** + **847 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V22** — All 7 ML-DSA circuits in 1 STARK + Merkle root Fiat-Shamir binding | ✅ Done |
@@ -92,6 +92,11 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **SDK + API audit (2026-06-03)** — `GET /node/config` endpoint + NodeConfig model (Python + TS), `prove_witnesses` param in HttpClient/TS SDK, Docker env var documentation (`N_FRI_QUERIES`, `TRUSTED_PROXIES`), DI-based HttpClient testing | ✅ Done (2026-06-03) |
 | **SDK enhancements (2026-06-03)** — `get_witness_status()` in LocalClient + HttpClient (mirrors TS SDK), `LocalClient.health()` API parity, `TransactionBuilder` auto-nonce counter (`start_nonce`, `next_nonce`), `getWitnessStatus` TS tests | ✅ Done (2026-06-03) |
 | **Code audit (2026-06-03)** — `HttpClient._decode_json()` guards all 7 JSON call-sites against proxy HTML responses (JSONDecodeError → RuntimeError with preview); `testnet/e2e.py` sender_key no longer redundantly recomputes SHA3-256 | ✅ Done (2026-06-03) |
+| **SDK enhancements (2026-06-04)** — `Wallet.is_wiped` + ValueError after wipe; `TransactionBuilder.reset_nonce(n=0)`; `HttpClient.wait_for_batch()` / `AggregatorClient.waitForBatch()` polling helpers; `GET /batches` + `history(limit)` list endpoint (newest-first, 1–200) | ✅ Done (2026-06-04) |
+| **Transaction tracking (2026-06-04)** — `GET /transaction/{tx_hash}` (pending/batched/404); `TransactionStatus` in Python + TS SDK; `tx_hash` field in submit responses; O(1) Mempool hash set + AggregatorNode tx-to-batch index | ✅ Done (2026-06-04) |
+| **Mempool visibility (2026-06-05)** — `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` in Python + TS; fix `LocalClient.get_batch()` O(n)→O(1) | ✅ Done (2026-06-05) |
+| **Deduplication + quality (2026-06-05)** — `DuplicateTxError` prevents duplicate tx_hashes in mempool; mypy clean; `aggregator/__main__.py` (`python -m aggregator`); `sdk/python/qlsa/py.typed` PEP 561 marker | ✅ Done (2026-06-05) |
+| **CI fix (2026-06-06)** — bandit B104 false positive suppressed in `aggregator/__main__.py` (`# nosec B104` on intentional `0.0.0.0` bind, runtime-configurable via `--host`/`HOST`); Python 3.10/3.12 CI now green | ✅ Done (2026-06-06) |
 
 ---
 
@@ -230,6 +235,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `Dockerfile` had no env var documentation — operators unaware of `N_FRI_QUERIES`/`TRUSTED_PROXIES` | Low | ✅ Fixed (documented `ENV` defaults with security trade-off comments; `docker-compose.yml` pass-through, 2026-06-03) |
 | `HttpClient` all JSON call-sites — unhandled `json.JSONDecodeError` when proxy returns HTML body with 2xx status | Medium | ✅ Fixed (`_decode_json()` static method wraps `resp.json()`, raises `RuntimeError` with 200-char preview, 2026-06-03) |
 | `testnet/e2e.py` redundant SHA3-256 recomputation — `sender_key` re-derived via `hashlib` though already in `tx.sender` | Low | ✅ Fixed (`bytes.fromhex(tx.sender)`, removed `import hashlib`, 2026-06-03) |
+| `aggregator/__main__.py` bandit B104 — `"0.0.0.0"` default flagged as hardcoded bind-all | Info | ✅ Fixed (`# nosec B104` — intentional, address is `--host`/`HOST` configurable, 2026-06-06) |
 
 For the full cryptography and security analysis, see `context.md`.
 
@@ -266,7 +272,7 @@ QLSA/
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
 ├── testnet/            # e2e.py, deploy.sh, submit.py, monitor.py (Sepolia)
-├── tests/              # 239 Python tests (no PyO3) + ~325 with PyO3 ext (pytest)
+├── tests/              # 304 Python tests (no PyO3) + ~390 with PyO3 ext (pytest)
 ├── context.md          # Technical decisions, architecture log, security risk table
 └── README.md
 ```

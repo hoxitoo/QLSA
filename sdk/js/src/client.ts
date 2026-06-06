@@ -1,11 +1,25 @@
 import type {
+  BatchListResult,
   BatchStatus,
+  MempoolStatus,
   NodeConfig,
   NodeStats,
   SubmitResult,
   TransactionPayload,
+  TransactionStatus,
   WitnessStatus,
 } from "./types.js";
+
+/**
+ * Thrown by AggregatorClient when the server returns a non-2xx HTTP response.
+ * Callers can inspect `status` to distinguish 404 (not found) from 5xx errors.
+ */
+export class AggregatorHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "AggregatorHttpError";
+  }
+}
 
 const HEX_RE = /^[0-9a-fA-F]+$/;
 
@@ -52,11 +66,13 @@ export class AggregatorClient {
       accepted: boolean;
       mempool_size: number;
       error?: string;
+      tx_hash?: string;
     }>("/transactions", body);
     return {
       accepted: data.accepted,
       mempoolSize: data.mempool_size,
       error: data.error,
+      txHash: data.tx_hash,
     };
   }
 
@@ -143,14 +159,16 @@ export class AggregatorClient {
         nFriQueries: data.n_fri_queries ?? 0,
         friSecurityBits: data.fri_security_bits ?? 0,
       };
-    } catch {
-      return null;
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && (e.status === 404 || e.status === 400)) return null;
+      throw e;
     }
   }
 
   /**
    * Retrieve the status of a specific batch by ID.
-   * Returns null if the batch is not found (HTTP 404) or the ID is invalid.
+   * Returns null if the batch is not found (HTTP 404) or the ID is invalid (HTTP 400).
+   * Re-throws on network errors and server errors (5xx) so callers detect outages.
    */
   async getBatch(batchId: string): Promise<BatchStatus | null> {
     try {
@@ -167,8 +185,103 @@ export class AggregatorClient {
         vfri7_commitment_log8?: string;
       }>(`/batch/${batchId}`);
       return this._toBatchStatus(data);
-    } catch {
-      return null;
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && (e.status === 404 || e.status === 400)) return null;
+      throw e;
+    }
+  }
+
+  /**
+   * Return recent batches from the aggregator, newest first.
+   *
+   * @param limit  Maximum number of batches to return (1–200, default 50).
+   */
+  async listBatches(limit = 50): Promise<BatchListResult> {
+    const data = await this._get<{
+      batches: Array<{
+        batch_id: string;
+        tx_count: number;
+        merkle_root: string;
+        is_proven: boolean;
+        stark_commitment?: string;
+        has_witness?: boolean;
+        witness_commitment?: string;
+        has_vfri7?: boolean;
+        vfri7_commitment_log10?: string;
+        vfri7_commitment_log8?: string;
+      }>;
+      total: number;
+    }>(`/batches?limit=${limit}`);
+    return {
+      batches: data.batches.map(b => this._toBatchStatus(b)),
+      total: data.total,
+    };
+  }
+
+  /**
+   * Look up a transaction by its 64-char hex SHA3-256 hash.
+   *
+   * Returns a {@link TransactionStatus} with `status` set to:
+   * - `"pending"`  — in the mempool, not yet batched
+   * - `"batched"`  — included in a batch; `batchId` is set
+   * - `"unknown"`  — not found in the mempool or recent history (404 → unknown)
+   */
+  async getTransaction(txHash: string): Promise<TransactionStatus> {
+    try {
+      const data = await this._get<{
+        tx_hash: string;
+        status: "pending" | "batched";
+        batch_id?: string;
+      }>(`/transaction/${txHash}`);
+      return {
+        txHash: data.tx_hash,
+        status: data.status,
+        batchId: data.batch_id,
+      };
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && e.status === 404) {
+        return { txHash, status: "unknown" };
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Return a snapshot of the current mempool.
+   *
+   * `limit` (1–1000) caps how many tx hashes are returned (default 100).
+   */
+  async getMempool(limit = 100): Promise<MempoolStatus> {
+    const data = await this._get<{
+      size: number;
+      capacity: number;
+      tx_hashes: string[];
+    }>(`/mempool?limit=${limit}`);
+    return {
+      size: data.size,
+      capacity: data.capacity,
+      txHashes: data.tx_hashes,
+    };
+  }
+
+  /**
+   * Return the ordered list of transaction hashes in a batch, or `null` if not found.
+   *
+   * Returns `null` on HTTP 404 (batch not in recent history).
+   */
+  async getBatchTransactions(batchId: string): Promise<string[] | null> {
+    try {
+      const data = await this._get<{
+        batch_id: string;
+        tx_count: number;
+        tx_hashes: string[];
+      }>(`/batch/${batchId}/transactions`);
+      return data.tx_hashes;
+    } catch (e) {
+      if (e instanceof AggregatorHttpError && (e.status === 404 || e.status === 400)) {
+        return null;
+      }
+      throw e;
     }
   }
 
@@ -224,6 +337,31 @@ export class AggregatorClient {
     }
   }
 
+  /**
+   * Poll GET /batch/{id} until the batch is found or the timeout is reached.
+   * Throws {@link Error} if the batch is not found within `timeoutMs`.
+   */
+  async waitForBatch(
+    batchId: string,
+    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  ): Promise<BatchStatus> {
+    const { timeoutMs = 60_000, pollIntervalMs = 2_000 } = options;
+    if (timeoutMs <= 0) throw new Error("timeoutMs must be positive");
+    if (pollIntervalMs <= 0) throw new Error("pollIntervalMs must be positive");
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const status = await this.getBatch(batchId);
+      if (status !== null) return status;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`Batch ${batchId} not found after ${timeoutMs} ms`);
+      }
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(pollIntervalMs, remaining)),
+      );
+    }
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────
 
   private _toBatchStatus(data: {
@@ -271,11 +409,23 @@ export class AggregatorClient {
         signal: controller.signal,
         ...init,
       });
+      // Read body as text once — avoids double-consumption when both the error
+      // branch and the JSON parse branch need the body.
+      const text = await res.text().catch(() => "");
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
+        throw new AggregatorHttpError(
+          res.status,
+          `HTTP ${res.status} ${res.statusText}: ${text}`,
+        );
       }
-      return (await res.json()) as T;
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        // Proxy/CDN returned HTML with 2xx (e.g. nginx restart page).
+        throw new Error(
+          `Aggregator ${path} returned non-JSON body: ${text.slice(0, 200)}`,
+        );
+      }
     } finally {
       clearTimeout(timer);
     }
