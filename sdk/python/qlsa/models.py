@@ -52,12 +52,12 @@ class TransactionStatus:
 
 @dataclass
 class WitnessStatus:
-    """Result of an ML-DSA-65 arithmetic witness STARK proof (VFRI7)."""
+    """Result of an ML-DSA-65 arithmetic witness STARK proof (VFRI7/VFRI8)."""
 
     has_witness: bool
-    # Legacy V3/V4 fields (kept for backward compatibility; None when VFRI7 is used).
+    # Legacy V3/V4 fields (kept for backward compatibility; None when VFRI7/VFRI8 is used).
     onchain_commitment: str | None = None  # 32-char hex — mapped to vfri7_commitment_log10
-    c_tilde_hex: str | None = None         # 96-char hex — not available in VFRI7 path
+    c_tilde_hex: str | None = None         # 96-char hex — not available in VFRI7/VFRI8 path
     max_norms: list[int] = field(default_factory=list)
     # VFRI7 cross-bound fields (MVP-5)
     has_vfri7: bool = False
@@ -65,6 +65,10 @@ class WitnessStatus:
     vfri7_commitment_log8:  str | None = None  # 32-char hex
     n_fri_queries: int = 0     # FRI queries used; 0 = extension not available
     fri_security_bits: int = 0 # 6 × n_fri_queries + 10; 0 = extension not available
+    # VFRI8 Poseidon2 trace commitment fields
+    has_vfri8: bool = False
+    vfri8_commitment_log10: str | None = None  # 32-char hex (Poseidon2 backend)
+    vfri8_commitment_log8:  str | None = None  # 32-char hex (Poseidon2 backend)
 
 
 @dataclass
@@ -80,6 +84,10 @@ class BatchStatus:
     has_vfri7: bool = False
     vfri7_commitment_log10: str | None = None  # 32-char hex
     vfri7_commitment_log8:  str | None = None  # 32-char hex
+    # VFRI8 Poseidon2 trace commitment
+    has_vfri8: bool = False
+    vfri8_commitment_log10: str | None = None  # 32-char hex (Poseidon2 backend)
+    vfri8_commitment_log8:  str | None = None  # 32-char hex (Poseidon2 backend)
 
 
 @dataclass
