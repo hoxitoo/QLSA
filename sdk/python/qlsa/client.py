@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from core.transaction import Transaction
 from aggregator.mempool import DuplicateTxError, MempoolFullError
 from aggregator.node import AggregatorNode
-from .models import BatchStatus, MempoolStatus, NodeConfig, NodeStats, SubmitResult, TransactionStatus, WitnessStatus
+from .models import BatchStatus, MempoolStatus, NodeConfig, NodeStats, SenderTxHistory, SubmitResult, TransactionStatus, WitnessStatus
 
 if TYPE_CHECKING:
     from aggregator.batcher import BatchResult
@@ -115,16 +115,41 @@ class LocalClient:
         """
         return _prove_witness_local(tx, n_fri_queries=self._node.n_fri_queries)
 
-    def history(self, limit: int | None = None) -> list[BatchStatus]:
+    def history(self, limit: int | None = None, proven: bool | None = None) -> list[BatchStatus]:
         """Return BatchStatus objects produced by this node (oldest → newest).
 
+        If *proven* is given, filter to only proven (``True``) or unproven
+        (``False``) batches before applying *limit*.
         If *limit* is given, return only the last *limit* entries (still
         ordered oldest → newest within that slice).
         """
         results = [_batch_status(r) for r in self._node.history()]
+        if proven is not None:
+            results = [r for r in results if r.is_proven == proven]
         if limit is not None:
             return results[-limit:]
         return results
+
+    def get_sender_transactions(self, sender_hex: str, limit: int = 100) -> SenderTxHistory:
+        """Return the tx history for *sender_hex* (pending + batched, newest-first).
+
+        *limit* caps the total number of tx_hashes returned (1–1000).
+        Raises ``ValueError`` if *limit* is out of range.
+        """
+        if not (1 <= limit <= 1000):
+            raise ValueError("limit must be between 1 and 1000")
+        pending_oldest = self._node.mempool.get_pending_by_sender(sender_hex)
+        pending = list(reversed(pending_oldest))
+        batched = self._node.get_sender_transactions(sender_hex, limit=500)
+        total = len(pending) + len(batched)
+        combined = (pending + batched)[:limit]
+        return SenderTxHistory(
+            sender=sender_hex,
+            tx_hashes=combined,
+            pending_count=len(pending),
+            total=total,
+            limit=limit,
+        )
 
     def get_batch(self, batch_id: str) -> BatchStatus | None:
         """Return the BatchStatus for a given batch_id, or None if not found."""
@@ -439,20 +464,48 @@ class HttpClient:
         """
         return _prove_witness_local(tx, n_fri_queries=n_fri_queries)
 
-    def history(self, limit: int = 50) -> list[BatchStatus]:
+    def history(self, limit: int = 50, proven: bool | None = None) -> list[BatchStatus]:
         """Return recent batches from the aggregator (newest first).
 
         ``limit`` caps the number returned (1–200). Raises ``ValueError`` for
         out-of-range values; the server enforces the same bound and returns
         HTTP 422 for values outside [1, 200].
+        ``proven`` filters to only proven (``True``) or unproven (``False``) batches
+        when set; ``None`` (default) returns all batches.
         """
         if not 1 <= limit <= 200:
             raise ValueError(f"limit must be between 1 and 200, got {limit}")
+        params: dict[str, Any] = {"limit": limit}
+        if proven is not None:
+            params["proven"] = str(proven).lower()
         client = self._get_client()
-        resp = client.get(f"{self._base_url}/batches", params={"limit": limit})
+        resp = client.get(f"{self._base_url}/batches", params=params)
         resp.raise_for_status()
         data = self._decode_json(resp, "/batches")
         return [self._parse_batch_status(b) for b in data.get("batches", [])]
+
+    def get_sender_transactions(self, sender_hex: str, limit: int = 100) -> SenderTxHistory:
+        """Return the tx history for *sender_hex* (pending + batched, newest-first).
+
+        *limit* caps the total number of tx_hashes returned (1–1000).
+        Raises ``ValueError`` if *limit* is out of range.
+        """
+        if not (1 <= limit <= 1000):
+            raise ValueError("limit must be between 1 and 1000")
+        client = self._get_client()
+        resp = client.get(
+            f"{self._base_url}/address/{sender_hex}/transactions",
+            params={"limit": limit},
+        )
+        resp.raise_for_status()
+        data = self._decode_json(resp, f"/address/{sender_hex}/transactions")
+        return SenderTxHistory(
+            sender=data["sender"],
+            tx_hashes=list(data["tx_hashes"]),
+            pending_count=int(data["pending_count"]),
+            total=int(data["total"]),
+            limit=int(data["limit"]),
+        )
 
     def wait_for_batch(
         self,

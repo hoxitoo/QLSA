@@ -16,6 +16,19 @@ class MempoolStatus:
 
 
 @dataclass
+class SenderTxHistory:
+    """Transaction history for a sender address (pending + batched, newest-first).
+
+    Retrieved from GET /address/{sender}/transactions.
+    """
+    sender: str          # 64-char hex address
+    tx_hashes: list[str]  # newest-first, up to limit
+    pending_count: int   # how many are currently pending in mempool
+    total: int           # total across pending + batched (before limit)
+    limit: int           # the limit used
+
+
+@dataclass
 class SubmitResult:
     accepted: bool
     error: str | None = None

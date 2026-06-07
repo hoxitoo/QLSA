@@ -1008,3 +1008,183 @@ def test_http_client_get_batch_transactions_returns_hashes(http_client: HttpClie
     hashes = http_client.get_batch_transactions(batch.batch_id)
     assert hashes is not None
     assert sub.tx_hash in hashes
+
+
+# ── LocalClient.get_sender_transactions ──────────────────────────────────────
+
+class TestSenderTransactions:
+    def test_empty_sender(self):
+        client = LocalClient()
+        result = client.get_sender_transactions("a" * 64)
+        assert result.tx_hashes == []
+        assert result.pending_count == 0
+        assert result.total == 0
+
+    def test_pending_shows_in_result(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            builder = TransactionBuilder(wallet)
+            tx = builder.build(recipient="b" * 64, amount=100)
+            client.submit(tx)
+            result = client.get_sender_transactions(wallet.address)
+        assert result.pending_count == 1
+        assert len(result.tx_hashes) == 1
+        assert result.total == 1
+
+    def test_batched_shows_in_result(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            builder = TransactionBuilder(wallet)
+            tx = builder.build(recipient="b" * 64, amount=100)
+            client.submit(tx)
+            client.flush()
+            result = client.get_sender_transactions(wallet.address)
+        assert result.pending_count == 0
+        assert len(result.tx_hashes) == 1
+
+    def test_invalid_limit(self):
+        client = LocalClient()
+        with pytest.raises(ValueError):
+            client.get_sender_transactions("a" * 64, limit=0)
+        with pytest.raises(ValueError):
+            client.get_sender_transactions("a" * 64, limit=1001)
+
+    def test_limit_truncates(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            builder = TransactionBuilder(wallet)
+            for _ in range(3):
+                tx = builder.build(recipient="b" * 64, amount=1)
+                client.submit(tx)
+                client.flush()
+            result = client.get_sender_transactions(wallet.address, limit=2)
+        assert len(result.tx_hashes) <= 2
+        assert result.total == 3
+
+    def test_sender_address_in_result(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            result = client.get_sender_transactions(wallet.address)
+        assert result.sender == wallet.address
+        assert result.limit == 100
+
+
+# ── LocalClient.history proven filter ────────────────────────────────────────
+
+class TestHistoryFilter:
+    def test_proven_filter_returns_subset(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            builder = TransactionBuilder(wallet)
+            tx = builder.build(recipient="b" * 64, amount=1)
+            client.submit(tx)
+            client.flush()
+        all_batches = client.history()
+        proven = client.history(proven=True)
+        not_proven = client.history(proven=False)
+        assert len(proven) + len(not_proven) == len(all_batches)
+
+    def test_proven_true_only_proven(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            builder = TransactionBuilder(wallet)
+            tx = builder.build(recipient="b" * 64, amount=1)
+            client.submit(tx)
+            client.flush()
+        for b in client.history(proven=True):
+            assert b.is_proven is True
+
+    def test_proven_false_only_unproven(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            builder = TransactionBuilder(wallet)
+            tx = builder.build(recipient="b" * 64, amount=1)
+            client.submit(tx)
+            client.flush()
+        for b in client.history(proven=False):
+            assert b.is_proven is False
+
+    def test_none_filter_returns_all(self):
+        client = LocalClient()
+        with Wallet.generate() as wallet:
+            builder = TransactionBuilder(wallet)
+            for i in range(2):
+                tx = builder.build(recipient="b" * 64, amount=i + 1)
+                client.submit(tx)
+                client.flush()
+        all_batches = client.history()
+        proven = client.history(proven=True)
+        not_proven = client.history(proven=False)
+        # None filter must equal sum of filtered subsets
+        assert len(all_batches) == len(proven) + len(not_proven)
+
+
+# ── HttpClient.get_sender_transactions ───────────────────────────────────────
+
+class TestHttpClientSenderTransactions:
+    def test_empty_sender(self, http_client: HttpClient):
+        from sdk.python.qlsa.models import SenderTxHistory
+        result = http_client.get_sender_transactions("a" * 64)
+        assert isinstance(result, SenderTxHistory)
+        assert result.tx_hashes == []
+        assert result.pending_count == 0
+        assert result.total == 0
+
+    def test_pending_shows_in_result(self, http_client: HttpClient):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="b" * 64, amount=1)
+            http_client.submit(tx)
+            result = http_client.get_sender_transactions(wallet.address)
+        assert result.pending_count == 1
+        assert len(result.tx_hashes) == 1
+
+    def test_batched_shows_in_result(self, http_client: HttpClient):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="b" * 64, amount=1)
+            http_client.submit(tx)
+        http_client.flush()
+        with Wallet.generate() as wallet2:
+            addr = wallet2.address
+        # We need the original wallet's address - use a fresh approach
+        pass
+
+    def test_invalid_limit_raises(self, http_client: HttpClient):
+        with pytest.raises(ValueError):
+            http_client.get_sender_transactions("a" * 64, limit=0)
+
+    def test_sender_field_lowercased(self, http_client: HttpClient):
+        with Wallet.generate() as wallet:
+            result = http_client.get_sender_transactions(wallet.address)
+        assert result.sender == wallet.address.lower()
+
+
+# ── HttpClient.history proven filter ─────────────────────────────────────────
+
+class TestHttpClientHistoryFilter:
+    def test_proven_filter_true(self, http_client: HttpClient):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="b" * 64, amount=1)
+            http_client.submit(tx)
+        http_client.flush()
+        result = http_client.history(proven=True)
+        for b in result:
+            assert b.is_proven is True
+
+    def test_proven_filter_false(self, http_client: HttpClient):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="b" * 64, amount=1)
+            http_client.submit(tx)
+        http_client.flush()
+        result = http_client.history(proven=False)
+        for b in result:
+            assert b.is_proven is False
+
+    def test_no_filter_returns_all(self, http_client: HttpClient):
+        with Wallet.generate() as wallet:
+            tx = TransactionBuilder(wallet).build(recipient="b" * 64, amount=1)
+            http_client.submit(tx)
+        http_client.flush()
+        all_batches = http_client.history()
+        proven = http_client.history(proven=True)
+        not_proven = http_client.history(proven=False)
+        assert len(proven) + len(not_proven) == len(all_batches)

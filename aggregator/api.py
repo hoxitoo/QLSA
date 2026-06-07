@@ -162,6 +162,13 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 reads per minute"},
                 )
+        elif method == "GET" and path.startswith("/address/"):
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 reads per minute"},
+                )
 
         return await call_next(request)
 
@@ -192,6 +199,16 @@ def _check_tx_hash(tx_hash: str) -> None:
         bytes.fromhex(tx_hash)
     except ValueError:
         raise HTTPException(status_code=400, detail="tx_hash must be a valid hex string")
+
+
+def _check_sender(sender: str) -> None:
+    """Raise HTTP 400 if sender is not a 64-char hex address string."""
+    if len(sender) != 64:
+        raise HTTPException(status_code=400, detail="sender must be a 64-character hex address")
+    try:
+        bytes.fromhex(sender)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="sender must be a 64-character hex address")
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -315,15 +332,19 @@ def stats(request: Request) -> dict[str, Any]:
 def list_batches(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
+    proven: bool | None = Query(default=None),
 ) -> dict[str, Any]:
     """Return recent batches, newest first.
 
-    ``limit`` caps the number returned (1–200, default 50). ``total`` is the
-    count of all batches held in the node's in-memory history (up to 1 000).
+    ``limit`` caps the number returned (1–200, default 50).
+    ``proven`` filters by proof status when provided: ``true`` returns only proven batches,
+    ``false`` returns only unproven batches.  ``total`` reflects the filtered count.
     """
     node: AggregatorNode = request.app.state.node
     results = node.history()          # oldest → newest; thread-safe snapshot
-    sliced = results[-limit:][::-1]   # take newest N, then reverse to newest-first
+    if proven is not None:
+        results = [r for r in results if r.is_proven == proven]
+    sliced = results[-limit:][::-1]   # take newest N from filtered, then reverse to newest-first
     return {
         "batches": [
             {
@@ -382,6 +403,41 @@ def mempool_status(
         "size": node.mempool.size(),
         "capacity": node.mempool.max_size,
         "tx_hashes": node.mempool.peek_hashes(limit),
+    }
+
+
+@app.get("/address/{sender}/transactions")
+def sender_transactions(
+    sender: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Return tx_hashes for a sender address (pending + batched, newest-first).
+
+    ``sender`` must be a 64-character hex address (SHA3-256 of the public key).
+    ``limit`` caps the total returned (1–1000, default 100).
+    ``pending_count`` indicates how many of the returned hashes are currently in
+    the mempool.  ``total`` is the sender's total tx count (pending + batched)
+    before the limit is applied.
+
+    Returns 400 if ``sender`` is not a 64-char hex string.
+    """
+    sender_lc = sender.lower()
+    _check_sender(sender_lc)
+    node: AggregatorNode = request.app.state.node
+    # Pending txs: linear scan of mempool, oldest-first; reverse to newest-first
+    pending_oldest_first = node.mempool.get_pending_by_sender(sender_lc)
+    pending = list(reversed(pending_oldest_first))
+    # Batched txs: already newest-first, up to _MAX_SENDER_HISTORY
+    batched = node.get_sender_transactions(sender_lc, limit=500)
+    total = len(pending) + len(batched)
+    combined = (pending + batched)[:limit]
+    return {
+        "sender": sender_lc,
+        "tx_hashes": combined,
+        "pending_count": len(pending),
+        "total": total,
+        "limit": limit,
     }
 
 

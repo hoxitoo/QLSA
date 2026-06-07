@@ -92,3 +92,17 @@ export interface MempoolStatus {
   /** First `min(size, limit)` pending tx hashes in FIFO order (64-char hex). */
   txHashes: string[];
 }
+
+/** Transaction history for a sender address (GET /address/{sender}/transactions). */
+export interface SenderTxHistory {
+  /** The sender address (64-char hex). */
+  sender: string;
+  /** Transaction hashes (newest-first, pending before batched), up to `limit`. */
+  txHashes: string[];
+  /** How many of the returned hashes are currently pending in the mempool. */
+  pendingCount: number;
+  /** Total tx count for this sender (across pending + batched), before limit. */
+  total: number;
+  /** The limit used for this query. */
+  limit: number;
+}

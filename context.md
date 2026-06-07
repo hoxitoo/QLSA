@@ -216,6 +216,22 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 
 ---
 
+## Незавершённые дела (не блокируют MVP-4)
+
+> Записано 2026-06-06. Выполнить в удобный момент — не критично для production, но улучшают качество.
+
+| # | Задача | Приоритет | Сложность | Описание |
+|---|--------|-----------|-----------|----------|
+| 1 | `bytes(private_key)` иммутабельная копия | Средний | Высокая | `wipe_key()` обнуляет основной буфер, но Python-side копия liboqs — best-effort. Нужна Rust-обёртка с `SecureZeroingMemory` / custom allocator |
+| 2 | tx_hash усечён до 31 бита для M31 | Низкий | Средняя | tx_hash = SHA3-256 (32 байта = 256 бит), но при вставке в M31 коммитмент берётся только 31 бит. Нужно либо расширить commitment до 256 бит, либо явно задокументировать как design decision |
+| 3 | Prometheus metrics endpoint | Низкий | Низкая | `GET /metrics` — gauges: `mempool_size`, `batches_total`, `proofs_total`, `pending_transactions`. Нужен для мониторинга production-нод |
+| 4 | WebSocket/SSE для real-time обновлений | Низкий | Средняя | `GET /events/batch/{id}` и `GET /events/transaction/{hash}` — SSE stream статусов. Клиенты смогут избежать polling |
+| 5 | Автоматизированные benchmarks | Средний | Низкая | `bench_core.py`, `bench_stark.py` существуют но не запускались системно. Нужен CI job + результаты в README для: proof_size(N), merkle_time(N), witness_prove_time |
+| 6 | E2E тесты на живом Sepolia | Средний | Средняя | `testnet/e2e.py` запускается вручную. Нужен автоматизированный режим: submit → batch → verify on-chain, результат в CI как scheduled job |
+| 7 | Docker Hub image | Низкий | Низкая | `docker build` работает локально, но нет published image. Нужен `ghcr.io/hoxitoo/qlsa-aggregator:latest` с автопушем из CI |
+
+---
+
 ## Открытые вопросы
 
 ### Архитектурные (критично)

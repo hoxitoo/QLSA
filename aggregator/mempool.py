@@ -124,6 +124,18 @@ class Mempool:
         with self._lock:
             return tx_hash_hex in self._tx_hashes
 
+    def get_pending_by_sender(self, sender_hex: str) -> list[str]:
+        """Return tx_hashes (FIFO order, oldest-first) for pending txs from *sender_hex*.
+
+        Performs a linear scan of the mempool deque.  Thread-safe.
+        """
+        with self._lock:
+            return [
+                tx.tx_hash().hex()
+                for tx in self._txs
+                if tx.sender == sender_hex
+            ]
+
     def clear(self) -> None:
         with self._lock:
             self._txs.clear()
