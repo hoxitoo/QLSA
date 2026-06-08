@@ -2507,3 +2507,57 @@ def gen_mldsa_v23_vfri8_cross_bound_hints(
         batch_merkle_root=batch_merkle_root,
         n_queries=n_queries,
     )
+
+
+def prove_mldsa_sig_vfri8_stark(
+    pk: bytes,
+    msg: bytes,
+    sig: bytes,
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds_log10: int | None = None,
+    num_folds_log8: int | None = None,
+) -> FullV23VFRI8CrossBoundHintResult:
+    """Generate cross-bound VFRI8 hints from a real ML-DSA-65 signature.
+
+    Decodes the signature to extract the arithmetic witness (z, c, t1, a_hat,
+    hints), then runs gen_mldsa_v23_vfri8_cross_bound_hints for both LOG=10 and
+    LOG=8 trace groups with the given batch_merkle_root.
+
+    Args:
+        pk:                ML-DSA-65 public key bytes (1952 bytes).
+        msg:               Signed message bytes.
+        sig:               ML-DSA-65 signature bytes (3309 bytes).
+        batch_merkle_root: 32-byte batch Merkle root for Fiat-Shamir binding.
+        n_queries:         FRI queries per group (default 1).
+        num_folds_log10:   Fold rounds for LOG=10 group (default: automatic).
+        num_folds_log8:    Fold rounds for LOG=8 group (default: automatic).
+
+    Returns:
+        FullV23VFRI8CrossBoundHintResult with cross-bound Poseidon2 proofs for both groups.
+
+    Raises:
+        ValueError: if the signature fails ML-DSA-65 verification.
+        RuntimeError: if the extension is not installed or proof generation fails.
+    """
+    _require_ext("extract_mldsa_witness_py")
+    try:
+        z_raw, c_raw, t1_raw, a_hat_raw, hints_raw = _ext.extract_mldsa_witness_py(
+            bytes(pk), bytes(msg), bytes(sig),
+        )
+    except Exception as exc:
+        raise ValueError(f"extract_mldsa_witness_py failed: {exc}") from exc
+
+    z     = [list(p) for p in z_raw]
+    c     = list(c_raw)
+    t1    = [list(p) for p in t1_raw]
+    a_hat = [list(p) for p in a_hat_raw]
+    hints = [list(h) for h in hints_raw]
+
+    return gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints,
+        batch_merkle_root,
+        n_queries=n_queries,
+        num_folds_log10=num_folds_log10,
+        num_folds_log8=num_folds_log8,
+    )

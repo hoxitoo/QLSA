@@ -358,6 +358,9 @@ def list_batches(
                 "has_vfri7": r.has_vfri7,
                 "vfri7_commitment_log10": r.vfri7_commitment_log10,
                 "vfri7_commitment_log8": r.vfri7_commitment_log8,
+                "has_vfri8": r.has_vfri8,
+                "vfri8_commitment_log10": r.vfri8_commitment_log10,
+                "vfri8_commitment_log8": r.vfri8_commitment_log8,
             }
             for r in sliced
         ],
@@ -527,6 +530,9 @@ def batch_run(
         "has_vfri7": result.has_vfri7,
         "vfri7_commitment_log10": result.vfri7_commitment_log10,
         "vfri7_commitment_log8": result.vfri7_commitment_log8,
+        "has_vfri8": result.has_vfri8,
+        "vfri8_commitment_log10": result.vfri8_commitment_log10,
+        "vfri8_commitment_log8": result.vfri8_commitment_log8,
     }
 
 
@@ -553,6 +559,9 @@ def batch_status(batch_id: str, request: Request) -> dict[str, Any]:
         "has_vfri7": result.has_vfri7,
         "vfri7_commitment_log10": result.vfri7_commitment_log10,
         "vfri7_commitment_log8": result.vfri7_commitment_log8,
+        "has_vfri8": result.has_vfri8,
+        "vfri8_commitment_log10": result.vfri8_commitment_log10,
+        "vfri8_commitment_log8": result.vfri8_commitment_log8,
     }
 
 
@@ -573,7 +582,8 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
     n = node.n_fri_queries
     if not result.has_witness:
         return {
-            "batch_id": batch_id, "has_witness": False, "has_vfri7": False,
+            "batch_id": batch_id, "has_witness": False,
+            "has_vfri7": False, "has_vfri8": False,
             "n_fri_queries": n, "fri_security_bits": 6 * n + 10,
         }
     return {
@@ -585,6 +595,9 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
         "has_vfri7": result.has_vfri7,
         "vfri7_commitment_log10": result.vfri7_commitment_log10,
         "vfri7_commitment_log8": result.vfri7_commitment_log8,
+        "has_vfri8": result.has_vfri8,
+        "vfri8_commitment_log10": result.vfri8_commitment_log10,
+        "vfri8_commitment_log8": result.vfri8_commitment_log8,
         "n_fri_queries": n,
         "fri_security_bits": 6 * n + 10,
     }
@@ -610,4 +623,7 @@ def batch_flush(
         "has_vfri7": result.has_vfri7,
         "vfri7_commitment_log10": result.vfri7_commitment_log10,
         "vfri7_commitment_log8": result.vfri7_commitment_log8,
+        "has_vfri8": result.has_vfri8,
+        "vfri8_commitment_log10": result.vfri8_commitment_log10,
+        "vfri8_commitment_log8": result.vfri8_commitment_log8,
     }

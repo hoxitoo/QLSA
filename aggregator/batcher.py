@@ -37,6 +37,15 @@ class BatchResult:
     vfri7_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
     vfri7_hints_log8:       bytes | None = field(default=None, repr=False)
 
+    # VFRI8 Poseidon2 cross-bound ML-DSA V23 proofs for tx[0].
+    # Populated when prove_witnesses=True and the PyO3 extension is available.
+    vfri8_proof_log10:      bytes | None = field(default=None, repr=False)
+    vfri8_commitment_log10: str | None = None   # 32-char hex (16-byte Blake2s binding)
+    vfri8_hints_log10:      bytes | None = field(default=None, repr=False)
+    vfri8_proof_log8:       bytes | None = field(default=None, repr=False)
+    vfri8_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
+    vfri8_hints_log8:       bytes | None = field(default=None, repr=False)
+
     # Convenience properties for Solidity submission
     @property
     def merkle_root_onchain(self) -> bytes:
@@ -69,8 +78,12 @@ class BatchResult:
         return self.vfri7_proof_log10 is not None and self.vfri7_proof_log8 is not None
 
     @property
+    def has_vfri8(self) -> bool:
+        return self.vfri8_proof_log10 is not None and self.vfri8_proof_log8 is not None
+
+    @property
     def has_witness(self) -> bool:
-        return self.witness_bundle is not None or self.has_vfri7
+        return self.witness_bundle is not None or self.has_vfri7 or self.has_vfri8
 
     @property
     def witness_norm_bound_ok(self) -> bool:
@@ -213,5 +226,27 @@ class Batcher:
                     logger.warning("ML-DSA signature invalid for VFRI7 proving: %s", exc)
                 except Exception as exc:
                     logger.error("Unexpected error during VFRI7 proving: %s", exc, exc_info=True)
+
+                try:
+                    from stark.prover import prove_mldsa_sig_vfri8_stark
+                    vr8 = prove_mldsa_sig_vfri8_stark(
+                        pk=tx0.public_key,
+                        msg=tx0.to_bytes(),
+                        sig=tx0.signature,
+                        batch_merkle_root=result.merkle_root_onchain,
+                        n_queries=self.n_fri_queries,
+                    )
+                    result.vfri8_proof_log10      = vr8.log10_proof
+                    result.vfri8_commitment_log10 = vr8.log10_commitment
+                    result.vfri8_hints_log10      = vr8.log10_query_hints
+                    result.vfri8_proof_log8       = vr8.log8_proof
+                    result.vfri8_commitment_log8  = vr8.log8_commitment
+                    result.vfri8_hints_log8       = vr8.log8_query_hints
+                except (RuntimeError, ImportError) as exc:
+                    logger.warning("VFRI8 witness proof skipped: %s", exc)
+                except ValueError as exc:
+                    logger.warning("ML-DSA signature invalid for VFRI8 proving: %s", exc)
+                except Exception as exc:
+                    logger.error("Unexpected error during VFRI8 proving: %s", exc, exc_info=True)
 
         return result
