@@ -2493,3 +2493,172 @@ def test_prove_mldsa_sig_vfri7_stark_batch_root_binding():
 
     assert ra.log10_commitment != rb.log10_commitment, "Different batch roots must give different LOG=10 commitments"
     assert ra.log8_commitment  != rb.log8_commitment,  "Different batch roots must give different LOG=8 commitments"
+
+
+# ── VFRI8: Poseidon2 trace commitment ─────────────────────────────────────────
+
+_VFRI8_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_hints_schema():
+    """LOG=10 VFRI8 result has expected structure and n_cols=1298."""
+    from stark.prover import gen_mldsa_v23_vfri8_hints, MldsaV23VFRI8HintResult
+    z, c, t1, a_hat = _v23_inputs(14000)
+    r = gen_mldsa_v23_vfri8_hints(z, c, t1, a_hat, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI8HintResult)
+    assert r.n_cols == 1298
+    assert r.n_queries == 1
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_hints_deterministic():
+    """Same inputs produce identical VFRI8 LOG=10 outputs."""
+    from stark.prover import gen_mldsa_v23_vfri8_hints
+    z, c, t1, a_hat = _v23_inputs(14100)
+    r1 = gen_mldsa_v23_vfri8_hints(z, c, t1, a_hat, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri8_hints(z, c, t1, a_hat, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_hints_differs_from_vfri7():
+    """VFRI8 Poseidon2 transcript differs from VFRI7 Blake2s transcript."""
+    from stark.prover import gen_mldsa_v23_vfri8_hints, gen_mldsa_v23_vfri7_hints
+    z, c, t1, a_hat = _v23_inputs(14200)
+    r7 = gen_mldsa_v23_vfri7_hints(z, c, t1, a_hat, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    r8 = gen_mldsa_v23_vfri8_hints(z, c, t1, a_hat, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r7.query_hints != r8.query_hints, "VFRI8 must differ from VFRI7 (Poseidon2 vs Blake2s)"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_hints_batch_root_binding():
+    """Different batch roots produce different VFRI8 LOG=10 hints."""
+    from stark.prover import gen_mldsa_v23_vfri8_hints
+    z, c, t1, a_hat = _v23_inputs(14300)
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_mldsa_v23_vfri8_hints(z, c, t1, a_hat, root_a, n_queries=1, num_folds=3)
+    rb = gen_mldsa_v23_vfri8_hints(z, c, t1, a_hat, root_b, n_queries=1, num_folds=3)
+    assert ra.query_hints != rb.query_hints, "Different batch roots must produce different VFRI8 hints"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_hints_log8_schema():
+    """LOG=8 VFRI8 result has expected structure and n_cols=2206."""
+    from stark.prover import gen_mldsa_v23_vfri8_hints_log8, MldsaV23VFRI8Log8HintResult
+    z, c, t1, a_hat = _v23_inputs(14400)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri8_hints_log8(z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI8Log8HintResult)
+    assert r.n_cols == 2206
+    assert r.n_queries == 1
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_hints_log8_differs_from_vfri7():
+    """VFRI8 LOG=8 hints differ from VFRI7 LOG=8 (Poseidon2 vs Blake2s)."""
+    from stark.prover import gen_mldsa_v23_vfri8_hints_log8, gen_mldsa_v23_vfri7_hints_log8
+    z, c, t1, a_hat = _v23_inputs(14500)
+    hints = _make_log8_hints()
+    r7 = gen_mldsa_v23_vfri7_hints_log8(z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    r8 = gen_mldsa_v23_vfri8_hints_log8(z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r7.query_hints != r8.query_hints, "VFRI8 LOG=8 must differ from VFRI7 (different hash backend)"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_cross_bound_hints_schema():
+    """Cross-bound VFRI8 result has correct structure for both LOG groups."""
+    from stark.prover import (
+        gen_mldsa_v23_vfri8_cross_bound_hints,
+        FullV23VFRI8CrossBoundHintResult,
+    )
+    z, c, t1, a_hat = _v23_inputs(14600)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    assert isinstance(r, FullV23VFRI8CrossBoundHintResult)
+    assert isinstance(r.log10_proof, bytes) and len(r.log10_proof) >= 700
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log10_query_hints, bytes) and len(r.log10_query_hints) > 0
+    assert isinstance(r.log8_proof, bytes) and len(r.log8_proof) >= 700
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    assert isinstance(r.log8_query_hints, bytes) and len(r.log8_query_hints) > 0
+    assert r.batch_merkle_root == _VFRI8_BATCH_ROOT
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_cross_bound_hints_deterministic():
+    """Same inputs produce identical cross-bound VFRI8 outputs."""
+    from stark.prover import gen_mldsa_v23_vfri8_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(14700)
+    hints = _make_log8_hints()
+    r1 = gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    r2 = gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    assert r1.log10_commitment == r2.log10_commitment
+    assert r1.log10_query_hints == r2.log10_query_hints
+    assert r1.log8_commitment == r2.log8_commitment
+    assert r1.log8_query_hints == r2.log8_query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_cross_bound_hints_batch_root_changes():
+    """Different batch roots produce different cross-bound VFRI8 commitments."""
+    from stark.prover import gen_mldsa_v23_vfri8_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(14800)
+    hints = _make_log8_hints()
+    root_a = bytes([0xAA] * 32)
+    root_b = bytes([0xBB] * 32)
+    ra = gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints, root_a, n_queries=1, num_folds_log10=3,
+    )
+    rb = gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints, root_b, n_queries=1, num_folds_log10=3,
+    )
+    assert ra.log10_commitment != rb.log10_commitment, "Different batch roots → different LOG=10 commitments"
+    assert ra.log8_commitment != rb.log8_commitment, "Different batch roots → different LOG=8 commitments"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_cross_bound_total_calldata():
+    """Cross-bound VFRI8 combined calldata < 20 KB."""
+    from stark.prover import gen_mldsa_v23_vfri8_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(14900)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    total = len(r.log10_query_hints) + len(r.log8_query_hints)
+    assert total < 20_000, f"Combined cross-bound VFRI8 hints {total} B should be < 20 KB"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri8_cross_bound_differs_from_vfri7():
+    """VFRI8 cross-bound hints differ from VFRI7 (Poseidon2 vs Blake2s transcript)."""
+    from stark.prover import (
+        gen_mldsa_v23_vfri8_cross_bound_hints,
+        gen_mldsa_v23_vfri7_cross_bound_hints,
+    )
+    z, c, t1, a_hat = _v23_inputs(15000)
+    hints = _make_log8_hints()
+    r7 = gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    r8 = gen_mldsa_v23_vfri8_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI8_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    assert r7.log10_query_hints != r8.log10_query_hints, "VFRI8 must differ from VFRI7 (Poseidon2 vs Blake2s)"
+    assert r7.log8_query_hints != r8.log8_query_hints, "VFRI8 LOG=8 must differ from VFRI7"
