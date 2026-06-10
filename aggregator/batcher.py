@@ -242,6 +242,9 @@ class Batcher:
                     result.vfri8_proof_log8       = vr8.log8_proof
                     result.vfri8_commitment_log8  = vr8.log8_commitment
                     result.vfri8_hints_log8       = vr8.log8_query_hints
+                    # H5 fix: set witness_commitment from VFRI8 if VFRI7 didn't populate it
+                    if result.witness_commitment is None:
+                        result.witness_commitment = vr8.log10_commitment
                 except (RuntimeError, ImportError) as exc:
                     logger.warning("VFRI8 witness proof skipped: %s", exc)
                 except ValueError as exc:

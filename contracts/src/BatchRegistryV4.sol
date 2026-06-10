@@ -139,6 +139,9 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
         if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
         if (finalizedBatches[merkleRoot]) revert BatchAlreadyFinalized(merkleRoot);
 
+        if (proofLog10.length < 40) revert Log10ProofInvalid();
+        if (proofLog8.length  < 40) revert Log8ProofInvalid();
+
         // Cross-proof binding: each proof's FRI queries depend on the other's trace root.
         bytes32 traceRoot10;
         bytes32 traceRoot8;
@@ -204,6 +207,9 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
                 }
             }
         }
+
+        if (proofLog10.length < 40) revert Log10ProofInvalid();
+        if (proofLog8.length  < 40) revert Log8ProofInvalid();
 
         // Cross-proof binding: each proof's FRI queries depend on the other's trace root.
         bytes32 traceRoot10w;

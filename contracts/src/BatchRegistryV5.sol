@@ -145,6 +145,12 @@ contract BatchRegistryV5 is ReentrancyGuard, Ownable {
         if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
         if (finalizedBatches[merkleRoot]) revert BatchAlreadyFinalized(merkleRoot);
 
+        // Guard against cross-bound root poisoning via short proof blobs.
+        // calldataload(offset+8) reads bytes 8..40 as the trace root; require
+        // at least 40 bytes so we read from within the proof, not adjacent calldata.
+        if (proofLog10.length < 40) revert Log10ProofInvalid();
+        if (proofLog8.length  < 40) revert Log8ProofInvalid();
+
         // Cross-proof binding: each proof's FRI queries depend on the other's trace root.
         bytes32 traceRoot10;
         bytes32 traceRoot8;

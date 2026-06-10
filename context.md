@@ -1,15 +1,19 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-06)
+## Статус (обновлено 2026-06-10)
 
-- Фаза: **MVP-5 завершён** (2026-05-25) + **V23 dual-VFRI7 production pipeline с cross-proof binding**
-- Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4 — завершены полностью
-- QLSAVerifierVFRI7: `mixRoot(merkleRoot)` перед `drawQueries`; BatchRegistryV4 использует cross-bound roots
-- Aggregator, HTTP API, Python SDK, TypeScript SDK — обновлены под VFRI7 dual-commitment
+- Фаза: **VFRI8 Phase 1 завершён** (2026-06-10) — Poseidon2 trace commitment; ≤15M gas для 20 queries
+- Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4/V5 — завершены
+- **VFRI8**: `QLSAVerifierVFRI8.sol`, `BatchRegistryV5.sol`, `Poseidon2MerkleVerifier.sol`, `Poseidon2Channel.sol`
+- **Rust bridges**: `gen_mldsa_v23_vfri8_hints`, `gen_mldsa_v23_vfri8_hints_log8`, `gen_mldsa_v23_vfri8_cross_bound_hints`
+- **Python wrappers**: `prove_mldsa_sig_vfri8_stark` → `FullV23VFRI8CrossBoundHintResult`
+- **Aggregator/SDK**: `BatchResult.has_vfri8`, vfri8_* fields, API endpoint, SDK client
+- **Tests**: 528 Python (incl. 11 VFRI8 @needs_ext), fixture `full_v23_vfri8_cross_bound_e2e.json`
 - Проведён аудит безопасности + code review (2026-05-25); 5 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-1); 8 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-2); 11 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-06-03); 2 новых findings — все устранены
+- **Аудит безопасности + code review (2026-06-10)**: 21 finding (3C + 5H + 7M + 6L из code audit; 2C + 4H + 3M + 3L из security audit) — 18 устранены, 3 задокументированы как known limitations
 - SDK расширен (2026-06-04): `Wallet.is_wiped` + знак после wipe, `TransactionBuilder.reset_nonce()`, `HttpClient.wait_for_batch()`, `AggregatorClient.waitForBatch()`, `GET /batches`
 - Transaction tracking (2026-06-04): `GET /transaction/{tx_hash}`, `TransactionStatus`, `get_transaction()` в Python + TS SDK; `tx_hash` в SubmitResult/SubmitResponse
 - Mempool visibility (2026-06-05): `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` Python + TS; fix `LocalClient.get_batch()` O(n)→O(1)
@@ -114,7 +118,11 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `BatchRegistry.sol` — v1, `Ownable`, `nonReentrant`, `BatchAlreadyFinalized` replay guard
 - `BatchRegistryV2.sol` — `submitBatchWithNonces()`: строгий порядок nonce per sender; `MAX_SENDERS=3000`
 - `BatchRegistryV3.sol` — IQLSAVerifierV4 interface + queryHints; `MAX_SENDERS=3000`
-- `BatchRegistryV4.sol` — dual-VFRI7: LOG=10 + LOG=8 cross-bound proofs; `MAX_SENDERS=3000`; `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)`
+- `BatchRegistryV4.sol` — dual-VFRI7: LOG=10 + LOG=8 cross-bound proofs; `MAX_SENDERS=3000`; `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)`; proof length guards (C3 fix)
+- `BatchRegistryV5.sol` — dual-VFRI8: identical to V4 but uses `QLSAVerifierVFRI8`; proof length guards; cross-proof binding unchanged
+- `QLSAVerifierVFRI8.sol` — VFRI7 + Poseidon2 Merkle + Poseidon2Channel; `_verifyOODS` returns (ok, fPlus, fMinus) instead of mutating struct (H4 fix)
+- `verifier/Poseidon2MerkleVerifier.sol` — Poseidon2 binary Merkle (rate-1 sponge leaf, compress pair)
+- `verifier/Poseidon2Channel.sol` — Poseidon2 duplex sponge Fiat-Shamir channel
 - `QLSAVerifier.sol` — заглушка (всегда true)
 - `QLSAVerifierV2.sol` — M31 структурный верификатор
 - `QLSAVerifierV3.sol` — MIN_PROOF_LENGTH=700, Blake2s imported
@@ -126,11 +134,11 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `M31.sol` — field arithmetic library
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
-#### Тесты (актуально 2026-06-06)
-- Python: **~354 тестов** (без PyO3) / **487** (с PyO3 ext, из CI лога)
+#### Тесты (актуально 2026-06-10)
+- Python: **336 тестов** (без PyO3) / **528** (с PyO3 ext) — включает 11 новых VFRI8 тестов
 - Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: **~71 тестов** (jest; +13 новых для waitForBatch/getTransaction/getMempool/getBatchTransactions)
-- Solidity/Hardhat: **847 тестов** — все проходят
+- Solidity/Hardhat: **847 тестов** — все проходят (Hardhat native solc недоступен в dev среде; node.js solc компилирует без ошибок)
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
@@ -212,7 +220,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **VFRI4/5/6** | **✅ Done** | **O(1)-gas on-chain verifier; 1298 и 2206 cols ≤ 15M gas** |
 | **BatchRegistryV4** | **✅ Done** | **Dual-VFRI7 registry; full V23 trace coverage; 847 tests** |
 | **MVP-5** | **✅ Done** | **VFRI7 cross-proof binding + aggregator/SDK wiring + security audit (2026-05-25)** |
-| MVP-4 | ⏳ Future | RPO256 hash AIR + full V23 OODS wiring (20 queries, blowup 64) |
+| **VFRI8** | **✅ Done** | **Poseidon2 trace commitment; ≤15M gas for 20 queries; aggregator/SDK wired (2026-06-10)** |
+| MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); last-layer FRI check (VFRI9) |
 
 ---
 
@@ -300,6 +309,13 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - **HttpClient.submit() KeyError guard**: защита от серверных ответов без поля `accepted` (2026-05-30)
 - **`HttpClient._decode_json()`**: обёртка `resp.json()` перехватывает `json.JSONDecodeError` — nginx/cloudflare могут вернуть HTML body с 2xx при рестарте; все 7 call-сайтов обновлены (2026-06-03)
 - **`testnet/e2e.py` sender_key**: дублировал вычисление SHA3-256(public_key) через `hashlib`, хотя `tx.sender` уже содержит это значение как hex; удалён лишний `import hashlib` (2026-06-03)
+- **Dead `_call_prover` удалён** (C1 fix, 2026-06-10): функция никогда не вызывалась; `_call_prover_p2` получил commitment-length guard (`len != 32`)
+- **`num_folds_log8` silent drop fix** (C2 fix, 2026-06-10): `gen_mldsa_v23_vfri7/8_cross_bound_hints` теперь использует `num_folds_log10 if not None else num_folds_log8`
+- **Proof length guard in BatchRegistryV4/V5** (C3 fix, 2026-06-10): `if (proofLog10.length < 40) revert` перед assembly calldataload — предотвращает second-preimage на cross-bound root
+- **Rate limiting `/stats` и `/node/config`** (H2 fix, 2026-06-10): добавлены в `_RateLimitMiddleware.dispatch` под `_read_windows` (200 req/min)
+- **`_verifyOODS` не мутирует `h`** (H4 fix, 2026-06-10): возвращает `(bool, fPlus, fMinus)` вместо записи в `h.compValue`; убраны тавтологические проверки `mul(a/b, b)==a`
+- **VFRI8 `witness_commitment` fallback** (H5 fix, 2026-06-10): если VFRI7 не установил `witness_commitment`, VFRI8 fallback `result.witness_commitment = vr8.log10_commitment`
+- **`_sender_txs` memory leak fix** (M6 fix, 2026-06-10): `AggregatorNode._record` при eviction батча удаляет tx_hash из `_sender_txs`; пустые deque удаляются из dict
 
 ### Таблица рисков (обновлено 2026-05-30)
 
@@ -356,6 +372,19 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | HttpClient.submit() KeyError при ответе без поля accepted | Низкий | ✅ Закрыт (try/except guard, 2026-05-30) |
 | `HttpClient` все методы — `json.JSONDecodeError` при HTML ответе от proxy с 2xx статусом | Средний | ✅ Закрыт (`_decode_json()` static method, все 7 call-сайтов, 2026-06-03) |
 | `testnet/e2e.py` повторно вычислял `sender_key` через `hashlib.sha3_256()` — `tx.sender` уже содержит это значение | Низкий | ✅ Закрыт (`bytes.fromhex(tx.sender)` + удалён импорт, 2026-06-03) |
+| Dead `_call_prover` — никогда не вызывался, скрывал commitment-length guard от активного пути | Критично | ✅ Закрыт (функция удалена; guard добавлен в `_call_prover_p2`, 2026-06-10) |
+| `num_folds_log8` игнорировался если `num_folds_log10=None` в cross_bound_hints | Критично | ✅ Закрыт (`num_folds_log10 if not None else num_folds_log8`, VFRI7+VFRI8, 2026-06-10) |
+| `calldataload(offset+8)` без проверки длины proof — second-preimage на cross-bound root | Критично | ✅ Закрыт (`if (proof.length < 40) revert` в V4 + V5, 2026-06-10) |
+| `GET /stats` и `/node/config` не rate-limited — DoS вектор | Высокий | ✅ Закрыт (200 req/min limit, 2026-06-10) |
+| `_verifyOODS` мутировал memory struct `h` — хрупкая зависимость от порядка вызовов | Высокий | ✅ Закрыт (возвращает `(bool, fPlus, fMinus)`, 2026-06-10) |
+| VFRI8 success не обновлял `witness_commitment` — `has_witness=True` при `onchain_commitment=None` | Высокий | ✅ Закрыт (fallback `result.witness_commitment = vr8.log10_commitment`, 2026-06-10) |
+| `_sender_txs` unbounded growth — каждый отправитель оставлял записи навсегда | Средний | ✅ Закрыт (cleanup при eviction батча, 2026-06-10) |
+| Missing last-layer polynomial check (FRI soundness gap) в VFRI7/VFRI8 | Критично | Open (research prototype; low practical risk с 20 queries; fix = VFRI9) |
+| `submitBatchWithNonces` не проверяет что senders совпадают с транзакциями в батче | Высокий | Open (griefing attack requires valid proof; нет финансового риска для пользователей) |
+| Poseidon2Channel t=2/M31 = 62-bit state (ниже 128-bit target sponge security) | Высокий | Open (upstream Stwo 2.2.0 design; permutation-level security = 128-bit; рекомендуется t=4 для продакшн) |
+| `setVerifier()` без timelock — single-key upgrade risk | Средний | Open (research prototype; рекомендуется 48h timelock + multisig для mainnet) |
+| No authentication on `/batch/run` и `/batch/flush` — DoS через compute drain | Высокий | Open (rate limiting 20 ops/min; Bearer token рекомендуется для mainnet) |
+| Off-chain mempool accepts stale-nonce transactions | Средний | Open (per-sender nonce tracking рекомендуется для mainnet) |
 
 ---
 

@@ -12,9 +12,10 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
 > - Off-chain STARK proof: `LOG_BLOWUP=6`, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit soundness
-> - On-chain verifier (VFRI7) spot-checks `n_queries` hints per call. Default `n_queries=1` → **16-bit on-chain soundness** (6×1+10). Gas-efficient for testnet; production target is n=3–5 (28–40 bits) pending gas optimization.
-> - Full 130-bit on-chain soundness (n=20) requires ~300M gas per group — exceeds mainnet block limit; solution deferred to MVP-4 (recursive batching or PoW nonce verification on-chain).
-> - Hash AIR upgraded to Poseidon2-over-M31; full RPO256 hash AIR is MVP-4
+> - On-chain verifier (VFRI8) uses Poseidon2 for Merkle + Fiat-Shamir. 20 queries ≤ 15M gas on mainnet.
+> - **Last-layer FRI check is not implemented in VFRI7/VFRI8** (VFRI9 TODO): protocol soundness is incomplete without verifying that the final FRI layer is a low-degree polynomial. Practical risk with 20 queries is negligible but the protocol is technically incomplete.
+> - Poseidon2Channel uses t=2/M31 (62-bit sponge state) — shared Stwo 2.2.0 design; permutation security = 128-bit; sponge collision bound = 31-bit. Recommended t=4 for production.
+> - No authentication on `/batch/run` and `/batch/flush` endpoints (compute DoS risk).
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
 
@@ -59,7 +60,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**MVP-5 complete** (2026-05-25). **V23 dual-VFRI7 production pipeline with cross-proof binding** — 8-component STARK + O(1)-gas on-chain verification + security audit (2026-05-30).
+**VFRI8 Phase 1 complete** (2026-06-10). Poseidon2 trace commitment — 20 queries verified in ≤ 15M gas on Ethereum mainnet. Full security + code audit (21 findings, 18 fixed).
 
 | Component | Status |
 |-----------|--------|
@@ -67,36 +68,19 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark_stwo/src/mldsa/` — Pure Rust ML-DSA-65 verifier (FIPS 204) | ✅ Done |
 | `stark_stwo/` — Stwo Circle STARK prover (Rust), 130-bit FRI security | ✅ Done |
 | ML-DSA arithmetic AIR circuits (8 components → 1 STARK, **V23**) | ✅ Done |
-| `stark/` — Python prover/verifier wrappers V4–V23, witness pipeline, dual-VFRI7 hint generators | ✅ Done |
-| `contracts/` — BatchRegistry(V2/V3/**V4**), QLSAVerifier(V4–V13/VFRI/VFRI2/VFRI3/**VFRI4/VFRI5/VFRI6/VFRI7**), CM31/QM31/MerkleVerifier | ✅ Done |
+| `stark/` — Python prover/verifier wrappers V4–V23 + VFRI7/VFRI8 hint generators | ✅ Done |
+| `contracts/` — BatchRegistry(V2–**V5**), QLSAVerifier(V4–VFRI8), Poseidon2Channel/Merkle | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** (non-ignored) + **~354 Python** (no PyO3) / **487** (with PyO3) + **~71 TS** + **847 Hardhat** | ✅ Done |
-| `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus) + JS SDK | ✅ Done |
+| Tests — **210 Rust** + **336 Python** (no PyO3) / **528** (with PyO3) + **~71 TS** + **847 Hardhat** | ✅ Done |
+| `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus + VFRI8 fields) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
-| **V22** — All 7 ML-DSA circuits in 1 STARK + Merkle root Fiat-Shamir binding | ✅ Done |
-| **V23** — V22 + RangeQBatch (288 cols) — az_hat ∈ [0,Q) closes AzFull soundness gap | ✅ Done |
-| **QLSAVerifierVFRI2** — K-round FRI + constant last-layer check (on-chain FRI complete) | ✅ Done |
-| **QLSAVerifierVFRI3** — Non-constant last-layer polynomial check (MVP-4 bounded-degree) | ✅ Done |
-| **QLSAVerifierVFRI4** — VFRI3 + Poseidon2 OODS sponge (O(1) channel for any column count) | ✅ Done |
-| **QLSAVerifierVFRI5** — VFRI4 + composition polynomial Merkle tree (eliminates per-query O(n_cols)) | ✅ Done |
-| **QLSAVerifierVFRI6** — VFRI5 + off-chain OODS combo (O(1) gas for 1298 and 2206 cols alike) | ✅ Done |
-| **BatchRegistryV4** — Dual-VFRI7 registry requiring both LOG=10 + LOG=8 cross-bound proofs | ✅ Done |
-| **Full V23 dual-VFRI6 E2E** — Both trace groups (3504 cols) verified ≤ 15M gas each; 12.5 KB calldata | ✅ Done |
-| **Security hardening** — MAX_SENDERS cap, y=0 circle-fold guard, .gitignore fixes, history eviction | ✅ Done (2026-05-22) |
-| **QLSAVerifierVFRI7** — VFRI6 + `mixRoot(merkleRoot)` before `drawQueries` (cross-proof binding) | ✅ Done (MVP-5, 2026-05-25) |
-| **BatchRegistryV4 cross-bound** — `boundRoot = keccak256(batchRoot ‖ traceRootOther)` passed to VFRI7 | ✅ Done (2026-05-25) |
-| **Full aggregator + SDK VFRI7 wiring** — Batcher, HTTP API, Python SDK, TypeScript SDK | ✅ Done (2026-05-25) |
-| **Security audit (2026-05-25)** — input validation hardening, dead code fix, defensive Solidity checks | ✅ Done (2026-05-25) |
-| **Security audit (2026-05-30 round-1)** — TRUSTED_PROXIES env config, amount≥1 validation, dead code removal, GET /batch/{id}, fri_security_bits SDK field, exception safety in submit.py | ✅ Done (2026-05-30) |
-| **Security + code audit (2026-05-30 round-2)** — IP validation, hex normalization, GET rate limiting, UUID batch_id validation, pubkey size check, deque history, O(1) batch index, N_FRI_QUERIES env guard | ✅ Done (2026-05-30) |
-| **SDK + API audit (2026-06-03)** — `GET /node/config` endpoint + NodeConfig model (Python + TS), `prove_witnesses` param in HttpClient/TS SDK, Docker env var documentation (`N_FRI_QUERIES`, `TRUSTED_PROXIES`), DI-based HttpClient testing | ✅ Done (2026-06-03) |
-| **SDK enhancements (2026-06-03)** — `get_witness_status()` in LocalClient + HttpClient (mirrors TS SDK), `LocalClient.health()` API parity, `TransactionBuilder` auto-nonce counter (`start_nonce`, `next_nonce`), `getWitnessStatus` TS tests | ✅ Done (2026-06-03) |
-| **Code audit (2026-06-03)** — `HttpClient._decode_json()` guards all 7 JSON call-sites against proxy HTML responses (JSONDecodeError → RuntimeError with preview); `testnet/e2e.py` sender_key no longer redundantly recomputes SHA3-256 | ✅ Done (2026-06-03) |
-| **SDK enhancements (2026-06-04)** — `Wallet.is_wiped` + ValueError after wipe; `TransactionBuilder.reset_nonce(n=0)`; `HttpClient.wait_for_batch()` / `AggregatorClient.waitForBatch()` polling helpers; `GET /batches` + `history(limit)` list endpoint (newest-first, 1–200) | ✅ Done (2026-06-04) |
-| **Transaction tracking (2026-06-04)** — `GET /transaction/{tx_hash}` (pending/batched/404); `TransactionStatus` in Python + TS SDK; `tx_hash` field in submit responses; O(1) Mempool hash set + AggregatorNode tx-to-batch index | ✅ Done (2026-06-04) |
-| **Mempool visibility (2026-06-05)** — `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` in Python + TS; fix `LocalClient.get_batch()` O(n)→O(1) | ✅ Done (2026-06-05) |
-| **Deduplication + quality (2026-06-05)** — `DuplicateTxError` prevents duplicate tx_hashes in mempool; mypy clean; `aggregator/__main__.py` (`python -m aggregator`); `sdk/python/qlsa/py.typed` PEP 561 marker | ✅ Done (2026-06-05) |
-| **CI fix (2026-06-06)** — bandit B104 false positive suppressed in `aggregator/__main__.py` (`# nosec B104` on intentional `0.0.0.0` bind, runtime-configurable via `--host`/`HOST`); Python 3.10/3.12 CI now green | ✅ Done (2026-06-06) |
+| **V23** — 8-component STARK, RangeQBatch, az_hat ∈ [0,Q) — closes AzFull soundness gap | ✅ Done |
+| **QLSAVerifierVFRI7** — VFRI6 + `mixRoot(merkleRoot)` + cross-proof binding | ✅ Done (2026-05-25) |
+| **BatchRegistryV4** — Dual-VFRI7: `boundRoot = keccak256(batchRoot ‖ traceRootOther)` | ✅ Done (2026-05-25) |
+| **QLSAVerifierVFRI8** — VFRI7 + Poseidon2 Merkle + Poseidon2Channel; ≤ 15M gas for 20 queries | ✅ Done (2026-06-10) |
+| **BatchRegistryV5** — Dual-VFRI8 registry; proof length guards; cross-proof binding identical to V4 | ✅ Done (2026-06-10) |
+| **Full V23 dual-VFRI8 E2E** — Both trace groups (3504 cols) verified on-chain via fixture | ✅ Done (2026-06-10) |
+| **Security + code audit (2026-06-10)** — 21 findings, 18 fixed: dead code removal, proof length guards, rate limiting `/stats`/`/node/config`, `_sender_txs` memory leak, VFRI8 `witness_commitment` fallback, `_verifyOODS` no-mutation refactor, `num_folds_log8` silent-drop fix | ✅ Done (2026-06-10) |
 
 ---
 

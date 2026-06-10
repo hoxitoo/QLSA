@@ -169,6 +169,13 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 200 reads per minute"},
                 )
+        elif method == "GET" and path in ("/stats", "/node/config"):
+            if not _check_rate(_read_windows, ip, _READ_LIMIT):
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "60"},
+                    content={"detail": "rate limit exceeded: max 200 reads per minute"},
+                )
 
         return await call_next(request)
 

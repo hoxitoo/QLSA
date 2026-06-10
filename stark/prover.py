@@ -73,37 +73,6 @@ def _txs_to_leaves(batch: Batch) -> list[int]:
     return [int.from_bytes(root[i : i + 8], "little") for i in range(0, 64, 8)]
 
 
-def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofResult:
-    _require_ext("prove_p2")
-    try:
-        proof_bytes, commitment, log_size = _ext.prove_p2(leaves, merkle_root)
-    except Exception as exc:
-        raise RuntimeError(f"qlsa-stark-stwo prove_p2 failed: {exc}") from exc
-
-    if len(commitment) != 32:
-        raise RuntimeError(
-            f"qlsa-stark-stwo prove_p2 returned unexpected commitment length "
-            f"({len(commitment)} chars, expected 32)"
-        )
-    if len(proof_bytes) < 32:
-        raise RuntimeError(
-            f"qlsa-stark-stwo prove_p2 returned proof shorter than 32 bytes "
-            f"({len(proof_bytes)} bytes) — cannot compute on-chain commitment"
-        )
-
-    binding_input = proof_bytes[:32]
-    if merkle_root is not None:
-        binding_input = binding_input + merkle_root[:32]
-    onchain_commitment = hashlib.blake2s(binding_input).digest()[:16].hex()
-
-    return ProofResult(
-        proof=proof_bytes,
-        commitment=commitment,
-        log_size=log_size,
-        onchain_commitment=onchain_commitment,
-    )
-
-
 # ─── Poseidon2 hash-chain STARK (MVP-3+) ─────────────────────────────────────
 
 @dataclass
@@ -125,6 +94,11 @@ def _call_prover_p2(
     except Exception as exc:
         raise RuntimeError(f"qlsa-stark-stwo prove_p2 failed: {exc}") from exc
 
+    if len(commitment) != 32:
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove_p2 returned unexpected commitment length "
+            f"({len(commitment)} chars, expected 32)"
+        )
     if len(proof_bytes) < 32:
         raise RuntimeError(
             f"qlsa-stark-stwo prove_p2 returned proof shorter than 32 bytes "
@@ -2237,9 +2211,9 @@ def gen_mldsa_v23_vfri7_cross_bound_hints(
             f"num_folds_log10={num_folds_log10} and num_folds_log8={num_folds_log8} differ; "
             "the Rust bridge uses the same fold count for both groups — pass only num_folds_log10."
         )
-    # The Rust bridge gen_mldsa_v23_vfri7_cross_bound_hints_py uses one fold
-    # count for both LOG groups. num_folds_log8 is accepted for API symmetry.
-    num_folds = num_folds_log10
+    # The Rust bridge uses one fold count for both LOG groups.
+    # num_folds_log8 is accepted for API symmetry; use it when log10 is unset.
+    num_folds = num_folds_log10 if num_folds_log10 is not None else num_folds_log8
     try:
         (proof10, commit10, hints10,
          proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri7_cross_bound_hints_py(
@@ -2482,7 +2456,7 @@ def gen_mldsa_v23_vfri8_cross_bound_hints(
             f"num_folds_log10={num_folds_log10} and num_folds_log8={num_folds_log8} differ; "
             "the Rust bridge uses the same fold count for both groups."
         )
-    num_folds = num_folds_log10
+    num_folds = num_folds_log10 if num_folds_log10 is not None else num_folds_log8
     try:
         (proof10, commit10, hints10,
          proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri8_cross_bound_hints_py(

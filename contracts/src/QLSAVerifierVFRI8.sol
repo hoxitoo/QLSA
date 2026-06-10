@@ -222,8 +222,9 @@ contract QLSAVerifierVFRI8 is IQLSAVerifierV4 {
             )) return false;
         }
 
-        if (!_verifyOODS(h, ctx)) return false;
-        if (!_checkCircleFold(h, ctx.friAlpha)) return false;
+        (bool oodsOk, uint128 fPlus, uint128 fMinus) = _verifyOODS(h, ctx);
+        if (!oodsOk) return false;
+        if (!_checkCircleFold(fPlus, fMinus, h, ctx.friAlpha)) return false;
 
         if (!Poseidon2MerkleVerifier.verifyMem(
             ctx.friLayerRoots[0],
@@ -237,29 +238,26 @@ contract QLSAVerifierVFRI8 is IQLSAVerifierV4 {
     function _verifyOODS(
         QueryHints memory h,
         VerifyCtx memory ctx
-    ) internal pure returns (bool) {
+    ) internal pure returns (bool ok, uint128 fPlus, uint128 fMinus) {
         uint128 pxQM31   = QM31.fromM31(h.queryPointX);
         uint128 denomPos = QM31.sub(pxQM31, ctx.z_x);
         uint128 denomNeg = QM31.sub(QM31.neg(pxQM31), ctx.z_x);
 
-        if (denomPos == uint128(0)) return false;
-        if (denomNeg == uint128(0)) return false;
+        if (denomPos == uint128(0)) return (false, 0, 0);
+        if (denomNeg == uint128(0)) return (false, 0, 0);
 
         uint128 numerPos = QM31.sub(h.compValue,    ctx.oodsComboPos);
         uint128 numerNeg = QM31.sub(h.compValueNeg, ctx.oodsComboNeg);
 
-        uint128 fPlus  = QM31.mul(numerPos, QM31.inv(denomPos));
-        uint128 fMinus = QM31.mul(numerNeg, QM31.inv(denomNeg));
+        fPlus  = QM31.mul(numerPos, QM31.inv(denomPos));
+        fMinus = QM31.mul(numerNeg, QM31.inv(denomNeg));
 
-        if (QM31.mul(fPlus,  denomPos) != numerPos) return false;
-        if (QM31.mul(fMinus, denomNeg) != numerNeg) return false;
-
-        h.compValue    = fPlus;
-        h.compValueNeg = fMinus;
-        return true;
+        return (true, fPlus, fMinus);
     }
 
     function _checkCircleFold(
+        uint128 fPlus,
+        uint128 fMinus,
         QueryHints memory h,
         uint128 friAlpha
     ) internal pure returns (bool) {
@@ -271,10 +269,7 @@ contract QLSAVerifierVFRI8 is IQLSAVerifierV4 {
         (uint256 cx, uint256 cy) = CirclePoint.cosetAt(h.treeDepth, h.queryIndex);
         if (cx != h.queryPointX || cy != h.queryPointY) return false;
 
-        uint256 yInv   = M31.inv(h.queryPointY);
-        uint128 fPlus  = h.compValue;
-        uint128 fMinus = h.compValueNeg;
-
+        uint256 yInv = M31.inv(h.queryPointY);
         return CirclePoint.circleFold(fPlus, fMinus, friAlpha, yInv) == h.foldedValue;
     }
 
