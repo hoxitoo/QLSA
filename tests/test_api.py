@@ -312,6 +312,53 @@ class TestBatchRun:
         assert "vfri7_commitment_log8" in data
 
 
+# ── Bearer-token auth on POST /batch/* ───────────────────────────────────────
+
+class TestBatchAuth:
+    def test_open_when_token_unset(self, client, monkeypatch):
+        monkeypatch.delenv("QLSA_API_TOKEN", raising=False)
+        resp = client.post("/batch/flush")
+        assert resp.status_code == 200
+
+    def test_missing_header_returns_401(self, client, monkeypatch):
+        monkeypatch.setenv("QLSA_API_TOKEN", "s3cret")
+        resp = client.post("/batch/flush")
+        assert resp.status_code == 401
+        assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_wrong_token_returns_403(self, client, monkeypatch):
+        monkeypatch.setenv("QLSA_API_TOKEN", "s3cret")
+        resp = client.post(
+            "/batch/flush", headers={"Authorization": "Bearer wrong"}
+        )
+        assert resp.status_code == 403
+
+    def test_non_bearer_scheme_returns_401(self, client, monkeypatch):
+        monkeypatch.setenv("QLSA_API_TOKEN", "s3cret")
+        resp = client.post(
+            "/batch/flush", headers={"Authorization": "Basic s3cret"}
+        )
+        assert resp.status_code == 401
+
+    def test_correct_token_allows_request(self, client, monkeypatch):
+        monkeypatch.setenv("QLSA_API_TOKEN", "s3cret")
+        resp = client.post(
+            "/batch/flush", headers={"Authorization": "Bearer s3cret"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "empty"
+
+    def test_batch_run_also_protected(self, client, monkeypatch):
+        monkeypatch.setenv("QLSA_API_TOKEN", "s3cret")
+        resp = client.post("/batch/run")
+        assert resp.status_code == 401
+
+    def test_transactions_not_affected_by_token(self, client, signed_payload, monkeypatch):
+        monkeypatch.setenv("QLSA_API_TOKEN", "s3cret")
+        resp = client.post("/transactions", json=signed_payload)
+        assert resp.status_code == 200
+
+
 # ── POST /batch/flush ─────────────────────────────────────────────────────────
 
 class TestBatchFlush:

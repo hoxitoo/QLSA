@@ -312,6 +312,117 @@ class TestBatcher:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Prover failure recovery (liveness)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestProverFailureRecovery:
+    def test_prepend_batch_returns_dropped_and_keeps_oldest(self):
+        mp = Mempool(max_size=2)
+        txs, privs = _signed_txs(3)
+        dropped = mp.prepend_batch(txs)
+        _wipe(privs)
+        # Oldest (FIFO-first) transactions are kept; newest overflow is dropped.
+        assert dropped == [txs[2]]
+        assert mp.peek(2) == [txs[0], txs[1]]
+        assert mp.dropped_count == 1
+
+    def test_prepend_batch_all_fit_returns_empty(self):
+        mp = Mempool(max_size=10)
+        txs, privs = _signed_txs(3)
+        dropped = mp.prepend_batch(txs)
+        _wipe(privs)
+        assert dropped == []
+        assert mp.size() == 3
+        assert mp.dropped_count == 0
+
+    def test_prover_crash_returns_txs_to_mempool(self, monkeypatch: pytest.MonkeyPatch):
+        import stark.prover as prover_mod
+
+        def _boom(batch):
+            raise RuntimeError("simulated prover crash")
+
+        monkeypatch.setattr(prover_mod, "prove_batch_poseidon2", _boom)
+        mp = Mempool()
+        txs, privs = _signed_txs(2)
+        for tx in txs:
+            mp.add(tx)
+        batcher = Batcher(mp)
+        result = batcher.try_batch()
+        _wipe(privs)
+        # Transient crash: no batch emitted, transactions back in the mempool.
+        assert result is None
+        assert mp.size() == 2
+
+    def test_prover_crash_gives_up_after_max_retries(self, monkeypatch: pytest.MonkeyPatch):
+        import stark.prover as prover_mod
+
+        def _boom(batch):
+            raise RuntimeError("simulated prover crash")
+
+        monkeypatch.setattr(prover_mod, "prove_batch_poseidon2", _boom)
+        mp = Mempool()
+        txs, privs = _signed_txs(2)
+        for tx in txs:
+            mp.add(tx)
+        batcher = Batcher(mp)
+        for _ in range(Batcher.MAX_PROOF_RETRIES):
+            assert batcher.try_batch() is None
+            assert mp.size() == 2  # returned each time
+        # Retry budget exhausted → unproven batch is emitted to preserve liveness.
+        result = batcher.try_batch()
+        _wipe(privs)
+        assert result is not None
+        assert result.is_proven is False
+        assert len(result.batch.transactions) == 2
+        assert mp.size() == 0
+
+    def test_prover_unavailable_emits_unproven_batch(self, monkeypatch: pytest.MonkeyPatch):
+        import stark.prover as prover_mod
+
+        def _missing(batch):
+            raise prover_mod.ProverUnavailableError("extension not installed")
+
+        monkeypatch.setattr(prover_mod, "prove_batch_poseidon2", _missing)
+        mp = Mempool()
+        txs, privs = _signed_txs(2)
+        for tx in txs:
+            mp.add(tx)
+        result = Batcher(mp).try_batch()
+        _wipe(privs)
+        # Documented degraded mode: batch emitted unproven, no retry loop.
+        assert result is not None
+        assert result.is_proven is False
+        assert mp.size() == 0
+
+    def test_successful_proof_clears_retry_budget(self, monkeypatch: pytest.MonkeyPatch):
+        import stark.prover as prover_mod
+
+        calls = {"n": 0}
+
+        def _flaky(batch):
+            calls["n"] += 1
+            raise RuntimeError("simulated prover crash")
+
+        monkeypatch.setattr(prover_mod, "prove_batch_poseidon2", _flaky)
+        mp = Mempool()
+        txs, privs = _signed_txs(2)
+        for tx in txs:
+            mp.add(tx)
+        batcher = Batcher(mp)
+        assert batcher.try_batch() is None  # one failed attempt recorded
+        # Prover recovers before the budget is exhausted.
+        monkeypatch.setattr(
+            prover_mod, "prove_batch_poseidon2",
+            lambda batch: (_ for _ in ()).throw(prover_mod.ProverUnavailableError("ext")),
+        )
+        result = batcher.try_batch()
+        _wipe(privs)
+        assert result is not None
+        # Retry map cleaned up after the batch is emitted.
+        assert batcher._proof_retries == {}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # AggregatorNode tests
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -322,6 +433,10 @@ class TestAggregatorNode:
         node.submit(tx)
         wipe_key(priv)
         assert node.pending_count() == 1
+
+    def test_mempool_capacity_below_min_batch_size_raises(self):
+        with pytest.raises(ValueError, match="mempool_capacity"):
+            AggregatorNode(min_batch_size=10, mempool_capacity=5)
 
     def test_run_cycle_returns_none_when_below_min(self):
         node = AggregatorNode(min_batch_size=5)

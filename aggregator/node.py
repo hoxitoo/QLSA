@@ -65,6 +65,13 @@ class AggregatorNode:
                 raise ValueError(
                     f"N_FRI_QUERIES must be in [1, 64], got {n_fri_queries}"
                 )
+        # A mempool smaller than min_batch_size can never satisfy try_batch —
+        # the node would silently produce no batches forever.
+        if mempool_capacity < min_batch_size:
+            raise ValueError(
+                f"mempool_capacity ({mempool_capacity}) must be >= "
+                f"min_batch_size ({min_batch_size})"
+            )
         self.mempool = Mempool(max_size=mempool_capacity)
         self.batcher = Batcher(
             self.mempool,

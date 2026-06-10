@@ -65,6 +65,31 @@ library Poseidon2Channel {
         s.nDraws = 0;
     }
 
+    /// @notice Absorb a WIDE Poseidon2 node root (62-bit content) as two
+    ///         big-endian u32 words: bytes[24..28] (s0) then bytes[28..32] (s1).
+    ///
+    /// Used by VFRI9 for compRoot / friLayerRoots, whose nodes are produced by
+    /// Poseidon2MerkleVerifierW.  Matches P2Channel::mix_root_w in
+    /// vfri2_bridge.rs.
+    function mixRootW(State memory s, bytes32 root) internal pure {
+        _absorb(s, uint32(uint256(root) >> 32));
+        _absorb(s, uint32(uint256(root)));
+        s.nDraws = 0;
+    }
+
+    /// @notice Absorb ALL 32 bytes of a root as 8 big-endian u32 words.
+    ///
+    /// VFRI8's mixRoot only absorbed the low 4 bytes, binding just 31 bits of
+    /// full-width roots (embedded Stwo trace root, batch merkle root) into the
+    /// Fiat-Shamir transcript.  VFRI9 uses this for complete 256-bit binding.
+    /// Matches P2Channel::mix_root_full in vfri2_bridge.rs.
+    function mixRootFull(State memory s, bytes32 root) internal pure {
+        for (uint256 i = 0; i < 8; i++) {
+            _absorb(s, uint32(uint256(root) >> (224 - 32 * i)));
+        }
+        s.nDraws = 0;
+    }
+
     // ── Squeeze operations ────────────────────────────────────────────────────
 
     /// @notice Squeeze one QM31 secure-field element.

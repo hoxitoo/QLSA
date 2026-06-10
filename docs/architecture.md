@@ -1,5 +1,11 @@
 # QLSA — Architecture
 
+> ⚠️ **STALE SNAPSHOT (pre-MVP-4).** This document describes an earlier
+> architecture iteration (QLSAVerifierV3, FRI blowup ×4). The current
+> production state is documented in `context.md` and `README.md`:
+> V23 STARK pipeline, QLSAVerifierVFRI9, BatchRegistryV5, blowup ×64 /
+> 130-bit soundness. Kept for historical reference only.
+
 ## Problem
 
 Post-quantum signatures (ML-DSA-65, FIPS 204) are ~35× larger than ECDSA.

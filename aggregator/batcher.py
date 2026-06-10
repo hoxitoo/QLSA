@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,13 @@ class BatchResult:
 class Batcher:
     """Creates batches from a Mempool and optionally generates STARK proofs."""
 
+    # When the prover fails unexpectedly (not "extension missing"), the batch's
+    # transactions are returned to the mempool and proving is retried on the
+    # next cycle, up to this many times per batch (keyed by Merkle root).
+    # After the budget is exhausted the batch is emitted unproven so that a
+    # persistently broken prover cannot stall the pipeline forever.
+    MAX_PROOF_RETRIES = 3
+
     def __init__(
         self,
         mempool: Mempool,
@@ -116,6 +124,8 @@ class Batcher:
         self.max_batch_size = max_batch_size
         self.algorithm = algorithm
         self.n_fri_queries = n_fri_queries
+        self._proof_retries: dict[bytes, int] = {}
+        self._retry_lock = threading.Lock()
         # Security level: log_blowup(6) × n_fri_queries + pow_bits(10)
         # n=1 → 16 bits (demo/testnet), n=3 → 28 bits, n=20 → 130 bits (but ~300M gas).
 
@@ -186,20 +196,59 @@ class Batcher:
             self.mempool.prepend_batch(valid_txs)
             return None
 
-        return self._try_prove(batch, prove_witnesses=prove_witnesses)
+        result, prover_crashed = self._try_prove(batch, prove_witnesses=prove_witnesses)
 
-    def _try_prove(self, batch: Batch, prove_witnesses: bool = False) -> BatchResult:
-        """Run the STARK prover; optionally add an ML-DSA witness proof for tx[0]."""
+        if prover_crashed:
+            # Transient prover failure (NOT "extension missing"): return the
+            # transactions to the mempool and retry on the next cycle, up to
+            # MAX_PROOF_RETRIES per batch.  After that, emit unproven to keep
+            # the pipeline live.
+            root = batch.merkle_root
+            with self._retry_lock:
+                # Bound the retry map — stale roots accumulate only on repeated
+                # failures with changing batch composition.
+                if len(self._proof_retries) > 256:
+                    self._proof_retries.clear()
+                attempts = self._proof_retries.get(root, 0) + 1
+                self._proof_retries[root] = attempts
+            if attempts <= self.MAX_PROOF_RETRIES:
+                logger.warning(
+                    "batcher: prover failed (attempt %d/%d) — returning %d tx(s) "
+                    "to mempool for retry",
+                    attempts, self.MAX_PROOF_RETRIES, len(valid_txs),
+                )
+                self.mempool.prepend_batch(valid_txs)
+                return None
+            logger.error(
+                "batcher: prover failed %d times for batch %s — emitting unproven batch",
+                attempts, batch.batch_id[:8],
+            )
+
+        with self._retry_lock:
+            self._proof_retries.pop(batch.merkle_root, None)
+        return result
+
+    def _try_prove(
+        self, batch: Batch, prove_witnesses: bool = False
+    ) -> tuple[BatchResult, bool]:
+        """Run the STARK prover; optionally add an ML-DSA witness proof for tx[0].
+
+        Returns (result, prover_crashed).  prover_crashed is True only when the
+        prover raised unexpectedly — not when the PyO3 extension is missing,
+        which is the documented unproven degraded mode.
+        """
         result = BatchResult(batch=batch)
+        prover_crashed = False
         try:
-            from stark.prover import prove_batch_poseidon2 as prove_batch
+            from stark.prover import ProverUnavailableError, prove_batch_poseidon2 as prove_batch
             pr = prove_batch(batch)
             result.proof = pr.proof
             result.commitment = pr.commitment
-        except RuntimeError as exc:
+        except ProverUnavailableError as exc:
             logger.warning("STARK proving skipped: %s", exc)
         except Exception as exc:
             logger.error("Unexpected error during STARK proving: %s", exc, exc_info=True)
+            prover_crashed = True
 
         if prove_witnesses and batch.transactions:
             tx0 = batch.transactions[0]
@@ -252,4 +301,4 @@ class Batcher:
                 except Exception as exc:
                     logger.error("Unexpected error during VFRI8 proving: %s", exc, exc_info=True)
 
-        return result
+        return result, prover_crashed
