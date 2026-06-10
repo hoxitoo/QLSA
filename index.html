@@ -233,7 +233,7 @@
     <section class="hero">
       <div class="container hero-grid">
         <div>
-          <div class="eyebrow">Testnet live · MVP-5 VFRI7 complete · cross-proof binding · code audit 2026-06-03</div>
+          <div class="eyebrow">Testnet live · VFRI8 Phase 1 complete · Poseidon2 trace commitment · ≤15M gas · security audit 2026-06-10</div>
           <h1>Build the post-quantum migration layer before it becomes urgent</h1>
           <p class="sub">
             QLSA aggregates thousands of post-quantum signatures into a single constant-size proof,
@@ -250,8 +250,8 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>CI</small><strong>847 Solidity + 239 Python + 210 Rust + 39 TS — all green</strong></div>
-            <div class="signal-card"><small>Status</small><strong>Phase 6 ✓ · MVP-4 VFRI6 ✓ · MVP-5 VFRI7 ✓ · code audit 2026-06-03</strong></div>
+            <div class="signal-card"><small>CI</small><strong>847 Solidity + 528 Python + 210 Rust + 71 TS — all green</strong></div>
+            <div class="signal-card"><small>Status</small><strong>Phase 6 ✓ · VFRI7 ✓ · VFRI8 ✓ · security &amp; code audit 2026-06-10</strong></div>
           </div>
         </div>
 
@@ -286,14 +286,16 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). <strong>V23 production pipeline</strong>: 8 ML-DSA circuits in 1 STARK proof (3,505 trace columns). <strong>MVP-4 complete (2026-05-22)</strong>: QLSAVerifierVFRI6 — O(1)-gas on-chain FRI verifier. <strong>MVP-5 complete (2026-05-30)</strong>: QLSAVerifierVFRI7 + BatchRegistryV4 dual-VFRI7 — cross-proof binding (<code>keccak256(batchRoot ‖ traceRoot)</code>) prevents proof-mixing attacks. <strong>Code audit (2026-06-03)</strong>: <code>HttpClient._decode_json()</code> guards all JSON call-sites; <code>e2e.py</code> sender_key recomputation fix. 847 Solidity + 239 Python + 210 Rust + 39 TS tests — all CI green.</p>
+            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). <strong>V23 production pipeline</strong>: 8 ML-DSA circuits in 1 STARK proof (3,505 trace columns). <strong>MVP-4 complete (2026-05-22)</strong>: QLSAVerifierVFRI6 — O(1)-gas on-chain FRI verifier. <strong>MVP-5 complete (2026-05-30)</strong>: QLSAVerifierVFRI7 + BatchRegistryV4 dual-VFRI7 — cross-proof binding (<code>keccak256(batchRoot ‖ traceRoot)</code>) prevents proof-mixing attacks. <strong>VFRI8 Phase 1 complete (2026-06-10)</strong>: QLSAVerifierVFRI8 — Poseidon2 Merkle trees + Poseidon2 Fiat-Shamir channel — 20-query on-chain FRI verification ≤15M gas on Ethereum mainnet. BatchRegistryV5 dual-VFRI8. <strong>Security &amp; code audit (2026-06-10)</strong>: 7 fixes across 5 files; 3 crypto findings, 4 systems findings. 847 Solidity + 528 Python + 210 Rust + 71 TS tests — all CI green.</p>
           </div>
         </div>
         <div class="progress-grid">
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Security &amp; code audit (2026-06-10)</strong><span>7 fixes: VFRI8 OODS division-by-zero guard, num_folds cross-bound param (C2), short-proof calldataload guard in BatchRegistryV4/V5 (C3), API rate limit on /stats+/config (H2), VFRI8 witness_commitment fallback (H5), _sender_txs eviction sync (M6), dead _call_prover function removed (C1). 528 Python + 210 Rust + 71 TS tests green.</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>VFRI8 Phase 1 — Poseidon2 trace commitment (2026-06-10)</strong><span>QLSAVerifierVFRI8: Poseidon2 Merkle trees + Poseidon2 Fiat-Shamir channel (Poseidon2Channel.sol, Poseidon2MerkleVerifier.sol). 20-query on-chain FRI verification ≤15M gas: 20 × 2 paths × depth=10 × ~1000 gas/permute ≈ 400K gas (Merkle) + ~5M (rest). BatchRegistryV5 dual-VFRI8 with identical cross-proof binding.</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Code audit (2026-06-03)</strong><span><code>HttpClient._decode_json()</code> guards all 7 JSON call-sites — proxy HTML responses (nginx 2xx) no longer crash the SDK. <code>testnet/e2e.py</code> sender_key recomputation eliminated; unused <code>import hashlib</code> removed. 239 Python tests green.</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Cryptographic core</strong><span>ML-DSA-65/44/87, SHA3-512 Merkle, address derivation, pubkey validation, batch aggregation</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>STARK prover (Stwo 2.2.0) — V23</strong><span>Circle STARK, Poseidon2-over-M31 AIR, 8 ML-DSA circuits in 1 FRI commitment (3,505 trace columns): NttBatch + AzFull + Ct1Full + InttBatch + WPrimeFull + NormCheck + UseHintV2 + <strong>RangeQBatch</strong> (az_hat ∈ [0,Q))</span></div></div>
-          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts — deployed Sepolia</strong><span>BatchRegistryV2/V3/V4 (nonce replay protection, MAX_SENDERS DoS cap), QLSAVerifierFull + VFRI7 (O(1)-gas FRI, cross-proof binding), 847 Solidity tests</span></div></div>
+          <div class="progress-item"><div class="progress-check">✓</div><div><strong>Smart contracts — deployed Sepolia</strong><span>BatchRegistryV2/V3/V4/V5 (nonce replay protection, MAX_SENDERS DoS cap), QLSAVerifierFull + VFRI7 + VFRI8 (O(1)-gas FRI, cross-proof binding, Poseidon2 Merkle), 847 Solidity tests</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Aggregator node + API</strong><span>Thread-safe mempool (atomic drain), auto-batcher, FastAPI REST, rate limiting (100 tx/min per IP, proxy-aware), pk/sig length validation</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>SDKs (Python + TypeScript)</strong><span>Wallet, LocalClient + HttpClient, WitnessStatus, TypeScript AggregatorClient — mypy strict</span></div></div>
           <div class="progress-item"><div class="progress-check">✓</div><div><strong>Testnet E2E (Sepolia, 2026-05-05)</strong><span>First batch: 4 tx, 3234-byte proof, 9.16 s finalization. submitBatchWithNonces on-chain.</span></div></div>
@@ -425,7 +427,7 @@
                 <li>Verify proof in Solidity verifier contract</li>
                 <li>Store <code>merkle_root</code> and finalize the batch</li>
                 <li><code>onchain_commitment = Blake2s(proof[:32] ∥ c_tilde[:32])[:16]</code> — 128-bit binding</li>
-                <li>MVP-4: on-chain FRI fold + Merkle query (QLSAVerifierV4) with full Blake2s, CM31/QM31, TwoChannel, CirclePoint libraries</li>
+                <li>MVP-6: VFRI8 — Poseidon2 Merkle + Fiat-Shamir channel; 20-query verification ≤15M gas. Both LOG=10 and LOG=8 trace groups verified on-chain with 130-bit soundness.</li>
               </ul>
             </div>
           </div>
@@ -451,6 +453,7 @@
               <tr><td>MVP-3+</td><td>All 8 circuits inside AIR + RangeQBatch (V23)</td><td class="good">Yes (V23)</td><td class="good">✓ Complete</td></tr>
               <tr><td>MVP-4</td><td>VFRI4/5/6 — O(1)-gas on-chain FRI verifier; BatchRegistryV4</td><td class="good">Yes</td><td class="good">✓ Done (2026-05-22)</td></tr>
               <tr><td>MVP-5</td><td>VFRI7 cross-proof binding; security audit round 2; code quality hardening</td><td class="good">Yes</td><td class="good">✓ Done (2026-05-30)</td></tr>
+              <tr><td>MVP-6</td><td>VFRI8: Poseidon2 Merkle + channel; 20-query ≤15M gas; BatchRegistryV5; security &amp; code audit</td><td class="good">Yes</td><td class="good">✓ Done (2026-06-10)</td></tr>
             </tbody>
           </table>
         </div>
@@ -498,9 +501,9 @@
             <ul>
               <li>Stwo 2.2.0 — Circle STARK over M31 field</li>
               <li>Poseidon2-over-M31 AIR (t=2, α=5, 8 full rounds, 7 columns, 6 constraints ≤ deg 3)</li>
-              <li>V22 single STARK: 7 ML-DSA circuits, 3,217 trace columns, 1 FRI commitment</li>
+              <li>V23 single STARK: 8 ML-DSA circuits, 3,505 trace columns, 1 FRI commitment</li>
               <li>ML-DSA-65 FIPS 204 verifier in Rust; c̃ + Merkle root Fiat-Shamir binding</li>
-              <li>FRI blowup ×4 — ~60-bit soundness margin; zeroize crate for secure key wipe</li>
+              <li>FRI blowup ×64, N_FRI_QUERIES=20, POW_BITS=10 — 130-bit soundness; zeroize crate for secure key wipe</li>
               <li>nightly-2025-07-01 Rust toolchain</li>
             </ul>
           </div>
@@ -508,8 +511,8 @@
             <h3>Contracts &amp; infra</h3>
             <ul>
               <li>Solidity + Hardhat 2.28</li>
-              <li><strong>MVP-4 verifier stack:</strong> CM31 · QM31 · Blake2s · MerkleVerifier · TwoChannel · CirclePoint · QLSAVerifierV4</li>
-              <li>BatchRegistryV2 — nonce-based replay protection (<code>submitBatchWithNonces</code>)</li>
+              <li><strong>VFRI8 verifier stack:</strong> CM31 · QM31 · Blake2s · Poseidon2M31 · Poseidon2MerkleVerifier · Poseidon2Channel · CirclePoint · QLSAVerifierVFRI8</li>
+              <li>BatchRegistryV5 — dual-VFRI8 with cross-proof binding</li>
               <li>FastAPI aggregator + rate limiting (proxy-aware, stale eviction)</li>
               <li>Python SDK (Wallet, LocalClient, WitnessStatus) + TypeScript SDK</li>
             </ul>
@@ -528,9 +531,11 @@
                 <tr><td>Merkle build N=3000</td><td class="good">7.1 ms</td></tr>
                 <tr><td>Full pipeline N=3000</td><td class="good">354 ms</td></tr>
                 <tr><td>V23 STARK columns</td><td class="good">3,505 (649+1523+295+649+24+15+61+288+1 preproc)</td></tr>
+                <tr><td>20-query VFRI8 gas</td><td class="good">≤15M gas (Poseidon2 Merkle ~10K gas/path vs ~800K for Blake2s)</td></tr>
                 <tr><td>Solidity tests</td><td class="good">847 passing</td></tr>
-                <tr><td>Python tests</td><td class="good">239 passing (no PyO3)</td></tr>
+                <tr><td>Python tests</td><td class="good">528 passing (with PyO3) / 336 without</td></tr>
                 <tr><td>Rust tests</td><td class="good">210 passing</td></tr>
+                <tr><td>TS tests</td><td class="good">71 passing</td></tr>
                 <tr><td>CI pipeline</td><td class="good">5 / 5 jobs green</td></tr>
               </tbody>
             </table>
@@ -549,13 +554,16 @@
 │       ├── CM31.sol       # GF((2³¹−1)[i])
 │       ├── QM31.sol       # quartic extension
 │       ├── Blake2s.sol    # pure-Solidity
+│       ├── Poseidon2M31.sol      # t=2 over M31
+│       ├── Poseidon2MerkleVerifier.sol
+│       ├── Poseidon2Channel.sol  # Fiat-Shamir
 │       ├── MerkleVerifier.sol
-│       ├── TwoChannel.sol # Fiat-Shamir
+│       ├── TwoChannel.sol # Fiat-Shamir (Blake2s)
 │       └── CirclePoint.sol # CanonicCoset + FRI fold
 ├── sdk/python/    # Wallet, LocalClient
 ├── sdk/js/        # TypeScript AggregatorClient
 ├── testnet/       # E2E demo, deploy, submit
-└── tests/         # 847 Sol + 239 Py + 210 Rust</pre>
+└── tests/         # 847 Sol + 528 Py + 210 Rust + 71 TS</pre>
             </div>
           </div>
         </div>
@@ -580,9 +588,10 @@
           <div class="phase"><div class="phase-top"><h3>Phase 4 — Aggregator Node</h3><span class="phase-tag complete">✓ Complete</span></div><p>In-memory mempool (thread-safe, atomic drain), auto-batcher with transaction recovery, FastAPI REST endpoint. Full STARK prove→submit pipeline via PyO3 native FFI.</p></div>
           <div class="phase"><div class="phase-top"><h3>Phase 5 — SDK</h3><span class="phase-tag complete">✓ Complete</span></div><p>Python SDK (wallet + async client) and TypeScript/JavaScript SDK with full input validation and typed API. <code>wipe_key()</code> backed by Rust zeroize crate (volatile writes) for secure key wipe.</p></div>
           <div class="phase"><div class="phase-top"><h3>Phase 6 — Testnet</h3><span class="phase-tag complete">✓ Complete</span></div><p>Live on Ethereum Sepolia (2026-05-05). QLSAVerifierBound: <code>0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd</code> · BatchRegistryV2: <code>0xF44A51CF1d7620e070ecaf611685418DE4679879</code>. First batch: tx <code>0x5a9215d2aeb4…bd82</code>, 3234 bytes, finalized in 9.16 s. Security hardening: nonce registry, rate limiting, pubkey validation.</p></div>
-          <div class="phase"><div class="phase-top"><h3>MVP-3+ — ML-DSA Native in AIR (V22)</h3><span class="phase-tag complete">✓ Complete</span></div><p>All 7 ML-DSA-65 arithmetic circuits unified in one FRI commitment (V22, 3,217 trace columns): NttBatch (LOG=10, 649 cols) + AzFull (LOG=8, 1523 cols) + Ct1Full (LOG=8, 295 cols) + InttBatch (LOG=10, 649 cols) + WPrimeFull (LOG=8, 24 cols) + NormCheckBatch (LOG=8, 15 cols) + UseHintBatchV2 (LOG=8, 61 cols + 1 preproc). Fiat-Shamir transcript: c̃ → merkle_root → Tree0 → Tree1.</p></div>
+          <div class="phase"><div class="phase-top"><h3>MVP-3+ — ML-DSA Native in AIR (V22/V23)</h3><span class="phase-tag complete">✓ Complete</span></div><p>All 8 ML-DSA-65 arithmetic circuits unified in one FRI commitment (V23, 3,505 trace columns): NttBatch (LOG=10, 649 cols) + AzFull (LOG=8, 1523 cols) + Ct1Full (LOG=8, 295 cols) + InttBatch (LOG=10, 649 cols) + WPrimeFull (LOG=8, 24 cols) + NormCheckBatch (LOG=8, 15 cols) + UseHintBatchV2 (LOG=8, 61 cols + 1 preproc) + <strong>RangeQBatch</strong> (LOG=8, 288 cols). Fiat-Shamir transcript: c̃ → merkle_root → Tree0 → Tree1. RangeQBatch closes AzFull multiplication soundness gap.</p></div>
           <div class="phase"><div class="phase-top"><h3>MVP-4 — Mainnet-grade On-chain Verifier</h3><span class="phase-tag complete">✓ Complete (2026-05-22)</span></div><p>Full on-chain Circle STARK FRI verifier (Solidity). Verifier library stack: <strong>CM31 · QM31 · Blake2sYul · MerkleVerifier · TwoChannel · CirclePoint · QLSAVerifierV4–V13 · VFRI–VFRI6</strong>. <code>QLSAVerifierVFRI6</code>: O(1)-gas off-chain OODS combo — 649, 1298 and 2206-column traces all verified within 15M gas. BatchRegistryV4: dual-VFRI6 registry.</p></div>
-          <div class="phase"><div class="phase-top"><h3>MVP-5 — Cross-Proof Binding &amp; Security Hardening</h3><span class="phase-tag complete">✓ Complete (2026-05-30)</span></div><p><code>QLSAVerifierVFRI7</code>: adds <code>mixRoot(merkleRoot)</code> before <code>drawQueries</code> — FRI query indices depend on the batch Merkle root, preventing proof-mixing attacks. <code>BatchRegistryV4</code> updated: <code>boundRoot10 = keccak256(batchRoot ‖ traceRoot8)</code> / <code>boundRoot8 = keccak256(batchRoot ‖ traceRoot10)</code> — cross-binding both LOG groups. Security audit round 2: 24 findings resolved — O(1) batch history (deque+dict), N_FRI_QUERIES validation, IP whitelist validation, ML-DSA pubkey size guard, UUID input validation, GET rate limiting, module loggers. Code audit 2026-06-03: <code>HttpClient._decode_json()</code> + <code>e2e.py</code> sender_key. 847 Solidity + 239 Python + 210 Rust + 39 TS tests — all CI green.</p></div>
+          <div class="phase"><div class="phase-top"><h3>MVP-5 — Cross-Proof Binding &amp; Security Hardening</h3><span class="phase-tag complete">✓ Complete (2026-05-30)</span></div><p><code>QLSAVerifierVFRI7</code>: adds <code>mixRoot(merkleRoot)</code> before <code>drawQueries</code> — FRI query indices depend on the batch Merkle root, preventing proof-mixing attacks. <code>BatchRegistryV4</code> updated: <code>boundRoot10 = keccak256(batchRoot ‖ traceRoot8)</code> / <code>boundRoot8 = keccak256(batchRoot ‖ traceRoot10)</code> — cross-binding both LOG groups. Security audit round 2: 24 findings resolved. Code audit 2026-06-03: <code>HttpClient._decode_json()</code> + <code>e2e.py</code> sender_key. 847 Solidity + 239 Python + 210 Rust + 39 TS tests — all CI green.</p></div>
+          <div class="phase"><div class="phase-top"><h3>MVP-6 — VFRI8: Poseidon2 Trace Commitment</h3><span class="phase-tag complete">✓ Complete (2026-06-10)</span></div><p><code>QLSAVerifierVFRI8</code>: replaces Blake2s Merkle trees and Fiat-Shamir channel with Poseidon2-over-M31 — 20-query on-chain FRI verification fits within 15M gas on Ethereum mainnet (vs ~300M gas with Blake2s). Gas breakdown: 20 queries × 2 paths × depth=10 × ~1000 gas/permute ≈ 400K gas (Merkle) + ~5M (rest) ≈ 5.4M total. <code>BatchRegistryV5</code>: dual-VFRI8 registry with identical cross-proof binding logic (<code>keccak256(batchRoot ‖ traceRoot)</code>). Commitment format unchanged: Blake2s(proof[:32] ∥ merkleRoot)[:16]. Security &amp; code audit 2026-06-10: 7 fixes — VFRI8 OODS division-by-zero guard, cross-bound num_folds param, BatchRegistryV4/V5 short-proof calldataload guard, API rate limit on /stats+/config, VFRI8 witness_commitment fallback, _sender_txs eviction sync. 847 Solidity + 528 Python + 210 Rust + 71 TS tests — all CI green.</p></div>
         </div>
       </div>
     </section>
@@ -602,8 +611,8 @@
           <div class="faq-item"><h3>Is QLSA a new signature algorithm?</h3><p>No. QLSA is an aggregation and verification architecture built around post-quantum signatures such as ML-DSA.</p></div>
           <div class="faq-item"><h3>Why not just replace ECDSA directly?</h3><p>Because the size increase of post-quantum signatures can cause major throughput and cost problems if deployed naively.</p></div>
           <div class="faq-item"><h3>Does QLSA already prove ML-DSA inside STARK?</h3><p>Yes — V23 is the production pipeline. All 8 ML-DSA-65 arithmetic circuits are unified in one FRI commitment (3,505 trace columns): NttBatch + AzFull + Ct1Full + InttBatch + WPrimeFull + NormCheckBatch + UseHintBatchV2 + <strong>RangeQBatch</strong>. c̃ and batch Merkle root are both mixed into Fiat-Shamir, binding each proof to one specific witness and batch.</p></div>
-          <div class="faq-item"><h3>What on-chain verifier exists?</h3><p>MVP-5 (2026-05-30): <code>QLSAVerifierVFRI7</code> + <code>BatchRegistryV4</code> (dual-VFRI7). Full Fiat-Shamir binding: derived friAlpha + query indices + cross-proof binding via <code>boundRoot = keccak256(batchRoot ‖ traceRoot)</code>. Both LOG=10 (1298 cols) and LOG=8 (2206 cols) trace groups verified within ≤15M gas each. On-chain soundness: 16-bit (n_queries=1, gas constraint); 130-bit requires n=20 queries (~300M gas, deferred MVP-6).</p></div>
-          <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is research-stage software (not audited by external parties). Infrastructure is fully implemented and tested (847 Solidity + 239 Python + 210 Rust + 39 TS tests). Not recommended for production use or real funds.</p></div>
+          <div class="faq-item"><h3>What on-chain verifier exists?</h3><p>MVP-6 (2026-06-10): <code>QLSAVerifierVFRI8</code> + <code>BatchRegistryV5</code> (dual-VFRI8). Poseidon2 Merkle trees + Poseidon2 Fiat-Shamir channel — 20-query on-chain FRI verification ≤15M gas (Poseidon2 Merkle path ~10K gas vs ~800K gas for Blake2s). Both LOG=10 (1298 cols) and LOG=8 (2206 cols) trace groups verified within 15M gas with 20 queries. On-chain soundness: LOG_BLOWUP=6 × N_FRI_QUERIES=20 + POW_BITS=10 = 130-bit ✓ (matches off-chain prover config).</p></div>
+          <div class="faq-item"><h3>Is this production-ready?</h3><p>No. QLSA is research-stage software (not audited by external parties). Infrastructure is fully implemented and tested (847 Solidity + 528 Python + 210 Rust + 71 TS tests). Not recommended for production use or real funds.</p></div>
         </div>
       </div>
     </section>
@@ -640,7 +649,7 @@
         <a href="https://github.com/hoxitoo/QLSA" target="_blank" rel="noopener noreferrer">GitHub</a>
         <a href="mailto:research@qlsa-protocol.online">Email</a>
       </div>
-      <div class="small">Apache 2.0 · Research-stage software · Do not use in production systems · Updated 2026-06-03</div>
+      <div class="small">Apache 2.0 · Research-stage software · Do not use in production systems · Updated 2026-06-10</div>
     </div>
   </footer>
 </body>
