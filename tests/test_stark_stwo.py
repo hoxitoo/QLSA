@@ -2662,3 +2662,162 @@ def test_gen_mldsa_v23_vfri8_cross_bound_differs_from_vfri7():
     )
     assert r7.log10_query_hints != r8.log10_query_hints, "VFRI8 must differ from VFRI7 (Poseidon2 vs Blake2s)"
     assert r7.log8_query_hints != r8.log8_query_hints, "VFRI8 LOG=8 must differ from VFRI7"
+
+
+# ── VFRI9: last-layer FRI check + wide Poseidon2 nodes ────────────────────────
+
+_VFRI9_BATCH_ROOT = bytes(range(32))
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_hints_schema():
+    """LOG=10 VFRI9 result has expected structure and n_cols=1298."""
+    from stark.prover import gen_mldsa_v23_vfri9_hints, MldsaV23VFRI9HintResult
+    z, c, t1, a_hat = _v23_inputs(16000)
+    r = gen_mldsa_v23_vfri9_hints(z, c, t1, a_hat, _VFRI9_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI9HintResult)
+    assert r.n_cols == 1298
+    assert r.n_queries == 1
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+    # Version marker: proof[0:8] = 3 (little-endian)
+    assert int.from_bytes(r.proof[0:8], "little") == 3
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_hints_deterministic():
+    """Same inputs produce identical VFRI9 LOG=10 outputs."""
+    from stark.prover import gen_mldsa_v23_vfri9_hints
+    z, c, t1, a_hat = _v23_inputs(16100)
+    r1 = gen_mldsa_v23_vfri9_hints(z, c, t1, a_hat, _VFRI9_BATCH_ROOT, n_queries=1, num_folds=3)
+    r2 = gen_mldsa_v23_vfri9_hints(z, c, t1, a_hat, _VFRI9_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r1.commitment == r2.commitment
+    assert r1.query_hints == r2.query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_hints_differs_from_vfri8():
+    """VFRI9 wide-node transcript differs from VFRI8."""
+    from stark.prover import gen_mldsa_v23_vfri9_hints, gen_mldsa_v23_vfri8_hints
+    z, c, t1, a_hat = _v23_inputs(16200)
+    r8 = gen_mldsa_v23_vfri8_hints(z, c, t1, a_hat, _VFRI9_BATCH_ROOT, n_queries=1, num_folds=3)
+    r9 = gen_mldsa_v23_vfri9_hints(z, c, t1, a_hat, _VFRI9_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert r8.query_hints != r9.query_hints, "VFRI9 must differ from VFRI8 (wide nodes + last layer)"
+    assert r8.proof[8:40] != r9.proof[8:40], "VFRI9 trace root must differ (wide leaf hash)"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_full_root_binding():
+    """VFRI9 binds ALL 32 bytes of the batch root, not just the low 4 bytes."""
+    from stark.prover import gen_mldsa_v23_vfri9_hints
+    z, c, t1, a_hat = _v23_inputs(16300)
+    # Roots agreeing in the low 4 bytes but differing in the high bytes.
+    root_a = bytes([0xAA] + [0] * 27 + [1, 2, 3, 4])
+    root_b = bytes([0xBB] + [0] * 27 + [1, 2, 3, 4])
+    ra = gen_mldsa_v23_vfri9_hints(z, c, t1, a_hat, root_a, n_queries=1, num_folds=3)
+    rb = gen_mldsa_v23_vfri9_hints(z, c, t1, a_hat, root_b, n_queries=1, num_folds=3)
+    assert ra.query_hints != rb.query_hints, \
+        "VFRI9 Fiat-Shamir must depend on the full 32-byte batch root"
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_hints_log8_schema():
+    """LOG=8 VFRI9 result has expected structure and n_cols=2206."""
+    from stark.prover import gen_mldsa_v23_vfri9_hints_log8, MldsaV23VFRI9Log8HintResult
+    z, c, t1, a_hat = _v23_inputs(16400)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri9_hints_log8(z, c, t1, a_hat, hints, _VFRI9_BATCH_ROOT, n_queries=1, num_folds=3)
+    assert isinstance(r, MldsaV23VFRI9Log8HintResult)
+    assert r.n_cols == 2206
+    assert isinstance(r.proof, bytes) and len(r.proof) >= 700
+    assert isinstance(r.commitment, str) and len(r.commitment) == 32
+    assert isinstance(r.query_hints, bytes) and len(r.query_hints) > 0
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_last_layer_evals_present():
+    """VFRI9 hints carry the last-layer evaluations array (head slot 3)."""
+    from stark.prover import gen_mldsa_v23_vfri9_hints
+    z, c, t1, a_hat = _v23_inputs(16500)
+    r = gen_mldsa_v23_vfri9_hints(z, c, t1, a_hat, _VFRI9_BATCH_ROOT, n_queries=1, num_folds=3)
+    h = r.query_hints
+    evals_offset = int.from_bytes(h[3 * 32 + 24:4 * 32], "big")
+    assert evals_offset == 6 * 32, "lastLayerEvals must directly follow the 6-slot head"
+    evals_len = int.from_bytes(h[evals_offset + 24:evals_offset + 32], "big")
+    # tree_depth=10, 3 folds → 1024 / 2^3 = 128 last-layer evaluations
+    assert evals_len == 128
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_cross_bound_hints_schema():
+    """Cross-bound VFRI9 result has correct structure for both LOG groups."""
+    from stark.prover import (
+        gen_mldsa_v23_vfri9_cross_bound_hints,
+        FullV23VFRI9CrossBoundHintResult,
+    )
+    z, c, t1, a_hat = _v23_inputs(16600)
+    hints = _make_log8_hints()
+    r = gen_mldsa_v23_vfri9_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI9_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    assert isinstance(r, FullV23VFRI9CrossBoundHintResult)
+    assert isinstance(r.log10_proof, bytes) and len(r.log10_proof) >= 700
+    assert isinstance(r.log10_commitment, str) and len(r.log10_commitment) == 32
+    assert isinstance(r.log10_query_hints, bytes) and len(r.log10_query_hints) > 0
+    assert isinstance(r.log8_proof, bytes) and len(r.log8_proof) >= 700
+    assert isinstance(r.log8_commitment, str) and len(r.log8_commitment) == 32
+    assert isinstance(r.log8_query_hints, bytes) and len(r.log8_query_hints) > 0
+    assert r.batch_merkle_root == _VFRI9_BATCH_ROOT
+    assert r.n_queries == 1
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_cross_bound_deterministic():
+    """Same inputs produce identical cross-bound VFRI9 outputs."""
+    from stark.prover import gen_mldsa_v23_vfri9_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(16700)
+    hints = _make_log8_hints()
+    r1 = gen_mldsa_v23_vfri9_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI9_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    r2 = gen_mldsa_v23_vfri9_cross_bound_hints(
+        z, c, t1, a_hat, hints, _VFRI9_BATCH_ROOT, n_queries=1, num_folds_log10=3,
+    )
+    assert r1.log10_commitment == r2.log10_commitment
+    assert r1.log10_query_hints == r2.log10_query_hints
+    assert r1.log8_commitment == r2.log8_commitment
+    assert r1.log8_query_hints == r2.log8_query_hints
+
+
+@needs_ext
+def test_gen_mldsa_v23_vfri9_num_folds_mismatch_raises():
+    """Conflicting num_folds for the two LOG groups raises ValueError."""
+    from stark.prover import gen_mldsa_v23_vfri9_cross_bound_hints
+    z, c, t1, a_hat = _v23_inputs(16800)
+    hints = _make_log8_hints()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="num_folds"):
+        gen_mldsa_v23_vfri9_cross_bound_hints(
+            z, c, t1, a_hat, hints, _VFRI9_BATCH_ROOT,
+            n_queries=1, num_folds_log10=3, num_folds_log8=4,
+        )
+
+
+@needs_oqs
+def test_prove_mldsa_sig_vfri9_stark_schema():
+    """prove_mldsa_sig_vfri9_stark returns a well-formed FullV23VFRI9CrossBoundHintResult."""
+    from stark.prover import prove_mldsa_sig_vfri9_stark, FullV23VFRI9CrossBoundHintResult
+    alg = _oqs.Signature("ML-DSA-65")
+    pk  = alg.generate_keypair()
+    msg = b"qlsa vfri9 e2e test"
+    sig = alg.sign(msg)
+    batch_root = bytes(range(32))
+
+    r = prove_mldsa_sig_vfri9_stark(pk, msg, sig, batch_root, n_queries=1)
+
+    assert isinstance(r, FullV23VFRI9CrossBoundHintResult)
+    assert len(r.log10_proof) >= 700
+    assert len(bytes.fromhex(r.log10_commitment)) == 16
+    assert len(bytes.fromhex(r.log8_commitment)) == 16
+    assert r.batch_merkle_root == batch_root

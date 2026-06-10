@@ -29,6 +29,7 @@ class Mempool:
         self.max_size = max_size
         self._txs: deque[Transaction] = deque()
         self._tx_hashes: set[str] = set()
+        self._dropped_total = 0
         self._lock = threading.Lock()
 
     def add(self, tx: Transaction) -> None:
@@ -80,26 +81,38 @@ class Mempool:
                 self._tx_hashes.discard(tx.tx_hash().hex())
             return txs
 
-    def prepend_batch(self, txs: list[Transaction]) -> None:
-        """Re-insert transactions at the front of the queue (LIFO recovery).
+    def prepend_batch(self, txs: list[Transaction]) -> list[Transaction]:
+        """Re-insert transactions at the front of the queue (FIFO recovery).
 
         Used by the batcher to return valid transactions that could not be batched
-        (e.g. batch creation failed) so they are included in the next cycle.
-        Drops transactions silently if the mempool is at capacity and logs a warning.
+        (e.g. batch creation or proving failed) so they are included in the next
+        cycle.  Preserves the original FIFO order; when capacity is insufficient
+        the OLDEST transactions are kept and the newest overflow is dropped.
+
+        Returns the list of dropped transactions (empty when all fit) so the
+        caller can persist, retry, or report them instead of losing them silently.
         """
-        dropped = 0
         with self._lock:
-            for tx in reversed(txs):
-                if len(self._txs) < self.max_size:
-                    self._txs.appendleft(tx)
-                    self._tx_hashes.add(tx.tx_hash().hex())
-                else:
-                    dropped += 1
+            fit = self.max_size - len(self._txs)
+            if fit < 0:
+                fit = 0
+            kept, dropped = txs[:fit], txs[fit:]
+            for tx in reversed(kept):
+                self._txs.appendleft(tx)
+                self._tx_hashes.add(tx.tx_hash().hex())
+            self._dropped_total += len(dropped)
         if dropped:
             logger.warning(
                 "prepend_batch: dropped %d tx(s) — mempool full (capacity=%d)",
-                dropped, self.max_size,
+                len(dropped), self.max_size,
             )
+        return dropped
+
+    @property
+    def dropped_count(self) -> int:
+        """Total transactions dropped by prepend_batch overflow since startup."""
+        with self._lock:
+            return self._dropped_total
 
     def peek(self, n: int) -> list[Transaction]:
         """Return up to *n* transactions without removing them."""

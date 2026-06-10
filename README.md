@@ -12,10 +12,10 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 > It has **not** undergone an external cryptographic audit.
 > Known architectural limitations include:
 > - Off-chain STARK proof: `LOG_BLOWUP=6`, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit soundness
-> - On-chain verifier (VFRI8) uses Poseidon2 for Merkle + Fiat-Shamir. 20 queries ≤ 15M gas on mainnet.
-> - **Last-layer FRI check is not implemented in VFRI7/VFRI8** (VFRI9 TODO): protocol soundness is incomplete without verifying that the final FRI layer is a low-degree polynomial. Practical risk with 20 queries is negligible but the protocol is technically incomplete.
-> - Poseidon2Channel uses t=2/M31 (62-bit sponge state) — shared Stwo 2.2.0 design; permutation security = 128-bit; sponge collision bound = 31-bit. Recommended t=4 for production.
-> - No authentication on `/batch/run` and `/batch/flush` endpoints (compute DoS risk).
+> - On-chain verifier (VFRI9) uses Poseidon2 for Merkle + Fiat-Shamir. 20 queries ≤ 15M gas on mainnet.
+> - **Last-layer FRI check implemented in VFRI9 (2026-06-10)** — the final FRI layer is rebuilt on-chain and checked against `friLayerRoots[K]`. VFRI5–VFRI8 remain in the repo WITHOUT this check (regression only — do not deploy them).
+> - Poseidon2 t=2/M31: channel sponge state and VFRI9 wide Merkle nodes are 62-bit — collision bound ~2^31 (t=2 maximum). 128-bit binding requires t=4 or RPO256 (MVP-6).
+> - `/batch/run` and `/batch/flush` support Bearer-token auth via `QLSA_API_TOKEN` (2026-06-10); unset = open (research default — set it on any non-local deployment).
 >
 > **Do not deploy to mainnet or use with real funds without a full external audit.**
 
@@ -60,7 +60,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**VFRI8 Phase 1 complete** (2026-06-10). Poseidon2 trace commitment — 20 queries verified in ≤ 15M gas on Ethereum mainnet. Full security + code audit (21 findings, 18 fixed).
+**VFRI9 complete** (2026-06-10). Last-layer FRI bounded-degree check + wide (62-bit) Poseidon2 Merkle nodes + full-root Fiat-Shamir absorption — the on-chain FRI protocol soundness argument is now complete. Aggregator liveness hardening + Bearer-token API auth in the same release.
 
 | Component | Status |
 |-----------|--------|
@@ -68,19 +68,22 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark_stwo/src/mldsa/` — Pure Rust ML-DSA-65 verifier (FIPS 204) | ✅ Done |
 | `stark_stwo/` — Stwo Circle STARK prover (Rust), 130-bit FRI security | ✅ Done |
 | ML-DSA arithmetic AIR circuits (8 components → 1 STARK, **V23**) | ✅ Done |
-| `stark/` — Python prover/verifier wrappers V4–V23 + VFRI7/VFRI8 hint generators | ✅ Done |
-| `contracts/` — BatchRegistry(V2–**V5**), QLSAVerifier(V4–VFRI8), Poseidon2Channel/Merkle | ✅ Done |
-| `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API | ✅ Done |
-| Tests — **210 Rust** + **336 Python** (no PyO3) / **528** (with PyO3) + **~71 TS** + **847 Hardhat** | ✅ Done |
+| `stark/` — Python prover/verifier wrappers V4–V23 + VFRI7/VFRI8/VFRI9 hint generators | ✅ Done |
+| `contracts/` — BatchRegistry(V2–**V5**), QLSAVerifier(V4–**VFRI9**), Poseidon2Channel/Merkle/MerkleW | ✅ Done |
+| `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API, prover-crash recovery | ✅ Done |
+| Tests — **303 Rust** + **350 Python** (no PyO3) / **552** (with PyO3) + **~71 TS** + **906 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus + VFRI8 fields) + JS SDK | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V23** — 8-component STARK, RangeQBatch, az_hat ∈ [0,Q) — closes AzFull soundness gap | ✅ Done |
 | **QLSAVerifierVFRI7** — VFRI6 + `mixRoot(merkleRoot)` + cross-proof binding | ✅ Done (2026-05-25) |
 | **BatchRegistryV4** — Dual-VFRI7: `boundRoot = keccak256(batchRoot ‖ traceRootOther)` | ✅ Done (2026-05-25) |
 | **QLSAVerifierVFRI8** — VFRI7 + Poseidon2 Merkle + Poseidon2Channel; ≤ 15M gas for 20 queries | ✅ Done (2026-06-10) |
-| **BatchRegistryV5** — Dual-VFRI8 registry; proof length guards; cross-proof binding identical to V4 | ✅ Done (2026-06-10) |
+| **BatchRegistryV5** — Dual-VFRI8/VFRI9 registry; proof length guards; cross-proof binding identical to V4 | ✅ Done (2026-06-10) |
 | **Full V23 dual-VFRI8 E2E** — Both trace groups (3504 cols) verified on-chain via fixture | ✅ Done (2026-06-10) |
 | **Security + code audit (2026-06-10)** — 21 findings, 18 fixed: dead code removal, proof length guards, rate limiting `/stats`/`/node/config`, `_sender_txs` memory leak, VFRI8 `witness_commitment` fallback, `_verifyOODS` no-mutation refactor, `num_folds_log8` silent-drop fix | ✅ Done (2026-06-10) |
+| **QLSAVerifierVFRI9** — last-layer FRI check + wide Poseidon2 nodes + full-root Fiat-Shamir; closes the VFRI5–8 bounded-degree soundness gap | ✅ Done (2026-06-10) |
+| **Aggregator liveness** — prover-crash recovery (txs returned to mempool, ≤3 retries), `prepend_batch` overflow accounting, config validation | ✅ Done (2026-06-10) |
+| **API auth** — Bearer token (`QLSA_API_TOKEN`) on `/batch/run` + `/batch/flush`, constant-time compare | ✅ Done (2026-06-10) |
 
 ---
 

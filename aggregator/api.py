@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import os
 import threading
@@ -85,6 +86,35 @@ def _get_client_ip(request: Request) -> str:
     return host
 
 
+def _check_batch_auth(request: Request) -> JSONResponse | None:
+    """Enforce Bearer-token auth on POST /batch/* when QLSA_API_TOKEN is set.
+
+    Batch operations trigger STARK proving (CPU-seconds per call), so on any
+    deployment beyond a local demo they must not be publicly invocable.
+    When the env var is unset the endpoints stay open (research-prototype
+    default) and a warning is logged at startup.
+
+    Returns None when the request is allowed, or a 401/403 JSONResponse.
+    """
+    expected = os.environ.get("QLSA_API_TOKEN", "")
+    if not expected:
+        return None
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+            content={"detail": "missing bearer token"},
+        )
+    supplied = header[len("Bearer "):]
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "invalid bearer token"},
+        )
+    return None
+
+
 def _evict_stale(windows: dict[str, deque[float]], cutoff: float) -> None:
     """Remove entries whose last timestamp is older than *cutoff*."""
     stale = [ip for ip, dq in windows.items() if not dq or dq[-1] < cutoff]
@@ -134,6 +164,9 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "60"},
                     content={"detail": "rate limit exceeded: max 20 batch operations per minute"},
                 )
+            auth_error = _check_batch_auth(request)
+            if auth_error is not None:
+                return auth_error
         elif method == "GET" and path.startswith("/batch/"):
             if not _check_rate(_read_windows, ip, _READ_LIMIT):
                 return JSONResponse(
@@ -182,6 +215,13 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    if not os.environ.get("QLSA_API_TOKEN"):
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "QLSA_API_TOKEN is not set — POST /batch/run and /batch/flush are "
+            "unauthenticated; anyone can trigger STARK proving (compute DoS). "
+            "Set QLSA_API_TOKEN on any non-local deployment."
+        )
     app.state.node = AggregatorNode()
     yield
 

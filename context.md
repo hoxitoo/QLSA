@@ -1,14 +1,25 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-10)
+## Статус (обновлено 2026-06-10, вечер — VFRI9)
 
-- Фаза: **VFRI8 Phase 1 завершён** (2026-06-10) — Poseidon2 trace commitment; ≤15M gas для 20 queries
-- Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7, BatchRegistryV4/V5 — завершены
+- Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
+- **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
+  - Last-layer check: прувер передаёт все `2^(treeDepth−K)` оценок финального FRI-слоя; верификатор строит Merkle-дерево и сверяет с `friLayerRoots[K]` — закрыт пробел soundness VFRI5–VFRI8
+  - Wide nodes: коллизия узла 2^15.5 → 2^31 (максимум для t=2; 128-бит требует t≥4/RPO256)
+  - Full-root absorption: `mixRootFull` поглощает все 32 байта trace root и batch merkle root (VFRI8 поглощал только 4 младших байта)
+  - ABI хинтов (6 head slots): `abi.encode(uint128, uint128, bytes32, uint128[] lastLayerEvals, bytes32[], QueryHints[])`; маркер версии proof[0:8]=3
+  - BatchRegistryV5 принимает VFRI9 через конструктор/`setVerifier` — новый реестр не нужен
+- **VFRI9 Rust bridges**: `gen_vfri9_hints_from_cols_nfolds`, `gen_mldsa_v23_vfri9_hints[_log8]`, `gen_mldsa_v23_vfri9_cross_bound_hints`
+- **VFRI9 Python wrappers**: `prove_mldsa_sig_vfri9_stark` → `FullV23VFRI9CrossBoundHintResult`
+- **Живучесть агрегатора (2026-06-10)**: восстановление после краха прувера (транзакции возвращаются в мемпул, ≤3 retry на батч, затем unproven-батч для liveness); `ProverUnavailableError` отличает «расширение не установлено» от «прувер упал»; `prepend_batch` возвращает потерянные tx (oldest-kept) + метрика `dropped_count`; валидация `mempool_capacity >= min_batch_size`
+- **API auth (2026-06-10)**: Bearer-token (`QLSA_API_TOKEN`) на `POST /batch/run`/`/batch/flush`, constant-time сравнение; без переменной — открыто с warning при старте
+- **Hardhat разблокирован локально**: в кэше `~/.cache/hardhat-nodejs/compilers-v2/linux-amd64/` лежал WASM `soljson-*.js` под видом нативного бинаря (источник EPIPE); создан маркер `*.does.not.work` → hardhat использует WASM fallback; полный набор контрактных тестов работает локально
+- Все Phase 1–6, MVP-3, MVP-3+, V22, V23, VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9, BatchRegistryV4/V5 — завершены
 - **VFRI8**: `QLSAVerifierVFRI8.sol`, `BatchRegistryV5.sol`, `Poseidon2MerkleVerifier.sol`, `Poseidon2Channel.sol`
 - **Rust bridges**: `gen_mldsa_v23_vfri8_hints`, `gen_mldsa_v23_vfri8_hints_log8`, `gen_mldsa_v23_vfri8_cross_bound_hints`
 - **Python wrappers**: `prove_mldsa_sig_vfri8_stark` → `FullV23VFRI8CrossBoundHintResult`
 - **Aggregator/SDK**: `BatchResult.has_vfri8`, vfri8_* fields, API endpoint, SDK client
-- **Tests**: 528 Python (incl. 11 VFRI8 @needs_ext), fixture `full_v23_vfri8_cross_bound_e2e.json`
+- **Tests**: 552 Python (incl. 11 VFRI9) / 350 без PyO3, 303 Rust (+88 ignored), 906 Hardhat (incl. 21 VFRI9 E2E), ~71 TS; fixtures `full_v23_vfri8_cross_bound_e2e.json` + `full_v23_vfri9_cross_bound_e2e.json`
 - Проведён аудит безопасности + code review (2026-05-25); 5 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-1); 8 новых findings — все устранены
 - Проведён аудит безопасности + code review (2026-05-30 round-2); 11 новых findings — все устранены
@@ -221,7 +232,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **BatchRegistryV4** | **✅ Done** | **Dual-VFRI7 registry; full V23 trace coverage; 847 tests** |
 | **MVP-5** | **✅ Done** | **VFRI7 cross-proof binding + aggregator/SDK wiring + security audit (2026-05-25)** |
 | **VFRI8** | **✅ Done** | **Poseidon2 trace commitment; ≤15M gas for 20 queries; aggregator/SDK wired (2026-06-10)** |
-| MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); last-layer FRI check (VFRI9) |
+| **VFRI9** | **✅ Done** | **Last-layer FRI check + wide Poseidon2 nodes + full-root Fiat-Shamir (2026-06-10)** |
+| MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
 
 ---
 
@@ -379,9 +391,13 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | `_verifyOODS` мутировал memory struct `h` — хрупкая зависимость от порядка вызовов | Высокий | ✅ Закрыт (возвращает `(bool, fPlus, fMinus)`, 2026-06-10) |
 | VFRI8 success не обновлял `witness_commitment` — `has_witness=True` при `onchain_commitment=None` | Высокий | ✅ Закрыт (fallback `result.witness_commitment = vr8.log10_commitment`, 2026-06-10) |
 | `_sender_txs` unbounded growth — каждый отправитель оставлял записи навсегда | Средний | ✅ Закрыт (cleanup при eviction батча, 2026-06-10) |
-| Missing last-layer polynomial check (FRI soundness gap) в VFRI7/VFRI8 | Критично | Open (research prototype; low practical risk с 20 queries; fix = VFRI9) |
+| Missing last-layer polynomial check (FRI soundness gap) в VFRI7/VFRI8 | Критично | ✅ Закрыт (QLSAVerifierVFRI9: `_checkLastLayer` rebuild + assert root == friLayerRoots[K], 2026-06-10). VFRI5–VFRI8 остаются в репо без проверки — только для регрессии, не деплоить |
 | `submitBatchWithNonces` не проверяет что senders совпадают с транзакциями в батче | Высокий | Open (griefing attack requires valid proof; нет финансового риска для пользователей) |
-| Poseidon2Channel t=2/M31 = 62-bit state (ниже 128-bit target sponge security) | Высокий | Open (upstream Stwo 2.2.0 design; permutation-level security = 128-bit; рекомендуется t=4 для продакшн) |
+| Poseidon2Channel t=2/M31 = 62-bit state (ниже 128-bit target sponge security) | Высокий | Частично смягчён (2026-06-10): VFRI9 wide nodes 31→62 бит (коллизия узла 2^15.5→2^31) + mixRootFull (полное поглощение 32-байтных корней). Полные 128 бит требуют t≥4/RPO256 — MVP-6 |
+| Узлы Poseidon2 Merkle в VFRI8 = 31 бит (s0 only) — коллизия листа ~2^15.5 | Высокий | ✅ Закрыт в VFRI9 (`Poseidon2MerkleVerifierW`, узел = `(s0<<32)\|s1`); VFRI8 — регрессионный, не деплоить |
+| Транзакции терялись при крахе прувера (батч с proof=None уходил в историю) | Высокий | ✅ Закрыт (Batcher retry ≤3 + возврат в мемпул через prepend_batch, 2026-06-10) |
+| `prepend_batch` молча терял транзакции при переполнении мемпула | Средний | ✅ Закрыт (возврат списка потерянных, oldest-kept, метрика dropped_count, 2026-06-10) |
+| Нет аутентификации на `/batch/run`/`/batch/flush` (compute DoS) | Высокий | ✅ Закрыт (Bearer-token `QLSA_API_TOKEN`, constant-time, opt-in, 2026-06-10) |
 | `setVerifier()` без timelock — single-key upgrade risk | Средний | Open (research prototype; рекомендуется 48h timelock + multisig для mainnet) |
 | No authentication on `/batch/run` и `/batch/flush` — DoS через compute drain | Высокий | Open (rate limiting 20 ops/min; Bearer token рекомендуется для mainnet) |
 | Off-chain mempool accepts stale-nonce transactions | Средний | Open (per-sender nonce tracking рекомендуется для mainnet) |

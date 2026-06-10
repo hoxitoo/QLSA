@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3/V4/V5, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2Channel.sol
+contracts/      Solidity: BatchRegistryV2/V3/V4/V5, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2Channel.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -25,7 +25,7 @@ benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_wit
 ## Key Commands
 
 ```bash
-# Run all Python tests (~487 passing when PyO3 ext installed; ~354 without PyO3)
+# Run all Python tests (~552 passing when PyO3 ext installed; ~350 without PyO3)
 pytest tests/ -v
 
 # Run only tests that do NOT need the PyO3 extension
@@ -37,7 +37,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (210 passing, 85 ignored slow STARK integration tests)
+# Run Rust tests (303 passing, 88 ignored slow STARK integration tests)
 cargo +nightly-2025-07-01 test --manifest-path stark_stwo/Cargo.toml
 
 # Run Rust tests including slow STARK integration tests
@@ -574,6 +574,46 @@ On-chain registry for VFRI8 proofs — identical logic to BatchRegistryV4 with V
 - Cross-proof binding: identical to BatchRegistryV4 (`boundRoot10 = keccak256(merkleRoot ‖ traceRoot8)`, `boundRoot8 = keccak256(merkleRoot ‖ traceRoot10)`)
 - Commitment format: Blake2s(proof[:32] ‖ merkleRoot)[:16] — unchanged (outer binding)
 - Events, errors, nonce registry, `MAX_SENDERS = 3000`: all identical to BatchRegistryV4
+- Verifier address is a constructor parameter (`setVerifier()` upgrade path) — VFRI9 plugs in without a new registry
+
+### `contracts/src/verifier/Poseidon2MerkleVerifierW.sol` (VFRI9)
+WIDE Poseidon2 Merkle verification — nodes carry BOTH sponge words (62-bit content).
+- Node encoding: `bytes32` where `uint256(node) = (s0 << 32) | s1` (bytes[24..28]=s0, bytes[28..32]=s1)
+- `hashLeaf(uint32[] colValues)` — rate-1 sponge; returns `(s0 << 32) | s1` (matches Rust `hash_leaf_cols_p2w`)
+- `hashPair(left, right)` — duplex compress: `state=(l0,l1); absorb r0; permute; absorb r1; permute` (matches `hash_pair_p2w`)
+- Rationale: VFRI8's 31-bit nodes (s0 only) have ~2^15.5 birthday collision cost; 62-bit nodes raise this to ~2^31 — the t=2 maximum (128-bit binding requires t≥4 / RPO256)
+
+### `contracts/src/verifier/Poseidon2Channel.sol` — VFRI9 additions
+- `mixRootW(state, root)` — absorb wide P2 node root as 2 BE u32 words (bytes[24..28], bytes[28..32]); `nDraws = 0`
+- `mixRootFull(state, root)` — absorb ALL 32 bytes of a root as 8 BE u32 words; `nDraws = 0`.
+  VFRI8's `mixRoot` only absorbed the low 4 bytes, binding just 31 bits of full-width roots
+  (embedded Stwo trace root, batch merkle root) into Fiat-Shamir.
+- Match Rust `P2Channel::mix_root_w` / `mix_root_full` in vfri2_bridge.rs
+
+### `contracts/src/QLSAVerifierVFRI9.sol`
+VFRI9 — VFRI8 + last-layer FRI check + wide Poseidon2 nodes + full-root Fiat-Shamir absorption.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding (6 head slots = 192 bytes):
+  `abi.encode(uint128 oodsComboPos, uint128 oodsComboNeg, bytes32 compRoot, uint128[] lastLayerEvals, bytes32[] friLayerRoots, QueryHints[])`
+- **Last-layer bounded-degree check** (closes the soundness gap left open in VFRI5..VFRI8):
+  prover supplies all `2^(treeDepth−K)` evaluations of the final FRI layer; verifier rebuilds
+  the Merkle tree (wide nodes) and asserts root == `friLayerRoots[K]`. Combined with the
+  per-query Merkle proofs into `friLayerRoots[K]`, every query's final fold value is fixed
+  to the committed last layer. `MAX_LAST_LAYER_SIZE = 65536`.
+- Hash backend: `Poseidon2MerkleVerifierW` (wide nodes); channel: `Poseidon2Channel` with
+  `mixRootFull(embeddedRoot)` / `mixRootW(compRoot, friLayerRoots[*])` / `mixRootFull(merkleRoot)`
+- `QueryHints` struct: identical to VFRI8 (11 fields)
+- Proof version marker: `proof[0:8] = 3` (little-endian; VFRI8 uses 2)
+- VFRI8 hints are NOT accepted (different ABI head + transcript + node format)
+- 10 Rust tests + 10 Python tests (@needs_ext) + 1 @needs_oqs + 21 JS E2E tests
+- Rust bridges: `gen_vfri9_hints_from_cols_nfolds`, `gen_mldsa_v23_vfri9_hints`,
+  `gen_mldsa_v23_vfri9_hints_log8`, `gen_mldsa_v23_vfri9_cross_bound_hints`
+- Python wrappers: `gen_mldsa_v23_vfri9_hints` → `MldsaV23VFRI9HintResult`,
+  `gen_mldsa_v23_vfri9_hints_log8` → `MldsaV23VFRI9Log8HintResult`,
+  `gen_mldsa_v23_vfri9_cross_bound_hints` → `FullV23VFRI9CrossBoundHintResult`,
+  `prove_mldsa_sig_vfri9_stark(pk, msg, sig, batch_merkle_root)` — from a real ML-DSA-65 signature
+- Fixture: `contracts/test/fixtures/full_v23_vfri9_cross_bound_e2e.json` (seed=16600, n_queries=1, num_folds=3)
+- BatchRegistryV5 deploys with the VFRI9 address — finalize/replay verified in E2E
 
 ## Multi-Component STARK Pattern
 
@@ -613,6 +653,8 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
+6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum.
+7. Last-layer FRI check: implemented in VFRI9 (2026-06-10). VFRI5–VFRI8 remain in the repo WITHOUT it for regression — do not deploy them to production.
 
 ## Security Hardening (implemented)
 
@@ -629,6 +671,12 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 - **`Wallet._wiped` flag** (2026-06-04): `sign_transaction()` raises `ValueError` with clear message after `wipe()` — callers discover misuse at the call-site rather than receiving a signing failure from zeroed key material; `is_wiped` property exposes the flag for introspection
 - **Mempool deduplication** (2026-06-05): `Mempool.add()` raises `DuplicateTxError` if the same `tx_hash` is already pending — prevents batches from containing duplicate transactions; duplicate submissions return `accepted=False` to the caller
 - **Bandit B104 nosec** (2026-06-06): `aggregator/__main__.py:32` — `# nosec B104` on the `"0.0.0.0"` default; binding all interfaces is intentional for a server entry point, address is runtime-configurable via `--host`/`HOST`
+- **VFRI9 last-layer FRI check** (2026-06-10): `QLSAVerifierVFRI9` rebuilds the final FRI layer Merkle tree from prover-supplied evaluations and asserts root == `friLayerRoots[K]` — closes the bounded-degree soundness gap open since VFRI5
+- **Wide Poseidon2 Merkle nodes** (2026-06-10): `Poseidon2MerkleVerifierW` — node = `(s0 << 32) | s1` (62-bit), node collision cost 2^15.5 → 2^31; t≥4/RPO256 needed for 128-bit (documented limitation)
+- **Full-root Fiat-Shamir absorption** (2026-06-10): VFRI9 `mixRootFull` binds all 32 bytes of the embedded trace root and batch merkle root (VFRI8 bound only the low 4 bytes of each)
+- **Prover failure recovery** (2026-06-10): `Batcher` returns transactions to the mempool and retries (up to `MAX_PROOF_RETRIES=3` per batch) when the STARK prover crashes unexpectedly; `ProverUnavailableError` (extension missing) still yields the documented unproven degraded mode
+- **`Mempool.prepend_batch` overflow accounting** (2026-06-10): returns the list of dropped transactions (oldest kept, newest dropped) instead of silent loss; `dropped_count` metric added; `AggregatorNode` rejects `mempool_capacity < min_batch_size` (silently-dead-node config)
+- **Bearer-token auth on batch endpoints** (2026-06-10): `POST /batch/run` and `POST /batch/flush` require `Authorization: Bearer $QLSA_API_TOKEN` when the env var is set (constant-time comparison); unset = open with a startup warning (research default)
 
 ## CI Pipeline
 

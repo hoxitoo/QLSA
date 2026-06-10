@@ -6523,6 +6523,161 @@ fn gen_mldsa_v23_vfri8_cross_bound_hints_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
+// ── VFRI9 PyO3 conversion helpers ─────────────────────────────────────────────
+
+#[cfg(feature = "python")]
+fn _conv_z(z: Vec<Vec<i64>>) -> PyResult<[[i64; 256]; 5]> {
+    if z.len() != 5 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("z must have 5 polynomials (L=5), got {}", z.len())
+        ));
+    }
+    z.into_iter()
+        .enumerate()
+        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            format!("z[{i}] must have 256 coefficients")
+        )))
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))
+}
+
+#[cfg(feature = "python")]
+fn _conv_c(c: Vec<i64>) -> PyResult<[i64; 256]> {
+    c.try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))
+}
+
+#[cfg(feature = "python")]
+fn _conv_t1(t1: Vec<Vec<i64>>) -> PyResult<[[i64; 256]; 6]> {
+    if t1.len() != 6 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
+        ));
+    }
+    t1.into_iter()
+        .enumerate()
+        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            format!("t1[{i}] must have 256 coefficients")
+        )))
+        .collect::<PyResult<Vec<[i64; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))
+}
+
+#[cfg(feature = "python")]
+fn _conv_a_hat(a_hat: Vec<Vec<i64>>) -> PyResult<Vec<[i64; 256]>> {
+    a_hat.into_iter()
+        .enumerate()
+        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            format!("a_hat[{i}] must have 256 coefficients")
+        )))
+        .collect()
+}
+
+#[cfg(feature = "python")]
+fn _conv_hints(hints: Vec<Vec<bool>>) -> PyResult<[[bool; 256]; 6]> {
+    if hints.len() != 6 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("hints must have 6 arrays (K=6), got {}", hints.len())
+        ));
+    }
+    hints.into_iter()
+        .enumerate()
+        .map(|(i, h)| h.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
+            format!("hints[{i}] must have 256 entries")
+        )))
+        .collect::<PyResult<Vec<[bool; 256]>>>()?
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("hints must have exactly 6 entries"))
+}
+
+/// gen_mldsa_v23_vfri9_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
+///   -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// VFRI9 = VFRI8 with wide (62-bit) Poseidon2 Merkle nodes, full-root
+/// Fiat-Shamir absorption, and the last-layer FRI bounded-degree check.
+/// LOG=10 group (NttBatch + InttBatch, 1298 cols).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_vfri9_hints_py(
+    z:                 Vec<Vec<i64>>,
+    c:                 Vec<i64>,
+    t1:                Vec<Vec<i64>>,
+    a_hat:             Vec<Vec<i64>>,
+    batch_merkle_root: Vec<u8>,
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    let z_arr = _conv_z(z)?;
+    let c_arr = _conv_c(c)?;
+    let t1_arr = _conv_t1(t1)?;
+    let a_hat_arr = _conv_a_hat(a_hat)?;
+    vfri2_bridge::gen_mldsa_v23_vfri9_hints(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
+        &batch_merkle_root, n_queries, num_folds,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// gen_mldsa_v23_vfri9_hints_log8_py(z, c, t1, a_hat, hints, batch_merkle_root, n_queries, num_folds)
+///   -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// VFRI9 hint generator for V23's LOG=8 component group (2206 columns).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, hints, batch_merkle_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_vfri9_hints_log8_py(
+    z:                 Vec<Vec<i64>>,
+    c:                 Vec<i64>,
+    t1:                Vec<Vec<i64>>,
+    a_hat:             Vec<Vec<i64>>,
+    hints:             Vec<Vec<bool>>,
+    batch_merkle_root: Vec<u8>,
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    let z_arr = _conv_z(z)?;
+    let c_arr = _conv_c(c)?;
+    let t1_arr = _conv_t1(t1)?;
+    let a_hat_arr = _conv_a_hat(a_hat)?;
+    let hints_arr = _conv_hints(hints)?;
+    vfri2_bridge::gen_mldsa_v23_vfri9_hints_log8(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
+        &batch_merkle_root, n_queries, num_folds,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// gen_mldsa_v23_vfri9_cross_bound_hints_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
+///   -> (proof10, commit10, hints10, proof8, commit8, hints8)
+///
+/// Two-pass cross-proof binding using VFRI9 (wide Poseidon2) backends:
+///   bound_root_10 = keccak256(batch_root ‖ proof8[8:40])
+///   bound_root_8  = keccak256(batch_root ‖ proof10[8:40])
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, hints, batch_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_vfri9_cross_bound_hints_py(
+    z:          Vec<Vec<i64>>,
+    c:          Vec<i64>,
+    t1:         Vec<Vec<i64>>,
+    a_hat:      Vec<Vec<i64>>,
+    hints:      Vec<Vec<bool>>,
+    batch_root: Vec<u8>,
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+) -> PyResult<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>)> {
+    let z_arr = _conv_z(z)?;
+    let c_arr = _conv_c(c)?;
+    let t1_arr = _conv_t1(t1)?;
+    let a_hat_arr = _conv_a_hat(a_hat)?;
+    let hints_arr = _conv_hints(hints)?;
+    vfri2_bridge::gen_mldsa_v23_vfri9_cross_bound_hints(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
+        &batch_root, n_queries, num_folds,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -6623,6 +6778,9 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri8_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri8_hints_log8_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri8_cross_bound_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri9_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri9_hints_log8_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri9_cross_bound_hints_py, m)?)?;
     Ok(())
 }
 
