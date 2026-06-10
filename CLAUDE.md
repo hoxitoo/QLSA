@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3/V4, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7, CM31.sol, QM31.sol, MerkleVerifier.sol
+contracts/      Solidity: BatchRegistryV2/V3/V4/V5, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2Channel.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -532,6 +532,48 @@ VFRI7 — VFRI6 + `mixRoot(merkleRoot)` before `drawQueries` in the Fiat-Shamir 
 ### `contracts/src/BatchRegistryV4.sol` (updated for cross-proof binding)
 - `submitBatch()` and `submitBatchWithNonces()` both now extract trace roots from proof bytes via `calldataload(proof.offset + 8)` and compute cross-bound roots before calling the verifier
 - Verifier receives `boundRoot10`/`boundRoot8` instead of raw `batchRoot`
+
+### `contracts/src/verifier/Poseidon2MerkleVerifier.sol` (VFRI8)
+Poseidon2 binary Merkle inclusion proofs — Poseidon2 replacement for MerkleVerifier.sol.
+- `hashLeaf(uint32[] colValues)` — rate-1 Poseidon2 sponge over M31 column values (matches `hash_leaf_cols_p2` in vfri2_bridge.rs):
+  `s=(0,0); for v in colValues: s0=(s0+v)%P; permute(s0,s1); return bytes32(s0)`
+- `hashPair(left, right)` — `bytes32(Poseidon2M31.compress(uint256(left), uint256(right)))`
+- Node encoding: `bytes32(uint256(m31_value))` — M31 value in low 32 bits (28 leading zero bytes)
+- `verify(root, leafHash, index, depth, siblings)` — calldata variant
+- `verifyMem(...)` — memory variant
+
+### `contracts/src/verifier/Poseidon2Channel.sol` (VFRI8)
+Poseidon2 duplex sponge Fiat-Shamir channel — Poseidon2 replacement for TwoChannel.sol.
+- State: `struct State { uint32 s0; uint32 s1; uint32 nDraws; }`
+- `init()` → zero-state
+- `_absorb(word)` — two-subtraction M31 reduction (handles arbitrary u32 values: `w < 2^32 = 2P+2`); then `s0 = (s0+w)%P; permute(s0,s1)`
+- `mixRoot(state, root)` — `absorb(uint32(uint256(root))); nDraws = 0`
+- `mixU32s(state, words[])` — absorb each word; `nDraws = 0`
+- `_drawPair()` — saves (w0=s0, w1=s1); mixes `s0=(s0+nDraws)%P`; permutes; increments `nDraws`; returns SAVED (w0,w1)
+- `drawSecureFelt(state)` — two `_drawPair` calls → QM31 as `uint128 = (CM31(w0,w1) << 64) | CM31(w2,w3)`
+- `drawQueries(state, logDomainSize, n)` — repeated `_drawPair` calls; each pair yields 2 candidate indices via `w & mask`
+
+### `contracts/src/QLSAVerifierVFRI8.sol` (VFRI8)
+VFRI8 — VFRI7 with Poseidon2 Merkle trees and Fiat-Shamir channel.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding: **identical to VFRI7** (`abi.encode(uint128, uint128, bytes32, bytes32[], QueryHints[])`)
+- Hash backend change vs VFRI7:
+  - `TwoChannel` → `Poseidon2Channel` (Fiat-Shamir channel)
+  - `MerkleVerifier` → `Poseidon2MerkleVerifier` (Merkle path verification)
+  - `Blake2s.hash` unchanged in `_checkCommitment` (outer binding, cheap single call)
+- Transcript: identical structure to VFRI7 but all absorb/mix/draw operations use Poseidon2 sponge
+- Gas: 20 queries × 2 paths × depth=10 × ~1000 gas/permute ≈ 400K gas (Merkle) + ~5M (rest) ≈ 5.4M total
+- **Fits within 15M gas on Ethereum mainnet** ✓
+- Rust bridges: `gen_vfri8_hints_from_cols_nfolds`, `gen_mldsa_v23_vfri8_hints`, `gen_mldsa_v23_vfri8_hints_log8`, `gen_mldsa_v23_vfri8_cross_bound_hints`
+- Python wrappers: `gen_mldsa_v23_vfri8_hints` → `MldsaV23VFRI8HintResult`, `gen_mldsa_v23_vfri8_hints_log8` → `MldsaV23VFRI8Log8HintResult`, `gen_mldsa_v23_vfri8_cross_bound_hints` → `FullV23VFRI8CrossBoundHintResult`
+- M31 reduction: `_absorb` uses two conditional subtractions for arbitrary u32 values (matches Rust `p2_absorb` fix)
+
+### `contracts/src/BatchRegistryV5.sol`
+On-chain registry for VFRI8 proofs — identical logic to BatchRegistryV4 with VFRI8 verifier.
+- Uses `QLSAVerifierVFRI8` (implements `IQLSAVerifierV4`) for both LOG=10 and LOG=8 proof checks
+- Cross-proof binding: identical to BatchRegistryV4 (`boundRoot10 = keccak256(merkleRoot ‖ traceRoot8)`, `boundRoot8 = keccak256(merkleRoot ‖ traceRoot10)`)
+- Commitment format: Blake2s(proof[:32] ‖ merkleRoot)[:16] — unchanged (outer binding)
+- Events, errors, nonce registry, `MAX_SENDERS = 3000`: all identical to BatchRegistryV4
 
 ## Multi-Component STARK Pattern
 

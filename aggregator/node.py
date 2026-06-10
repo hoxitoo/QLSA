@@ -168,7 +168,17 @@ class AggregatorNode:
                 evicted = self._history[0]
                 self._batch_index.pop(evicted.batch.batch_id, None)
                 for tx in evicted.batch.transactions:
-                    self._tx_to_batch.pop(tx.tx_hash().hex(), None)
+                    tx_hex = tx.tx_hash().hex()
+                    self._tx_to_batch.pop(tx_hex, None)
+                    sender = tx.sender
+                    if sender in self._sender_txs:
+                        sq = self._sender_txs[sender]
+                        try:
+                            sq.remove(tx_hex)
+                        except ValueError:
+                            pass
+                        if not sq:
+                            del self._sender_txs[sender]
             self._history.append(result)
             self._batch_index[result.batch.batch_id] = result
             for tx in result.batch.transactions:

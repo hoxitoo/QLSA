@@ -450,6 +450,9 @@ def test_batch_status_has_witness_false_by_default():
     assert status.has_vfri7 is False
     assert status.vfri7_commitment_log10 is None
     assert status.vfri7_commitment_log8 is None
+    assert status.has_vfri8 is False
+    assert status.vfri8_commitment_log10 is None
+    assert status.vfri8_commitment_log8 is None
 
 
 def test_batch_status_prove_witnesses_param_accepted():
@@ -462,6 +465,7 @@ def test_batch_status_prove_witnesses_param_accepted():
     assert status is not None
     assert isinstance(status.has_witness, bool)
     assert isinstance(status.has_vfri7, bool)
+    assert isinstance(status.has_vfri8, bool)
 
 
 def test_run_cycle_prove_witnesses_param_accepted():
@@ -517,6 +521,15 @@ def test_prove_witness_signed_tx_returns_witness_status():
         assert ws.c_tilde_hex is None
         # FRI security fields
         assert ws.n_fri_queries >= 1
+        # VFRI8 is also generated alongside VFRI7 when PyO3 is available
+        assert isinstance(ws.has_vfri8, bool)
+        if ws.has_vfri8:
+            assert ws.vfri8_commitment_log10 is not None
+            assert len(ws.vfri8_commitment_log10) == 32
+            assert ws.vfri8_commitment_log8 is not None
+            assert len(ws.vfri8_commitment_log8) == 32
+            # VFRI8 Poseidon2 commitments differ from VFRI7 Blake2s commitments
+            assert ws.vfri8_commitment_log10 != ws.vfri7_commitment_log10
         assert ws.fri_security_bits == 6 * ws.n_fri_queries + 10
 
 
@@ -587,6 +600,7 @@ def test_http_client_run_cycle_prove_witnesses_param_accepted(http_client: HttpC
     assert status is not None
     assert isinstance(status.has_witness, bool)
     assert isinstance(status.has_vfri7, bool)
+    assert isinstance(status.has_vfri8, bool)
 
 
 def test_http_client_flush_prove_witnesses_param_accepted(http_client: HttpClient):
@@ -597,6 +611,7 @@ def test_http_client_flush_prove_witnesses_param_accepted(http_client: HttpClien
     assert status is not None
     assert isinstance(status.has_witness, bool)
     assert isinstance(status.has_vfri7, bool)
+    assert isinstance(status.has_vfri8, bool)
 
 
 def test_http_client_get_batch_returns_status(http_client: HttpClient):
@@ -663,6 +678,7 @@ def test_http_client_run_cycle_prove_witnesses_param_accepted(http_client: HttpC
     assert status is not None
     assert isinstance(status.has_witness, bool)
     assert isinstance(status.has_vfri7, bool)
+    assert isinstance(status.has_vfri8, bool)
 
 
 def test_http_client_flush_prove_witnesses_param_accepted(http_client: HttpClient):
@@ -673,6 +689,7 @@ def test_http_client_flush_prove_witnesses_param_accepted(http_client: HttpClien
     assert status is not None
     assert isinstance(status.has_witness, bool)
     assert isinstance(status.has_vfri7, bool)
+    assert isinstance(status.has_vfri8, bool)
 
 
 # ── LocalClient.get_witness_status ───────────────────────────────────────────

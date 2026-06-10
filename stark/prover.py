@@ -73,37 +73,6 @@ def _txs_to_leaves(batch: Batch) -> list[int]:
     return [int.from_bytes(root[i : i + 8], "little") for i in range(0, 64, 8)]
 
 
-def _call_prover(leaves: list[int], merkle_root: bytes | None = None) -> ProofResult:
-    _require_ext("prove_p2")
-    try:
-        proof_bytes, commitment, log_size = _ext.prove_p2(leaves, merkle_root)
-    except Exception as exc:
-        raise RuntimeError(f"qlsa-stark-stwo prove_p2 failed: {exc}") from exc
-
-    if len(commitment) != 32:
-        raise RuntimeError(
-            f"qlsa-stark-stwo prove_p2 returned unexpected commitment length "
-            f"({len(commitment)} chars, expected 32)"
-        )
-    if len(proof_bytes) < 32:
-        raise RuntimeError(
-            f"qlsa-stark-stwo prove_p2 returned proof shorter than 32 bytes "
-            f"({len(proof_bytes)} bytes) — cannot compute on-chain commitment"
-        )
-
-    binding_input = proof_bytes[:32]
-    if merkle_root is not None:
-        binding_input = binding_input + merkle_root[:32]
-    onchain_commitment = hashlib.blake2s(binding_input).digest()[:16].hex()
-
-    return ProofResult(
-        proof=proof_bytes,
-        commitment=commitment,
-        log_size=log_size,
-        onchain_commitment=onchain_commitment,
-    )
-
-
 # ─── Poseidon2 hash-chain STARK (MVP-3+) ─────────────────────────────────────
 
 @dataclass
@@ -125,6 +94,11 @@ def _call_prover_p2(
     except Exception as exc:
         raise RuntimeError(f"qlsa-stark-stwo prove_p2 failed: {exc}") from exc
 
+    if len(commitment) != 32:
+        raise RuntimeError(
+            f"qlsa-stark-stwo prove_p2 returned unexpected commitment length "
+            f"({len(commitment)} chars, expected 32)"
+        )
     if len(proof_bytes) < 32:
         raise RuntimeError(
             f"qlsa-stark-stwo prove_p2 returned proof shorter than 32 bytes "
@@ -2237,9 +2211,9 @@ def gen_mldsa_v23_vfri7_cross_bound_hints(
             f"num_folds_log10={num_folds_log10} and num_folds_log8={num_folds_log8} differ; "
             "the Rust bridge uses the same fold count for both groups — pass only num_folds_log10."
         )
-    # The Rust bridge gen_mldsa_v23_vfri7_cross_bound_hints_py uses one fold
-    # count for both LOG groups. num_folds_log8 is accepted for API symmetry.
-    num_folds = num_folds_log10
+    # The Rust bridge uses one fold count for both LOG groups.
+    # num_folds_log8 is accepted for API symmetry; use it when log10 is unset.
+    num_folds = num_folds_log10 if num_folds_log10 is not None else num_folds_log8
     try:
         (proof10, commit10, hints10,
          proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri7_cross_bound_hints_py(
@@ -2312,6 +2286,249 @@ def prove_mldsa_sig_vfri7_stark(
     hints = [list(h) for h in hints_raw]
 
     return gen_mldsa_v23_vfri7_cross_bound_hints(
+        z, c, t1, a_hat, hints,
+        batch_merkle_root,
+        n_queries=n_queries,
+        num_folds_log10=num_folds_log10,
+        num_folds_log8=num_folds_log8,
+    )
+
+
+# ── VFRI8: Poseidon2 trace commitment ────────────────────────────────────────
+
+
+@dataclass
+class MldsaV23VFRI8HintResult:
+    proof:       bytes
+    commitment:  str
+    query_hints: bytes
+    n_cols:      int    # 1298
+    n_queries:   int
+
+
+def gen_mldsa_v23_vfri8_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI8HintResult:
+    """Generate VFRI8 hints for V23's LOG=10 group (1298 cols, NttBatch+InttBatch).
+
+    VFRI8 = VFRI7 with Poseidon2 replacing Blake2s for Merkle hashing and the
+    Fiat-Shamir channel.  Gas: ~400K for Merkle proofs vs ~160M for Blake2s.
+
+    Args:
+        z, c, t1, a_hat:   ML-DSA witness (L=5/K=6 polynomials, 256 coeffs each).
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries:         FRI queries (default 1; use 20 for 130-bit soundness).
+        num_folds:         Fold rounds (default: automatic = tree_depth - 1 = 9).
+
+    Returns:
+        MldsaV23VFRI8HintResult with proof, commitment, query_hints, n_cols=1298.
+    """
+    _require_ext("gen_mldsa_v23_vfri8_hints_py")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri8_hints_py(
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri8_hints failed: {exc}") from exc
+    return MldsaV23VFRI8HintResult(
+        proof=bytes(proof),
+        commitment=commitment,
+        query_hints=bytes(query_hints),
+        n_cols=1298,
+        n_queries=n_queries,
+    )
+
+
+@dataclass
+class MldsaV23VFRI8Log8HintResult:
+    proof:       bytes
+    commitment:  str
+    query_hints: bytes
+    n_cols:      int    # 2206
+    n_queries:   int
+
+
+def gen_mldsa_v23_vfri8_hints_log8(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI8Log8HintResult:
+    """Generate VFRI8 hints for V23's LOG=8 group (2206 cols).
+
+    Args:
+        hints:   K=6 UseHint bool arrays (each 256 bools).
+        Other:   Same as gen_mldsa_v23_vfri8_hints.
+
+    Returns:
+        MldsaV23VFRI8Log8HintResult with proof, commitment, query_hints, n_cols=2206.
+    """
+    _require_ext("gen_mldsa_v23_vfri8_hints_log8_py")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri8_hints_log8_py(
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri8_hints_log8 failed: {exc}") from exc
+    return MldsaV23VFRI8Log8HintResult(
+        proof=bytes(proof),
+        commitment=commitment,
+        query_hints=bytes(query_hints),
+        n_cols=2206,
+        n_queries=n_queries,
+    )
+
+
+@dataclass
+class FullV23VFRI8CrossBoundHintResult:
+    """Cross-bound VFRI8 hints for the full V23 trace.
+
+    Identical semantics to FullV23VFRI7CrossBoundHintResult but uses Poseidon2
+    for Merkle hashing and the Fiat-Shamir channel instead of Blake2s.
+    """
+
+    log10_proof: bytes
+    log10_commitment: str
+    log10_query_hints: bytes
+
+    log8_proof: bytes
+    log8_commitment: str
+    log8_query_hints: bytes
+
+    batch_merkle_root: bytes
+    n_queries: int
+
+
+def gen_mldsa_v23_vfri8_cross_bound_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds_log10: int | None = None,
+    num_folds_log8: int | None = None,
+) -> FullV23VFRI8CrossBoundHintResult:
+    """Generate cross-bound VFRI8 hints for both LOG groups.
+
+    Two-pass cross-proof binding using Poseidon2 backends:
+      bound_root_10 = keccak256(batch_merkle_root ‖ proof8[8:40])
+      bound_root_8  = keccak256(batch_merkle_root ‖ proof10[8:40])
+
+    Args:
+        z, c, t1, a_hat:   ML-DSA witness.
+        hints:             K=6 UseHint bool arrays.
+        batch_merkle_root: 32-byte batch Merkle root.
+        n_queries:         FRI queries per group (default 1; use 20 for production).
+        num_folds_log10:   Fold rounds for LOG=10 (default: automatic).
+        num_folds_log8:    Fold rounds for LOG=8 (default: automatic).
+
+    Returns:
+        FullV23VFRI8CrossBoundHintResult with both proof triples.
+    """
+    _require_ext("gen_mldsa_v23_vfri8_cross_bound_hints_py")
+    if num_folds_log10 is not None and num_folds_log8 is not None and num_folds_log10 != num_folds_log8:
+        raise ValueError(
+            f"num_folds_log10={num_folds_log10} and num_folds_log8={num_folds_log8} differ; "
+            "the Rust bridge uses the same fold count for both groups."
+        )
+    num_folds = num_folds_log10 if num_folds_log10 is not None else num_folds_log8
+    try:
+        (proof10, commit10, hints10,
+         proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri8_cross_bound_hints_py(
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri8_cross_bound_hints failed: {exc}") from exc
+    return FullV23VFRI8CrossBoundHintResult(
+        log10_proof=bytes(proof10),
+        log10_commitment=commit10,
+        log10_query_hints=bytes(hints10),
+        log8_proof=bytes(proof8),
+        log8_commitment=commit8,
+        log8_query_hints=bytes(hints8),
+        batch_merkle_root=batch_merkle_root,
+        n_queries=n_queries,
+    )
+
+
+def prove_mldsa_sig_vfri8_stark(
+    pk: bytes,
+    msg: bytes,
+    sig: bytes,
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds_log10: int | None = None,
+    num_folds_log8: int | None = None,
+) -> FullV23VFRI8CrossBoundHintResult:
+    """Generate cross-bound VFRI8 hints from a real ML-DSA-65 signature.
+
+    Decodes the signature to extract the arithmetic witness (z, c, t1, a_hat,
+    hints), then runs gen_mldsa_v23_vfri8_cross_bound_hints for both LOG=10 and
+    LOG=8 trace groups with the given batch_merkle_root.
+
+    Args:
+        pk:                ML-DSA-65 public key bytes (1952 bytes).
+        msg:               Signed message bytes.
+        sig:               ML-DSA-65 signature bytes (3309 bytes).
+        batch_merkle_root: 32-byte batch Merkle root for Fiat-Shamir binding.
+        n_queries:         FRI queries per group (default 1).
+        num_folds_log10:   Fold rounds for LOG=10 group (default: automatic).
+        num_folds_log8:    Fold rounds for LOG=8 group (default: automatic).
+
+    Returns:
+        FullV23VFRI8CrossBoundHintResult with cross-bound Poseidon2 proofs for both groups.
+
+    Raises:
+        ValueError: if the signature fails ML-DSA-65 verification.
+        RuntimeError: if the extension is not installed or proof generation fails.
+    """
+    _require_ext("extract_mldsa_witness_py")
+    try:
+        z_raw, c_raw, t1_raw, a_hat_raw, hints_raw = _ext.extract_mldsa_witness_py(
+            bytes(pk), bytes(msg), bytes(sig),
+        )
+    except Exception as exc:
+        raise ValueError(f"extract_mldsa_witness_py failed: {exc}") from exc
+
+    z     = [list(p) for p in z_raw]
+    c     = list(c_raw)
+    t1    = [list(p) for p in t1_raw]
+    a_hat = [list(p) for p in a_hat_raw]
+    hints = [list(h) for h in hints_raw]
+
+    return gen_mldsa_v23_vfri8_cross_bound_hints(
         z, c, t1, a_hat, hints,
         batch_merkle_root,
         n_queries=n_queries,

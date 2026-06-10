@@ -5,9 +5,10 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./IQLSAVerifierV4.sol";
 
-/// @title BatchRegistryV4
+/// @title BatchRegistryV5
 /// @notice On-chain registry of QLSA-finalized batches requiring BOTH a LOG=10
-///         and a LOG=8 VFRI7 proof, enabling full V23 ML-DSA STARK verification.
+///         and a LOG=8 VFRI8 proof, enabling full V23 ML-DSA STARK verification
+///         with Poseidon2 trace commitment.
 ///
 /// The V23 ML-DSA trace has two distinct sub-groups of columns:
 ///   - LOG=10 group (1024 rows): NttBatch (649 cols) + InttBatch (649 cols) = 1298 cols
@@ -15,13 +16,18 @@ import "./IQLSAVerifierV4.sol";
 ///                               + WPrimeFull (24) + NormCheckBatch (15)
 ///                               + UseHintBatchV2 (61 + 1 preproc) = 2206 cols + 1 preproc
 ///
-/// Each group requires a separate VFRI7 FRI commitment tree because the trace
-/// domains have different sizes (LOG=10 vs LOG=8).  BatchRegistryV4 accepts two
+/// Each group requires a separate VFRI8 FRI commitment tree because the trace
+/// domains have different sizes (LOG=10 vs LOG=8).  BatchRegistryV5 accepts two
 /// (proof, commitment, hints) pairs and verifies both before finalizing a batch.
 ///
-/// Cross-proof binding (MVP-5 Priority 2, implemented in VFRI7):
-///   QLSAVerifierVFRI7 mixes `merkleRoot` into the Fiat-Shamir transcript before
-///   drawing FRI query indices.  BatchRegistryV4 uses cross-bound roots:
+/// VFRI8 vs VFRI7: all hash operations use Poseidon2-over-M31 instead of Blake2s.
+/// Merkle trees are Poseidon2 binary trees; the Fiat-Shamir channel is a Poseidon2
+/// duplex sponge.  The commitment check (_checkCommitment) still uses Blake2s for
+/// the outer 16-byte binding (single cheap call).
+///
+/// Cross-proof binding (identical to BatchRegistryV4):
+///   QLSAVerifierVFRI8 mixes `merkleRoot` into the Fiat-Shamir transcript before
+///   drawing FRI query indices.  BatchRegistryV5 uses cross-bound roots:
 ///
 ///     boundRoot10 = keccak256(merkleRoot ‖ traceRoot8)   (traceRoot8  = proofLog8[8:40])
 ///     boundRoot8  = keccak256(merkleRoot ‖ traceRoot10)  (traceRoot10 = proofLog10[8:40])
@@ -29,27 +35,27 @@ import "./IQLSAVerifierV4.sol";
 ///   The LOG=10 proof is verified against boundRoot10, so its FRI query indices
 ///   depend on the LOG=8 trace commitment; and vice versa.  An adversary who mixes
 ///   proofs from different witnesses would get mismatched query indices and fail
-///   Merkle verification.  This closes the cross-proof cherry-pick vulnerability.
+///   Merkle verification.
 ///
 /// Flow:
 ///   1. Aggregator builds SHA3-512 Merkle tree over N transactions.
-///   2. Stwo prover generates V23 proof → two VFRI7 hint sets (LOG=10, LOG=8).
+///   2. Stwo prover generates V23 proof → two VFRI8 hint sets (LOG=10, LOG=8).
 ///   3. Aggregator derives:
-///        commitmentLog10 = Blake2s(proofLog10[:32] || merkleRoot)[:16]
-///        commitmentLog8  = Blake2s(proofLog8[:32]  || merkleRoot)[:16]
+///        commitmentLog10 = Blake2s(proofLog10[:32] ‖ merkleRoot)[:16]
+///        commitmentLog8  = Blake2s(proofLog8[:32]  ‖ merkleRoot)[:16]
 ///   4. Aggregator calls submitBatch(merkleRoot, ...).
-///   5. BatchRegistryV4 calls verifier.verify() for the LOG=10 proof, then again
+///   5. BatchRegistryV5 calls verifier.verify() for the LOG=10 proof, then again
 ///      for the LOG=8 proof.  Both must return true.
 ///   6. On success, merkleRoot is stored as finalized forever.
 ///
-/// Nonce registry and replay protection are identical to BatchRegistryV3.
-contract BatchRegistryV4 is ReentrancyGuard, Ownable {
+/// Nonce registry and replay protection are identical to BatchRegistryV4.
+contract BatchRegistryV5 is ReentrancyGuard, Ownable {
 
     // ──────────────────────────────────────────────────────────────────────────
     // State
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// @notice The VFRI7 verifier used for BOTH the LOG=10 and LOG=8 proof checks.
+    /// @notice The VFRI8 verifier used for BOTH the LOG=10 and LOG=8 proof checks.
     IQLSAVerifierV4 public verifier;
 
     /// @notice Maximum senders per submitBatchWithNonces call (caps O(n²) dedup loop).
@@ -107,7 +113,7 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
 
     /// @param initialOwner Address that will own the registry (can update verifier).
     /// @param _verifier    Address of the initial IQLSAVerifierV4 implementation
-    ///                     (typically QLSAVerifierVFRI7) used for both proof calls.
+    ///                     (typically QLSAVerifierVFRI8) used for both proof calls.
     constructor(address initialOwner, address _verifier) Ownable(initialOwner) {
         if (_verifier == address(0)) revert ZeroAddressVerifier();
         verifier = IQLSAVerifierV4(_verifier);
@@ -117,16 +123,16 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
     // Core logic
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// @notice Submit a batch for on-chain finalization requiring two VFRI7 proofs.
+    /// @notice Submit a batch for on-chain finalization requiring two VFRI8 proofs.
     /// @dev Both proofs are verified against the same `merkleRoot`.
-    ///      The VFRI7 commitment encodes: Blake2s(proof[:32] ‖ merkleRoot)[:16].
+    ///      The VFRI8 commitment encodes: Blake2s(proof[:32] ‖ merkleRoot)[:16].
     /// @param merkleRoot       bytes32 SHA3-512 Merkle root of the batch.
-    /// @param commitmentLog10  16-byte VFRI7 commitment for the LOG=10 trace group.
+    /// @param commitmentLog10  16-byte VFRI8 commitment for the LOG=10 trace group.
     /// @param proofLog10       Full serialized STARK proof for the LOG=10 group.
-    /// @param hintsLog10       ABI-encoded VFRI7 hints for the LOG=10 group.
-    /// @param commitmentLog8   16-byte VFRI7 commitment for the LOG=8 trace group.
+    /// @param hintsLog10       ABI-encoded VFRI8 hints for the LOG=10 group.
+    /// @param commitmentLog8   16-byte VFRI8 commitment for the LOG=8 trace group.
     /// @param proofLog8        Full serialized STARK proof for the LOG=8 group.
-    /// @param hintsLog8        ABI-encoded VFRI7 hints for the LOG=8 group.
+    /// @param hintsLog8        ABI-encoded VFRI8 hints for the LOG=8 group.
     function submitBatch(
         bytes32        merkleRoot,
         bytes16        commitmentLog10,
@@ -139,6 +145,9 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
         if (merkleRoot == bytes32(0)) revert InvalidMerkleRoot();
         if (finalizedBatches[merkleRoot]) revert BatchAlreadyFinalized(merkleRoot);
 
+        // Guard against cross-bound root poisoning via short proof blobs.
+        // calldataload(offset+8) reads bytes 8..40 as the trace root; require
+        // at least 40 bytes so we read from within the proof, not adjacent calldata.
         if (proofLog10.length < 40) revert Log10ProofInvalid();
         if (proofLog8.length  < 40) revert Log8ProofInvalid();
 
@@ -168,12 +177,12 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
 
     /// @notice Submit a batch with per-sender nonce enforcement (replay protection).
     /// @param merkleRoot       bytes32 SHA3-512 Merkle root of the batch.
-    /// @param commitmentLog10  16-byte VFRI7 commitment for the LOG=10 trace group.
+    /// @param commitmentLog10  16-byte VFRI8 commitment for the LOG=10 trace group.
     /// @param proofLog10       Full serialized STARK proof for the LOG=10 group.
-    /// @param hintsLog10       ABI-encoded VFRI7 hints for the LOG=10 group.
-    /// @param commitmentLog8   16-byte VFRI7 commitment for the LOG=8 trace group.
+    /// @param hintsLog10       ABI-encoded VFRI8 hints for the LOG=10 group.
+    /// @param commitmentLog8   16-byte VFRI8 commitment for the LOG=8 trace group.
     /// @param proofLog8        Full serialized STARK proof for the LOG=8 group.
-    /// @param hintsLog8        ABI-encoded VFRI7 hints for the LOG=8 group.
+    /// @param hintsLog8        ABI-encoded VFRI8 hints for the LOG=8 group.
     /// @param senders          Array of sender address hashes (bytes32 = SHA3-256 of ML-DSA pubkey).
     /// @param newNonces        New nonce values (must be strictly > current stored nonce for each sender).
     function submitBatchWithNonces(
@@ -207,9 +216,6 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
                 }
             }
         }
-
-        if (proofLog10.length < 40) revert Log10ProofInvalid();
-        if (proofLog8.length  < 40) revert Log8ProofInvalid();
 
         // Cross-proof binding: each proof's FRI queries depend on the other's trace root.
         bytes32 traceRoot10w;
