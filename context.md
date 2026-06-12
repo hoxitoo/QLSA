@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-10, вечер — VFRI9)
+## Статус (обновлено 2026-06-12 — MVP-6 groundwork)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -30,6 +30,11 @@
 - Mempool visibility (2026-06-05): `GET /mempool?limit`, `GET /batch/{id}/transactions`; `MempoolStatus`; `get_mempool()` + `get_batch_transactions()` Python + TS; fix `LocalClient.get_batch()` O(n)→O(1)
 - Code quality (2026-06-05): `DuplicateTxError` mempool deduplication; mypy clean; `python -m aggregator` entry point; `py.typed` PEP 561 marker
 - CI fix (2026-06-06): `aggregator/__main__.py` — bandit B104 false positive suppressed (`# nosec B104`) для intentional `0.0.0.0` bind (конфигурируется через `--host`/`HOST`)
+- **VFRI9 aggregator pipeline (2026-06-12)**: `BatchResult` + `has_vfri9` + `vfri9_proof/commitment/hints_log{10,8}`; `Batcher._try_prove` вызывает `prove_mldsa_sig_vfri9_stark`; API `/batch/run`/`/batch/flush`/`/batch/{id}`/`/batch/{id}/witness`/`/batches` возвращают `has_vfri9` + commitments; Python SDK `WitnessStatus`/`BatchStatus` + `LocalClient`/`HttpClient` обновлены
+- **pyo3 0.24→0.29 CVE fix (2026-06-12)**: устранены RUSTSEC-2026-0176 (OOB read в `PyList`/`PyTuple` nth/nth_back) и RUSTSEC-2026-0177 (missing `Sync` на `PyCFunction::new_closure`); только version bump + lockfile update, никаких изменений исходников
+- **JS SDK VFRI9 parity (2026-06-12)**: `types.ts` — `WitnessStatus`/`BatchStatus` получили `hasVfri9`/`vfri9CommitmentLog{10,8}`; `client.ts` — 5 inline копий wire-типа консолидированы в `RawBatchStatus` interface + `_toBatchStatus` helper
+- **Poseidon2 t=4 (MVP-6 groundwork, 2026-06-12)**: `stark_stwo/src/poseidon2_t4.rs` — полный R_F=8 + R_P=21 пермутатор, rate-2 capacity-2 sponge (флаг odd-length в capacity cell s[3]), `compress_t4` для 124-bit wide nodes; 12 Rust тестов с frozen reference vectors. `contracts/src/verifier/Poseidon2M31T4.sol` — Solidity зеркало; 11 JS тестов. Vectors заморожены кросс-языково. VFRI10 не подключён — see Known Limitations #6
+- **Тесты (2026-06-12)**: 315 Rust (+12 poseidon2_t4, +88 ignored), 917 Hardhat (+11 Poseidon2M31T4)
 
 ### Что готово
 
@@ -146,10 +151,10 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - `Blake2s.sol` — Blake2s-256 (RFC 7693, pure Solidity)
 
 #### Тесты (актуально 2026-06-10)
-- Python: **336 тестов** (без PyO3) / **528** (с PyO3 ext) — включает 11 новых VFRI8 тестов
-- Rust: **210 тестов** (cargo test, non-ignored) + **85 ignored** (slow STARK integration tests incl. V23)
-- TypeScript SDK: **~71 тестов** (jest; +13 новых для waitForBatch/getTransaction/getMempool/getBatchTransactions)
-- Solidity/Hardhat: **847 тестов** — все проходят (Hardhat native solc недоступен в dev среде; node.js solc компилирует без ошибок)
+- Python: **~350 тестов** (без PyO3) / **~552** (с PyO3 ext)
+- Rust: **315 тестов** (cargo test, non-ignored) + **88 ignored** (slow STARK integration tests incl. V23)
+- TypeScript SDK: **~71 тестов** (jest)
+- Solidity/Hardhat: **917 тестов** (+11 Poseidon2M31T4.test.js)
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
@@ -233,6 +238,10 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **MVP-5** | **✅ Done** | **VFRI7 cross-proof binding + aggregator/SDK wiring + security audit (2026-05-25)** |
 | **VFRI8** | **✅ Done** | **Poseidon2 trace commitment; ≤15M gas for 20 queries; aggregator/SDK wired (2026-06-10)** |
 | **VFRI9** | **✅ Done** | **Last-layer FRI check + wide Poseidon2 nodes + full-root Fiat-Shamir (2026-06-10)** |
+| **VFRI9 pipeline** | **✅ Done** | **Aggregator BatchResult + API + Python SDK + JS SDK expose VFRI9 commitments (2026-06-12)** |
+| **pyo3 CVE fix** | **✅ Done** | **pyo3 0.24→0.29: RUSTSEC-2026-0176 + RUSTSEC-2026-0177 (2026-06-12)** |
+| **Poseidon2 t=4** | **✅ Done (groundwork)** | **Rust + Solidity cross-checked permutation; 124-bit compress; 315 Rust + 917 Solidity tests (2026-06-12)** |
+| MVP-6 | ⏳ Next | VFRI10: wire t=4 channel + Merkle + verifier; 128-bit FRI binding |
 | MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
 
 ---
@@ -393,7 +402,7 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | `_sender_txs` unbounded growth — каждый отправитель оставлял записи навсегда | Средний | ✅ Закрыт (cleanup при eviction батча, 2026-06-10) |
 | Missing last-layer polynomial check (FRI soundness gap) в VFRI7/VFRI8 | Критично | ✅ Закрыт (QLSAVerifierVFRI9: `_checkLastLayer` rebuild + assert root == friLayerRoots[K], 2026-06-10). VFRI5–VFRI8 остаются в репо без проверки — только для регрессии, не деплоить |
 | `submitBatchWithNonces` не проверяет что senders совпадают с транзакциями в батче | Высокий | Open (griefing attack requires valid proof; нет финансового риска для пользователей) |
-| Poseidon2Channel t=2/M31 = 62-bit state (ниже 128-bit target sponge security) | Высокий | Частично смягчён (2026-06-10): VFRI9 wide nodes 31→62 бит (коллизия узла 2^15.5→2^31) + mixRootFull (полное поглощение 32-байтных корней). Полные 128 бит требуют t≥4/RPO256 — MVP-6 |
+| Poseidon2Channel t=2/M31 = 62-bit state (ниже 128-bit target sponge security) | Высокий | Частично смягчён (2026-06-10): VFRI9 wide nodes 31→62 бит + mixRootFull. Groundwork MVP-6 готов (2026-06-12): `poseidon2_t4.rs` + `Poseidon2M31T4.sol` cross-checked (t=4, 124-bit compress, collision ~2^62). VFRI10 не подключён — полные 128 бит требуют t≥4 wire-up |
 | Узлы Poseidon2 Merkle в VFRI8 = 31 бит (s0 only) — коллизия листа ~2^15.5 | Высокий | ✅ Закрыт в VFRI9 (`Poseidon2MerkleVerifierW`, узел = `(s0<<32)\|s1`); VFRI8 — регрессионный, не деплоить |
 | Транзакции терялись при крахе прувера (батч с proof=None уходил в историю) | Высокий | ✅ Закрыт (Batcher retry ≤3 + возврат в мемпул через prepend_batch, 2026-06-10) |
 | `prepend_batch` молча терял транзакции при переполнении мемпула | Средний | ✅ Закрыт (возврат списка потерянных, oldest-kept, метрика dropped_count, 2026-06-10) |
