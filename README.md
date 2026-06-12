@@ -60,7 +60,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**VFRI9 complete** (2026-06-10). Last-layer FRI bounded-degree check + wide (62-bit) Poseidon2 Merkle nodes + full-root Fiat-Shamir absorption — the on-chain FRI protocol soundness argument is now complete. Aggregator liveness hardening + Bearer-token API auth in the same release.
+**MVP-6 groundwork complete** (2026-06-12). Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`poseidon2_t4.rs` + `Poseidon2M31T4.sol`) — 124-bit compress, rate-2 capacity-2 sponge (collision ~2^62 vs t=2's ~2^31). VFRI9 pipeline wired into aggregator, API, Python SDK, and JS SDK. pyo3 CVEs (RUSTSEC-2026-0176/0177) fixed. 315 Rust + 917 Solidity tests.
 
 | Component | Status |
 |-----------|--------|
@@ -71,8 +71,8 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23 + VFRI7/VFRI8/VFRI9 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2–**V5**), QLSAVerifier(V4–**VFRI9**), Poseidon2Channel/Merkle/MerkleW | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API, prover-crash recovery | ✅ Done |
-| Tests — **303 Rust** + **350 Python** (no PyO3) / **552** (with PyO3) + **~71 TS** + **906 Hardhat** | ✅ Done |
-| `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus + VFRI8 fields) + JS SDK | ✅ Done |
+| Tests — **315 Rust** + **350 Python** (no PyO3) / **552** (with PyO3) + **~71 TS** + **917 Hardhat** | ✅ Done |
+| `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus + VFRI9 fields) + JS SDK (VFRI9 parity) | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V23** — 8-component STARK, RangeQBatch, az_hat ∈ [0,Q) — closes AzFull soundness gap | ✅ Done |
 | **QLSAVerifierVFRI7** — VFRI6 + `mixRoot(merkleRoot)` + cross-proof binding | ✅ Done (2026-05-25) |
@@ -84,6 +84,10 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **QLSAVerifierVFRI9** — last-layer FRI check + wide Poseidon2 nodes + full-root Fiat-Shamir; closes the VFRI5–8 bounded-degree soundness gap | ✅ Done (2026-06-10) |
 | **Aggregator liveness** — prover-crash recovery (txs returned to mempool, ≤3 retries), `prepend_batch` overflow accounting, config validation | ✅ Done (2026-06-10) |
 | **API auth** — Bearer token (`QLSA_API_TOKEN`) on `/batch/run` + `/batch/flush`, constant-time compare | ✅ Done (2026-06-10) |
+| **VFRI9 aggregator pipeline** — `BatchResult.has_vfri9` + vfri9 proof/commitment fields; API + Python SDK + JS SDK expose VFRI9 commitments | ✅ Done (2026-06-12) |
+| **pyo3 0.24→0.29** — fixes RUSTSEC-2026-0176 (OOB read in `PyList`/`PyTuple` iterators) and RUSTSEC-2026-0177 (`PyCFunction` missing `Sync`); no source changes | ✅ Done (2026-06-12) |
+| **JS SDK VFRI9 parity** — `WitnessStatus`/`BatchStatus` gain `hasVfri9` fields; `RawBatchStatus` interface deduplicates 5 inline copies of API wire shape | ✅ Done (2026-06-12) |
+| **Poseidon2 t=4 (MVP-6 groundwork)** — `poseidon2_t4.rs` + `Poseidon2M31T4.sol`: R_F=8, R_P=21, rate-2 cap-2 sponge; 124-bit compress (collision ~2^62); 315 Rust / 917 Solidity tests | ✅ Done (2026-06-12) |
 
 ---
 
@@ -106,9 +110,11 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ### Layer 3 — Verification (on-chain)
 
-- **BatchRegistryV4** (dual-VFRI7): two independent VFRI7 `verify()` calls — LOG=10 and LOG=8 groups
+- **BatchRegistryV5** (dual-VFRI9): two independent VFRI9 `verify()` calls — LOG=10 and LOG=8 groups
 - Cross-proof binding: `boundRoot10 = keccak256(batchRoot ‖ traceRoot8)`, `boundRoot8 = keccak256(batchRoot ‖ traceRoot10)` — FRI query indices depend on the other group's trace commitment
-- Each VFRI7 call runs ≤ 15M gas regardless of column count (O(1) in n_cols)
+- Last-layer FRI check: prover supplies all `2^(treeDepth−K)` final-layer evaluations; verifier rebuilds the Merkle tree with wide Poseidon2 nodes (62-bit) and asserts root == `friLayerRoots[K]`
+- Full-root Fiat-Shamir: `mixRootFull` absorbs all 32 bytes of trace root and batch Merkle root
+- Each VFRI9 call runs ≤ 15M gas regardless of column count (O(1) in n_cols)
 - Combined calldata: ~12.5 KB (7.2 KB LOG=10 + 5.3 KB LOG=8)
 - Store `merkle_root` + both commitments on-chain (nonce-ordered replay protection)
 
@@ -259,7 +265,7 @@ QLSA/
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
 ├── testnet/            # e2e.py, deploy.sh, submit.py, monitor.py (Sepolia)
-├── tests/              # 304 Python tests (no PyO3) + ~390 with PyO3 ext (pytest)
+├── tests/              # ~350 Python tests (no PyO3) + ~552 with PyO3 ext (pytest)
 ├── context.md          # Technical decisions, architecture log, security risk table
 └── README.md
 ```

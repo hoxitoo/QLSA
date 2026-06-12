@@ -37,7 +37,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (303 passing, 88 ignored slow STARK integration tests)
+# Run Rust tests (315 passing, 88 ignored slow STARK integration tests)
 cargo +nightly-2025-07-01 test --manifest-path stark_stwo/Cargo.toml
 
 # Run Rust tests including slow STARK integration tests
@@ -618,6 +618,23 @@ VFRI9 — VFRI8 + last-layer FRI check + wide Poseidon2 nodes + full-root Fiat-S
   `prove_mldsa_sig_vfri9_stark(pk, msg, sig, batch_merkle_root)` — from a real ML-DSA-65 signature
 - Fixture: `contracts/test/fixtures/full_v23_vfri9_cross_bound_e2e.json` (seed=16600, n_queries=1, num_folds=3)
 - BatchRegistryV5 deploys with the VFRI9 address — finalize/replay verified in E2E
+
+### `contracts/src/verifier/Poseidon2M31T4.sol` (MVP-6 groundwork)
+Poseidon2 t=4 permutation over M31 — cross-checked bit-exact against `stark_stwo/src/poseidon2_t4.rs`.
+- Parameters: t=4 state, α=5 (x^5), R_F=8 external rounds, R_P=21 internal rounds
+- External matrix M4 = [[5,7,1,3],[4,6,1,1],[1,3,5,7],[1,1,4,6]] (8-addition fast path)
+- Internal matrix J + diag(1,2,3,4): `out_i = (Σ s_j) + μ_i·s_i`
+- Round constants: SHA-256 K[0..53] reduced mod P (external K[0..32], internal K[32..53])
+- `permute(s0,s1,s2,s3)` — full t=4 permutation
+- `compress(l0,l1,r0,r1) → (out0, out1)` — 2-to-1 for 124-bit wide nodes (collision ~2^62)
+- `sponge(values[]) → (s0, s1)` — rate-2 capacity-2; odd-length flag in capacity cell s[3]
+- Cross-check vectors (frozen in `poseidon2_t4.rs::test_reference_vectors`):
+  `permute(0,0,0,0) → (201_095_161, 440_871_427, 944_955_487, 992_273_343)`
+  `permute(1,2,3,4) → (1_706_601_437, 1_471_208_702, 244_698_605, 2_091_016_348)`
+  `compress([1,2],[3,4]) → (1_706_601_437, 1_471_208_702)`
+  `sponge([1..8]) → (1_315_656_215, 594_434_174)`
+- 11 JS tests (`Poseidon2M31T4.test.js`) + 12 Rust tests (`poseidon2_t4.rs`)
+- VFRI10 (t=4 channel + Merkle + verifier) not yet wired — see Known Limitations #6
 
 ## Multi-Component STARK Pattern
 
