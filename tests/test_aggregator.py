@@ -259,11 +259,14 @@ class TestBatcher:
         assert result.has_witness is False
         assert result.has_vfri7 is False
         assert result.has_vfri8 is False
+        assert result.has_vfri9 is False
         assert result.witness_commitment is None
         assert result.vfri7_commitment_log10 is None
         assert result.vfri7_commitment_log8 is None
         assert result.vfri8_commitment_log10 is None
         assert result.vfri8_commitment_log8 is None
+        assert result.vfri9_commitment_log10 is None
+        assert result.vfri9_commitment_log8 is None
 
     def test_try_batch_prove_witnesses_true_accepted(self):
         """prove_witnesses=True runs without error; has_witness may be False without PyO3 ext."""
@@ -277,6 +280,7 @@ class TestBatcher:
         assert isinstance(result.has_witness, bool)
         assert isinstance(result.has_vfri7, bool)
         assert isinstance(result.has_vfri8, bool)
+        assert isinstance(result.has_vfri9, bool)
 
     def test_force_batch_prove_witnesses_true_accepted(self):
         mp = Mempool()
@@ -288,6 +292,7 @@ class TestBatcher:
         assert isinstance(result.has_witness, bool)
         assert isinstance(result.has_vfri7, bool)
         assert isinstance(result.has_vfri8, bool)
+        assert isinstance(result.has_vfri9, bool)
 
     def test_batch_result_vfri7_fields_accessible(self):
         """VFRI7 fields are present on BatchResult regardless of extension availability."""
@@ -309,6 +314,12 @@ class TestBatcher:
         assert hasattr(result, "vfri8_proof_log8")
         assert hasattr(result, "vfri8_commitment_log8")
         assert hasattr(result, "vfri8_hints_log8")
+        assert hasattr(result, "vfri9_proof_log10")
+        assert hasattr(result, "vfri9_commitment_log10")
+        assert hasattr(result, "vfri9_hints_log10")
+        assert hasattr(result, "vfri9_proof_log8")
+        assert hasattr(result, "vfri9_commitment_log8")
+        assert hasattr(result, "vfri9_hints_log8")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

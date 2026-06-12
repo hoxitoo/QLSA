@@ -144,6 +144,46 @@ describe("AggregatorClient _toBatchStatus", () => {
     expect(status.vfri7CommitmentLog10).toBe("c".repeat(32));
     expect(status.vfri7CommitmentLog8).toBe("d".repeat(32));
   });
+
+  it("maps VFRI8 and VFRI9 commitment fields from snake_case", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    // @ts-expect-error accessing private for test
+    const status = client._toBatchStatus({
+      batch_id: "vfri9-id",
+      tx_count: 1,
+      merkle_root: "b".repeat(128),
+      is_proven: false,
+      has_witness: true,
+      has_vfri8: true,
+      vfri8_commitment_log10: "1".repeat(32),
+      vfri8_commitment_log8: "2".repeat(32),
+      has_vfri9: true,
+      vfri9_commitment_log10: "3".repeat(32),
+      vfri9_commitment_log8: "4".repeat(32),
+    });
+    expect(status.hasVfri8).toBe(true);
+    expect(status.vfri8CommitmentLog10).toBe("1".repeat(32));
+    expect(status.vfri8CommitmentLog8).toBe("2".repeat(32));
+    expect(status.hasVfri9).toBe(true);
+    expect(status.vfri9CommitmentLog10).toBe("3".repeat(32));
+    expect(status.vfri9CommitmentLog8).toBe("4".repeat(32));
+  });
+
+  it("defaults hasVfri8 and hasVfri9 to false when absent", () => {
+    const client = new AggregatorClient("http://localhost:8000");
+    // @ts-expect-error accessing private for test
+    const status = client._toBatchStatus({
+      batch_id: "x",
+      tx_count: 1,
+      merkle_root: "a".repeat(128),
+      is_proven: false,
+    });
+    expect(status.hasVfri8).toBe(false);
+    expect(status.vfri8CommitmentLog10).toBeUndefined();
+    expect(status.hasVfri9).toBe(false);
+    expect(status.vfri9CommitmentLog10).toBeUndefined();
+    expect(status.vfri9CommitmentLog8).toBeUndefined();
+  });
 });
 
 describe("AggregatorClient getBatch", () => {

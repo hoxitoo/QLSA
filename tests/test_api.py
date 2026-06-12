@@ -311,6 +311,17 @@ class TestBatchRun:
         assert "vfri7_commitment_log10" in data
         assert "vfri7_commitment_log8" in data
 
+    def test_run_response_includes_vfri9_fields(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        resp = client.post("/batch/run")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "has_vfri9" in data
+        assert data["has_vfri9"] is False
+        assert "vfri9_commitment_log10" in data
+        assert "vfri9_commitment_log8" in data
+
 
 # ── Bearer-token auth on POST /batch/* ───────────────────────────────────────
 
@@ -408,6 +419,17 @@ class TestBatchFlush:
         assert data["has_vfri7"] is False
         assert "vfri7_commitment_log10" in data
         assert "vfri7_commitment_log8" in data
+
+    def test_flush_response_includes_vfri9_fields(self, client, signed_payload):
+        client.post("/transactions", json=signed_payload)
+        resp = client.post("/batch/flush")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "has_vfri9" in data
+        assert data["has_vfri9"] is False
+        assert "vfri9_commitment_log10" in data
+        assert "vfri9_commitment_log8" in data
 
     def test_flush_updates_stats(self, client):
         for p in _make_payloads(2):
@@ -596,7 +618,7 @@ class TestListBatches:
         client.post("/batch/flush")
         b = client.get("/batches").json()["batches"][0]
         for field in ("batch_id", "tx_count", "merkle_root", "is_proven",
-                      "has_witness", "has_vfri7"):
+                      "has_witness", "has_vfri7", "has_vfri9"):
             assert field in b, f"missing field: {field}"
 
     def test_newest_first_ordering(self, client, signed_payload):

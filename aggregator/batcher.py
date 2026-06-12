@@ -47,6 +47,16 @@ class BatchResult:
     vfri8_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
     vfri8_hints_log8:       bytes | None = field(default=None, repr=False)
 
+    # VFRI9 cross-bound ML-DSA V23 proofs for tx[0] (last-layer FRI check,
+    # wide Poseidon2 nodes, full-root Fiat-Shamir absorption).
+    # Populated when prove_witnesses=True and the PyO3 extension is available.
+    vfri9_proof_log10:      bytes | None = field(default=None, repr=False)
+    vfri9_commitment_log10: str | None = None   # 32-char hex (16-byte Blake2s binding)
+    vfri9_hints_log10:      bytes | None = field(default=None, repr=False)
+    vfri9_proof_log8:       bytes | None = field(default=None, repr=False)
+    vfri9_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
+    vfri9_hints_log8:       bytes | None = field(default=None, repr=False)
+
     # Convenience properties for Solidity submission
     @property
     def merkle_root_onchain(self) -> bytes:
@@ -83,8 +93,17 @@ class BatchResult:
         return self.vfri8_proof_log10 is not None and self.vfri8_proof_log8 is not None
 
     @property
+    def has_vfri9(self) -> bool:
+        return self.vfri9_proof_log10 is not None and self.vfri9_proof_log8 is not None
+
+    @property
     def has_witness(self) -> bool:
-        return self.witness_bundle is not None or self.has_vfri7 or self.has_vfri8
+        return (
+            self.witness_bundle is not None
+            or self.has_vfri7
+            or self.has_vfri8
+            or self.has_vfri9
+        )
 
     @property
     def witness_norm_bound_ok(self) -> bool:
@@ -300,5 +319,29 @@ class Batcher:
                     logger.warning("ML-DSA signature invalid for VFRI8 proving: %s", exc)
                 except Exception as exc:
                     logger.error("Unexpected error during VFRI8 proving: %s", exc, exc_info=True)
+
+                try:
+                    from stark.prover import prove_mldsa_sig_vfri9_stark
+                    vr9 = prove_mldsa_sig_vfri9_stark(
+                        pk=tx0.public_key,
+                        msg=tx0.to_bytes(),
+                        sig=tx0.signature,
+                        batch_merkle_root=result.merkle_root_onchain,
+                        n_queries=self.n_fri_queries,
+                    )
+                    result.vfri9_proof_log10      = vr9.log10_proof
+                    result.vfri9_commitment_log10 = vr9.log10_commitment
+                    result.vfri9_hints_log10      = vr9.log10_query_hints
+                    result.vfri9_proof_log8       = vr9.log8_proof
+                    result.vfri9_commitment_log8  = vr9.log8_commitment
+                    result.vfri9_hints_log8       = vr9.log8_query_hints
+                    if result.witness_commitment is None:
+                        result.witness_commitment = vr9.log10_commitment
+                except (RuntimeError, ImportError) as exc:
+                    logger.warning("VFRI9 witness proof skipped: %s", exc)
+                except ValueError as exc:
+                    logger.warning("ML-DSA signature invalid for VFRI9 proving: %s", exc)
+                except Exception as exc:
+                    logger.error("Unexpected error during VFRI9 proving: %s", exc, exc_info=True)
 
         return result, prover_crashed
