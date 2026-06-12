@@ -24,6 +24,26 @@ export class AggregatorHttpError extends Error {
 
 const HEX_RE = /^[0-9a-fA-F]+$/;
 
+/** Wire format of a batch object as returned by the aggregator API (snake_case). */
+interface RawBatchStatus {
+  batch_id: string;
+  tx_count: number;
+  merkle_root: string;
+  is_proven: boolean;
+  stark_commitment?: string;
+  has_witness?: boolean;
+  witness_commitment?: string;
+  has_vfri7?: boolean;
+  vfri7_commitment_log10?: string;
+  vfri7_commitment_log8?: string;
+  has_vfri8?: boolean;
+  vfri8_commitment_log10?: string;
+  vfri8_commitment_log8?: string;
+  has_vfri9?: boolean;
+  vfri9_commitment_log10?: string;
+  vfri9_commitment_log8?: string;
+}
+
 function _validateTransaction(tx: TransactionPayload): void {
   if (!tx.sender || tx.sender.length !== 64 || !HEX_RE.test(tx.sender))
     throw new TypeError("sender must be a 64-character hex string");
@@ -80,49 +100,25 @@ export class AggregatorClient {
   /**
    * Attempt to create a batch (respects the node's min_batch_size).
    * Returns null if there are not enough pending transactions.
-   * @param proveWitnesses  When true, request VFRI7 witness generation (requires PyO3 ext).
+   * @param proveWitnesses  When true, request VFRI7/VFRI8/VFRI9 witness generation (requires PyO3 ext).
    */
   async runCycle(proveWitnesses = false): Promise<BatchStatus | null> {
     const path = proveWitnesses ? "/batch/run?prove_witnesses=true" : "/batch/run";
-    const data = await this._post<{
-      status: string;
-      batch_id?: string;
-      tx_count?: number;
-      merkle_root?: string;
-      is_proven?: boolean;
-      stark_commitment?: string;
-      has_witness?: boolean;
-      witness_commitment?: string;
-      has_vfri7?: boolean;
-      vfri7_commitment_log10?: string;
-      vfri7_commitment_log8?: string;
-    }>(path, {});
+    const data = await this._post<{ status: string } & Partial<RawBatchStatus>>(path, {});
     if (data.status === "no_batch") return null;
-    return this._toBatchStatus(data as Required<typeof data>);
+    return this._toBatchStatus(data as RawBatchStatus);
   }
 
   /**
    * Force a batch from whatever is in the mempool.
    * Returns null if the mempool is empty.
-   * @param proveWitnesses  When true, request VFRI7 witness generation (requires PyO3 ext).
+   * @param proveWitnesses  When true, request VFRI7/VFRI8/VFRI9 witness generation (requires PyO3 ext).
    */
   async flush(proveWitnesses = false): Promise<BatchStatus | null> {
     const path = proveWitnesses ? "/batch/flush?prove_witnesses=true" : "/batch/flush";
-    const data = await this._post<{
-      status: string;
-      batch_id?: string;
-      tx_count?: number;
-      merkle_root?: string;
-      is_proven?: boolean;
-      stark_commitment?: string;
-      has_witness?: boolean;
-      witness_commitment?: string;
-      has_vfri7?: boolean;
-      vfri7_commitment_log10?: string;
-      vfri7_commitment_log8?: string;
-    }>(path, {});
+    const data = await this._post<{ status: string } & Partial<RawBatchStatus>>(path, {});
     if (data.status === "empty") return null;
-    return this._toBatchStatus(data as Required<typeof data>);
+    return this._toBatchStatus(data as RawBatchStatus);
   }
 
   /**
@@ -139,12 +135,19 @@ export class AggregatorClient {
         has_vfri7?: boolean;
         vfri7_commitment_log10?: string;
         vfri7_commitment_log8?: string;
+        has_vfri8?: boolean;
+        vfri8_commitment_log10?: string;
+        vfri8_commitment_log8?: string;
+        has_vfri9?: boolean;
+        vfri9_commitment_log10?: string;
+        vfri9_commitment_log8?: string;
         n_fri_queries?: number;
         fri_security_bits?: number;
       }>(`/batch/${batchId}/witness`);
       if (!data.has_witness) {
         return {
-          hasWitness: false, maxNorms: [], hasVfri7: false,
+          hasWitness: false, maxNorms: [],
+          hasVfri7: false, hasVfri8: false, hasVfri9: false,
           nFriQueries: data.n_fri_queries ?? 0,
           friSecurityBits: data.fri_security_bits ?? 0,
         };
@@ -157,6 +160,12 @@ export class AggregatorClient {
         hasVfri7: data.has_vfri7 ?? false,
         vfri7CommitmentLog10: data.vfri7_commitment_log10,
         vfri7CommitmentLog8: data.vfri7_commitment_log8,
+        hasVfri8: data.has_vfri8 ?? false,
+        vfri8CommitmentLog10: data.vfri8_commitment_log10,
+        vfri8CommitmentLog8: data.vfri8_commitment_log8,
+        hasVfri9: data.has_vfri9 ?? false,
+        vfri9CommitmentLog10: data.vfri9_commitment_log10,
+        vfri9CommitmentLog8: data.vfri9_commitment_log8,
         nFriQueries: data.n_fri_queries ?? 0,
         friSecurityBits: data.fri_security_bits ?? 0,
       };
@@ -173,18 +182,7 @@ export class AggregatorClient {
    */
   async getBatch(batchId: string): Promise<BatchStatus | null> {
     try {
-      const data = await this._get<{
-        batch_id: string;
-        tx_count: number;
-        merkle_root: string;
-        is_proven: boolean;
-        stark_commitment?: string;
-        has_witness?: boolean;
-        witness_commitment?: string;
-        has_vfri7?: boolean;
-        vfri7_commitment_log10?: string;
-        vfri7_commitment_log8?: string;
-      }>(`/batch/${batchId}`);
+      const data = await this._get<RawBatchStatus>(`/batch/${batchId}`);
       return this._toBatchStatus(data);
     } catch (e) {
       if (e instanceof AggregatorHttpError && (e.status === 404 || e.status === 400)) return null;
@@ -202,18 +200,7 @@ export class AggregatorClient {
     let path = `/batches?limit=${limit}`;
     if (proven !== undefined) path += `&proven=${proven}`;
     const data = await this._get<{
-      batches: Array<{
-        batch_id: string;
-        tx_count: number;
-        merkle_root: string;
-        is_proven: boolean;
-        stark_commitment?: string;
-        has_witness?: boolean;
-        witness_commitment?: string;
-        has_vfri7?: boolean;
-        vfri7_commitment_log10?: string;
-        vfri7_commitment_log8?: string;
-      }>;
+      batches: RawBatchStatus[];
       total: number;
     }>(path);
     return {
@@ -391,18 +378,7 @@ export class AggregatorClient {
 
   // ── Private helpers ──────────────────────────────────────────────────────
 
-  private _toBatchStatus(data: {
-    batch_id: string;
-    tx_count: number;
-    merkle_root: string;
-    is_proven: boolean;
-    stark_commitment?: string;
-    has_witness?: boolean;
-    witness_commitment?: string;
-    has_vfri7?: boolean;
-    vfri7_commitment_log10?: string;
-    vfri7_commitment_log8?: string;
-  }): BatchStatus {
+  private _toBatchStatus(data: RawBatchStatus): BatchStatus {
     return {
       batchId: data.batch_id,
       txCount: data.tx_count,
@@ -414,6 +390,12 @@ export class AggregatorClient {
       hasVfri7: data.has_vfri7 ?? false,
       vfri7CommitmentLog10: data.vfri7_commitment_log10,
       vfri7CommitmentLog8: data.vfri7_commitment_log8,
+      hasVfri8: data.has_vfri8 ?? false,
+      vfri8CommitmentLog10: data.vfri8_commitment_log10,
+      vfri8CommitmentLog8: data.vfri8_commitment_log8,
+      hasVfri9: data.has_vfri9 ?? false,
+      vfri9CommitmentLog10: data.vfri9_commitment_log10,
+      vfri9CommitmentLog8: data.vfri9_commitment_log8,
     };
   }
 

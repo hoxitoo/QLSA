@@ -47,6 +47,8 @@ describe("BatchStatus", () => {
       hasWitness: true,
       witnessCommitment: "1".repeat(32),
       hasVfri7: false,
+      hasVfri8: false,
+      hasVfri9: false,
     };
     expect(s.isProven).toBe(true);
     expect(s.hasWitness).toBe(true);
@@ -62,6 +64,8 @@ describe("BatchStatus", () => {
       isProven: false,
       hasWitness: false,
       hasVfri7: false,
+      hasVfri8: false,
+      hasVfri9: false,
     };
     expect(s.starkCommitment).toBeUndefined();
     expect(s.witnessCommitment).toBeUndefined();
@@ -78,6 +82,8 @@ describe("BatchStatus", () => {
       hasWitness: true,
       witnessCommitment: "a".repeat(32),
       hasVfri7: true,
+      hasVfri8: false,
+      hasVfri9: false,
       vfri7CommitmentLog10: "d".repeat(32),
       vfri7CommitmentLog8: "e".repeat(32),
     };
@@ -85,12 +91,32 @@ describe("BatchStatus", () => {
     expect(s.vfri7CommitmentLog10).toHaveLength(32);
     expect(s.vfri7CommitmentLog8).toHaveLength(32);
   });
+
+  it("vfri9 batch carries dual commitment fields", () => {
+    const s: BatchStatus = {
+      batchId: "vfri9-test",
+      txCount: 1,
+      merkleRoot: "c".repeat(128),
+      isProven: false,
+      hasWitness: true,
+      witnessCommitment: "a".repeat(32),
+      hasVfri7: true,
+      hasVfri8: true,
+      hasVfri9: true,
+      vfri9CommitmentLog10: "1".repeat(32),
+      vfri9CommitmentLog8: "2".repeat(32),
+    };
+    expect(s.hasVfri9).toBe(true);
+    expect(s.vfri9CommitmentLog10).toHaveLength(32);
+    expect(s.vfri9CommitmentLog8).toHaveLength(32);
+  });
 });
 
 describe("WitnessStatus", () => {
   it("no-witness status has empty maxNorms, no vfri7, zero security fields", () => {
     const ws: WitnessStatus = {
-      hasWitness: false, maxNorms: [], hasVfri7: false, nFriQueries: 0, friSecurityBits: 0,
+      hasWitness: false, maxNorms: [], hasVfri7: false, hasVfri8: false, hasVfri9: false,
+      nFriQueries: 0, friSecurityBits: 0,
     };
     expect(ws.hasWitness).toBe(false);
     expect(ws.maxNorms).toHaveLength(0);
@@ -109,6 +135,8 @@ describe("WitnessStatus", () => {
       onchainCommitment: "a".repeat(32),
       maxNorms: [],
       hasVfri7: true,
+      hasVfri8: false,
+      hasVfri9: false,
       vfri7CommitmentLog10: "d".repeat(32),
       vfri7CommitmentLog8: "e".repeat(32),
       nFriQueries: 1,
@@ -126,7 +154,7 @@ describe("WitnessStatus", () => {
     const cases: Array<[number, number]> = [[1, 16], [3, 28], [20, 130]];
     for (const [n, bits] of cases) {
       const ws: WitnessStatus = {
-        hasWitness: true, maxNorms: [], hasVfri7: true,
+        hasWitness: true, maxNorms: [], hasVfri7: true, hasVfri8: false, hasVfri9: false,
         nFriQueries: n, friSecurityBits: bits,
       };
       expect(ws.friSecurityBits).toBe(6 * ws.nFriQueries + 10);

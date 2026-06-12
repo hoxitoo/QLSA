@@ -32,14 +32,22 @@ export interface TransactionStatus {
 export interface WitnessStatus {
   hasWitness: boolean;
   onchainCommitment?: string;  // 32-char hex — alias for vfri7CommitmentLog10 (backward compat)
-  cTildeHex?: string;          // 96-char hex — legacy V3/V4 path only; undefined for VFRI7
-  maxNorms: number[];          // legacy V3/V4 path only; empty for VFRI7
+  cTildeHex?: string;          // 96-char hex — legacy V3/V4 path only; undefined for VFRI7+
+  maxNorms: number[];          // legacy V3/V4 path only; empty for VFRI7+
   // VFRI7 cross-bound ML-DSA V23 proof commitments (MVP-5)
   hasVfri7: boolean;
   vfri7CommitmentLog10?: string;  // 32-char hex (16-byte binding, LOG=10 group)
   vfri7CommitmentLog8?: string;   // 32-char hex (16-byte binding, LOG=8 group)
   nFriQueries: number;            // FRI queries used; 0 = extension not available
   friSecurityBits: number;        // 6 × nFriQueries + 10
+  // VFRI8 Poseidon2 trace commitment
+  hasVfri8: boolean;
+  vfri8CommitmentLog10?: string;  // 32-char hex (Poseidon2 backend)
+  vfri8CommitmentLog8?: string;   // 32-char hex (Poseidon2 backend)
+  // VFRI9 (last-layer FRI check, wide Poseidon2 nodes, full-root FS)
+  hasVfri9: boolean;
+  vfri9CommitmentLog10?: string;  // 32-char hex (Poseidon2W backend)
+  vfri9CommitmentLog8?: string;   // 32-char hex (Poseidon2W backend)
 }
 
 export interface BatchStatus {
@@ -54,6 +62,14 @@ export interface BatchStatus {
   hasVfri7: boolean;
   vfri7CommitmentLog10?: string;  // 32-char hex (16-byte binding, LOG=10 group)
   vfri7CommitmentLog8?: string;   // 32-char hex (16-byte binding, LOG=8 group)
+  // VFRI8 Poseidon2 trace commitment
+  hasVfri8: boolean;
+  vfri8CommitmentLog10?: string;  // 32-char hex (Poseidon2 backend)
+  vfri8CommitmentLog8?: string;   // 32-char hex (Poseidon2 backend)
+  // VFRI9 (last-layer FRI check, wide Poseidon2 nodes, full-root FS)
+  hasVfri9: boolean;
+  vfri9CommitmentLog10?: string;  // 32-char hex (Poseidon2W backend)
+  vfri9CommitmentLog8?: string;   // 32-char hex (Poseidon2W backend)
 }
 
 export interface NodeStats {
