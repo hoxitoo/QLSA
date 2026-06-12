@@ -27,11 +27,14 @@ def _batch_status(result: BatchResult) -> BatchStatus:
         has_vfri8=result.has_vfri8,
         vfri8_commitment_log10=result.vfri8_commitment_log10,
         vfri8_commitment_log8=result.vfri8_commitment_log8,
+        has_vfri9=result.has_vfri9,
+        vfri9_commitment_log10=result.vfri9_commitment_log10,
+        vfri9_commitment_log8=result.vfri9_commitment_log8,
     )
 
 
 def _prove_witness_local(tx: Transaction, n_fri_queries: int = 1) -> WitnessStatus:
-    """Prove VFRI7 + VFRI8 cross-bound V23 ML-DSA witness for a single transaction (local, no mempool).
+    """Prove VFRI7 + VFRI8 + VFRI9 cross-bound V23 ML-DSA witness for a single transaction (local, no mempool).
 
     Uses a zero batch_merkle_root (bytes(32)) since this is a standalone per-tx operation
     with no associated batch context.  The resulting commitment is therefore bound to the
@@ -71,6 +74,20 @@ def _prove_witness_local(tx: Transaction, n_fri_queries: int = 1) -> WitnessStat
         status.has_vfri8 = True
         status.vfri8_commitment_log10 = vr8.log10_commitment
         status.vfri8_commitment_log8 = vr8.log8_commitment
+    except (RuntimeError, ImportError, ValueError):
+        pass
+    try:
+        from stark.prover import prove_mldsa_sig_vfri9_stark
+        vr9 = prove_mldsa_sig_vfri9_stark(
+            pk=tx.public_key,
+            msg=tx.to_bytes(),
+            sig=tx.signature,
+            batch_merkle_root=bytes(32),
+            n_queries=n_fri_queries,
+        )
+        status.has_vfri9 = True
+        status.vfri9_commitment_log10 = vr9.log10_commitment
+        status.vfri9_commitment_log8 = vr9.log8_commitment
     except (RuntimeError, ImportError, ValueError):
         pass
     return status
@@ -219,6 +236,7 @@ class LocalClient:
                 has_witness=False,
                 has_vfri7=False,
                 has_vfri8=False,
+                has_vfri9=False,
                 n_fri_queries=n,
                 fri_security_bits=6 * n + 10,
             )
@@ -235,6 +253,9 @@ class LocalClient:
             has_vfri8=result.has_vfri8,
             vfri8_commitment_log10=result.vfri8_commitment_log10,
             vfri8_commitment_log8=result.vfri8_commitment_log8,
+            has_vfri9=result.has_vfri9,
+            vfri9_commitment_log10=result.vfri9_commitment_log10,
+            vfri9_commitment_log8=result.vfri9_commitment_log8,
         )
 
     def health(self) -> bool:
@@ -463,6 +484,7 @@ class HttpClient:
                 has_witness=False,
                 has_vfri7=False,
                 has_vfri8=False,
+                has_vfri9=False,
                 n_fri_queries=data.get("n_fri_queries", 0),
                 fri_security_bits=data.get("fri_security_bits", 0),
             )
@@ -479,6 +501,9 @@ class HttpClient:
             has_vfri8=data.get("has_vfri8", False),
             vfri8_commitment_log10=data.get("vfri8_commitment_log10"),
             vfri8_commitment_log8=data.get("vfri8_commitment_log8"),
+            has_vfri9=data.get("has_vfri9", False),
+            vfri9_commitment_log10=data.get("vfri9_commitment_log10"),
+            vfri9_commitment_log8=data.get("vfri9_commitment_log8"),
         )
 
     def prove_witness(self, tx: Transaction, n_fri_queries: int = 1) -> WitnessStatus:
@@ -637,4 +662,7 @@ class HttpClient:
             has_vfri8=data.get("has_vfri8", False),
             vfri8_commitment_log10=data.get("vfri8_commitment_log10"),
             vfri8_commitment_log8=data.get("vfri8_commitment_log8"),
+            has_vfri9=data.get("has_vfri9", False),
+            vfri9_commitment_log10=data.get("vfri9_commitment_log10"),
+            vfri9_commitment_log8=data.get("vfri9_commitment_log8"),
         )
