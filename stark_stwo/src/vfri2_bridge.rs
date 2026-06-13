@@ -4326,6 +4326,159 @@ impl P2Channel {
     }
 }
 
+// ── VFRI10 hash backend: Poseidon2 t=4 wide Merkle + Fiat-Shamir channel ──────
+//
+// The t=2 channel and the t=2 wide (`p2w`) Merkle nodes carry only 62 bits of
+// capacity — collision / transcript attacks bottom out at ~2^31 (limitation #6).
+// These t=4 primitives reuse the frozen `poseidon2_t4` permutation: a capacity-2
+// duplex sponge over a 124-bit state, the next step toward 128-bit binding
+// (VFRI10).  Node encoding is unchanged from `p2w` (two M31 words packed into
+// bytes[24..32]) so the Solidity Merkle path logic is identical — only the
+// permutation differs.
+
+/// Wide t=4 leaf hash: rate-2 capacity-2 sponge over the column values.
+/// Node = (state[0], state[1]) packed into bytes[24..32].
+/// Matches Poseidon2MerkleVerifierT4.hashLeaf and uses the same `sponge_t4`
+/// padding convention (odd-length flag in capacity cell 3).
+#[allow(dead_code)]
+fn hash_leaf_cols_p2t4(col_values: &[u32]) -> [u8; 32] {
+    let vals: Vec<u64> = col_values.iter().map(|&v| v as u64).collect();
+    let s = crate::poseidon2_t4::sponge_t4(&vals);
+    let mut out = [0u8; 32];
+    out[24..28].copy_from_slice(&(s[0] as u32).to_be_bytes());
+    out[28..32].copy_from_slice(&(s[1] as u32).to_be_bytes());
+    out
+}
+
+/// Wide t=4 pair hash: 2-to-1 compression of two 2-word nodes via a single
+/// t=4 permutation (state = (l0, l1, r0, r1) → permute → (s0, s1)).
+/// Matches Poseidon2MerkleVerifierT4.hashPair.
+#[allow(dead_code)]
+fn hash_pair_p2t4(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let l0 = u32::from_be_bytes(left[24..28].try_into().unwrap()) as u64;
+    let l1 = u32::from_be_bytes(left[28..32].try_into().unwrap()) as u64;
+    let r0 = u32::from_be_bytes(right[24..28].try_into().unwrap()) as u64;
+    let r1 = u32::from_be_bytes(right[28..32].try_into().unwrap()) as u64;
+    let s = crate::poseidon2_t4::compress_t4([l0, l1], [r0, r1]);
+    let mut out = [0u8; 32];
+    out[24..28].copy_from_slice(&(s[0] as u32).to_be_bytes());
+    out[28..32].copy_from_slice(&(s[1] as u32).to_be_bytes());
+    out
+}
+
+/// Wide t=4 leaf hash for a single QM31 value (4 M31 words).
+#[allow(dead_code)]
+fn hash_leaf_qm31_p2t4(value: u128) -> [u8; 32] {
+    let words = qm31_words(value);
+    let vals: Vec<u64> = words.iter().map(|&w| w as u64).collect();
+    let s = crate::poseidon2_t4::sponge_t4(&vals);
+    let mut out = [0u8; 32];
+    out[24..28].copy_from_slice(&(s[0] as u32).to_be_bytes());
+    out[28..32].copy_from_slice(&(s[1] as u32).to_be_bytes());
+    out
+}
+
+#[allow(dead_code)]
+fn build_tree_p2t4(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
+    assert!(leaves.len().is_power_of_two(), "leaves.len() must be power of 2");
+    let mut levels = vec![leaves];
+    while levels.last().unwrap().len() > 1 {
+        let prev = levels.last().unwrap();
+        let mut next = Vec::with_capacity(prev.len() / 2);
+        for chunk in prev.chunks(2) {
+            next.push(hash_pair_p2t4(&chunk[0], &chunk[1]));
+        }
+        levels.push(next);
+    }
+    levels
+}
+
+/// Poseidon2 t=4 duplex Fiat-Shamir channel (VFRI10).
+///
+/// Structural analogue of `P2Channel` (t=2) widened to the t=4 permutation:
+///   - absorb: rate-1 into cell 0 (cells 1–3 form the capacity → 93 bits)
+///   - draw_pair: squeeze the two rate-adjacent cells (s0, s1), then mix the
+///     squeeze counter into cell 0 and permute
+/// Exposes the same interface (mix_root / mix_root_w / mix_root_full /
+/// mix_u32s / draw_secure_felt / draw_queries) so VFRI10 can swap it in for
+/// `P2Channel` with no transcript-shape changes — only the permutation widens.
+#[allow(dead_code)]
+struct P2T4Channel {
+    s: [u64; 4],
+    n_draws: u32,
+}
+
+#[allow(dead_code)]
+impl P2T4Channel {
+    fn init() -> Self {
+        P2T4Channel { s: [0u64; 4], n_draws: 0 }
+    }
+
+    fn absorb(&mut self, word: u32) {
+        // Reduce arbitrary u32 (e.g. keccak bytes) to M31 — two subtractions
+        // suffice since u32 < 2*P+2.
+        let mut w = word as u64;
+        if w >= crate::poseidon2::M31_P { w -= crate::poseidon2::M31_P; }
+        if w >= crate::poseidon2::M31_P { w -= crate::poseidon2::M31_P; }
+        self.s[0] = crate::poseidon2::m31_add(self.s[0], w);
+        crate::poseidon2_t4::permute_t4(&mut self.s);
+    }
+
+    fn mix_root(&mut self, root: &[u8; 32]) {
+        self.absorb(u32::from_be_bytes(root[28..32].try_into().unwrap()));
+        self.n_draws = 0;
+    }
+
+    fn mix_root_w(&mut self, root: &[u8; 32]) {
+        self.absorb(u32::from_be_bytes(root[24..28].try_into().unwrap()));
+        self.absorb(u32::from_be_bytes(root[28..32].try_into().unwrap()));
+        self.n_draws = 0;
+    }
+
+    fn mix_root_full(&mut self, root: &[u8; 32]) {
+        for i in 0..8 {
+            self.absorb(u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap()));
+        }
+        self.n_draws = 0;
+    }
+
+    fn mix_u32s(&mut self, words: &[u32]) {
+        for &w in words { self.absorb(w); }
+        self.n_draws = 0;
+    }
+
+    fn draw_pair(&mut self) -> (u32, u32) {
+        let w0 = self.s[0] as u32;
+        let w1 = self.s[1] as u32;
+        self.s[0] = crate::poseidon2::m31_add(self.s[0], self.n_draws as u64);
+        crate::poseidon2_t4::permute_t4(&mut self.s);
+        self.n_draws += 1;
+        (w0, w1)
+    }
+
+    fn draw_secure_felt(&mut self) -> u128 {
+        let (w0, w1) = self.draw_pair();
+        let (w2, w3) = self.draw_pair();
+        let c0 = cm31_pack(w0, w1);
+        let c1 = cm31_pack(w2, w3);
+        qm31_pack_c(c0, c1)
+    }
+
+    fn draw_queries(&mut self, log_domain_size: u32, n: usize) -> Vec<usize> {
+        let mask = ((1u64 << log_domain_size) - 1) as u32;
+        let mut queries = Vec::with_capacity(n);
+        while queries.len() < n {
+            let (w0, w1) = self.draw_pair();
+            queries.push((w0 & mask) as usize);
+            if queries.len() < n {
+                queries.push((w1 & mask) as usize);
+            }
+        }
+        queries.truncate(n);
+        queries
+    }
+}
+
 fn abi_encode_vfri9_hints(
     oods_combo_pos:   u128,
     oods_combo_neg:   u128,
@@ -5964,6 +6117,141 @@ mod tests_vfri8 {
         // Same sponge: wide s0 (bytes 24..28) equals narrow s0 (bytes 28..32)
         assert_eq!(&h[24..28], &h_narrow[28..32],
             "s0 word must match the narrow hash (same sponge)");
+    }
+
+    // ── VFRI10 t=4 hash backend cross-check ──────────────────────────────────
+
+    #[test]
+    #[ignore = "prints reference vectors for regeneration; values are frozen in test_p2t4_reference_vectors"]
+    fn test_p2t4_print_reference_vectors() {
+        // Prints the values frozen below + in Poseidon2MerkleVerifierT4.test.js.
+        // Run with: cargo test test_p2t4_print_reference_vectors -- --ignored --nocapture
+        let leaf = hash_leaf_cols_p2t4(&[1, 2, 3, 4]);
+        let l0 = u32::from_be_bytes(leaf[24..28].try_into().unwrap());
+        let l1 = u32::from_be_bytes(leaf[28..32].try_into().unwrap());
+        eprintln!("hash_leaf_cols_p2t4([1,2,3,4]) = ({l0}, {l1})");
+
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        a[24..28].copy_from_slice(&1u32.to_be_bytes());
+        a[28..32].copy_from_slice(&2u32.to_be_bytes());
+        b[24..28].copy_from_slice(&3u32.to_be_bytes());
+        b[28..32].copy_from_slice(&4u32.to_be_bytes());
+        let pair = hash_pair_p2t4(&a, &b);
+        let p0 = u32::from_be_bytes(pair[24..28].try_into().unwrap());
+        let p1 = u32::from_be_bytes(pair[28..32].try_into().unwrap());
+        eprintln!("hash_pair_p2t4([1,2],[3,4]) = ({p0}, {p1})");
+
+        let mut ch = P2T4Channel::init();
+        ch.mix_root(&[0x11u8; 32]);
+        let q = ch.draw_queries(10, 4);
+        eprintln!("channel.mix_root(0x11..).draw_queries(10,4) = {q:?}");
+        let felt = { let mut c = P2T4Channel::init(); c.mix_u32s(&[1, 2, 3]); c.draw_secure_felt() };
+        eprintln!("channel.mix_u32s([1,2,3]).draw_secure_felt() = {felt}");
+    }
+
+    #[test]
+    fn test_p2t4_reference_vectors() {
+        // Frozen — Poseidon2MerkleVerifierT4.test.js asserts the same outputs.
+        let leaf = hash_leaf_cols_p2t4(&[1, 2, 3, 4]);
+        assert_eq!(u32::from_be_bytes(leaf[24..28].try_into().unwrap()), 188_265_029);
+        assert_eq!(u32::from_be_bytes(leaf[28..32].try_into().unwrap()), 348_838_750);
+
+        // hash_pair of nodes (1,2) and (3,4) is exactly compress_t4([1,2],[3,4]).
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        a[24..28].copy_from_slice(&1u32.to_be_bytes());
+        a[28..32].copy_from_slice(&2u32.to_be_bytes());
+        b[24..28].copy_from_slice(&3u32.to_be_bytes());
+        b[28..32].copy_from_slice(&4u32.to_be_bytes());
+        let pair = hash_pair_p2t4(&a, &b);
+        assert_eq!(u32::from_be_bytes(pair[24..28].try_into().unwrap()), 1_706_601_437);
+        assert_eq!(u32::from_be_bytes(pair[28..32].try_into().unwrap()), 1_471_208_702);
+    }
+
+    #[test]
+    fn test_p2t4_leaf_is_wide_and_sponge_consistent() {
+        let cols = vec![1u32, 2, 3, 4];
+        let h = hash_leaf_cols_p2t4(&cols);
+        // Content lives in the low 8 bytes; upper 24 bytes are zero.
+        assert_eq!(&h[..24], &[0u8; 24]);
+        // Leaf == sponge_t4 of the columns (first two words).
+        let s = crate::poseidon2_t4::sponge_t4(&[1, 2, 3, 4]);
+        assert_eq!(u32::from_be_bytes(h[24..28].try_into().unwrap()), s[0] as u32);
+        assert_eq!(u32::from_be_bytes(h[28..32].try_into().unwrap()), s[1] as u32);
+        // t=4 leaf differs from the t=2 wide leaf (different permutation).
+        assert_ne!(h, hash_leaf_cols_p2w(&cols));
+    }
+
+    #[test]
+    fn test_p2t4_pair_uses_both_words_and_order_sensitive() {
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        a[24..28].copy_from_slice(&1u32.to_be_bytes());
+        a[28..32].copy_from_slice(&7u32.to_be_bytes());
+        b[24..28].copy_from_slice(&2u32.to_be_bytes());
+        b[28..32].copy_from_slice(&7u32.to_be_bytes());
+        let sib = [0x05u8; 32];
+        // Nodes differing only in the high word must yield different parents.
+        assert_ne!(hash_pair_p2t4(&a, &sib), hash_pair_p2t4(&b, &sib));
+        // Compression is not commutative.
+        assert_ne!(hash_pair_p2t4(&a, &sib), hash_pair_p2t4(&sib, &a));
+    }
+
+    #[test]
+    fn test_p2t4_tree_roundtrip() {
+        // Build a depth-2 tree, walk a Merkle path, confirm it reaches the root.
+        let leaves: Vec<[u8; 32]> = (0..4u32)
+            .map(|j| hash_leaf_cols_p2t4(&[j, j + 1, j + 2]))
+            .collect();
+        let levels = build_tree_p2t4(leaves.clone());
+        let root = levels.last().unwrap()[0];
+        assert_eq!(levels.len(), 3); // 4 → 2 → 1
+        // Verify inclusion of leaf index 1 by recomputing up the path.
+        let idx = 1usize;
+        let mut cur = leaves[idx];
+        let sib0 = leaves[0]; // sibling of leaf 1 is leaf 0
+        cur = hash_pair_p2t4(&sib0, &cur); // idx odd → sibling on the left
+        let sib1 = levels[1][1]; // sibling of node 0 at level 1 is node 1
+        cur = hash_pair_p2t4(&cur, &sib1);
+        assert_eq!(cur, root);
+    }
+
+    #[test]
+    fn test_p2t4_channel_deterministic_and_binds() {
+        let mut a = P2T4Channel::init();
+        let mut b = P2T4Channel::init();
+        a.mix_root(&[0x11u8; 32]);
+        b.mix_root(&[0x11u8; 32]);
+        assert_eq!(a.draw_queries(10, 8), b.draw_queries(10, 8));
+        // Different root → different query stream.
+        let mut c = P2T4Channel::init();
+        c.mix_root(&[0x12u8; 32]);
+        let mut d = P2T4Channel::init();
+        d.mix_root(&[0x11u8; 32]);
+        assert_ne!(c.draw_queries(10, 8), d.draw_queries(10, 8));
+        // Queries are within the domain.
+        let mut e = P2T4Channel::init();
+        e.mix_root(&[0x11u8; 32]);
+        for q in e.draw_queries(10, 16) {
+            assert!(q < (1 << 10));
+        }
+    }
+
+    #[test]
+    fn test_p2t4_channel_full_root_binds_all_bytes() {
+        // mix_root_full must depend on every byte; mix_root (low 4 bytes) must not.
+        let mut base = [0u8; 32];
+        base[0] = 0xAA; // high byte
+        let mut alt = base;
+        alt[0] = 0xBB;
+        let q_full_base = { let mut c = P2T4Channel::init(); c.mix_root_full(&base); c.draw_queries(8, 4) };
+        let q_full_alt = { let mut c = P2T4Channel::init(); c.mix_root_full(&alt); c.draw_queries(8, 4) };
+        assert_ne!(q_full_base, q_full_alt, "mix_root_full must bind high bytes");
+        // mix_root only looks at bytes[28..32] → high-byte change is invisible.
+        let q_lo_base = { let mut c = P2T4Channel::init(); c.mix_root(&base); c.draw_queries(8, 4) };
+        let q_lo_alt = { let mut c = P2T4Channel::init(); c.mix_root(&alt); c.draw_queries(8, 4) };
+        assert_eq!(q_lo_base, q_lo_alt);
     }
 
     #[test]

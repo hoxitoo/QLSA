@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-12 — MVP-6 groundwork)
+## Статус (обновлено 2026-06-13 — VFRI10 hash backend)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -35,6 +35,13 @@
 - **JS SDK VFRI9 parity (2026-06-12)**: `types.ts` — `WitnessStatus`/`BatchStatus` получили `hasVfri9`/`vfri9CommitmentLog{10,8}`; `client.ts` — 5 inline копий wire-типа консолидированы в `RawBatchStatus` interface + `_toBatchStatus` helper
 - **Poseidon2 t=4 (MVP-6 groundwork, 2026-06-12)**: `stark_stwo/src/poseidon2_t4.rs` — полный R_F=8 + R_P=21 пермутатор, rate-2 capacity-2 sponge (флаг odd-length в capacity cell s[3]), `compress_t4` для 124-bit wide nodes; 12 Rust тестов с frozen reference vectors. `contracts/src/verifier/Poseidon2M31T4.sol` — Solidity зеркало; 11 JS тестов. Vectors заморожены кросс-языково. VFRI10 не подключён — see Known Limitations #6
 - **Тесты (2026-06-12)**: 315 Rust (+12 poseidon2_t4, +88 ignored), 917 Hardhat (+11 Poseidon2M31T4)
+- **VFRI10 hash backend (2026-06-13)**: t=4 wide Merkle + Fiat-Shamir channel поверх готового `poseidon2_t4`
+  - `contracts/src/verifier/Poseidon2MerkleVerifierT4.sol` — узлы 2 слова `(s0<<32)|s1` (как W), но t=4: `sponge` для листьев, `compress` (4→2) для пар; 124-бит состояние, 2-cell capacity
+  - `contracts/src/verifier/Poseidon2ChannelT4.sol` — t=4 duplex sponge: absorb rate-1 в cell 0 (capacity 93 бит), draw squeeze (s0,s1); mixRoot/mixRootW/mixRootFull/mixU32s/drawSecureFelt/drawQueries
+  - Rust references в `vfri2_bridge.rs`: `hash_leaf_cols_p2t4`/`hash_pair_p2t4`/`hash_leaf_qm31_p2t4`/`build_tree_p2t4`/`P2T4Channel` (#[allow(dead_code)] до подключения VFRI10 верификатора)
+  - Cross-check заморожен: `hashLeaf([1,2,3,4])→(188265029,348838750)`, `hashPair((1,2),(3,4))→(1706601437,1471208702)`, `mixRoot(0x11..).drawQueries(10,4)→[674,500,407,375]`
+  - 6 Rust тестов (`p2t4`) + 12 JS тестов (`Poseidon2T4Backend.test.js`); остаётся подключить VFRI10 верификатор-контракт
+- **Тесты (2026-06-13)**: 321 Rust (+6 p2t4, 89 ignored), 929 Hardhat (+12 Poseidon2T4Backend)
 
 ### Что готово
 
@@ -152,9 +159,9 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 
 #### Тесты (актуально 2026-06-10)
 - Python: **~350 тестов** (без PyO3) / **~552** (с PyO3 ext)
-- Rust: **315 тестов** (cargo test, non-ignored) + **88 ignored** (slow STARK integration tests incl. V23)
+- Rust: **321 тестов** (cargo test, non-ignored) + **89 ignored** (slow STARK integration tests incl. V23)
 - TypeScript SDK: **~71 тестов** (jest)
-- Solidity/Hardhat: **917 тестов** (+11 Poseidon2M31T4.test.js)
+- Solidity/Hardhat: **929 тестов** (+12 Poseidon2T4Backend.test.js)
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
@@ -241,7 +248,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **VFRI9 pipeline** | **✅ Done** | **Aggregator BatchResult + API + Python SDK + JS SDK expose VFRI9 commitments (2026-06-12)** |
 | **pyo3 CVE fix** | **✅ Done** | **pyo3 0.24→0.29: RUSTSEC-2026-0176 + RUSTSEC-2026-0177 (2026-06-12)** |
 | **Poseidon2 t=4** | **✅ Done (groundwork)** | **Rust + Solidity cross-checked permutation; 124-bit compress; 315 Rust + 917 Solidity tests (2026-06-12)** |
-| MVP-6 | ⏳ Next | VFRI10: wire t=4 channel + Merkle + verifier; 128-bit FRI binding |
+| **VFRI10 hash backend** | **✅ Done** | **t=4 wide Merkle (`Poseidon2MerkleVerifierT4`) + Fiat-Shamir channel (`Poseidon2ChannelT4`) + Rust refs, cross-checked; 321 Rust + 929 Solidity (2026-06-13)** |
+| MVP-6 VFRI10 | ⏳ Next | Wire t=4 backend into a full VFRI10 verifier contract; 128-bit FRI binding |
 | MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
 
 ---

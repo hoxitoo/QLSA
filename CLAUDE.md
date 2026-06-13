@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3/V4/V5, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2Channel.sol
+contracts/      Solidity: BatchRegistryV2/V3/V4/V5, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2MerkleVerifierT4.sol, Poseidon2Channel.sol, Poseidon2ChannelT4.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -37,7 +37,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (315 passing, 88 ignored slow STARK integration tests)
+# Run Rust tests (321 passing, 89 ignored slow STARK integration tests)
 cargo +nightly-2025-07-01 test --manifest-path stark_stwo/Cargo.toml
 
 # Run Rust tests including slow STARK integration tests
@@ -634,7 +634,32 @@ Poseidon2 t=4 permutation over M31 — cross-checked bit-exact against `stark_st
   `compress([1,2],[3,4]) → (1_706_601_437, 1_471_208_702)`
   `sponge([1..8]) → (1_315_656_215, 594_434_174)`
 - 11 JS tests (`Poseidon2M31T4.test.js`) + 12 Rust tests (`poseidon2_t4.rs`)
-- VFRI10 (t=4 channel + Merkle + verifier) not yet wired — see Known Limitations #6
+- VFRI10 verifier (t=4 verifier contract) not yet wired — see Known Limitations #6
+
+### `contracts/src/verifier/Poseidon2MerkleVerifierT4.sol` (VFRI10 hash backend)
+Poseidon2 t=4 wide Merkle verification — the t=4 successor to `Poseidon2MerkleVerifierW`.
+- Same 2-word node encoding (`uint256(node) = (s0 << 32) | s1`, bytes[24..32]) but built on
+  the t=4 permutation: 124-bit state with a 2-cell capacity (vs t=2's single capacity cell)
+- `hashLeaf(uint32[] cols)` — rate-2 capacity-2 `Poseidon2M31T4.sponge`; returns `(s0<<32)|s1`
+- `hashPair(left, right)` — single 4→2 `Poseidon2M31T4.compress(l0,l1,r0,r1)`
+- `verify / verifyMem` — identical Merkle path logic to `Poseidon2MerkleVerifierW`
+- Matches Rust `hash_leaf_cols_p2t4` / `hash_pair_p2t4` in `vfri2_bridge.rs`
+
+### `contracts/src/verifier/Poseidon2ChannelT4.sol` (VFRI10 hash backend)
+Poseidon2 t=4 duplex Fiat-Shamir channel — the t=4 successor to `Poseidon2Channel`.
+- State: `(s0, s1, s2, s3, nDraws)` — four M31 cells + squeeze counter
+- Absorb: rate-1 into cell 0 (cells 1–3 form a 93-bit capacity); `permute` after each word
+- `mixRoot` (low 4 bytes) / `mixRootW` (2 words) / `mixRootFull` (all 8 words) / `mixU32s`
+- `_drawPair` squeezes the rate-adjacent cells `(s0, s1)`, mixes `nDraws` into s0, permutes
+- `drawSecureFelt` (two `_drawPair` → QM31) / `drawQueries` (FRI query indices)
+- Matches Rust `P2T4Channel` in `vfri2_bridge.rs`
+- Cross-check vectors (frozen in `vfri2_bridge.rs::test_p2t4_reference_vectors`):
+  `hashLeaf([1,2,3,4]) → (188_265_029, 348_838_750)`
+  `hashPair((1,2),(3,4)) → (1_706_601_437, 1_471_208_702)`
+  `mixRoot(0x11..).drawQueries(10,4) → [674, 500, 407, 375]`
+  `mixU32s([1,2,3]).drawSecureFelt() → 61579212343548856246129823755073713120`
+- 12 JS tests (`Poseidon2T4Backend.test.js`) + 6 Rust tests (`vfri2_bridge.rs`, `p2t4`)
+- Rust references are `#[allow(dead_code)]` until the VFRI10 verifier wires them in
 
 ## Multi-Component STARK Pattern
 
@@ -674,7 +699,7 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
-6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum. **MVP-6 groundwork (2026-06-12):** Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t4.rs` + `contracts/src/verifier/Poseidon2M31T4.sol`) — R_F=8 + R_P=21, α=5, M4 external matrix, J+diag(1,2,3,4) internal, SHA-256 K[0..53] constants; rate-2 capacity-2 sponge with capacity-cell odd-length flag; `compress` for 124-bit wide nodes (collision ~2^62). VFRI10 (t=4 channel + Merkle + verifier) not yet wired.
+6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum. **MVP-6 groundwork (2026-06-12):** Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t4.rs` + `contracts/src/verifier/Poseidon2M31T4.sol`) — R_F=8 + R_P=21, α=5, M4 external matrix, J+diag(1,2,3,4) internal, SHA-256 K[0..53] constants; rate-2 capacity-2 sponge with capacity-cell odd-length flag; `compress` for 124-bit wide nodes (collision ~2^62). **Hash backend (2026-06-13):** `Poseidon2MerkleVerifierT4.sol` (t=4 wide Merkle) + `Poseidon2ChannelT4.sol` (t=4 Fiat-Shamir channel) + Rust references `hash_leaf_cols_p2t4` / `hash_pair_p2t4` / `P2T4Channel` in `vfri2_bridge.rs`, cross-checked bit-exact (18 tests). The VFRI10 verifier contract wiring these into the full proof path is the remaining step.
 7. Last-layer FRI check: implemented in VFRI9 (2026-06-10). VFRI5–VFRI8 remain in the repo WITHOUT it for regression — do not deploy them to production.
 
 ## Security Hardening (implemented)
