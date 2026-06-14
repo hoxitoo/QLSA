@@ -5191,6 +5191,211 @@ pub fn gen_mldsa_v23_vfri9_cross_bound_hints(
     Ok((proof10, commit10, hints10, proof8, commit8, hints8))
 }
 
+/// VFRI10 wrapper for V23 LOG=10 group (NttBatch + InttBatch, 1298 cols, tree_depth=10).
+/// Identical trace construction to gen_mldsa_v23_vfri9_hints; only the generic
+/// generator changes (t=4 hash backend).
+pub fn gen_mldsa_v23_vfri10_hints(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+
+    let (ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+    let tree_depth = mldsa_ntt_batch_air::LOG_N_ROWS;
+
+    let z_hat:  [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into().map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat:  [i64; 256]      = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into().map_err(|_| "t1_hat slice error".to_string())?;
+
+    let (_az_cols, az_hat)  = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (_ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (intt_cols, _) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+
+    let n_rows = 1usize << tree_depth;
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(ntt_cols.len() + intt_cols.len());
+    for col in &ntt_cols {
+        cols.push(col.values.iter().map(|v| v.0).collect());
+        debug_assert_eq!(cols.last().unwrap().len(), n_rows);
+    }
+    for col in &intt_cols {
+        cols.push(col.values.iter().map(|v| v.0).collect());
+        debug_assert_eq!(cols.last().unwrap().len(), n_rows);
+    }
+
+    gen_vfri10_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// VFRI10 wrapper for V23 LOG=8 group (2206 cols). Same trace as the VFRI9 log8
+/// wrapper; only the generic generator (t=4 backend) differs.
+pub fn gen_mldsa_v23_vfri10_hints_log8(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    use crate::mldsa_ntt_batch_air;
+    use crate::mldsa_intt_batch_air;
+    use crate::mldsa_az_full_air;
+    use crate::mldsa_ct1_full_air;
+    use crate::mldsa_wprime_full_air;
+    use crate::mldsa_norm_check_batch_air;
+    use crate::mldsa_range_q_batch_air;
+    use crate::mldsa_use_hint_batch_air;
+
+    const L: usize = 5;
+    const K: usize = 6;
+
+    if a_hat.len() != K * L {
+        return Err(format!("a_hat must have K*L={} entries, got {}", K * L, a_hat.len()));
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!("batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+    if n_queries == 0 || n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {n_queries}"));
+    }
+
+    let mut ntt_inputs: Vec<[i64; 256]> = Vec::with_capacity(L + 1 + K);
+    ntt_inputs.extend_from_slice(z);
+    ntt_inputs.push(*c);
+    ntt_inputs.extend_from_slice(t1);
+    let (_ntt_cols, ntt_outputs) = mldsa_ntt_batch_air::build_trace(&ntt_inputs);
+
+    let z_hat:  [[i64; 256]; L] = ntt_outputs[0..L]
+        .try_into().map_err(|_| "z_hat slice error".to_string())?;
+    let c_hat:  [i64; 256]      = ntt_outputs[L];
+    let t1_hat: [[i64; 256]; K] = ntt_outputs[L + 1..L + 1 + K]
+        .try_into().map_err(|_| "t1_hat slice error".to_string())?;
+
+    let (az_cols,  az_hat)  = mldsa_az_full_air::build_trace(a_hat, &z_hat);
+    let (ct1_cols, ct1_hat) = mldsa_ct1_full_air::build_trace(&c_hat, &t1_hat);
+
+    let (rq_cols, rq_valid) = mldsa_range_q_batch_air::build_trace(&az_hat);
+    if !rq_valid {
+        return Err("RangeQBatch: az_hat contains values outside [0, Q)".to_string());
+    }
+
+    let mut intt_inputs: Vec<[i64; 256]> = Vec::with_capacity(2 * K);
+    intt_inputs.extend_from_slice(&az_hat);
+    intt_inputs.extend_from_slice(&ct1_hat);
+    let (_intt_cols, intt_out) = mldsa_intt_batch_air::build_trace(&intt_inputs);
+    let az_out:  [[i64; 256]; K] = intt_out[..K].try_into().map_err(|_| "az_out slice error".to_string())?;
+    let ct1_out: [[i64; 256]; K] = intt_out[K..].try_into().map_err(|_| "ct1_out slice error".to_string())?;
+
+    let (wp_cols,   _w_prime) = mldsa_wprime_full_air::build_trace(&az_out, &ct1_out);
+    let w_prime: [[i64; 256]; K] = _w_prime;
+    let (norm_cols, _, _) = mldsa_norm_check_batch_air::build_trace(z);
+    let (uh_main_cols, uh_preproc_cols, _, _) =
+        mldsa_use_hint_batch_air::build_trace_v2(&w_prime, hints);
+
+    const TREE_DEPTH: u32 = 8;
+    let n_rows = 1usize << (TREE_DEPTH as usize);
+    let total_cols = az_cols.len() + ct1_cols.len() + rq_cols.len()
+        + wp_cols.len() + norm_cols.len() + uh_main_cols.len() + uh_preproc_cols.len();
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(total_cols);
+    let groups = [&az_cols, &ct1_cols, &rq_cols, &wp_cols, &norm_cols, &uh_main_cols, &uh_preproc_cols];
+    for group in &groups {
+        for col in group.iter() {
+            if col.values.len() != n_rows {
+                return Err(format!("LOG=8 col has {} rows, expected {n_rows}", col.values.len()));
+            }
+            cols.push(col.values.iter().map(|v| v.0).collect());
+        }
+    }
+
+    gen_vfri10_hints_from_cols_nfolds(&cols, TREE_DEPTH, batch_merkle_root, n_queries, num_folds)
+}
+
+/// Generate cross-bound VFRI10 hints for V23's two trace groups.
+///
+/// Identical to gen_mldsa_v23_vfri9_cross_bound_hints but using VFRI10 generators.
+///
+/// bound_root_10 = keccak256(batch_root ‖ trace_root_8)
+/// bound_root_8  = keccak256(batch_root ‖ trace_root_10)
+pub fn gen_mldsa_v23_vfri10_cross_bound_hints(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_root:        &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>), String> {
+    use sha3::{Keccak256, Digest as Sha3Digest};
+
+    if batch_root.len() != 32 {
+        return Err(format!("batch_root must be 32 bytes, got {}", batch_root.len()));
+    }
+
+    // Pass 1: extract trace roots
+    let (proof10_p1, _, _) = gen_mldsa_v23_vfri10_hints(z, c, t1, a_hat, batch_root, 1, num_folds)?;
+    let (proof8_p1,  _, _) = gen_mldsa_v23_vfri10_hints_log8(z, c, t1, a_hat, hints, batch_root, 1, num_folds)?;
+
+    if proof10_p1.len() < 40 || proof8_p1.len() < 40 {
+        return Err("proof bytes too short to contain trace root at [8:40]".into());
+    }
+    let trace_root_10: [u8; 32] = proof10_p1[8..40].try_into().unwrap();
+    let trace_root_8:  [u8; 32] = proof8_p1[8..40].try_into().unwrap();
+
+    let bound_root_10: [u8; 32] = {
+        let mut h = Keccak256::new();
+        h.update(batch_root);
+        h.update(&trace_root_8);
+        h.finalize().into()
+    };
+    let bound_root_8: [u8; 32] = {
+        let mut h = Keccak256::new();
+        h.update(batch_root);
+        h.update(&trace_root_10);
+        h.finalize().into()
+    };
+
+    // Pass 2: generate final hints with cross-bound roots
+    let (proof10, commit10, hints10) =
+        gen_mldsa_v23_vfri10_hints(z, c, t1, a_hat, &bound_root_10, n_queries, num_folds)?;
+    let (proof8, commit8, hints8) =
+        gen_mldsa_v23_vfri10_hints_log8(z, c, t1, a_hat, hints, &bound_root_8, n_queries, num_folds)?;
+
+    Ok((proof10, commit10, hints10, proof8, commit8, hints8))
+}
+
 mod tests {
     use super::*;
 

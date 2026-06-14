@@ -671,12 +671,21 @@ VFRI10 — VFRI9 protocol with the Poseidon2 t=4 hash backend.
 - t=4 lifts the node/transcript collision wall above the t=2 ceiling (~2^31) toward 128-bit (limitation #6)
 - Proof version marker: `proof[0:8] = 4` (little-endian; VFRI9 uses 3)
 - VFRI9 hints are NOT accepted (different permutation → different trace root + query indices)
-- Rust bridge: `gen_vfri10_hints_from_cols_nfolds` (generic; reuses the VFRI9 ABI encoder)
-- 2 Rust smoke tests (`test_vfri10_smoke_small`, `test_vfri10_differs_from_vfri9`) + 11 JS E2E tests
-- Fixture: `contracts/test/fixtures/vfri10_e2e.json` (6 cols, tree_depth=4, n_queries=2, num_folds=2),
-  regenerated via `cargo test write_vfri10_e2e_fixture -- --ignored --nocapture`
-- Remaining for production: V23 cross-bound wrappers (`gen_mldsa_v23_vfri10_*`) + PyO3/Python wrappers
-  + a BatchRegistryV6 (or `setVerifier` on V5) to deploy VFRI10 in the aggregator path
+- Rust bridges: `gen_vfri10_hints_from_cols_nfolds` (generic; reuses the VFRI9 ABI encoder),
+  `gen_mldsa_v23_vfri10_hints` (LOG=10, 1298 cols), `gen_mldsa_v23_vfri10_hints_log8` (LOG=8, 2206 cols),
+  `gen_mldsa_v23_vfri10_cross_bound_hints` (two-pass cross-binding, keccak256)
+- Python wrappers (`stark/prover.py`): `gen_mldsa_v23_vfri10_hints` → `MldsaV23VFRI10HintResult`,
+  `gen_mldsa_v23_vfri10_hints_log8` → `MldsaV23VFRI10Log8HintResult`,
+  `gen_mldsa_v23_vfri10_cross_bound_hints` → `FullV23VFRI10CrossBoundHintResult`,
+  `prove_mldsa_sig_vfri10_stark(pk, msg, sig, batch_merkle_root)` — from a real ML-DSA-65 signature
+- Tests: 2 Rust smoke + 11 JS generic E2E + 8 Python (`tests/test_stark_stwo.py`) + 10 JS V23 cross-bound E2E
+- Fixtures: `vfri10_e2e.json` (generic, 6 cols, depth=4, regenerate via `cargo test write_vfri10_e2e_fixture
+  -- --ignored`), `full_v23_vfri10_cross_bound_e2e.json` (V23, seed=16600, n_queries=1, **num_folds=6**)
+- `BatchRegistryV5` deploys with the VFRI10 address (verifier-agnostic, `setVerifier` path)
+- **Gas finding (2026-06-14):** each VFRI10 V23 group `verify()` fits within 16.7M gas individually
+  (~8–10M); dual-group `submitBatch` (both t=4 verifies in one tx) overruns the 16.7M per-tx cap.
+  `num_folds=6` (last layer 16/4 evals) is required — `num_folds=3` (128-eval last layer) overruns
+  LOG=10 alone. Production: per-group registry (one verify per tx) or mainnet's 30M block limit.
 
 ## Multi-Component STARK Pattern
 
@@ -716,7 +725,7 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
-6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum. **MVP-6 groundwork (2026-06-12):** Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t4.rs` + `contracts/src/verifier/Poseidon2M31T4.sol`) — R_F=8 + R_P=21, α=5, M4 external matrix, J+diag(1,2,3,4) internal, SHA-256 K[0..53] constants; rate-2 capacity-2 sponge with capacity-cell odd-length flag; `compress` for 124-bit wide nodes (collision ~2^62). **Hash backend (2026-06-13):** `Poseidon2MerkleVerifierT4.sol` (t=4 wide Merkle) + `Poseidon2ChannelT4.sol` (t=4 Fiat-Shamir channel) + Rust references `hash_leaf_cols_p2t4` / `hash_pair_p2t4` / `P2T4Channel` in `vfri2_bridge.rs`, cross-checked bit-exact (18 tests). **VFRI10 verifier (2026-06-13):** `QLSAVerifierVFRI10.sol` wires the t=4 backend into the full VFRI9 proof path (identical ABI; only the hash backend changes) — `gen_vfri10_hints_from_cols_nfolds` bridge + on-chain `verify()==true` E2E (fixture `vfri10_e2e.json`, 11 JS tests). t=4 lifts the node/transcript collision wall above the t=2 ceiling (~2^31). Remaining for production: V23 cross-bound wrappers (`gen_mldsa_v23_vfri10_*`) + PyO3/Python wrappers + a registry deploying VFRI10 in the aggregator path.
+6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum. **MVP-6 groundwork (2026-06-12):** Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t4.rs` + `contracts/src/verifier/Poseidon2M31T4.sol`) — R_F=8 + R_P=21, α=5, M4 external matrix, J+diag(1,2,3,4) internal, SHA-256 K[0..53] constants; rate-2 capacity-2 sponge with capacity-cell odd-length flag; `compress` for 124-bit wide nodes (collision ~2^62). **Hash backend (2026-06-13):** `Poseidon2MerkleVerifierT4.sol` (t=4 wide Merkle) + `Poseidon2ChannelT4.sol` (t=4 Fiat-Shamir channel) + Rust references `hash_leaf_cols_p2t4` / `hash_pair_p2t4` / `P2T4Channel` in `vfri2_bridge.rs`, cross-checked bit-exact (18 tests). **VFRI10 verifier (2026-06-13):** `QLSAVerifierVFRI10.sol` wires the t=4 backend into the full VFRI9 proof path (identical ABI; only the hash backend changes) — `gen_vfri10_hints_from_cols_nfolds` bridge + on-chain `verify()==true` E2E (fixture `vfri10_e2e.json`, 11 JS tests). t=4 lifts the node/transcript collision wall above the t=2 ceiling (~2^31). **VFRI10 production pipeline (2026-06-14):** V23 cross-bound wrappers (`gen_mldsa_v23_vfri10_hints[_log8]`, `gen_mldsa_v23_vfri10_cross_bound_hints`) + PyO3 bindings + Python wrappers (`prove_mldsa_sig_vfri10_stark`) + on-chain dual-group E2E via `BatchRegistryV5` (8 Python + 10 JS tests, fixture `full_v23_vfri10_cross_bound_e2e.json`). **Gas finding:** each V23 group `verify()` fits within 16.7M gas individually (~8–10M) at `num_folds=6`; the dual-group `submitBatch` (both t=4 verifies in one tx) overruns the 16.7M per-tx cap — production needs a per-group registry (one verify per tx) or mainnet's 30M block limit. `num_folds=3` (128-eval last layer) overruns LOG=10 alone. Remaining: a per-group registry (split dual-verify) or RPO256 for single-pass 128-bit binding.
 7. Last-layer FRI check: implemented in VFRI9 (2026-06-10). VFRI5–VFRI8 remain in the repo WITHOUT it for regression — do not deploy them to production.
 
 ## Security Hardening (implemented)

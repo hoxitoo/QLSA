@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-13 — VFRI10 верификатор)
+## Статус (обновлено 2026-06-14 — VFRI10 production pipeline)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -49,6 +49,14 @@
   - On-chain `verify()==true` (≤16.7M gas для малого fixture); t=4 хинты НЕ принимаются VFRI9 верификатором (разная перестановка → разные query indices)
   - 2 Rust smoke-теста + 11 JS E2E тестов; остаётся V23 cross-bound обёртки (`gen_mldsa_v23_vfri10_*`) + PyO3/Python + реестр для aggregator-пути
 - **Тесты (2026-06-13, VFRI10)**: 323 Rust (+2 vfri10, 90 ignored), 940 Hardhat (+11 QLSAVerifierVFRI10E2E)
+- **VFRI10 production pipeline (2026-06-14)**: V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E
+  - Rust V23 мосты: `gen_mldsa_v23_vfri10_hints` (LOG=10, 1298), `gen_mldsa_v23_vfri10_hints_log8` (LOG=8, 2206), `gen_mldsa_v23_vfri10_cross_bound_hints` (two-pass keccak256)
+  - PyO3: `gen_mldsa_v23_vfri10_hints_py` / `_log8_py` / `_cross_bound_hints_py`
+  - Python (`stark/prover.py`): `gen_mldsa_v23_vfri10_hints[_log8]`, `gen_mldsa_v23_vfri10_cross_bound_hints`, `prove_mldsa_sig_vfri10_stark` + результаты `MldsaV23VFRI10HintResult`/`...Log8...`/`FullV23VFRI10CrossBoundHintResult`
+  - `BatchRegistryV5` подключает VFRI10 через конструктор (verifier-agnostic); on-chain оба группы verify()==true индивидуально
+  - **Gas finding**: каждая V23-группа verify() ≤16.7M gas по отдельности (~8–10M); dual-group submitBatch (обе t=4 проверки в одной tx) превышает 16.7M per-tx cap. `num_folds=6` обязателен (last layer 16/4 evals); `num_folds=3` (128 evals) превышает cap уже на LOG=10. Production: per-group реестр (одна проверка на tx) или mainnet 30M
+  - 8 Python тестов (`tests/test_stark_stwo.py`) + 10 JS V23 cross-bound E2E + фикстура `full_v23_vfri10_cross_bound_e2e.json`
+- **Тесты (2026-06-14)**: 323 Rust, 210 stark_stwo Python (+8 vfri10), 950 Hardhat (+10 QLSAVerifierVFRI10CrossBoundE2E)
 
 ### Что готово
 
@@ -167,8 +175,9 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 #### Тесты (актуально 2026-06-10)
 - Python: **~350 тестов** (без PyO3) / **~552** (с PyO3 ext)
 - Rust: **323 тестов** (cargo test, non-ignored) + **90 ignored** (slow STARK integration tests incl. V23)
+- Python (stark_stwo): **210 тестов** (+8 VFRI10 V23)
 - TypeScript SDK: **~71 тестов** (jest)
-- Solidity/Hardhat: **940 тестов** (+11 QLSAVerifierVFRI10E2E.test.js)
+- Solidity/Hardhat: **950 тестов** (+10 QLSAVerifierVFRI10CrossBoundE2E.test.js)
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
@@ -257,7 +266,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **Poseidon2 t=4** | **✅ Done (groundwork)** | **Rust + Solidity cross-checked permutation; 124-bit compress; 315 Rust + 917 Solidity tests (2026-06-12)** |
 | **VFRI10 hash backend** | **✅ Done** | **t=4 wide Merkle (`Poseidon2MerkleVerifierT4`) + Fiat-Shamir channel (`Poseidon2ChannelT4`) + Rust refs, cross-checked; 321 Rust + 929 Solidity (2026-06-13)** |
 | **VFRI10 верификатор** | **✅ Done** | **`QLSAVerifierVFRI10.sol` — VFRI9-протокол на t=4 backend; `gen_vfri10_hints_from_cols_nfolds`; on-chain verify()==true; 323 Rust + 940 Solidity (2026-06-13)** |
-| MVP-6 production | ⏳ Next | V23 cross-bound VFRI10 обёртки + PyO3/Python + реестр (BatchRegistryV6 / setVerifier) для aggregator-пути |
+| **VFRI10 production pipeline** | **✅ Done** | **V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E; per-group verify ≤16.7M; 210 Python + 950 Solidity (2026-06-14)** |
+| MVP-6 next | ⏳ Next | Per-group реестр (split dual-verify по двум tx для 16.7M cap) либо RPO256 hash AIR (128-бит за один проход) |
 | MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
 
 ---
