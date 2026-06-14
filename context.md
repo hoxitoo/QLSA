@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-14 — security + code audit)
+## Статус (обновлено 2026-06-14 — BatchRegistryV6 per-group split)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -68,6 +68,13 @@
   - **Verified-OK**: Bearer-token constant-time, Merkle `hmac.compare_digest`, mempool locking, нет unsafe deserialization/SSRF/ReDoS; VFRI10 ≡ VFRI9 кроме backend+marker; t=4 Poseidon2 математика (M4 fast-path) верна; PyO3 boundary не паникует на malformed input
   - **Documented research-defaults (unchanged)**: M1 XFF-spoofing зависит от proxy-конфига; M2 `/batch/*` открыт без `QLSA_API_TOKEN` (warning при старте); L1 ML-DSA key copies в CPython не зануляются
 - **Тесты после аудита (2026-06-14)**: 354 non-PyO3 Python (+4 replay-тесты), mypy clean, Rust release warning-free
+- **BatchRegistryV6 — per-group split (2026-06-14)**: закрывает gas-wall dual-verify для t=4 backend
+  - `submitGroup10` / `submitGroup8` — по одному `verify()` на транзакцию (LOG=10 ~10.6M gas, LOG=8 ~7.9M gas, оба ≤16.7M); auto-finalize когда обе группы present И cross-consistent
+  - `submitGroup8WithNonces` — завершающий вызов с per-sender nonce enforcement (требует group10 present & consistent, иначе `NotReadyToFinalize`)
+  - Cross-proof binding сохранён lazy: verify против `keccak256(merkleRoot ‖ crossTraceRoot)` на submit; на finalize проверка `crossRoot8For10 == traceRoot8` и `crossRoot10For8 == traceRoot10` (каждый proof привязан к реальному trace root другого) — та же soundness, что у атомарного V5, но через 2 tx
+  - Order-independent; не-финализированную группу можно перезаписать (нет front-run griefing lock); pending state `delete` на finalize (storage refund)
+  - Полный V23 t=4 verify теперь deployable на 16.7M-cap сети через 2 транзакции
+  - 8 JS E2E тестов (`BatchRegistryV6E2E.test.js`); 958 Hardhat (+8)
 
 ### Что готово
 
@@ -188,7 +195,7 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - Rust: **323 тестов** (cargo test, non-ignored) + **90 ignored** (slow STARK integration tests incl. V23)
 - Python (stark_stwo): **210 тестов** (+8 VFRI10 V23)
 - TypeScript SDK: **~71 тестов** (jest)
-- Solidity/Hardhat: **950 тестов** (+10 QLSAVerifierVFRI10CrossBoundE2E.test.js)
+- Solidity/Hardhat: **958 тестов** (+8 BatchRegistryV6E2E.test.js)
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
@@ -278,7 +285,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **VFRI10 hash backend** | **✅ Done** | **t=4 wide Merkle (`Poseidon2MerkleVerifierT4`) + Fiat-Shamir channel (`Poseidon2ChannelT4`) + Rust refs, cross-checked; 321 Rust + 929 Solidity (2026-06-13)** |
 | **VFRI10 верификатор** | **✅ Done** | **`QLSAVerifierVFRI10.sol` — VFRI9-протокол на t=4 backend; `gen_vfri10_hints_from_cols_nfolds`; on-chain verify()==true; 323 Rust + 940 Solidity (2026-06-13)** |
 | **VFRI10 production pipeline** | **✅ Done** | **V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E; per-group verify ≤16.7M; 210 Python + 950 Solidity (2026-06-14)** |
-| MVP-6 next | ⏳ Next | Per-group реестр (split dual-verify по двум tx для 16.7M cap) либо RPO256 hash AIR (128-бит за один проход) |
+| **BatchRegistryV6** | **✅ Done** | **Per-group split: 1 verify()/tx (LOG=10 ~10.6M, LOG=8 ~7.9M gas, оба ≤16.7M); полный V23 t=4 deployable через 2 tx (2026-06-14)** |
+| MVP-6 next | ⏳ Next | RPO256 hash AIR (single-tx 128-бит dual-verify) или recursive STARK |
 | MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
 
 ---

@@ -71,7 +71,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23 + VFRI7/VFRI8/VFRI9 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2–**V5**), QLSAVerifier(V4–**VFRI9**), Poseidon2Channel/Merkle/MerkleW | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API, prover-crash recovery | ✅ Done |
-| Tests — **323 Rust** + **354 Python** (no PyO3) / **~560** (with PyO3) + **~71 TS** + **950 Hardhat** | ✅ Done |
+| Tests — **323 Rust** + **354 Python** (no PyO3) / **~560** (with PyO3) + **~71 TS** + **958 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus + VFRI9 fields) + JS SDK (VFRI9 parity) | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V23** — 8-component STARK, RangeQBatch, az_hat ∈ [0,Q) — closes AzFull soundness gap | ✅ Done |
@@ -90,6 +90,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **Poseidon2 t=4 (MVP-6 groundwork)** — `poseidon2_t4.rs` + `Poseidon2M31T4.sol`: R_F=8, R_P=21, rate-2 cap-2 sponge; 124-bit compress (collision ~2^62); 315 Rust / 917 Solidity tests | ✅ Done (2026-06-12) |
 | **VFRI10 + t=4 hash backend** — `QLSAVerifierVFRI10` (VFRI9 protocol, t=4 Merkle + channel) + V23 cross-bound Rust/PyO3/Python pipeline + dual-group E2E via `BatchRegistryV5` | ✅ Done (2026-06-14) |
 | **Security + code audit** — off-chain replay guard (`ReplayedTxError`), submit error-text hardening, `/stats` overflow metric, release-build test-fixture gating, FRI `tree_depth` guard | ✅ Done (2026-06-14) |
+| **BatchRegistryV6** — per-group split: each V23 t=4 group `verify()` in its own tx (LOG=10 ~10.6M, LOG=8 ~7.9M gas, both ≤16.7M); finalizes the full batch across two txs with cross-proof binding preserved | ✅ Done (2026-06-14) |
 
 ---
 
