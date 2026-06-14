@@ -4540,8 +4540,10 @@ pub fn gen_vfri9_hints_from_cols_nfolds(
     if n_queries == 0 || n_queries > 64 {
         return Err(format!("n_queries must be 1..64, got {n_queries}"));
     }
-    if tree_depth < 2 {
-        return Err(format!("tree_depth={tree_depth} must be ≥ 2"));
+    if !(2..=30).contains(&tree_depth) {
+        // Upper bound mirrors the on-chain `logDomainSize > 30` guard and
+        // prevents the coset_at shift underflow for oversized depths.
+        return Err(format!("tree_depth={tree_depth} must be in 2..=30"));
     }
     let n = 1usize << tree_depth;
     for (j, col) in cols.iter().enumerate() {
@@ -4778,8 +4780,11 @@ pub fn gen_vfri10_hints_from_cols_nfolds(
     if n_queries == 0 || n_queries > 64 {
         return Err(format!("n_queries must be 1..64, got {n_queries}"));
     }
-    if tree_depth < 2 {
-        return Err(format!("tree_depth={tree_depth} must be ≥ 2"));
+    if !(2..=30).contains(&tree_depth) {
+        // Upper bound mirrors the on-chain `logDomainSize > 30` guard and
+        // prevents the `30 - tree_depth` / `31 - tree_depth` shift underflow in
+        // coset_at (which has no Result channel of its own).
+        return Err(format!("tree_depth={tree_depth} must be in 2..=30"));
     }
     let n = 1usize << tree_depth;
     for (j, col) in cols.iter().enumerate() {
@@ -5396,6 +5401,7 @@ pub fn gen_mldsa_v23_vfri10_cross_bound_hints(
     Ok((proof10, commit10, hints10, proof8, commit8, hints8))
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 

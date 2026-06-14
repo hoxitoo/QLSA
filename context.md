@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-14 — VFRI10 production pipeline)
+## Статус (обновлено 2026-06-14 — security + code audit)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -57,6 +57,17 @@
   - **Gas finding**: каждая V23-группа verify() ≤16.7M gas по отдельности (~8–10M); dual-group submitBatch (обе t=4 проверки в одной tx) превышает 16.7M per-tx cap. `num_folds=6` обязателен (last layer 16/4 evals); `num_folds=3` (128 evals) превышает cap уже на LOG=10. Production: per-group реестр (одна проверка на tx) или mainnet 30M
   - 8 Python тестов (`tests/test_stark_stwo.py`) + 10 JS V23 cross-bound E2E + фикстура `full_v23_vfri10_cross_bound_e2e.json`
 - **Тесты (2026-06-14)**: 323 Rust, 210 stark_stwo Python (+8 vfri10), 950 Hardhat (+10 QLSAVerifierVFRI10CrossBoundE2E)
+- **Security + code audit (2026-06-14)**: 2 эксперта (crypto/blockchain + systems). Найдено 9, исправлено 6, 1 false-positive, 2 задокументированы как research-defaults:
+  - **H1 (fixed)**: off-chain replay — уже забатченную tx можно было пересабмитить и забатчить снова (mempool dedup покрывает только pending). Добавлен `ReplayedTxError` guard в `AggregatorNode.submit()` (отклоняет re-submission tx из retained history `_tx_to_batch`); on-chain nonce registry — durable backstop
+  - **H2 (false positive)**: `_sender_txs` unbounded — проверено: ограничен 1000-batch history eviction (только забатченные tx, пустые deque удаляются, per-sender cap 500). Не уязвимость
+  - **L2 (fixed)**: `POST /transactions` возвращал raw `str(exc)` → leak внутренних деталей; теперь fixed-сообщения (`invalid transaction` / `mempool full`), детали в server-side log
+  - **L4 (fixed)**: `/stats` теперь отдаёт `mempool_dropped` (потери prepend_batch overflow)
+  - **MEDIUM code (fixed)**: `vfri2_bridge.rs:5399 mod tests` без `#[cfg(test)]` → тест-фикстуры (`make_v23_inputs`/`make_vfri5_polys`/`make_log8_hints`) компилировались в production lib (5 warnings). Gated; release build чист
+  - **LOW code (fixed)**: `poseidon2_t4.rs` import `m31_mul` использовался только в тестах → перенесён в test-модуль
+  - **Latent (hardened)**: generic FRI генераторы VFRI9/VFRI10 теперь валидируют `tree_depth ∈ 2..=30` (зеркалит on-chain `logDomainSize > 30`), предотвращает `coset_at` shift underflow; не attacker-reachable (V23 wrappers фиксируют depth 8/10)
+  - **Verified-OK**: Bearer-token constant-time, Merkle `hmac.compare_digest`, mempool locking, нет unsafe deserialization/SSRF/ReDoS; VFRI10 ≡ VFRI9 кроме backend+marker; t=4 Poseidon2 математика (M4 fast-path) верна; PyO3 boundary не паникует на malformed input
+  - **Documented research-defaults (unchanged)**: M1 XFF-spoofing зависит от proxy-конфига; M2 `/batch/*` открыт без `QLSA_API_TOKEN` (warning при старте); L1 ML-DSA key copies в CPython не зануляются
+- **Тесты после аудита (2026-06-14)**: 354 non-PyO3 Python (+4 replay-тесты), mypy clean, Rust release warning-free
 
 ### Что готово
 
@@ -435,7 +446,9 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | Нет аутентификации на `/batch/run`/`/batch/flush` (compute DoS) | Высокий | ✅ Закрыт (Bearer-token `QLSA_API_TOKEN`, constant-time, opt-in, 2026-06-10) |
 | `setVerifier()` без timelock — single-key upgrade risk | Средний | Open (research prototype; рекомендуется 48h timelock + multisig для mainnet) |
 | No authentication on `/batch/run` и `/batch/flush` — DoS через compute drain | Высокий | Open (rate limiting 20 ops/min; Bearer token рекомендуется для mainnet) |
-| Off-chain mempool accepts stale-nonce transactions | Средний | Open (per-sender nonce tracking рекомендуется для mainnet) |
+| Off-chain mempool accepts stale-nonce transactions | Средний | Частично закрыто (2026-06-14): `ReplayedTxError` отклоняет re-submission уже забатченной tx в пределах retained history; полный per-sender nonce tracking рекомендуется для mainnet, on-chain registry — durable backstop |
+| `POST /transactions` возвращал raw `str(exc)` (leak внутренних деталей валидации/ёмкости) | Низкий | ✅ Закрыто (fixed client-сообщения + server-side log, 2026-06-14) |
+| Тест-фикстуры компилировались в production lib (`mod tests` без `#[cfg(test)]`) | Низкий | ✅ Закрыто (gate добавлен; release build warning-free, 2026-06-14) |
 
 ---
 

@@ -11,7 +11,7 @@ from core.signing import sign
 from core.transaction import Transaction
 from aggregator.mempool import Mempool, MempoolFullError
 from aggregator.batcher import BatchResult, Batcher
-from aggregator.node import AggregatorNode
+from aggregator.node import AggregatorNode, ReplayedTxError
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -448,6 +448,20 @@ class TestAggregatorNode:
     def test_mempool_capacity_below_min_batch_size_raises(self):
         with pytest.raises(ValueError, match="mempool_capacity"):
             AggregatorNode(min_batch_size=10, mempool_capacity=5)
+
+    def test_resubmitting_a_batched_tx_is_rejected(self):
+        # Replay guard: once a tx is batched it must not be batched again, even
+        # after it has left the mempool (its hash is no longer pending).
+        node = AggregatorNode(min_batch_size=1)
+        tx, priv = _make_signed_tx()
+        node.submit(tx)
+        result = node.run_cycle()
+        wipe_key(priv)
+        assert result is not None and node.pending_count() == 0
+        with pytest.raises(ReplayedTxError):
+            node.submit(tx)
+        # The replayed tx must not have been re-queued.
+        assert node.pending_count() == 0
 
     def test_run_cycle_returns_none_when_below_min(self):
         node = AggregatorNode(min_batch_size=5)
