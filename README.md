@@ -60,7 +60,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**MVP-6 groundwork complete** (2026-06-12). Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`poseidon2_t4.rs` + `Poseidon2M31T4.sol`) — 124-bit compress, rate-2 capacity-2 sponge (collision ~2^62 vs t=2's ~2^31). VFRI9 pipeline wired into aggregator, API, Python SDK, and JS SDK. pyo3 CVEs (RUSTSEC-2026-0176/0177) fixed. 315 Rust + 917 Solidity tests.
+**VFRI10 complete + security/code audit** (2026-06-14). The Poseidon2 t=4 hash backend (124-bit nodes, collision ~2^62 vs t=2's ~2^31) is wired into the full proof path: `QLSAVerifierVFRI10` + V23 cross-bound Rust/PyO3/Python pipeline + on-chain dual-group E2E via `BatchRegistryV5` (each V23 group `verify()` ≤16.7M gas). A two-expert audit (crypto/blockchain + systems) closed an off-chain replay gap (re-batching an already-batched tx), hardened submit error-text leakage, surfaced mempool-overflow drops in `/stats`, gated stray test fixtures out of the release library, and added an FRI `tree_depth` guard. 323 Rust + 950 Solidity + 354 Python (no PyO3) tests.
 
 | Component | Status |
 |-----------|--------|
@@ -71,7 +71,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `stark/` — Python prover/verifier wrappers V4–V23 + VFRI7/VFRI8/VFRI9 hint generators | ✅ Done |
 | `contracts/` — BatchRegistry(V2–**V5**), QLSAVerifier(V4–**VFRI9**), Poseidon2Channel/Merkle/MerkleW | ✅ Done |
 | `aggregator/` — Mempool, Batcher, AggregatorNode, rate limiting, HTTP API, prover-crash recovery | ✅ Done |
-| Tests — **315 Rust** + **350 Python** (no PyO3) / **552** (with PyO3) + **~71 TS** + **917 Hardhat** | ✅ Done |
+| Tests — **323 Rust** + **354 Python** (no PyO3) / **~560** (with PyO3) + **~71 TS** + **950 Hardhat** | ✅ Done |
 | `sdk/` — Python SDK (Wallet, LocalClient, HttpClient, WitnessStatus + VFRI9 fields) + JS SDK (VFRI9 parity) | ✅ Done |
 | Phase 6 — Sepolia testnet: first batch finalized (4 tx, 3234-byte proof, 9.16 s) | ✅ Done |
 | **V23** — 8-component STARK, RangeQBatch, az_hat ∈ [0,Q) — closes AzFull soundness gap | ✅ Done |
@@ -88,6 +88,8 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **pyo3 0.24→0.29** — fixes RUSTSEC-2026-0176 (OOB read in `PyList`/`PyTuple` iterators) and RUSTSEC-2026-0177 (`PyCFunction` missing `Sync`); no source changes | ✅ Done (2026-06-12) |
 | **JS SDK VFRI9 parity** — `WitnessStatus`/`BatchStatus` gain `hasVfri9` fields; `RawBatchStatus` interface deduplicates 5 inline copies of API wire shape | ✅ Done (2026-06-12) |
 | **Poseidon2 t=4 (MVP-6 groundwork)** — `poseidon2_t4.rs` + `Poseidon2M31T4.sol`: R_F=8, R_P=21, rate-2 cap-2 sponge; 124-bit compress (collision ~2^62); 315 Rust / 917 Solidity tests | ✅ Done (2026-06-12) |
+| **VFRI10 + t=4 hash backend** — `QLSAVerifierVFRI10` (VFRI9 protocol, t=4 Merkle + channel) + V23 cross-bound Rust/PyO3/Python pipeline + dual-group E2E via `BatchRegistryV5` | ✅ Done (2026-06-14) |
+| **Security + code audit** — off-chain replay guard (`ReplayedTxError`), submit error-text hardening, `/stats` overflow metric, release-build test-fixture gating, FRI `tree_depth` guard | ✅ Done (2026-06-14) |
 
 ---
 
@@ -229,6 +231,10 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | `HttpClient` all JSON call-sites — unhandled `json.JSONDecodeError` when proxy returns HTML body with 2xx status | Medium | ✅ Fixed (`_decode_json()` static method wraps `resp.json()`, raises `RuntimeError` with 200-char preview, 2026-06-03) |
 | `testnet/e2e.py` redundant SHA3-256 recomputation — `sender_key` re-derived via `hashlib` though already in `tx.sender` | Low | ✅ Fixed (`bytes.fromhex(tx.sender)`, removed `import hashlib`, 2026-06-03) |
 | `aggregator/__main__.py` bandit B104 — `"0.0.0.0"` default flagged as hardcoded bind-all | Info | ✅ Fixed (`# nosec B104` — intentional, address is `--host`/`HOST` configurable, 2026-06-06) |
+| Off-chain replay — an already-batched tx could be re-submitted and re-batched (mempool dedup covers only pending txs) | High | ✅ Fixed (`ReplayedTxError` guard in `AggregatorNode.submit()` rejects re-submission of any tx still in retained batch history; on-chain nonce registry is the durable backstop, 2026-06-14) |
+| `POST /transactions` echoed raw `str(exc)` — leaked internal validation/capacity detail | Low | ✅ Fixed (fixed client messages `invalid transaction`/`mempool full`; detail logged server-side, 2026-06-14) |
+| Test fixtures compiled into the release library (`mod tests` lacked `#[cfg(test)]` in `vfri2_bridge.rs`) | Low | ✅ Fixed (gated; release build warning-free, 2026-06-14) |
+| Generic FRI generators validated only `tree_depth ≥ 2` — `coset_at` shift underflow for depth > 30 | Low | ✅ Fixed (`tree_depth ∈ 2..=30` guard, mirrors on-chain `logDomainSize > 30`; not attacker-reachable, 2026-06-14) |
 
 For the full cryptography and security analysis, see `context.md`.
 

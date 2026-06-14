@@ -178,6 +178,15 @@ class TestSubmitTransaction:
         # mempool still has only 1 entry
         assert r2.json()["mempool_size"] == 1
 
+    def test_resubmitting_a_batched_tx_rejected(self, client, signed_payload):
+        # Replay guard: after a tx is batched, re-submitting it must be rejected
+        # even though it is no longer in the pending mempool.
+        assert client.post("/transactions", json=signed_payload).json()["accepted"] is True
+        client.post("/batch/flush")
+        r = client.post("/transactions", json=signed_payload)
+        assert r.json()["accepted"] is False
+        assert "already batched" in r.json()["error"]
+
     def test_invalid_signature_rejected(self, client, signed_payload):
         # Correct ML-DSA-65 signature length (3309 bytes) but wrong content —
         # passes pydantic length validator, rejected by cryptographic verification.
@@ -520,10 +529,12 @@ class TestBatchWitness:
         data = client.get(f"/batch/{batch_id}/witness").json()
         assert data["batch_id"] == batch_id
 
-    def test_multiple_batches_each_have_own_witness_record(self, client, signed_payload):
-        client.post("/transactions", json=signed_payload)
+    def test_multiple_batches_each_have_own_witness_record(self, client):
+        # Distinct transactions (the replay guard rejects re-submitting one tx).
+        p1, p2 = _make_payloads(2)
+        client.post("/transactions", json=p1)
         id1 = client.post("/batch/flush").json()["batch_id"]
-        client.post("/transactions", json=signed_payload)
+        client.post("/transactions", json=p2)
         id2 = client.post("/batch/flush").json()["batch_id"]
         assert id1 != id2
         assert client.get(f"/batch/{id1}/witness").status_code == 200
@@ -621,10 +632,12 @@ class TestListBatches:
                       "has_witness", "has_vfri7", "has_vfri9"):
             assert field in b, f"missing field: {field}"
 
-    def test_newest_first_ordering(self, client, signed_payload):
-        client.post("/transactions", json=signed_payload)
+    def test_newest_first_ordering(self, client):
+        # Distinct transactions (the replay guard rejects re-submitting one tx).
+        p1, p2 = _make_payloads(2)
+        client.post("/transactions", json=p1)
         id1 = client.post("/batch/flush").json()["batch_id"]
-        client.post("/transactions", json=signed_payload)
+        client.post("/transactions", json=p2)
         id2 = client.post("/batch/flush").json()["batch_id"]
         data = client.get("/batches").json()
         assert data["total"] == 2

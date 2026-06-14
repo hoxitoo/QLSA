@@ -29,7 +29,7 @@
 ///   21 × (AddRC[0] → SBox(cell 0) → M_I)
 ///   4 × (AddRC → SBox(all) → M_E)
 
-use crate::poseidon2::{m31_add, m31_mul, sbox, M31_P};
+use crate::poseidon2::{m31_add, sbox, M31_P};
 
 pub const T: usize = 4;
 pub const R_F: usize = 8; // external (full) rounds, split 4 + 4
@@ -205,7 +205,7 @@ pub fn compress_t4(left: [u64; 2], right: [u64; 2]) -> [u64; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::poseidon2::m31_sub;
+    use crate::poseidon2::{m31_mul, m31_sub};
 
     /// 4×4 determinant mod M31 by cofactor expansion (test-only).
     fn det4(m: [[u64; 4]; 4]) -> u64 {

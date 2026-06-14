@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3/V4/V5, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2Channel.sol
+contracts/      Solidity: BatchRegistryV2/V3/V4/V5, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9/VFRI10, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2MerkleVerifierT4.sol, Poseidon2Channel.sol, Poseidon2ChannelT4.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py, deploy.sh, submit.py, monitor.py
@@ -37,7 +37,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (315 passing, 88 ignored slow STARK integration tests)
+# Run Rust tests (323 passing, 90 ignored slow STARK integration tests)
 cargo +nightly-2025-07-01 test --manifest-path stark_stwo/Cargo.toml
 
 # Run Rust tests including slow STARK integration tests
@@ -634,7 +634,58 @@ Poseidon2 t=4 permutation over M31 — cross-checked bit-exact against `stark_st
   `compress([1,2],[3,4]) → (1_706_601_437, 1_471_208_702)`
   `sponge([1..8]) → (1_315_656_215, 594_434_174)`
 - 11 JS tests (`Poseidon2M31T4.test.js`) + 12 Rust tests (`poseidon2_t4.rs`)
-- VFRI10 (t=4 channel + Merkle + verifier) not yet wired — see Known Limitations #6
+- Wired into the VFRI10 verifier (`QLSAVerifierVFRI10.sol`) via the t=4 hash backend
+
+### `contracts/src/verifier/Poseidon2MerkleVerifierT4.sol` (VFRI10 hash backend)
+Poseidon2 t=4 wide Merkle verification — the t=4 successor to `Poseidon2MerkleVerifierW`.
+- Same 2-word node encoding (`uint256(node) = (s0 << 32) | s1`, bytes[24..32]) but built on
+  the t=4 permutation: 124-bit state with a 2-cell capacity (vs t=2's single capacity cell)
+- `hashLeaf(uint32[] cols)` — rate-2 capacity-2 `Poseidon2M31T4.sponge`; returns `(s0<<32)|s1`
+- `hashPair(left, right)` — single 4→2 `Poseidon2M31T4.compress(l0,l1,r0,r1)`
+- `verify / verifyMem` — identical Merkle path logic to `Poseidon2MerkleVerifierW`
+- Matches Rust `hash_leaf_cols_p2t4` / `hash_pair_p2t4` in `vfri2_bridge.rs`
+
+### `contracts/src/verifier/Poseidon2ChannelT4.sol` (VFRI10 hash backend)
+Poseidon2 t=4 duplex Fiat-Shamir channel — the t=4 successor to `Poseidon2Channel`.
+- State: `(s0, s1, s2, s3, nDraws)` — four M31 cells + squeeze counter
+- Absorb: rate-1 into cell 0 (cells 1–3 form a 93-bit capacity); `permute` after each word
+- `mixRoot` (low 4 bytes) / `mixRootW` (2 words) / `mixRootFull` (all 8 words) / `mixU32s`
+- `_drawPair` squeezes the rate-adjacent cells `(s0, s1)`, mixes `nDraws` into s0, permutes
+- `drawSecureFelt` (two `_drawPair` → QM31) / `drawQueries` (FRI query indices)
+- Matches Rust `P2T4Channel` in `vfri2_bridge.rs`
+- Cross-check vectors (frozen in `vfri2_bridge.rs::test_p2t4_reference_vectors`):
+  `hashLeaf([1,2,3,4]) → (188_265_029, 348_838_750)`
+  `hashPair((1,2),(3,4)) → (1_706_601_437, 1_471_208_702)`
+  `mixRoot(0x11..).drawQueries(10,4) → [674, 500, 407, 375]`
+  `mixU32s([1,2,3]).drawSecureFelt() → 61579212343548856246129823755073713120`
+- 12 JS tests (`Poseidon2T4Backend.test.js`) + 6 Rust tests (`vfri2_bridge.rs`, `p2t4`)
+
+### `contracts/src/QLSAVerifierVFRI10.sol`
+VFRI10 — VFRI9 protocol with the Poseidon2 t=4 hash backend.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding: **byte-for-byte identical to VFRI9** (6 head slots:
+  `abi.encode(uint128 oodsComboPos, uint128 oodsComboNeg, bytes32 compRoot, uint128[] lastLayerEvals, bytes32[] friLayerRoots, QueryHints[])`)
+- Only the hash backend changes vs VFRI9:
+  `Poseidon2MerkleVerifierW → Poseidon2MerkleVerifierT4`, `Poseidon2Channel → Poseidon2ChannelT4`
+- Keeps VFRI9's last-layer FRI bounded-degree check, 2-word node encoding, full-root Fiat-Shamir
+- t=4 lifts the node/transcript collision wall above the t=2 ceiling (~2^31) toward 128-bit (limitation #6)
+- Proof version marker: `proof[0:8] = 4` (little-endian; VFRI9 uses 3)
+- VFRI9 hints are NOT accepted (different permutation → different trace root + query indices)
+- Rust bridges: `gen_vfri10_hints_from_cols_nfolds` (generic; reuses the VFRI9 ABI encoder),
+  `gen_mldsa_v23_vfri10_hints` (LOG=10, 1298 cols), `gen_mldsa_v23_vfri10_hints_log8` (LOG=8, 2206 cols),
+  `gen_mldsa_v23_vfri10_cross_bound_hints` (two-pass cross-binding, keccak256)
+- Python wrappers (`stark/prover.py`): `gen_mldsa_v23_vfri10_hints` → `MldsaV23VFRI10HintResult`,
+  `gen_mldsa_v23_vfri10_hints_log8` → `MldsaV23VFRI10Log8HintResult`,
+  `gen_mldsa_v23_vfri10_cross_bound_hints` → `FullV23VFRI10CrossBoundHintResult`,
+  `prove_mldsa_sig_vfri10_stark(pk, msg, sig, batch_merkle_root)` — from a real ML-DSA-65 signature
+- Tests: 2 Rust smoke + 11 JS generic E2E + 8 Python (`tests/test_stark_stwo.py`) + 10 JS V23 cross-bound E2E
+- Fixtures: `vfri10_e2e.json` (generic, 6 cols, depth=4, regenerate via `cargo test write_vfri10_e2e_fixture
+  -- --ignored`), `full_v23_vfri10_cross_bound_e2e.json` (V23, seed=16600, n_queries=1, **num_folds=6**)
+- `BatchRegistryV5` deploys with the VFRI10 address (verifier-agnostic, `setVerifier` path)
+- **Gas finding (2026-06-14):** each VFRI10 V23 group `verify()` fits within 16.7M gas individually
+  (~8–10M); dual-group `submitBatch` (both t=4 verifies in one tx) overruns the 16.7M per-tx cap.
+  `num_folds=6` (last layer 16/4 evals) is required — `num_folds=3` (128-eval last layer) overruns
+  LOG=10 alone. Production: per-group registry (one verify per tx) or mainnet's 30M block limit.
 
 ## Multi-Component STARK Pattern
 
@@ -674,7 +725,7 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
-6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum. **MVP-6 groundwork (2026-06-12):** Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t4.rs` + `contracts/src/verifier/Poseidon2M31T4.sol`) — R_F=8 + R_P=21, α=5, M4 external matrix, J+diag(1,2,3,4) internal, SHA-256 K[0..53] constants; rate-2 capacity-2 sponge with capacity-cell odd-length flag; `compress` for 124-bit wide nodes (collision ~2^62). VFRI10 (t=4 channel + Merkle + verifier) not yet wired.
+6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum. **MVP-6 groundwork (2026-06-12):** Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t4.rs` + `contracts/src/verifier/Poseidon2M31T4.sol`) — R_F=8 + R_P=21, α=5, M4 external matrix, J+diag(1,2,3,4) internal, SHA-256 K[0..53] constants; rate-2 capacity-2 sponge with capacity-cell odd-length flag; `compress` for 124-bit wide nodes (collision ~2^62). **Hash backend (2026-06-13):** `Poseidon2MerkleVerifierT4.sol` (t=4 wide Merkle) + `Poseidon2ChannelT4.sol` (t=4 Fiat-Shamir channel) + Rust references `hash_leaf_cols_p2t4` / `hash_pair_p2t4` / `P2T4Channel` in `vfri2_bridge.rs`, cross-checked bit-exact (18 tests). **VFRI10 verifier (2026-06-13):** `QLSAVerifierVFRI10.sol` wires the t=4 backend into the full VFRI9 proof path (identical ABI; only the hash backend changes) — `gen_vfri10_hints_from_cols_nfolds` bridge + on-chain `verify()==true` E2E (fixture `vfri10_e2e.json`, 11 JS tests). t=4 lifts the node/transcript collision wall above the t=2 ceiling (~2^31). **VFRI10 production pipeline (2026-06-14):** V23 cross-bound wrappers (`gen_mldsa_v23_vfri10_hints[_log8]`, `gen_mldsa_v23_vfri10_cross_bound_hints`) + PyO3 bindings + Python wrappers (`prove_mldsa_sig_vfri10_stark`) + on-chain dual-group E2E via `BatchRegistryV5` (8 Python + 10 JS tests, fixture `full_v23_vfri10_cross_bound_e2e.json`). **Gas finding:** each V23 group `verify()` fits within 16.7M gas individually (~8–10M) at `num_folds=6`; the dual-group `submitBatch` (both t=4 verifies in one tx) overruns the 16.7M per-tx cap — production needs a per-group registry (one verify per tx) or mainnet's 30M block limit. `num_folds=3` (128-eval last layer) overruns LOG=10 alone. Remaining: a per-group registry (split dual-verify) or RPO256 for single-pass 128-bit binding.
 7. Last-layer FRI check: implemented in VFRI9 (2026-06-10). VFRI5–VFRI8 remain in the repo WITHOUT it for regression — do not deploy them to production.
 
 ## Security Hardening (implemented)
@@ -698,6 +749,11 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 - **Prover failure recovery** (2026-06-10): `Batcher` returns transactions to the mempool and retries (up to `MAX_PROOF_RETRIES=3` per batch) when the STARK prover crashes unexpectedly; `ProverUnavailableError` (extension missing) still yields the documented unproven degraded mode
 - **`Mempool.prepend_batch` overflow accounting** (2026-06-10): returns the list of dropped transactions (oldest kept, newest dropped) instead of silent loss; `dropped_count` metric added; `AggregatorNode` rejects `mempool_capacity < min_batch_size` (silently-dead-node config)
 - **Bearer-token auth on batch endpoints** (2026-06-10): `POST /batch/run` and `POST /batch/flush` require `Authorization: Bearer $QLSA_API_TOKEN` when the env var is set (constant-time comparison); unset = open with a startup warning (research default)
+- **Off-chain replay guard** (2026-06-14 audit): `AggregatorNode.submit()` raises `ReplayedTxError` if a tx whose hash is still in the retained batch history (`_tx_to_batch`, ≤`_MAX_HISTORY` batches) is re-submitted — closes the gap where a batched tx (no longer pending, so past the mempool's hash-dedup) could be re-batched; the on-chain nonce registry remains the durable backstop. API returns `"transaction already batched"`, `accepted=False`
+- **Submit error-text hardening** (2026-06-14 audit): `POST /transactions` no longer echoes raw `str(exc)`; `ValueError`→`"invalid transaction"` (detail logged server-side via `logging.getLogger(__name__)`), `MempoolFullError`→`"mempool full"` — stops leaking internal validation/capacity specifics
+- **`/stats` overflow observability** (2026-06-14 audit): `mempool_dropped` (txs lost to `prepend_batch` overflow during prover-crash recovery) is now surfaced so operators can detect silent loss
+- **Production-build hygiene** (2026-06-14 audit): `vfri2_bridge.rs` test module gained the missing `#[cfg(test)]` gate (test fixtures `make_v23_inputs`/`make_vfri5_polys`/`make_log8_hints` no longer compiled into the shipped library); `poseidon2_t4.rs` `m31_mul` import moved to its test module — release build is now warning-free
+- **FRI generator depth guard** (2026-06-14 audit): the VFRI9/VFRI10 generic generators validate `tree_depth ∈ 2..=30` (mirrors the on-chain `logDomainSize > 30` guard), preventing the `coset_at` shift underflow for oversized depths (defense-in-depth; V23 wrappers always use fixed depth 8/10)
 
 ## CI Pipeline
 

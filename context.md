@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-12 — MVP-6 groundwork)
+## Статус (обновлено 2026-06-14 — security + code audit)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -35,6 +35,39 @@
 - **JS SDK VFRI9 parity (2026-06-12)**: `types.ts` — `WitnessStatus`/`BatchStatus` получили `hasVfri9`/`vfri9CommitmentLog{10,8}`; `client.ts` — 5 inline копий wire-типа консолидированы в `RawBatchStatus` interface + `_toBatchStatus` helper
 - **Poseidon2 t=4 (MVP-6 groundwork, 2026-06-12)**: `stark_stwo/src/poseidon2_t4.rs` — полный R_F=8 + R_P=21 пермутатор, rate-2 capacity-2 sponge (флаг odd-length в capacity cell s[3]), `compress_t4` для 124-bit wide nodes; 12 Rust тестов с frozen reference vectors. `contracts/src/verifier/Poseidon2M31T4.sol` — Solidity зеркало; 11 JS тестов. Vectors заморожены кросс-языково. VFRI10 не подключён — see Known Limitations #6
 - **Тесты (2026-06-12)**: 315 Rust (+12 poseidon2_t4, +88 ignored), 917 Hardhat (+11 Poseidon2M31T4)
+- **VFRI10 hash backend (2026-06-13)**: t=4 wide Merkle + Fiat-Shamir channel поверх готового `poseidon2_t4`
+  - `contracts/src/verifier/Poseidon2MerkleVerifierT4.sol` — узлы 2 слова `(s0<<32)|s1` (как W), но t=4: `sponge` для листьев, `compress` (4→2) для пар; 124-бит состояние, 2-cell capacity
+  - `contracts/src/verifier/Poseidon2ChannelT4.sol` — t=4 duplex sponge: absorb rate-1 в cell 0 (capacity 93 бит), draw squeeze (s0,s1); mixRoot/mixRootW/mixRootFull/mixU32s/drawSecureFelt/drawQueries
+  - Rust references в `vfri2_bridge.rs`: `hash_leaf_cols_p2t4`/`hash_pair_p2t4`/`hash_leaf_qm31_p2t4`/`build_tree_p2t4`/`P2T4Channel` (#[allow(dead_code)] до подключения VFRI10 верификатора)
+  - Cross-check заморожен: `hashLeaf([1,2,3,4])→(188265029,348838750)`, `hashPair((1,2),(3,4))→(1706601437,1471208702)`, `mixRoot(0x11..).drawQueries(10,4)→[674,500,407,375]`
+  - 6 Rust тестов (`p2t4`) + 12 JS тестов (`Poseidon2T4Backend.test.js`); остаётся подключить VFRI10 верификатор-контракт
+- **Тесты (2026-06-13)**: 321 Rust (+6 p2t4, 89 ignored), 929 Hardhat (+12 Poseidon2T4Backend)
+- **VFRI10 верификатор (2026-06-13)**: `QLSAVerifierVFRI10.sol` — протокол VFRI9 с t=4 hash backend
+  - Только смена backend: `Poseidon2MerkleVerifierW→Poseidon2MerkleVerifierT4`, `Poseidon2Channel→Poseidon2ChannelT4`; ABI хинтов байт-в-байт как у VFRI9 (6 head slots), last-layer FRI check сохранён, маркер версии `proof[0:8]=4`
+  - Rust-мост `gen_vfri10_hints_from_cols_nfolds` — копия VFRI9-моста с 5 заменами backend, переиспользует ABI-энкодер VFRI9
+  - Fixture `contracts/test/fixtures/vfri10_e2e.json` (6 cols, depth=4, 2 queries, 2 folds) генерится `cargo test write_vfri10_e2e_fixture -- --ignored`
+  - On-chain `verify()==true` (≤16.7M gas для малого fixture); t=4 хинты НЕ принимаются VFRI9 верификатором (разная перестановка → разные query indices)
+  - 2 Rust smoke-теста + 11 JS E2E тестов; остаётся V23 cross-bound обёртки (`gen_mldsa_v23_vfri10_*`) + PyO3/Python + реестр для aggregator-пути
+- **Тесты (2026-06-13, VFRI10)**: 323 Rust (+2 vfri10, 90 ignored), 940 Hardhat (+11 QLSAVerifierVFRI10E2E)
+- **VFRI10 production pipeline (2026-06-14)**: V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E
+  - Rust V23 мосты: `gen_mldsa_v23_vfri10_hints` (LOG=10, 1298), `gen_mldsa_v23_vfri10_hints_log8` (LOG=8, 2206), `gen_mldsa_v23_vfri10_cross_bound_hints` (two-pass keccak256)
+  - PyO3: `gen_mldsa_v23_vfri10_hints_py` / `_log8_py` / `_cross_bound_hints_py`
+  - Python (`stark/prover.py`): `gen_mldsa_v23_vfri10_hints[_log8]`, `gen_mldsa_v23_vfri10_cross_bound_hints`, `prove_mldsa_sig_vfri10_stark` + результаты `MldsaV23VFRI10HintResult`/`...Log8...`/`FullV23VFRI10CrossBoundHintResult`
+  - `BatchRegistryV5` подключает VFRI10 через конструктор (verifier-agnostic); on-chain оба группы verify()==true индивидуально
+  - **Gas finding**: каждая V23-группа verify() ≤16.7M gas по отдельности (~8–10M); dual-group submitBatch (обе t=4 проверки в одной tx) превышает 16.7M per-tx cap. `num_folds=6` обязателен (last layer 16/4 evals); `num_folds=3` (128 evals) превышает cap уже на LOG=10. Production: per-group реестр (одна проверка на tx) или mainnet 30M
+  - 8 Python тестов (`tests/test_stark_stwo.py`) + 10 JS V23 cross-bound E2E + фикстура `full_v23_vfri10_cross_bound_e2e.json`
+- **Тесты (2026-06-14)**: 323 Rust, 210 stark_stwo Python (+8 vfri10), 950 Hardhat (+10 QLSAVerifierVFRI10CrossBoundE2E)
+- **Security + code audit (2026-06-14)**: 2 эксперта (crypto/blockchain + systems). Найдено 9, исправлено 6, 1 false-positive, 2 задокументированы как research-defaults:
+  - **H1 (fixed)**: off-chain replay — уже забатченную tx можно было пересабмитить и забатчить снова (mempool dedup покрывает только pending). Добавлен `ReplayedTxError` guard в `AggregatorNode.submit()` (отклоняет re-submission tx из retained history `_tx_to_batch`); on-chain nonce registry — durable backstop
+  - **H2 (false positive)**: `_sender_txs` unbounded — проверено: ограничен 1000-batch history eviction (только забатченные tx, пустые deque удаляются, per-sender cap 500). Не уязвимость
+  - **L2 (fixed)**: `POST /transactions` возвращал raw `str(exc)` → leak внутренних деталей; теперь fixed-сообщения (`invalid transaction` / `mempool full`), детали в server-side log
+  - **L4 (fixed)**: `/stats` теперь отдаёт `mempool_dropped` (потери prepend_batch overflow)
+  - **MEDIUM code (fixed)**: `vfri2_bridge.rs:5399 mod tests` без `#[cfg(test)]` → тест-фикстуры (`make_v23_inputs`/`make_vfri5_polys`/`make_log8_hints`) компилировались в production lib (5 warnings). Gated; release build чист
+  - **LOW code (fixed)**: `poseidon2_t4.rs` import `m31_mul` использовался только в тестах → перенесён в test-модуль
+  - **Latent (hardened)**: generic FRI генераторы VFRI9/VFRI10 теперь валидируют `tree_depth ∈ 2..=30` (зеркалит on-chain `logDomainSize > 30`), предотвращает `coset_at` shift underflow; не attacker-reachable (V23 wrappers фиксируют depth 8/10)
+  - **Verified-OK**: Bearer-token constant-time, Merkle `hmac.compare_digest`, mempool locking, нет unsafe deserialization/SSRF/ReDoS; VFRI10 ≡ VFRI9 кроме backend+marker; t=4 Poseidon2 математика (M4 fast-path) верна; PyO3 boundary не паникует на malformed input
+  - **Documented research-defaults (unchanged)**: M1 XFF-spoofing зависит от proxy-конфига; M2 `/batch/*` открыт без `QLSA_API_TOKEN` (warning при старте); L1 ML-DSA key copies в CPython не зануляются
+- **Тесты после аудита (2026-06-14)**: 354 non-PyO3 Python (+4 replay-тесты), mypy clean, Rust release warning-free
 
 ### Что готово
 
@@ -152,9 +185,10 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 
 #### Тесты (актуально 2026-06-10)
 - Python: **~350 тестов** (без PyO3) / **~552** (с PyO3 ext)
-- Rust: **315 тестов** (cargo test, non-ignored) + **88 ignored** (slow STARK integration tests incl. V23)
+- Rust: **323 тестов** (cargo test, non-ignored) + **90 ignored** (slow STARK integration tests incl. V23)
+- Python (stark_stwo): **210 тестов** (+8 VFRI10 V23)
 - TypeScript SDK: **~71 тестов** (jest)
-- Solidity/Hardhat: **917 тестов** (+11 Poseidon2M31T4.test.js)
+- Solidity/Hardhat: **950 тестов** (+10 QLSAVerifierVFRI10CrossBoundE2E.test.js)
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
@@ -241,7 +275,10 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **VFRI9 pipeline** | **✅ Done** | **Aggregator BatchResult + API + Python SDK + JS SDK expose VFRI9 commitments (2026-06-12)** |
 | **pyo3 CVE fix** | **✅ Done** | **pyo3 0.24→0.29: RUSTSEC-2026-0176 + RUSTSEC-2026-0177 (2026-06-12)** |
 | **Poseidon2 t=4** | **✅ Done (groundwork)** | **Rust + Solidity cross-checked permutation; 124-bit compress; 315 Rust + 917 Solidity tests (2026-06-12)** |
-| MVP-6 | ⏳ Next | VFRI10: wire t=4 channel + Merkle + verifier; 128-bit FRI binding |
+| **VFRI10 hash backend** | **✅ Done** | **t=4 wide Merkle (`Poseidon2MerkleVerifierT4`) + Fiat-Shamir channel (`Poseidon2ChannelT4`) + Rust refs, cross-checked; 321 Rust + 929 Solidity (2026-06-13)** |
+| **VFRI10 верификатор** | **✅ Done** | **`QLSAVerifierVFRI10.sol` — VFRI9-протокол на t=4 backend; `gen_vfri10_hints_from_cols_nfolds`; on-chain verify()==true; 323 Rust + 940 Solidity (2026-06-13)** |
+| **VFRI10 production pipeline** | **✅ Done** | **V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E; per-group verify ≤16.7M; 210 Python + 950 Solidity (2026-06-14)** |
+| MVP-6 next | ⏳ Next | Per-group реестр (split dual-verify по двум tx для 16.7M cap) либо RPO256 hash AIR (128-бит за один проход) |
 | MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
 
 ---
@@ -409,7 +446,9 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | Нет аутентификации на `/batch/run`/`/batch/flush` (compute DoS) | Высокий | ✅ Закрыт (Bearer-token `QLSA_API_TOKEN`, constant-time, opt-in, 2026-06-10) |
 | `setVerifier()` без timelock — single-key upgrade risk | Средний | Open (research prototype; рекомендуется 48h timelock + multisig для mainnet) |
 | No authentication on `/batch/run` и `/batch/flush` — DoS через compute drain | Высокий | Open (rate limiting 20 ops/min; Bearer token рекомендуется для mainnet) |
-| Off-chain mempool accepts stale-nonce transactions | Средний | Open (per-sender nonce tracking рекомендуется для mainnet) |
+| Off-chain mempool accepts stale-nonce transactions | Средний | Частично закрыто (2026-06-14): `ReplayedTxError` отклоняет re-submission уже забатченной tx в пределах retained history; полный per-sender nonce tracking рекомендуется для mainnet, on-chain registry — durable backstop |
+| `POST /transactions` возвращал raw `str(exc)` (leak внутренних деталей валидации/ёмкости) | Низкий | ✅ Закрыто (fixed client-сообщения + server-side log, 2026-06-14) |
+| Тест-фикстуры компилировались в production lib (`mod tests` без `#[cfg(test)]`) | Низкий | ✅ Закрыто (gate добавлен; release build warning-free, 2026-06-14) |
 
 ---
 

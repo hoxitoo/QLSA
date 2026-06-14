@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import logging
 import os
 import threading
 import time
@@ -17,10 +18,12 @@ from pydantic import BaseModel, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from aggregator.mempool import DuplicateTxError, MempoolFullError
-from aggregator.node import AggregatorNode
+from aggregator.node import AggregatorNode, ReplayedTxError
 from core.keys import derive_address
 from core.signing import verify as sig_verify
 from core.transaction import Transaction
+
+logger = logging.getLogger(__name__)
 
 
 # ── Rate-limit configuration ──────────────────────────────────────────────────
@@ -370,6 +373,7 @@ def stats(request: Request) -> dict[str, Any]:
         "batches_created": s.batches_created,
         "proofs_generated": s.proofs_generated,
         "pending": node.pending_count(),
+        "mempool_dropped": node.mempool.dropped_count,  # txs lost to overflow on recovery
         "n_fri_queries": n,
         "fri_security_bits": 6 * n + 10,  # log_blowup(6) × n + pow_bits(10)
     }
@@ -553,9 +557,22 @@ def submit_transaction(payload: TxPayload, request: Request) -> SubmitResponse:
             mempool_size=node.pending_count(),
             error="duplicate transaction: already in mempool",
         )
-    except (ValueError, MempoolFullError) as exc:
+    except ReplayedTxError:
         return SubmitResponse(
-            accepted=False, mempool_size=node.pending_count(), error=str(exc)
+            accepted=False,
+            mempool_size=node.pending_count(),
+            error="transaction already batched",
+        )
+    except MempoolFullError:
+        return SubmitResponse(
+            accepted=False, mempool_size=node.pending_count(), error="mempool full",
+        )
+    except ValueError:
+        # Do not echo internal validation text to the client; log it server-side.
+        logger.warning("rejected malformed transaction submission", exc_info=True)
+        return SubmitResponse(
+            accepted=False, mempool_size=node.pending_count(),
+            error="invalid transaction",
         )
 
 
