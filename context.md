@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-16 — Poseidon2 t=8 groundwork + VFRI10 в агрегаторе + testnet tooling)
+## Статус (обновлено 2026-06-16 — Poseidon2 t=8 hash backend + перестановка + VFRI10 в агрегаторе + testnet tooling)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -88,8 +88,15 @@
   - `stark_stwo/src/poseidon2_t8.rs` + `contracts/src/verifier/Poseidon2M31T8.sol`: t=8, R_F=8, R_P=14, α=5, блочная внешняя матрица `[[2·M4,M4],[M4,2·M4]]`, внутренняя J+diag(1..8), RC[0..78] из SHA-256("QLSA-Poseidon2-t8"‖i)
   - `compress` несёт **4-словные (124-бит) узлы → коллизия ~2^62** (vs 2^31 у VFRI10); rate-4 capacity-4 sponge, odd-flag в capacity cell s[7]
   - Reference vectors заморожены и сверены: 11 JS (`Poseidon2M31T8.test.js`) + 12 Rust тестов; matrices invertible, fast-path == naive, полная диффузия
-  - **Лестница:** t=2/t=4 (2^31) → **t=8 (2^62)** → t=16 (8-словные узлы, ~2^124 ≈ 128-bit, = нативный Poseidon2-16 в Stwo). Следующее: MerkleVerifierW8 + Channel8 + верификатор VFRI11, затем t=16
+  - **Лестница:** t=2/t=4 (2^31) → **t=8 (2^62)** → t=16 (8-словные узлы, ~2^124 ≈ 128-bit, = нативный Poseidon2-16 в Stwo)
   - Release build чистый (warning-free)
+
+- **t=8 hash backend (2026-06-16)**: Merkle-верификатор + Fiat-Shamir канал на t=8 перестановке, кросс-чек bit-exact
+  - `contracts/src/verifier/Poseidon2MerkleVerifierT8.sol` — **4-словные (124-бит) узлы** `(w0<<96)|(w1<<64)|(w2<<32)|w3` (bytes[16..32]); `hashLeaf` = rate-4 cap-4 sponge, `hashPair` = 8→4 compress; коллизия узла 2^31 (T4) → **2^62**
+  - `contracts/src/verifier/Poseidon2ChannelT8.sol` — состояние (s0..s7, nDraws), rate-1 absorb в cell 0 (cells 1–7 = 217-бит capacity); mixRoot/mixRootW(4 слова)/mixRootFull/mixU32s/drawSecureFelt/drawQueries
+  - Rust references в `vfri2_bridge.rs` (#[allow(dead_code)] до VFRI11): `hash_leaf_cols_p2t8`/`hash_pair_p2t8`/`hash_leaf_qm31_p2t8`/`build_tree_p2t8`/`P2T8Channel`
+  - Reference vectors заморожены и сверены: **13 JS** (`Poseidon2T8Backend.test.js`) + **6 Rust** (`p2t8`); Merkle inclusion E2E, full-root binding
+  - Следующее: верификатор VFRI11 (клон VFRI10 с T8-бекендом + 4-словное кодирование узла), затем t=16
 
 - **VFRI10 в пайплайне агрегатора (2026-06-16)**: продакшн-нода теперь генерирует VFRI10 witness-proofs (раньше только VFRI7/8/9)
   - `aggregator/batcher.py`: `BatchResult` несёт поля `vfri10_{proof,commitment,hints}_{log10,log8}`, свойство `has_vfri10`, добавлено в `has_witness`; генерация через `prove_mldsa_sig_vfri10_stark` с `Batcher.VFRI10_NUM_FOLDS = 6` (gas budget BatchRegistryV6)

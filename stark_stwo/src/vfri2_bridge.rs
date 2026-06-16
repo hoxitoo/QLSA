@@ -4479,6 +4479,166 @@ impl P2T4Channel {
     }
 }
 
+// ── t=8 hash backend: Poseidon2 t=8 wide Merkle + Fiat-Shamir channel ─────────
+//
+// The t=4 `p2t4` backend still truncates Merkle nodes to 2 M31 words (62 bits →
+// node collision ~2^31).  The t=8 primitives reuse the frozen `poseidon2_t8`
+// permutation: a capacity-4 duplex sponge over a 248-bit state with 4-word
+// (124-bit) nodes → node collision ~2^62 — the next rung toward 128-bit binding.
+// Node encoding: four M31 words packed into bytes[16..32].
+
+/// Read the four BE u32 node words (bytes[16..32]) into a [u64; 4].
+#[allow(dead_code)]
+fn p2t8_node_words(node: &[u8; 32]) -> [u64; 4] {
+    let mut w = [0u64; 4];
+    for k in 0..4 {
+        w[k] = u32::from_be_bytes(node[16 + 4 * k..20 + 4 * k].try_into().unwrap()) as u64;
+    }
+    w
+}
+
+/// Pack a 4-word node into bytes[16..32].
+#[allow(dead_code)]
+fn p2t8_pack(words: [u64; 4]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for k in 0..4 {
+        out[16 + 4 * k..20 + 4 * k].copy_from_slice(&(words[k] as u32).to_be_bytes());
+    }
+    out
+}
+
+/// Wide t=8 leaf hash: rate-4 capacity-4 sponge over the column values.
+/// Node = (state[0..4]) packed into bytes[16..32].
+/// Matches Poseidon2MerkleVerifierT8.hashLeaf and the `sponge_t8` padding
+/// convention (odd-length flag in capacity cell 7).
+#[allow(dead_code)]
+fn hash_leaf_cols_p2t8(col_values: &[u32]) -> [u8; 32] {
+    let vals: Vec<u64> = col_values.iter().map(|&v| v as u64).collect();
+    let s = crate::poseidon2_t8::sponge_t8(&vals);
+    p2t8_pack([s[0], s[1], s[2], s[3]])
+}
+
+/// Wide t=8 pair hash: 8→4 compression of two 4-word nodes via a single t=8
+/// permutation.  Matches Poseidon2MerkleVerifierT8.hashPair.
+#[allow(dead_code)]
+fn hash_pair_p2t8(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let s = crate::poseidon2_t8::compress_t8(p2t8_node_words(left), p2t8_node_words(right));
+    p2t8_pack(s)
+}
+
+/// Wide t=8 leaf hash for a single QM31 value (4 M31 words).
+#[allow(dead_code)]
+fn hash_leaf_qm31_p2t8(value: u128) -> [u8; 32] {
+    let words = qm31_words(value);
+    let vals: Vec<u64> = words.iter().map(|&w| w as u64).collect();
+    let s = crate::poseidon2_t8::sponge_t8(&vals);
+    p2t8_pack([s[0], s[1], s[2], s[3]])
+}
+
+#[allow(dead_code)]
+fn build_tree_p2t8(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
+    assert!(leaves.len().is_power_of_two(), "leaves.len() must be power of 2");
+    let mut levels = vec![leaves];
+    while levels.last().unwrap().len() > 1 {
+        let prev = levels.last().unwrap();
+        let mut next = Vec::with_capacity(prev.len() / 2);
+        for chunk in prev.chunks(2) {
+            next.push(hash_pair_p2t8(&chunk[0], &chunk[1]));
+        }
+        levels.push(next);
+    }
+    levels
+}
+
+/// Poseidon2 t=8 duplex Fiat-Shamir channel.
+///
+/// The t=8 analogue of `P2T4Channel`: absorb is rate-1 into cell 0 (cells 1–7
+/// form a 217-bit capacity); each draw squeezes the two rate-adjacent cells
+/// (s0, s1).  Same interface so a future VFRI11 can swap it in for `P2T4Channel`
+/// with no transcript-shape changes — only the permutation widens.
+#[allow(dead_code)]
+struct P2T8Channel {
+    s: [u64; 8],
+    n_draws: u32,
+}
+
+#[allow(dead_code)]
+impl P2T8Channel {
+    fn init() -> Self {
+        P2T8Channel { s: [0u64; 8], n_draws: 0 }
+    }
+
+    fn absorb(&mut self, word: u32) {
+        let mut w = word as u64;
+        if w >= crate::poseidon2::M31_P {
+            w -= crate::poseidon2::M31_P;
+        }
+        if w >= crate::poseidon2::M31_P {
+            w -= crate::poseidon2::M31_P;
+        }
+        self.s[0] = crate::poseidon2::m31_add(self.s[0], w);
+        crate::poseidon2_t8::permute_t8(&mut self.s);
+    }
+
+    fn mix_root(&mut self, root: &[u8; 32]) {
+        self.absorb(u32::from_be_bytes(root[28..32].try_into().unwrap()));
+        self.n_draws = 0;
+    }
+
+    /// Absorb the 4 words of a wide t=8 node (bytes[16..32]).
+    fn mix_root_w(&mut self, root: &[u8; 32]) {
+        for k in 0..4 {
+            self.absorb(u32::from_be_bytes(root[16 + 4 * k..20 + 4 * k].try_into().unwrap()));
+        }
+        self.n_draws = 0;
+    }
+
+    fn mix_root_full(&mut self, root: &[u8; 32]) {
+        for i in 0..8 {
+            self.absorb(u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap()));
+        }
+        self.n_draws = 0;
+    }
+
+    fn mix_u32s(&mut self, words: &[u32]) {
+        for &w in words {
+            self.absorb(w);
+        }
+        self.n_draws = 0;
+    }
+
+    fn draw_pair(&mut self) -> (u32, u32) {
+        let w0 = self.s[0] as u32;
+        let w1 = self.s[1] as u32;
+        self.s[0] = crate::poseidon2::m31_add(self.s[0], self.n_draws as u64);
+        crate::poseidon2_t8::permute_t8(&mut self.s);
+        self.n_draws += 1;
+        (w0, w1)
+    }
+
+    fn draw_secure_felt(&mut self) -> u128 {
+        let (w0, w1) = self.draw_pair();
+        let (w2, w3) = self.draw_pair();
+        let c0 = cm31_pack(w0, w1);
+        let c1 = cm31_pack(w2, w3);
+        qm31_pack_c(c0, c1)
+    }
+
+    fn draw_queries(&mut self, log_domain_size: u32, n: usize) -> Vec<usize> {
+        let mask = ((1u64 << log_domain_size) - 1) as u32;
+        let mut queries = Vec::with_capacity(n);
+        while queries.len() < n {
+            let (w0, w1) = self.draw_pair();
+            queries.push((w0 & mask) as usize);
+            if queries.len() < n {
+                queries.push((w1 & mask) as usize);
+            }
+        }
+        queries.truncate(n);
+        queries
+    }
+}
+
 fn abi_encode_vfri9_hints(
     oods_combo_pos:   u128,
     oods_combo_neg:   u128,
@@ -6700,6 +6860,137 @@ mod tests_vfri8 {
         // mix_root only looks at bytes[28..32] → high-byte change is invisible.
         let q_lo_base = { let mut c = P2T4Channel::init(); c.mix_root(&base); c.draw_queries(8, 4) };
         let q_lo_alt = { let mut c = P2T4Channel::init(); c.mix_root(&alt); c.draw_queries(8, 4) };
+        assert_eq!(q_lo_base, q_lo_alt);
+    }
+
+    // ── t=8 hash backend cross-check (Poseidon2T8Backend.test.js) ──────────────
+
+    #[test]
+    #[ignore = "prints reference vectors for regeneration; values are frozen in test_p2t8_reference_vectors"]
+    fn test_p2t8_print_reference_vectors() {
+        // Run with: cargo test test_p2t8_print_reference_vectors -- --ignored --nocapture
+        let leaf = hash_leaf_cols_p2t8(&[1, 2, 3, 4]);
+        eprintln!("hash_leaf_cols_p2t8([1,2,3,4]) = {:?}", p2t8_node_words(&leaf));
+
+        let a = p2t8_pack([1, 2, 3, 4]);
+        let b = p2t8_pack([5, 6, 7, 8]);
+        let pair = hash_pair_p2t8(&a, &b);
+        eprintln!("hash_pair_p2t8(node[1..4],node[5..8]) = {:?}", p2t8_node_words(&pair));
+
+        let mut ch = P2T8Channel::init();
+        ch.mix_root(&[0x11u8; 32]);
+        eprintln!("channel.mix_root(0x11..).draw_queries(10,4) = {:?}", ch.draw_queries(10, 4));
+
+        let node = p2t8_pack([1, 2, 3, 4]);
+        let mut chw = P2T8Channel::init();
+        chw.mix_root_w(&node);
+        eprintln!("channel.mix_root_w(node[1..4]).draw_queries(10,4) = {:?}", chw.draw_queries(10, 4));
+
+        let felt = { let mut c = P2T8Channel::init(); c.mix_u32s(&[1, 2, 3]); c.draw_secure_felt() };
+        eprintln!("channel.mix_u32s([1,2,3]).draw_secure_felt() = {felt}");
+    }
+
+    #[test]
+    fn test_p2t8_reference_vectors() {
+        // Frozen — Poseidon2T8Backend.test.js asserts the same outputs.
+        let leaf = hash_leaf_cols_p2t8(&[1, 2, 3, 4]);
+        assert_eq!(p2t8_node_words(&leaf), REF_T8_LEAF);
+
+        // hash_pair of nodes (1,2,3,4) and (5,6,7,8) == compress_t8([1..4],[5..8]).
+        let pair = hash_pair_p2t8(&p2t8_pack([1, 2, 3, 4]), &p2t8_pack([5, 6, 7, 8]));
+        assert_eq!(p2t8_node_words(&pair), REF_T8_PAIR);
+        assert_eq!(
+            p2t8_node_words(&pair),
+            crate::poseidon2_t8::compress_t8([1, 2, 3, 4], [5, 6, 7, 8])
+        );
+
+        let mut ch = P2T8Channel::init();
+        ch.mix_root(&[0x11u8; 32]);
+        assert_eq!(ch.draw_queries(10, 4), REF_T8_QUERIES.to_vec());
+
+        let mut chw = P2T8Channel::init();
+        chw.mix_root_w(&p2t8_pack([1, 2, 3, 4]));
+        assert_eq!(chw.draw_queries(10, 4), REF_T8_QUERIES_W.to_vec());
+
+        let felt = { let mut c = P2T8Channel::init(); c.mix_u32s(&[1, 2, 3]); c.draw_secure_felt() };
+        assert_eq!(felt, REF_T8_FELT);
+    }
+
+    // Frozen t=8 backend reference vectors (from test_p2t8_print_reference_vectors).
+    const REF_T8_LEAF: [u64; 4] = [1073120416, 1930841549, 67141568, 840805313];
+    const REF_T8_PAIR: [u64; 4] = [890515421, 531626735, 2060583819, 1311645369];
+    const REF_T8_QUERIES: [usize; 4] = [436, 378, 839, 927];
+    const REF_T8_QUERIES_W: [usize; 4] = [301, 134, 1008, 447];
+    const REF_T8_FELT: u128 = 133164500022319262877528816935901679472;
+
+    #[test]
+    fn test_p2t8_leaf_is_wide_and_differs_from_t4() {
+        let cols = vec![1u32, 2, 3, 4];
+        let h = hash_leaf_cols_p2t8(&cols);
+        // Content lives in bytes[16..32]; upper 16 bytes are zero.
+        assert_eq!(&h[..16], &[0u8; 16]);
+        // Leaf == sponge_t8 of the columns (first four words).
+        let s = crate::poseidon2_t8::sponge_t8(&[1, 2, 3, 4]);
+        assert_eq!(p2t8_node_words(&h), [s[0], s[1], s[2], s[3]]);
+        // t=8 leaf differs from the t=4 leaf (wider state, different permutation).
+        assert_ne!(h, hash_leaf_cols_p2t4(&cols));
+    }
+
+    #[test]
+    fn test_p2t8_pair_order_sensitive_and_diffuses() {
+        let a = p2t8_pack([1, 2, 3, 7]);
+        let b = p2t8_pack([2, 2, 3, 7]);
+        let sib = p2t8_pack([5, 5, 5, 5]);
+        // Nodes differing only in the first word must yield different parents.
+        assert_ne!(hash_pair_p2t8(&a, &sib), hash_pair_p2t8(&b, &sib));
+        // Compression is not commutative.
+        assert_ne!(hash_pair_p2t8(&a, &sib), hash_pair_p2t8(&sib, &a));
+    }
+
+    #[test]
+    fn test_p2t8_tree_roundtrip() {
+        let leaves: Vec<[u8; 32]> = (0..4u32)
+            .map(|j| hash_leaf_cols_p2t8(&[j, j + 1, j + 2]))
+            .collect();
+        let levels = build_tree_p2t8(leaves.clone());
+        let root = levels.last().unwrap()[0];
+        assert_eq!(levels.len(), 3); // 4 → 2 → 1
+        let mut cur = leaves[1];
+        cur = hash_pair_p2t8(&leaves[0], &cur); // idx 1 odd → sibling on the left
+        cur = hash_pair_p2t8(&cur, &levels[1][1]);
+        assert_eq!(cur, root);
+    }
+
+    #[test]
+    fn test_p2t8_channel_deterministic_and_binds() {
+        let mut a = P2T8Channel::init();
+        let mut b = P2T8Channel::init();
+        a.mix_root(&[0x11u8; 32]);
+        b.mix_root(&[0x11u8; 32]);
+        assert_eq!(a.draw_queries(10, 8), b.draw_queries(10, 8));
+        let mut c = P2T8Channel::init();
+        c.mix_root(&[0x12u8; 32]);
+        let mut d = P2T8Channel::init();
+        d.mix_root(&[0x11u8; 32]);
+        assert_ne!(c.draw_queries(10, 8), d.draw_queries(10, 8));
+        let mut e = P2T8Channel::init();
+        e.mix_root(&[0x11u8; 32]);
+        for q in e.draw_queries(10, 16) {
+            assert!(q < (1 << 10));
+        }
+    }
+
+    #[test]
+    fn test_p2t8_channel_full_root_binds_all_bytes() {
+        let mut base = [0u8; 32];
+        base[0] = 0xAA;
+        let mut alt = base;
+        alt[0] = 0xBB;
+        let q_full_base = { let mut c = P2T8Channel::init(); c.mix_root_full(&base); c.draw_queries(8, 4) };
+        let q_full_alt = { let mut c = P2T8Channel::init(); c.mix_root_full(&alt); c.draw_queries(8, 4) };
+        assert_ne!(q_full_base, q_full_alt, "mix_root_full must bind high bytes");
+        let q_lo_base = { let mut c = P2T8Channel::init(); c.mix_root(&base); c.draw_queries(8, 4) };
+        let q_lo_alt = { let mut c = P2T8Channel::init(); c.mix_root(&alt); c.draw_queries(8, 4) };
         assert_eq!(q_lo_base, q_lo_alt);
     }
 
