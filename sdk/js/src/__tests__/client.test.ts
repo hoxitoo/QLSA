@@ -145,11 +145,11 @@ describe("AggregatorClient _toBatchStatus", () => {
     expect(status.vfri7CommitmentLog8).toBe("d".repeat(32));
   });
 
-  it("maps VFRI8 and VFRI9 commitment fields from snake_case", () => {
+  it("maps VFRI8, VFRI9 and VFRI10 commitment fields from snake_case", () => {
     const client = new AggregatorClient("http://localhost:8000");
     // @ts-expect-error accessing private for test
     const status = client._toBatchStatus({
-      batch_id: "vfri9-id",
+      batch_id: "vfri10-id",
       tx_count: 1,
       merkle_root: "b".repeat(128),
       is_proven: false,
@@ -160,6 +160,9 @@ describe("AggregatorClient _toBatchStatus", () => {
       has_vfri9: true,
       vfri9_commitment_log10: "3".repeat(32),
       vfri9_commitment_log8: "4".repeat(32),
+      has_vfri10: true,
+      vfri10_commitment_log10: "5".repeat(32),
+      vfri10_commitment_log8: "6".repeat(32),
     });
     expect(status.hasVfri8).toBe(true);
     expect(status.vfri8CommitmentLog10).toBe("1".repeat(32));
@@ -167,9 +170,12 @@ describe("AggregatorClient _toBatchStatus", () => {
     expect(status.hasVfri9).toBe(true);
     expect(status.vfri9CommitmentLog10).toBe("3".repeat(32));
     expect(status.vfri9CommitmentLog8).toBe("4".repeat(32));
+    expect(status.hasVfri10).toBe(true);
+    expect(status.vfri10CommitmentLog10).toBe("5".repeat(32));
+    expect(status.vfri10CommitmentLog8).toBe("6".repeat(32));
   });
 
-  it("defaults hasVfri8 and hasVfri9 to false when absent", () => {
+  it("defaults hasVfri8, hasVfri9 and hasVfri10 to false when absent", () => {
     const client = new AggregatorClient("http://localhost:8000");
     // @ts-expect-error accessing private for test
     const status = client._toBatchStatus({
@@ -183,6 +189,9 @@ describe("AggregatorClient _toBatchStatus", () => {
     expect(status.hasVfri9).toBe(false);
     expect(status.vfri9CommitmentLog10).toBeUndefined();
     expect(status.vfri9CommitmentLog8).toBeUndefined();
+    expect(status.hasVfri10).toBe(false);
+    expect(status.vfri10CommitmentLog10).toBeUndefined();
+    expect(status.vfri10CommitmentLog8).toBeUndefined();
   });
 });
 

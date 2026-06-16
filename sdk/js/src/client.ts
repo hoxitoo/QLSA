@@ -42,6 +42,9 @@ interface RawBatchStatus {
   has_vfri9?: boolean;
   vfri9_commitment_log10?: string;
   vfri9_commitment_log8?: string;
+  has_vfri10?: boolean;
+  vfri10_commitment_log10?: string;
+  vfri10_commitment_log8?: string;
 }
 
 function _validateTransaction(tx: TransactionPayload): void {
@@ -141,13 +144,16 @@ export class AggregatorClient {
         has_vfri9?: boolean;
         vfri9_commitment_log10?: string;
         vfri9_commitment_log8?: string;
+        has_vfri10?: boolean;
+        vfri10_commitment_log10?: string;
+        vfri10_commitment_log8?: string;
         n_fri_queries?: number;
         fri_security_bits?: number;
       }>(`/batch/${batchId}/witness`);
       if (!data.has_witness) {
         return {
           hasWitness: false, maxNorms: [],
-          hasVfri7: false, hasVfri8: false, hasVfri9: false,
+          hasVfri7: false, hasVfri8: false, hasVfri9: false, hasVfri10: false,
           nFriQueries: data.n_fri_queries ?? 0,
           friSecurityBits: data.fri_security_bits ?? 0,
         };
@@ -166,6 +172,9 @@ export class AggregatorClient {
         hasVfri9: data.has_vfri9 ?? false,
         vfri9CommitmentLog10: data.vfri9_commitment_log10,
         vfri9CommitmentLog8: data.vfri9_commitment_log8,
+        hasVfri10: data.has_vfri10 ?? false,
+        vfri10CommitmentLog10: data.vfri10_commitment_log10,
+        vfri10CommitmentLog8: data.vfri10_commitment_log8,
         nFriQueries: data.n_fri_queries ?? 0,
         friSecurityBits: data.fri_security_bits ?? 0,
       };
@@ -396,6 +405,9 @@ export class AggregatorClient {
       hasVfri9: data.has_vfri9 ?? false,
       vfri9CommitmentLog10: data.vfri9_commitment_log10,
       vfri9CommitmentLog8: data.vfri9_commitment_log8,
+      hasVfri10: data.has_vfri10 ?? false,
+      vfri10CommitmentLog10: data.vfri10_commitment_log10,
+      vfri10CommitmentLog8: data.vfri10_commitment_log8,
     };
   }
 

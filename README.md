@@ -92,6 +92,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **Security + code audit** — off-chain replay guard (`ReplayedTxError`), submit error-text hardening, `/stats` overflow metric, release-build test-fixture gating, FRI `tree_depth` guard | ✅ Done (2026-06-14) |
 | **BatchRegistryV6** — per-group split: each V23 t=4 group `verify()` in its own tx (LOG=10 ~10.6M, LOG=8 ~7.9M gas, both ≤16.7M); finalizes the full batch across two txs with cross-proof binding preserved | ✅ Done (2026-06-14) |
 | **MVP-6 testnet tooling** — `deploy_v6.js`/`deploy_v6.sh` (VFRI10 + BatchRegistryV6), `OnchainSubmitterV6` per-group split flow, `e2e.py --stack v6` (`num_folds=6`); MVP-5 V4 path kept for regression | ✅ Done (2026-06-16) |
+| **VFRI10 in the aggregator** — `Batcher` now emits VFRI10 witness proofs (`num_folds=6`), surfaced through `BatchResult.has_vfri10`, the API witness endpoints, and the Python + JS SDKs | ✅ Done (2026-06-16) |
 
 ---
 

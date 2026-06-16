@@ -73,6 +73,10 @@ class WitnessStatus:
     has_vfri9: bool = False
     vfri9_commitment_log10: str | None = None  # 32-char hex (Poseidon2W backend)
     vfri9_commitment_log8:  str | None = None  # 32-char hex (Poseidon2W backend)
+    # VFRI10 fields (VFRI9 protocol on the Poseidon2 t=4 hash backend; num_folds=6)
+    has_vfri10: bool = False
+    vfri10_commitment_log10: str | None = None  # 32-char hex (Poseidon2 t=4 backend)
+    vfri10_commitment_log8:  str | None = None  # 32-char hex (Poseidon2 t=4 backend)
 
 
 @dataclass
@@ -96,6 +100,10 @@ class BatchStatus:
     has_vfri9: bool = False
     vfri9_commitment_log10: str | None = None  # 32-char hex (Poseidon2W backend)
     vfri9_commitment_log8:  str | None = None  # 32-char hex (Poseidon2W backend)
+    # VFRI10 (VFRI9 protocol on the Poseidon2 t=4 hash backend; num_folds=6)
+    has_vfri10: bool = False
+    vfri10_commitment_log10: str | None = None  # 32-char hex (Poseidon2 t=4 backend)
+    vfri10_commitment_log8:  str | None = None  # 32-char hex (Poseidon2 t=4 backend)
 
 
 @dataclass

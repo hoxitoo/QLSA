@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-16 — testnet tooling для VFRI10 + BatchRegistryV6)
+## Статус (обновлено 2026-06-16 — VFRI10 в агрегаторе + testnet tooling)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -82,6 +82,14 @@
   - `python -m testnet.e2e --stack v6` (default) — `prove_mldsa_sig_vfri10_stark` с `num_folds=6` (gas budget); `--stack v4` сохраняет MVP-5 путь (VFRI7 + BatchRegistryV4) для регрессии
   - `testnet/monitor.py` совместим с V4 и V6 (идентичная сигнатура `BatchFinalized`)
   - Проверено: оба dry-run (`v6`/`v4`) генерируют реальные cross-bound proofs; `deploy_v6.js` деплоит оба контракта; ABI совпадает
+
+- **VFRI10 в пайплайне агрегатора (2026-06-16)**: продакшн-нода теперь генерирует VFRI10 witness-proofs (раньше только VFRI7/8/9)
+  - `aggregator/batcher.py`: `BatchResult` несёт поля `vfri10_{proof,commitment,hints}_{log10,log8}`, свойство `has_vfri10`, добавлено в `has_witness`; генерация через `prove_mldsa_sig_vfri10_stark` с `Batcher.VFRI10_NUM_FOLDS = 6` (gas budget BatchRegistryV6)
+  - `aggregator/api.py`: все 6 witness-эндпоинтов отдают `has_vfri10` / `vfri10_commitment_log{10,8}`
+  - Python SDK (`models.py` `WitnessStatus`/`BatchStatus`, `client.py` Local+HTTP): поля VFRI10 проброшены; `_prove_witness_local` гоняет VFRI10
+  - JS SDK (`types.ts`, `client.ts`): `hasVfri10` / `vfri10CommitmentLog{10,8}` в `BatchStatus`/`WitnessStatus` + snake_case маппинг
+  - Тесты: интеграционный `test_vfri10_populated_and_version4_when_proving` (проверяет marker==4, реальный прувер), расширены aggregator/sdk Python + JS client/types тесты
+  - Проверено: 264 Python (aggregator+sdk+api) + 66 JS + mypy strict + tsc --noEmit — всё зелёное
 
 ### Что готово
 

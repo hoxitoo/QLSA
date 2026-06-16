@@ -129,10 +129,12 @@ Fiat-Shamir transcript: `c_tilde` → `merkle_root` → Tree0 → Tree1 → fing
 - `BatchResult` — wraps `Batch` + `proof`, `commitment`, `witness_bundle`, `witness_commitment`
 - `Batcher.try_batch(prove_witnesses=False)` — respects `min_batch_size`
 - `Batcher.force_batch(prove_witnesses=False)` — ignores `min_batch_size`
-- `prove_witnesses=True` generates VFRI7 + VFRI8 + VFRI9 cross-bound proofs for tx[0];
-  `BatchResult` carries `vfri{7,8,9}_{proof,commitment,hints}_{log10,log8}` fields and
-  `has_vfri7/has_vfri8/has_vfri9` properties; API and Python SDK expose
-  `has_vfri9` / `vfri9_commitment_log10` / `vfri9_commitment_log8` alongside the VFRI7/VFRI8 fields
+- `prove_witnesses=True` generates VFRI7 + VFRI8 + VFRI9 + VFRI10 cross-bound proofs for tx[0];
+  `BatchResult` carries `vfri{7,8,9,10}_{proof,commitment,hints}_{log10,log8}` fields and
+  `has_vfri7/has_vfri8/has_vfri9/has_vfri10` properties; API, Python SDK and JS SDK expose
+  `has_vfri10` / `vfri10_commitment_log10` / `vfri10_commitment_log8` alongside the VFRI7/8/9 fields.
+  VFRI10 witness proofs use `Batcher.VFRI10_NUM_FOLDS = 6` so each t=4 group `verify()` fits
+  the ~16.7M per-tx gas cap on `BatchRegistryV6`
 
 ### `aggregator/api.py`
 - `POST /transactions` — submit signed tx; response includes `tx_hash` (64-char hex) when accepted

@@ -260,6 +260,7 @@ class TestBatcher:
         assert result.has_vfri7 is False
         assert result.has_vfri8 is False
         assert result.has_vfri9 is False
+        assert result.has_vfri10 is False
         assert result.witness_commitment is None
         assert result.vfri7_commitment_log10 is None
         assert result.vfri7_commitment_log8 is None
@@ -267,6 +268,8 @@ class TestBatcher:
         assert result.vfri8_commitment_log8 is None
         assert result.vfri9_commitment_log10 is None
         assert result.vfri9_commitment_log8 is None
+        assert result.vfri10_commitment_log10 is None
+        assert result.vfri10_commitment_log8 is None
 
     def test_try_batch_prove_witnesses_true_accepted(self):
         """prove_witnesses=True runs without error; has_witness may be False without PyO3 ext."""
@@ -281,6 +284,7 @@ class TestBatcher:
         assert isinstance(result.has_vfri7, bool)
         assert isinstance(result.has_vfri8, bool)
         assert isinstance(result.has_vfri9, bool)
+        assert isinstance(result.has_vfri10, bool)
 
     def test_force_batch_prove_witnesses_true_accepted(self):
         mp = Mempool()
@@ -293,6 +297,7 @@ class TestBatcher:
         assert isinstance(result.has_vfri7, bool)
         assert isinstance(result.has_vfri8, bool)
         assert isinstance(result.has_vfri9, bool)
+        assert isinstance(result.has_vfri10, bool)
 
     def test_batch_result_vfri7_fields_accessible(self):
         """VFRI7 fields are present on BatchResult regardless of extension availability."""
@@ -320,6 +325,36 @@ class TestBatcher:
         assert hasattr(result, "vfri9_proof_log8")
         assert hasattr(result, "vfri9_commitment_log8")
         assert hasattr(result, "vfri9_hints_log8")
+        assert hasattr(result, "vfri10_proof_log10")
+        assert hasattr(result, "vfri10_commitment_log10")
+        assert hasattr(result, "vfri10_hints_log10")
+        assert hasattr(result, "vfri10_proof_log8")
+        assert hasattr(result, "vfri10_commitment_log8")
+        assert hasattr(result, "vfri10_hints_log8")
+
+    def test_vfri10_populated_and_version4_when_proving(self):
+        """When the PyO3 extension is present, prove_witnesses=True populates the
+        VFRI10 fields with consistent commitments and version-4 proof markers."""
+        mp = Mempool()
+        tx, priv = _make_signed_tx()
+        mp.add(tx)
+        wipe_key(priv)
+        result = Batcher(mp, min_batch_size=1).force_batch(prove_witnesses=True)
+        assert result is not None
+        if not result.has_vfri10:
+            pytest.skip("PyO3 extension (qlsa_stark_stwo) not available")
+        # Both groups present and self-consistent.
+        assert result.has_witness is True
+        for proof, commit, hints in (
+            (result.vfri10_proof_log10, result.vfri10_commitment_log10, result.vfri10_hints_log10),
+            (result.vfri10_proof_log8,  result.vfri10_commitment_log8,  result.vfri10_hints_log8),
+        ):
+            assert isinstance(proof, bytes) and len(proof) >= 40
+            assert isinstance(hints, bytes) and len(hints) > 0
+            assert isinstance(commit, str) and len(commit) == 32
+            bytes.fromhex(commit)  # valid hex
+            # VFRI10 proof version marker is 4 (little-endian u64 in proof[0:8]).
+            assert int.from_bytes(proof[0:8], "little") == 4
 
 
 # ──────────────────────────────────────────────────────────────────────────────

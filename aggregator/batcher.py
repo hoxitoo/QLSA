@@ -57,6 +57,17 @@ class BatchResult:
     vfri9_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
     vfri9_hints_log8:       bytes | None = field(default=None, repr=False)
 
+    # VFRI10 cross-bound ML-DSA V23 proofs for tx[0] (VFRI9 protocol on the
+    # Poseidon2 t=4 hash backend). Generated with num_folds=6 so each group's
+    # verify() fits within the ~16.7M per-tx gas cap on BatchRegistryV6.
+    # Populated when prove_witnesses=True and the PyO3 extension is available.
+    vfri10_proof_log10:      bytes | None = field(default=None, repr=False)
+    vfri10_commitment_log10: str | None = None  # 32-char hex (16-byte Blake2s binding)
+    vfri10_hints_log10:      bytes | None = field(default=None, repr=False)
+    vfri10_proof_log8:       bytes | None = field(default=None, repr=False)
+    vfri10_commitment_log8:  str | None = None  # 32-char hex (16-byte Blake2s binding)
+    vfri10_hints_log8:       bytes | None = field(default=None, repr=False)
+
     # Convenience properties for Solidity submission
     @property
     def merkle_root_onchain(self) -> bytes:
@@ -97,12 +108,17 @@ class BatchResult:
         return self.vfri9_proof_log10 is not None and self.vfri9_proof_log8 is not None
 
     @property
+    def has_vfri10(self) -> bool:
+        return self.vfri10_proof_log10 is not None and self.vfri10_proof_log8 is not None
+
+    @property
     def has_witness(self) -> bool:
         return (
             self.witness_bundle is not None
             or self.has_vfri7
             or self.has_vfri8
             or self.has_vfri9
+            or self.has_vfri10
         )
 
     @property
@@ -123,6 +139,11 @@ class Batcher:
     # After the budget is exhausted the batch is emitted unproven so that a
     # persistently broken prover cannot stall the pipeline forever.
     MAX_PROOF_RETRIES = 3
+
+    # Fold rounds for VFRI10 witness proofs.  BatchRegistryV6 verifies each V23
+    # trace group in its own tx; num_folds=6 keeps each Poseidon2 t=4 verify()
+    # within the ~16.7M per-tx gas cap (num_folds=3 overruns the LOG=10 group).
+    VFRI10_NUM_FOLDS = 6
 
     def __init__(
         self,
@@ -343,5 +364,34 @@ class Batcher:
                     logger.warning("ML-DSA signature invalid for VFRI9 proving: %s", exc)
                 except Exception as exc:
                     logger.error("Unexpected error during VFRI9 proving: %s", exc, exc_info=True)
+
+                try:
+                    from stark.prover import prove_mldsa_sig_vfri10_stark
+                    vr10 = prove_mldsa_sig_vfri10_stark(
+                        pk=tx0.public_key,
+                        msg=tx0.to_bytes(),
+                        sig=tx0.signature,
+                        batch_merkle_root=result.merkle_root_onchain,
+                        n_queries=self.n_fri_queries,
+                        # num_folds=6 keeps each t=4 group verify() within the
+                        # ~16.7M per-tx gas cap on BatchRegistryV6 (num_folds=3
+                        # overruns the LOG=10 group alone).
+                        num_folds_log10=self.VFRI10_NUM_FOLDS,
+                        num_folds_log8=self.VFRI10_NUM_FOLDS,
+                    )
+                    result.vfri10_proof_log10      = vr10.log10_proof
+                    result.vfri10_commitment_log10 = vr10.log10_commitment
+                    result.vfri10_hints_log10      = vr10.log10_query_hints
+                    result.vfri10_proof_log8       = vr10.log8_proof
+                    result.vfri10_commitment_log8  = vr10.log8_commitment
+                    result.vfri10_hints_log8       = vr10.log8_query_hints
+                    if result.witness_commitment is None:
+                        result.witness_commitment = vr10.log10_commitment
+                except (RuntimeError, ImportError) as exc:
+                    logger.warning("VFRI10 witness proof skipped: %s", exc)
+                except ValueError as exc:
+                    logger.warning("ML-DSA signature invalid for VFRI10 proving: %s", exc)
+                except Exception as exc:
+                    logger.error("Unexpected error during VFRI10 proving: %s", exc, exc_info=True)
 
         return result, prover_crashed
