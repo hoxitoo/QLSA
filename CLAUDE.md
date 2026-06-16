@@ -17,7 +17,7 @@ aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
 contracts/      Solidity: BatchRegistryV2/V3/V4/V5/V6, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9/VFRI10, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2MerkleVerifierT4.sol, Poseidon2Channel.sol, Poseidon2ChannelT4.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
-testnet/        e2e.py, deploy.sh, submit.py, monitor.py
+testnet/        e2e.py (--stack v6/v4), deploy.sh, deploy_v6.sh, submit.py (V4/V6 submitters), monitor.py
 tests/          Python test suite (pytest)
 benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_witnesses.py
 ```
@@ -590,6 +590,22 @@ Per-group (split) V23 registry — verifies each trace group in its OWN transact
 - Order-independent; a not-yet-finalized group may be overwritten by a later valid submission (no front-run griefing lock); pending state is `delete`d on finalize for a storage refund
 - `pendingGroups(merkleRoot) → (has10, has8, readyToFinalize)` view; `finalizedBatches`/`batchTimestamps`/`batchCommitmentsLog{10,8}`/`senderNonces`/`MAX_SENDERS=3000` identical to V5
 - 8 JS E2E tests (`BatchRegistryV6E2E.test.js`): happy path + per-group gas (≤16.7M each), order-independence, wrong-cross-root rejection, replay, nonce finalization, `NotReadyToFinalize`
+
+### `testnet/` — deployment & E2E tooling
+
+Two contract stacks, selected by the `--stack` flag / deploy script:
+- **MVP-6 (default): `QLSAVerifierVFRI10` + `BatchRegistryV6`** — Poseidon2 t=4, per-group split
+  - `contracts/scripts/deploy_v6.js` — deploys VFRI10 + BatchRegistryV6 (prints both addresses)
+  - `testnet/deploy_v6.sh [--network sepolia]` — builds STARK binary, deploys, writes `.env.deployed`
+  - `testnet.submit.OnchainSubmitterV6` — per-group split flow: `submit_group10()` then
+    `submit_group8_with_nonces()`; `finalize_batch(merkle_root, vfri10_result, senders, nonces)`
+    runs both txs (extracts each group's cross trace root from the OTHER proof's `[8:40]`),
+    `pending_groups()` / `wait_and_verify()` views
+  - `python -m testnet.e2e --stack v6 [--txs N] [--dry-run]` — uses `prove_mldsa_sig_vfri10_stark`
+    with `num_folds=6` (gas budget); submits via the two-tx split
+- **MVP-5: `QLSAVerifierVFRI7` + `BatchRegistryV4`** — single `submitBatch`
+  - `contracts/scripts/deploy.js`, `testnet/deploy.sh`, `OnchainSubmitterV4`, `--stack v4`
+- `testnet/monitor.py` — polls `BatchFinalized` (identical event signature for V4 and V6)
 
 ### `contracts/src/verifier/Poseidon2MerkleVerifierW.sol` (VFRI9)
 WIDE Poseidon2 Merkle verification — nodes carry BOTH sponge words (62-bit content).

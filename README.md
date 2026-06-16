@@ -91,6 +91,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **VFRI10 + t=4 hash backend** — `QLSAVerifierVFRI10` (VFRI9 protocol, t=4 Merkle + channel) + V23 cross-bound Rust/PyO3/Python pipeline + dual-group E2E via `BatchRegistryV5` | ✅ Done (2026-06-14) |
 | **Security + code audit** — off-chain replay guard (`ReplayedTxError`), submit error-text hardening, `/stats` overflow metric, release-build test-fixture gating, FRI `tree_depth` guard | ✅ Done (2026-06-14) |
 | **BatchRegistryV6** — per-group split: each V23 t=4 group `verify()` in its own tx (LOG=10 ~10.6M, LOG=8 ~7.9M gas, both ≤16.7M); finalizes the full batch across two txs with cross-proof binding preserved | ✅ Done (2026-06-14) |
+| **MVP-6 testnet tooling** — `deploy_v6.js`/`deploy_v6.sh` (VFRI10 + BatchRegistryV6), `OnchainSubmitterV6` per-group split flow, `e2e.py --stack v6` (`num_folds=6`); MVP-5 V4 path kept for regression | ✅ Done (2026-06-16) |
 
 ---
 
@@ -271,7 +272,7 @@ QLSA/
 ├── sdk/python/         # Python SDK: Wallet, LocalClient, HttpClient, WitnessStatus
 ├── sdk/js/             # TypeScript SDK: AggregatorClient
 ├── benchmarks/         # bench_core, bench_stark, bench_poly_circuits, bench_witnesses
-├── testnet/            # e2e.py, deploy.sh, submit.py, monitor.py (Sepolia)
+├── testnet/            # e2e.py (--stack v6/v4), deploy.sh, deploy_v6.sh, submit.py, monitor.py (Sepolia)
 ├── tests/              # ~350 Python tests (no PyO3) + ~552 with PyO3 ext (pytest)
 ├── context.md          # Technical decisions, architecture log, security risk table
 └── README.md

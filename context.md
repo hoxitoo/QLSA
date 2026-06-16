@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-14 — BatchRegistryV6 per-group split)
+## Статус (обновлено 2026-06-16 — testnet tooling для VFRI10 + BatchRegistryV6)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -75,6 +75,13 @@
   - Order-independent; не-финализированную группу можно перезаписать (нет front-run griefing lock); pending state `delete` на finalize (storage refund)
   - Полный V23 t=4 verify теперь deployable на 16.7M-cap сети через 2 транзакции
   - 8 JS E2E тестов (`BatchRegistryV6E2E.test.js`); 958 Hardhat (+8)
+
+- **Testnet tooling для MVP-6 (2026-06-16)**: деплой/E2E цепочка подключена к продакшн-стеку VFRI10 + BatchRegistryV6
+  - `contracts/scripts/deploy_v6.js` + `testnet/deploy_v6.sh` — деплой `QLSAVerifierVFRI10` + `BatchRegistryV6`, запись адресов в `.env.deployed`
+  - `testnet.submit.OnchainSubmitterV6` — per-group split поток: `submit_group10()` → `submit_group8_with_nonces()`; `finalize_batch(merkle_root, vfri10_result, senders, nonces)` гоняет обе tx (cross trace root каждой группы извлекается из `proof[8:40]` другой); ABI сверен byte-for-byte с артефактом контракта
+  - `python -m testnet.e2e --stack v6` (default) — `prove_mldsa_sig_vfri10_stark` с `num_folds=6` (gas budget); `--stack v4` сохраняет MVP-5 путь (VFRI7 + BatchRegistryV4) для регрессии
+  - `testnet/monitor.py` совместим с V4 и V6 (идентичная сигнатура `BatchFinalized`)
+  - Проверено: оба dry-run (`v6`/`v4`) генерируют реальные cross-bound proofs; `deploy_v6.js` деплоит оба контракта; ABI совпадает
 
 ### Что готово
 
@@ -201,7 +208,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 #### Деплой
 - Сеть: **Ethereum Sepolia** (2026-05-05)
 - Первый батч финализирован: 4 транзакции, 3234 байт proof, 9.16 секунды
-- `testnet/e2e.py` — end-to-end тест с реальными подписями
+- `testnet/e2e.py --stack v6` — end-to-end тест с реальными подписями (VFRI10 + BatchRegistryV6 по умолчанию; `--stack v4` для MVP-5)
+- Деплой продакшн-стека: `bash testnet/deploy_v6.sh` (VFRI10 + BatchRegistryV6); MVP-5: `bash testnet/deploy.sh`
 
 ---
 
