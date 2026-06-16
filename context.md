@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-16 — VFRI10 в агрегаторе + testnet tooling)
+## Статус (обновлено 2026-06-16 — Poseidon2 t=8 groundwork + VFRI10 в агрегаторе + testnet tooling)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -82,6 +82,14 @@
   - `python -m testnet.e2e --stack v6` (default) — `prove_mldsa_sig_vfri10_stark` с `num_folds=6` (gas budget); `--stack v4` сохраняет MVP-5 путь (VFRI7 + BatchRegistryV4) для регрессии
   - `testnet/monitor.py` совместим с V4 и V6 (идентичная сигнатура `BatchFinalized`)
   - Проверено: оба dry-run (`v6`/`v4`) генерируют реальные cross-bound proofs; `deploy_v6.js` деплоит оба контракта; ABI совпадает
+
+- **Poseidon2 t=8 — следующая ступень к 128-bit binding (2026-06-16)**: groundwork-перестановка, кросс-чек Rust↔Solidity bit-exact
+  - Уточнение диагноза: стену ~2^31 держит **ширина узла**, а не семейство хеша — VFRI10 (t=4) усекает Merkle-узлы до 2 слов M31 (62 бита → 2^31). Дешёвый рычаг к 128 битам — **широкий Poseidon2**, а не RPO256 (x^5 forward S-box остаётся дешёвым на EVM, без инверсного S-box)
+  - `stark_stwo/src/poseidon2_t8.rs` + `contracts/src/verifier/Poseidon2M31T8.sol`: t=8, R_F=8, R_P=14, α=5, блочная внешняя матрица `[[2·M4,M4],[M4,2·M4]]`, внутренняя J+diag(1..8), RC[0..78] из SHA-256("QLSA-Poseidon2-t8"‖i)
+  - `compress` несёт **4-словные (124-бит) узлы → коллизия ~2^62** (vs 2^31 у VFRI10); rate-4 capacity-4 sponge, odd-flag в capacity cell s[7]
+  - Reference vectors заморожены и сверены: 11 JS (`Poseidon2M31T8.test.js`) + 12 Rust тестов; matrices invertible, fast-path == naive, полная диффузия
+  - **Лестница:** t=2/t=4 (2^31) → **t=8 (2^62)** → t=16 (8-словные узлы, ~2^124 ≈ 128-bit, = нативный Poseidon2-16 в Stwo). Следующее: MerkleVerifierW8 + Channel8 + верификатор VFRI11, затем t=16
+  - Release build чистый (warning-free)
 
 - **VFRI10 в пайплайне агрегатора (2026-06-16)**: продакшн-нода теперь генерирует VFRI10 witness-proofs (раньше только VFRI7/8/9)
   - `aggregator/batcher.py`: `BatchResult` несёт поля `vfri10_{proof,commitment,hints}_{log10,log8}`, свойство `has_vfri10`, добавлено в `has_witness`; генерация через `prove_mldsa_sig_vfri10_stark` с `Batcher.VFRI10_NUM_FOLDS = 6` (gas budget BatchRegistryV6)
