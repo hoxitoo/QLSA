@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-16 — Poseidon2 t=8 hash backend + перестановка + VFRI10 в агрегаторе + testnet tooling)
+## Статус (обновлено 2026-06-16 — VFRI11 верификатор + Poseidon2 t=8 backend/перестановка + VFRI10 в агрегаторе)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -96,7 +96,14 @@
   - `contracts/src/verifier/Poseidon2ChannelT8.sol` — состояние (s0..s7, nDraws), rate-1 absorb в cell 0 (cells 1–7 = 217-бит capacity); mixRoot/mixRootW(4 слова)/mixRootFull/mixU32s/drawSecureFelt/drawQueries
   - Rust references в `vfri2_bridge.rs` (#[allow(dead_code)] до VFRI11): `hash_leaf_cols_p2t8`/`hash_pair_p2t8`/`hash_leaf_qm31_p2t8`/`build_tree_p2t8`/`P2T8Channel`
   - Reference vectors заморожены и сверены: **13 JS** (`Poseidon2T8Backend.test.js`) + **6 Rust** (`p2t8`); Merkle inclusion E2E, full-root binding
-  - Следующее: верификатор VFRI11 (клон VFRI10 с T8-бекендом + 4-словное кодирование узла), затем t=16
+
+- **VFRI11 верификатор (2026-06-16)**: протокол VFRI10 на t=8 хеш-бекенде — on-chain `verify()==true`
+  - `contracts/src/QLSAVerifierVFRI11.sol` — клон VFRI10 с заменой `Poseidon2MerkleVerifierT4`→`T8`, `Poseidon2ChannelT4`→`T8`; ABI идентичен VFRI9/10 (6 head slots); marker proof[0:8]=5
+  - Узлы 2 слова (62-бит) → **4 слова (124-бит)** → коллизия узла/транскрипта 2^31 → ~2^62; last-layer FRI check + full-root FS сохранены
+  - `Poseidon2M31T8._matI` оптимизирован на 1 `mulmod`/ячейку (== Rust repeated-add reference) → generic `verify()` **~13.1M gas** (depth=4, 2 queries, 2 folds), влезает в 16.7M cap
+  - Rust bridge `gen_vfri11_hints_from_cols_nfolds` (клон VFRI10 + 5 t8-замен); 3 Rust smoke + **11 JS E2E** (`QLSAVerifierVFRI11E2E.test.js`); фикстура `vfri11_e2e.json`
+  - Backend-mismatch: VFRI11 хинты НЕ принимаются VFRI10 (разная перестановка → разный trace root)
+  - Следующее: V23 cross-bound обёртки + PyO3 + Python (`prove_mldsa_sig_vfri11_stark`) + реестр, зеркаля VFRI10 production pipeline; затем t=16 для полных 128 бит
 
 - **VFRI10 в пайплайне агрегатора (2026-06-16)**: продакшн-нода теперь генерирует VFRI10 witness-proofs (раньше только VFRI7/8/9)
   - `aggregator/batcher.py`: `BatchResult` несёт поля `vfri10_{proof,commitment,hints}_{log10,log8}`, свойство `has_vfri10`, добавлено в `has_witness`; генерация через `prove_mldsa_sig_vfri10_stark` с `Batcher.VFRI10_NUM_FOLDS = 6` (gas budget BatchRegistryV6)

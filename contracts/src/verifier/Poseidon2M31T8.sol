@@ -89,18 +89,15 @@ library Poseidon2M31T8 {
     }
 
     /// @dev Internal linear layer: out_i = (Σ_j s_j) + μ_i·s_i with μ = (1,…,8).
+    ///      μ_i·s_i computed as a single mulmod (== (i+1) repeated adds in the
+    ///      Rust reference, identical result mod P).
     function _matI(uint256[8] memory s) private pure {
         uint256 sum = 0;
         for (uint256 i = 0; i < 8; i++) {
             sum = _add(sum, s[i]);
         }
         for (uint256 i = 0; i < 8; i++) {
-            uint256 si = s[i];
-            uint256 acc = sum;
-            for (uint256 k = 0; k <= i; k++) {
-                acc = _add(acc, si);
-            }
-            s[i] = acc;
+            s[i] = _add(sum, mulmod(i + 1, s[i], P));
         }
     }
 

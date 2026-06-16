@@ -702,7 +702,25 @@ node/transcript collision wall ~2^31 (t=4) → **~2^62** (4-word nodes / 217-bit
   `mixRootW(node[1..4]).drawQueries(10,4) → [301,134,1008,447]`
   `mixU32s([1,2,3]).drawSecureFelt() → 133164500022319262877528816935901679472`
 - 13 JS tests (`Poseidon2T8Backend.test.js`) + 6 Rust tests (`vfri2_bridge.rs`, `p2t8`)
-- Next: a VFRI11 verifier wiring this backend (VFRI10 clone with the T8 backend + 4-word node encoding).
+
+### `contracts/src/QLSAVerifierVFRI11.sol`
+VFRI11 — the VFRI10 proof protocol on the Poseidon2 **t=8** hash backend.
+- Implements `IQLSAVerifierV4` (same 4-param `verify` signature)
+- `queryHints` ABI encoding: **byte-for-byte identical to VFRI9/VFRI10** (6 head slots)
+- Only the hash backend changes vs VFRI10:
+  `Poseidon2MerkleVerifierT4 → Poseidon2MerkleVerifierT8`, `Poseidon2ChannelT4 → Poseidon2ChannelT8`
+- Keeps VFRI9/VFRI10's last-layer FRI bounded-degree check + full-root Fiat-Shamir; node encoding
+  widens from 2 words (62-bit) to **4 words (124-bit)** → node/transcript collision ~2^31 → ~2^62
+- Proof version marker: `proof[0:8] = 5` (little-endian; VFRI10 uses 4)
+- VFRI11 hints are NOT accepted by VFRI10 (different permutation → different trace root + query indices)
+- `Poseidon2M31T8._matI` uses one `mulmod` per cell (== the Rust repeated-add reference) — keeps the
+  generic VFRI11 `verify()` at ~13.1M gas (depth=4, 2 queries, 2 folds), within the 16.7M per-tx cap
+- Rust bridge: `gen_vfri11_hints_from_cols_nfolds` (VFRI10 clone with the 5 t8 backend substitutions)
+- Tests: 3 Rust smoke (`test_vfri11_smoke_small` / `differs_from_vfri10` / `deterministic`) + 11 JS
+  E2E (`QLSAVerifierVFRI11E2E.test.js`); fixture `vfri11_e2e.json` (regenerate via
+  `cargo test write_vfri11_e2e_fixture -- --ignored`)
+- Next: V23 cross-bound wrappers + PyO3 + Python (`prove_mldsa_sig_vfri11_stark`) + a BatchRegistry
+  deployment, mirroring the VFRI10 production pipeline; then t=16 for full 128-bit.
 
 ### `contracts/src/verifier/Poseidon2MerkleVerifierT4.sol` (VFRI10 hash backend)
 Poseidon2 t=4 wide Merkle verification — the t=4 successor to `Poseidon2MerkleVerifierW`.
