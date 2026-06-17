@@ -22,6 +22,8 @@ pub mod poseidon2;
 pub mod poseidon2_air;
 pub mod poseidon2_merkle_air;
 pub mod poseidon2_t4;
+pub mod poseidon2_t8;
+pub mod recursive;
 pub mod trace;
 pub mod vfri2_bridge;
 
@@ -6764,6 +6766,89 @@ fn gen_mldsa_v23_vfri10_cross_bound_hints_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
+/// gen_mldsa_v23_vfri11_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
+///   -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// VFRI11 = VFRI10 protocol on the Poseidon2 t=8 hash backend (4-word/124-bit
+/// wide Merkle nodes + 217-bit-capacity channel). LOG=10 group (1298 cols).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_vfri11_hints_py(
+    z:                 Vec<Vec<i64>>,
+    c:                 Vec<i64>,
+    t1:                Vec<Vec<i64>>,
+    a_hat:             Vec<Vec<i64>>,
+    batch_merkle_root: Vec<u8>,
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    let z_arr = _conv_z(z)?;
+    let c_arr = _conv_c(c)?;
+    let t1_arr = _conv_t1(t1)?;
+    let a_hat_arr = _conv_a_hat(a_hat)?;
+    vfri2_bridge::gen_mldsa_v23_vfri11_hints(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
+        &batch_merkle_root, n_queries, num_folds,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// gen_mldsa_v23_vfri11_hints_log8_py(z, c, t1, a_hat, hints, batch_merkle_root, n_queries, num_folds)
+///   -> (proof: bytes, commitment: str, query_hints: bytes)
+///
+/// VFRI11 hint generator for V23's LOG=8 component group (2206 columns).
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, hints, batch_merkle_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_vfri11_hints_log8_py(
+    z:                 Vec<Vec<i64>>,
+    c:                 Vec<i64>,
+    t1:                Vec<Vec<i64>>,
+    a_hat:             Vec<Vec<i64>>,
+    hints:             Vec<Vec<bool>>,
+    batch_merkle_root: Vec<u8>,
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
+    let z_arr = _conv_z(z)?;
+    let c_arr = _conv_c(c)?;
+    let t1_arr = _conv_t1(t1)?;
+    let a_hat_arr = _conv_a_hat(a_hat)?;
+    let hints_arr = _conv_hints(hints)?;
+    vfri2_bridge::gen_mldsa_v23_vfri11_hints_log8(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
+        &batch_merkle_root, n_queries, num_folds,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
+/// gen_mldsa_v23_vfri11_cross_bound_hints_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
+///   -> (proof10, commit10, hints10, proof8, commit8, hints8)
+///
+/// Two-pass cross-proof binding using VFRI11 (t=8 Poseidon2) backends.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, hints, batch_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
+    z:          Vec<Vec<i64>>,
+    c:          Vec<i64>,
+    t1:         Vec<Vec<i64>>,
+    a_hat:      Vec<Vec<i64>>,
+    hints:      Vec<Vec<bool>>,
+    batch_root: Vec<u8>,
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+) -> PyResult<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>)> {
+    let z_arr = _conv_z(z)?;
+    let c_arr = _conv_c(c)?;
+    let t1_arr = _conv_t1(t1)?;
+    let a_hat_arr = _conv_a_hat(a_hat)?;
+    let hints_arr = _conv_hints(hints)?;
+    vfri2_bridge::gen_mldsa_v23_vfri11_cross_bound_hints(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
+        &batch_root, n_queries, num_folds,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -6870,6 +6955,9 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri10_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri10_hints_log8_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri10_cross_bound_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_log8_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_cross_bound_hints_py, m)?)?;
     Ok(())
 }
 

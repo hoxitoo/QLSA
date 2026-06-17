@@ -3036,3 +3036,199 @@ def prove_mldsa_sig_vfri10_stark(
         num_folds_log10=num_folds_log10,
         num_folds_log8=num_folds_log8,
     )
+
+
+# ── VFRI11 (VFRI10 protocol on the Poseidon2 t=8 hash backend) ────────────────
+
+
+@dataclass
+class MldsaV23VFRI11HintResult:
+    proof:       bytes
+    commitment:  str
+    query_hints: bytes
+    n_cols:      int    # 1298
+    n_queries:   int
+
+
+def gen_mldsa_v23_vfri11_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI11HintResult:
+    """Generate VFRI11 hints for V23's LOG=10 group (1298 cols).
+
+    VFRI11 is the VFRI10 proof protocol on the Poseidon2 t=8 hash backend
+    (4-word/124-bit wide Merkle nodes + 217-bit-capacity Fiat-Shamir channel).
+    Same queryHints ABI and last-layer FRI check as VFRI9/VFRI10; only the
+    permutation widens (t=4 → t=8), lifting node/transcript collision ~2^31 → ~2^62.
+    """
+    _require_ext("gen_mldsa_v23_vfri11_hints_py")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri11_hints_py(
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri11_hints failed: {exc}") from exc
+    return MldsaV23VFRI11HintResult(
+        proof=bytes(proof),
+        commitment=commitment,
+        query_hints=bytes(query_hints),
+        n_cols=1298,
+        n_queries=n_queries,
+    )
+
+
+@dataclass
+class MldsaV23VFRI11Log8HintResult:
+    proof:       bytes
+    commitment:  str
+    query_hints: bytes
+    n_cols:      int    # 2206
+    n_queries:   int
+
+
+def gen_mldsa_v23_vfri11_hints_log8(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> MldsaV23VFRI11Log8HintResult:
+    """Generate VFRI11 hints for V23's LOG=8 group (2206 cols)."""
+    _require_ext("gen_mldsa_v23_vfri11_hints_log8_py")
+    try:
+        proof, commitment, query_hints = _ext.gen_mldsa_v23_vfri11_hints_log8_py(
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri11_hints_log8 failed: {exc}") from exc
+    return MldsaV23VFRI11Log8HintResult(
+        proof=bytes(proof),
+        commitment=commitment,
+        query_hints=bytes(query_hints),
+        n_cols=2206,
+        n_queries=n_queries,
+    )
+
+
+@dataclass
+class FullV23VFRI11CrossBoundHintResult:
+    """Cross-bound VFRI11 hints for the full V23 trace (Poseidon2 t=8 backend)."""
+
+    log10_proof: bytes
+    log10_commitment: str
+    log10_query_hints: bytes
+
+    log8_proof: bytes
+    log8_commitment: str
+    log8_query_hints: bytes
+
+    batch_merkle_root: bytes
+    n_queries: int
+
+
+def gen_mldsa_v23_vfri11_cross_bound_hints(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds_log10: int | None = None,
+    num_folds_log8: int | None = None,
+) -> FullV23VFRI11CrossBoundHintResult:
+    """Generate cross-bound VFRI11 hints for both LOG groups (t=8 backend).
+
+    Two-pass cross-proof binding (same as VFRI10):
+      bound_root_10 = keccak256(batch_merkle_root ‖ proof8[8:40])
+      bound_root_8  = keccak256(batch_merkle_root ‖ proof10[8:40])
+    """
+    _require_ext("gen_mldsa_v23_vfri11_cross_bound_hints_py")
+    if num_folds_log10 is not None and num_folds_log8 is not None and num_folds_log10 != num_folds_log8:
+        raise ValueError(
+            f"num_folds_log10={num_folds_log10} and num_folds_log8={num_folds_log8} differ; "
+            "the Rust bridge uses the same fold count for both groups."
+        )
+    num_folds = num_folds_log10 if num_folds_log10 is not None else num_folds_log8
+    try:
+        (proof10, commit10, hints10,
+         proof8, commit8, hints8) = _ext.gen_mldsa_v23_vfri11_cross_bound_hints_py(
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_vfri11_cross_bound_hints failed: {exc}") from exc
+    return FullV23VFRI11CrossBoundHintResult(
+        log10_proof=bytes(proof10),
+        log10_commitment=commit10,
+        log10_query_hints=bytes(hints10),
+        log8_proof=bytes(proof8),
+        log8_commitment=commit8,
+        log8_query_hints=bytes(hints8),
+        batch_merkle_root=batch_merkle_root,
+        n_queries=n_queries,
+    )
+
+
+def prove_mldsa_sig_vfri11_stark(
+    pk: bytes,
+    msg: bytes,
+    sig: bytes,
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds_log10: int | None = None,
+    num_folds_log8: int | None = None,
+) -> FullV23VFRI11CrossBoundHintResult:
+    """Generate cross-bound VFRI11 hints from a real ML-DSA-65 signature (t=8 backend).
+
+    Decodes the signature to extract the arithmetic witness, then runs
+    gen_mldsa_v23_vfri11_cross_bound_hints for both LOG=10 and LOG=8 groups.
+    """
+    _require_ext("extract_mldsa_witness_py")
+    try:
+        z_raw, c_raw, t1_raw, a_hat_raw, hints_raw = _ext.extract_mldsa_witness_py(
+            bytes(pk), bytes(msg), bytes(sig),
+        )
+    except Exception as exc:
+        raise ValueError(f"extract_mldsa_witness_py failed: {exc}") from exc
+
+    z     = [list(p) for p in z_raw]
+    c     = list(c_raw)
+    t1    = [list(p) for p in t1_raw]
+    a_hat = [list(p) for p in a_hat_raw]
+    hints = [list(h) for h in hints_raw]
+
+    return gen_mldsa_v23_vfri11_cross_bound_hints(
+        z, c, t1, a_hat, hints,
+        batch_merkle_root,
+        n_queries=n_queries,
+        num_folds_log10=num_folds_log10,
+        num_folds_log8=num_folds_log8,
+    )

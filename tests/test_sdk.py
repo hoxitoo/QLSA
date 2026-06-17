@@ -456,6 +456,9 @@ def test_batch_status_has_witness_false_by_default():
     assert status.has_vfri9 is False
     assert status.vfri9_commitment_log10 is None
     assert status.vfri9_commitment_log8 is None
+    assert status.has_vfri10 is False
+    assert status.vfri10_commitment_log10 is None
+    assert status.vfri10_commitment_log8 is None
 
 
 def test_batch_status_prove_witnesses_param_accepted():
@@ -470,6 +473,7 @@ def test_batch_status_prove_witnesses_param_accepted():
     assert isinstance(status.has_vfri7, bool)
     assert isinstance(status.has_vfri8, bool)
     assert isinstance(status.has_vfri9, bool)
+    assert isinstance(status.has_vfri10, bool)
 
 
 def test_run_cycle_prove_witnesses_param_accepted():

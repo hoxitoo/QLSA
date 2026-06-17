@@ -1,6 +1,30 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-14 — security + code audit)
+## Статус (обновлено 2026-06-17 — решение по пути: standalone t=16 пропущен, старт рекурсии)
+
+- **Решение по пути (2026-06-17)**: standalone **t=16-верификатор (VFRI12) ПРОПУЩЕН** — вместо него идём сразу к **рекурсии доказательств**.
+  - Обоснование: отдельный on-chain t=16-верификатор имеет ту же газовую стену, что t=8, но ~×4 хуже (~400M+ газа на полный V23) — доказал бы корректность только на depth-4 toy-масштабе, никогда не задеплоил бы production V23.
+  - t=16 (~2^124 ≈ 128-бит, = нативный Poseidon2-16 в Stwo) — целевой уровень коллизии узла, но его ценность **внутри inner hash AIR рекурсивного доказательства**, где on-chain газ константен независимо от ширины перестановки.
+  - Рекурсия даёт ОБА результата за один шаг: 128-бит soundness И production-feasible константный газ (~5M).
+  - Лестница t=2/t=4/t=8 остаётся в репо как кросс-проверенный soundness-сертификат; t=16 переезжает внутрь рекурсии.
+  - Полный план: `docs/roadmap/recursion.md`. Код: `stark_stwo/src/recursive/`.
+
+- **Рекурсия R0.1 (2026-06-17)**: первый foundational gadget — `stark_stwo/src/recursive/qm31_mul_air.rs`
+  - QM31 batch-multiply AIR: доказывает `z = x·y` в QM31 = CM31[u]/(u²−R), R = 2+i; 12 cols (x:4,y:4,z:4), 4 ограничения степени 2, без preproc
+  - Несущий примитив рекурсивного верификатора (circleFold/lineFold/OODS сводятся к QM31-арифметике)
+  - Полный Stwo prove/verify roundtrip + кросс-чек против u128-референса (`u²=R`, `1·y=y`); 6 Rust тестов
+
+- **Аудит безопасности + code review (2026-06-17)**: 2 эксперта (crypto/blockchain + Rust/системы) по диффу VFRI11/t=8/рекурсия против main. **Нет Critical/High/Medium.** QM31-формула рекурсивного gadget проверена вручную — корректна, soundness-пробела нет (4 ограничения точно фиксируют каждый limb z). Исправлено/упрочнено:
+  - **deploy_v6.sh (HIGH, fixed)**: флаг `--network` молча игнорировался (`NETWORK="${1:-sepolia}"` ставил `NETWORK="--network"`) → риск деплоя в неверную сеть. Добавлен полноценный парсинг `--network[=]val` + `-h`
+  - **deploy_v6.sh (LOW, fixed)**: `.env.deployed` создаётся `umask 077` (0600) — гигиена перед append в `.env` (хранит `DEPLOYER_PRIVATE_KEY`)
+  - **e2e.py (MED, fixed)**: `--n-queries`/`--txs` теперь валидируются `>= 1` (раньше `0`/негатив давали бессмысленный security_bits и UB на стороне прувера)
+  - **submit.py (MED, fixed)**: web3 `HTTPProvider(..., request_kwargs={"timeout":30})` на всех 3 провайдерах — зависший RPC больше не блокирует поток дольше `confirm_timeout_s`
+  - **Poseidon2M31T8.sol (LOW, fixed)**: `sponge` редуцирует входные слова `% P` — точное соответствие Rust `sponge_t8` даже для non-canonical слов ≥ P (defense-in-depth; в VFRI-пайплайне входы всегда — QM31-лимбы < P). Замороженные cross-check векторы не сдвинулись (24 T8-теста зелёные)
+  - **qm31_mul_air.rs (LOW, fixed)**: задокументирована предусловие каноничности limbs (< M31_P) + `debug_assert` в `build_trace`; комментарий о границе входов в `m31_mul`
+  - **Задокументировано как non-exploitable / accepted**: версия-маркер `proof[0:8]=5` не проверяется on-chain (уже связан через commitment Blake2s(proof[:32]‖root); идентично задеплоенному VFRI10); estimateGas-preflight в submit отсутствует намеренно (избегает падения на большом calldata); broad-except в PyO3-обёртках консистентен с VFRI10; OnchainSubmitterV6 не concurrency-safe (single-threaded e2e)
+  - **Verified-OK**: VFRI11 — точный backend-swap VFRI10 (Fiat-Shamir порядок, M31-редукция в `_absorb`, Merkle node encoding, cross-bound binding BatchRegistryV6, replay/nonce/griefing); poseidon2_t8 матрицы/RC/S-box bit-exact; PyO3-граница panic-safe; release build warning-free
+
+## Статус (2026-06-16 — VFRI11 V23 pipeline + верификатор + Poseidon2 t=8 backend)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -68,6 +92,57 @@
   - **Verified-OK**: Bearer-token constant-time, Merkle `hmac.compare_digest`, mempool locking, нет unsafe deserialization/SSRF/ReDoS; VFRI10 ≡ VFRI9 кроме backend+marker; t=4 Poseidon2 математика (M4 fast-path) верна; PyO3 boundary не паникует на malformed input
   - **Documented research-defaults (unchanged)**: M1 XFF-spoofing зависит от proxy-конфига; M2 `/batch/*` открыт без `QLSA_API_TOKEN` (warning при старте); L1 ML-DSA key copies в CPython не зануляются
 - **Тесты после аудита (2026-06-14)**: 354 non-PyO3 Python (+4 replay-тесты), mypy clean, Rust release warning-free
+- **BatchRegistryV6 — per-group split (2026-06-14)**: закрывает gas-wall dual-verify для t=4 backend
+  - `submitGroup10` / `submitGroup8` — по одному `verify()` на транзакцию (LOG=10 ~10.6M gas, LOG=8 ~7.9M gas, оба ≤16.7M); auto-finalize когда обе группы present И cross-consistent
+  - `submitGroup8WithNonces` — завершающий вызов с per-sender nonce enforcement (требует group10 present & consistent, иначе `NotReadyToFinalize`)
+  - Cross-proof binding сохранён lazy: verify против `keccak256(merkleRoot ‖ crossTraceRoot)` на submit; на finalize проверка `crossRoot8For10 == traceRoot8` и `crossRoot10For8 == traceRoot10` (каждый proof привязан к реальному trace root другого) — та же soundness, что у атомарного V5, но через 2 tx
+  - Order-independent; не-финализированную группу можно перезаписать (нет front-run griefing lock); pending state `delete` на finalize (storage refund)
+  - Полный V23 t=4 verify теперь deployable на 16.7M-cap сети через 2 транзакции
+  - 8 JS E2E тестов (`BatchRegistryV6E2E.test.js`); 958 Hardhat (+8)
+
+- **Testnet tooling для MVP-6 (2026-06-16)**: деплой/E2E цепочка подключена к продакшн-стеку VFRI10 + BatchRegistryV6
+  - `contracts/scripts/deploy_v6.js` + `testnet/deploy_v6.sh` — деплой `QLSAVerifierVFRI10` + `BatchRegistryV6`, запись адресов в `.env.deployed`
+  - `testnet.submit.OnchainSubmitterV6` — per-group split поток: `submit_group10()` → `submit_group8_with_nonces()`; `finalize_batch(merkle_root, vfri10_result, senders, nonces)` гоняет обе tx (cross trace root каждой группы извлекается из `proof[8:40]` другой); ABI сверен byte-for-byte с артефактом контракта
+  - `python -m testnet.e2e --stack v6` (default) — `prove_mldsa_sig_vfri10_stark` с `num_folds=6` (gas budget); `--stack v4` сохраняет MVP-5 путь (VFRI7 + BatchRegistryV4) для регрессии
+  - `testnet/monitor.py` совместим с V4 и V6 (идентичная сигнатура `BatchFinalized`)
+  - Проверено: оба dry-run (`v6`/`v4`) генерируют реальные cross-bound proofs; `deploy_v6.js` деплоит оба контракта; ABI совпадает
+
+- **Poseidon2 t=8 — следующая ступень к 128-bit binding (2026-06-16)**: groundwork-перестановка, кросс-чек Rust↔Solidity bit-exact
+  - Уточнение диагноза: стену ~2^31 держит **ширина узла**, а не семейство хеша — VFRI10 (t=4) усекает Merkle-узлы до 2 слов M31 (62 бита → 2^31). Дешёвый рычаг к 128 битам — **широкий Poseidon2**, а не RPO256 (x^5 forward S-box остаётся дешёвым на EVM, без инверсного S-box)
+  - `stark_stwo/src/poseidon2_t8.rs` + `contracts/src/verifier/Poseidon2M31T8.sol`: t=8, R_F=8, R_P=14, α=5, блочная внешняя матрица `[[2·M4,M4],[M4,2·M4]]`, внутренняя J+diag(1..8), RC[0..78] из SHA-256("QLSA-Poseidon2-t8"‖i)
+  - `compress` несёт **4-словные (124-бит) узлы → коллизия ~2^62** (vs 2^31 у VFRI10); rate-4 capacity-4 sponge, odd-flag в capacity cell s[7]
+  - Reference vectors заморожены и сверены: 11 JS (`Poseidon2M31T8.test.js`) + 12 Rust тестов; matrices invertible, fast-path == naive, полная диффузия
+  - **Лестница:** t=2/t=4 (2^31) → **t=8 (2^62)** → t=16 (8-словные узлы, ~2^124 ≈ 128-bit, = нативный Poseidon2-16 в Stwo)
+  - Release build чистый (warning-free)
+
+- **t=8 hash backend (2026-06-16)**: Merkle-верификатор + Fiat-Shamir канал на t=8 перестановке, кросс-чек bit-exact
+  - `contracts/src/verifier/Poseidon2MerkleVerifierT8.sol` — **4-словные (124-бит) узлы** `(w0<<96)|(w1<<64)|(w2<<32)|w3` (bytes[16..32]); `hashLeaf` = rate-4 cap-4 sponge, `hashPair` = 8→4 compress; коллизия узла 2^31 (T4) → **2^62**
+  - `contracts/src/verifier/Poseidon2ChannelT8.sol` — состояние (s0..s7, nDraws), rate-1 absorb в cell 0 (cells 1–7 = 217-бит capacity); mixRoot/mixRootW(4 слова)/mixRootFull/mixU32s/drawSecureFelt/drawQueries
+  - Rust references в `vfri2_bridge.rs` (#[allow(dead_code)] до VFRI11): `hash_leaf_cols_p2t8`/`hash_pair_p2t8`/`hash_leaf_qm31_p2t8`/`build_tree_p2t8`/`P2T8Channel`
+  - Reference vectors заморожены и сверены: **13 JS** (`Poseidon2T8Backend.test.js`) + **6 Rust** (`p2t8`); Merkle inclusion E2E, full-root binding
+
+- **VFRI11 верификатор (2026-06-16)**: протокол VFRI10 на t=8 хеш-бекенде — on-chain `verify()==true`
+  - `contracts/src/QLSAVerifierVFRI11.sol` — клон VFRI10 с заменой `Poseidon2MerkleVerifierT4`→`T8`, `Poseidon2ChannelT4`→`T8`; ABI идентичен VFRI9/10 (6 head slots); marker proof[0:8]=5
+  - Узлы 2 слова (62-бит) → **4 слова (124-бит)** → коллизия узла/транскрипта 2^31 → ~2^62; last-layer FRI check + full-root FS сохранены
+  - `Poseidon2M31T8._matI` оптимизирован на 1 `mulmod`/ячейку (== Rust repeated-add reference) → generic `verify()` **~13.1M gas** (depth=4, 2 queries, 2 folds), влезает в 16.7M cap
+  - Rust bridge `gen_vfri11_hints_from_cols_nfolds` (клон VFRI10 + 5 t8-замен); 3 Rust smoke + **11 JS E2E** (`QLSAVerifierVFRI11E2E.test.js`); фикстура `vfri11_e2e.json`
+  - Backend-mismatch: VFRI11 хинты НЕ принимаются VFRI10 (разная перестановка → разный trace root)
+
+- **VFRI11 V23 production pipeline (2026-06-16)**: cross-bound обёртки + PyO3 + Python + structural E2E
+  - Rust: `gen_mldsa_v23_vfri11_hints[_log8]`, `gen_mldsa_v23_vfri11_cross_bound_hints` (клоны VFRI10-обёрток, вызывают `gen_vfri11_hints_from_cols_nfolds`)
+  - PyO3: `gen_mldsa_v23_vfri11_hints_py` / `_log8_py` / `_cross_bound_hints_py` (wheel пересобран и установлен)
+  - Python (`stark/prover.py`): `gen_mldsa_v23_vfri11_hints[_log8]`, `gen_mldsa_v23_vfri11_cross_bound_hints`, `prove_mldsa_sig_vfri11_stark` + dataclasses `MldsaV23VFRI11HintResult`/`...Log8...`/`FullV23VFRI11CrossBoundHintResult`
+  - **7 Python тестов** (markers==5) + **8 JS structural E2E** (`QLSAVerifierVFRI11CrossBoundE2E.test.js`, `BatchRegistryV5` подключён к VFRI11); фикстура `full_v23_vfri11_cross_bound_e2e.json` (seed=16600, num_folds=6) via `gen_full_v23_vfri11_fixture.py`
+  - **Gas finding**: on-chain `verify()` полной V23 t=8 группы **превышает 100M газа** на depth-10 (estimateGas упирается в 100M block limit) — t=8 перестановка ~3–4× t=4, плюс depth-10 Merkle paths + 6 fold rounds. Корректность t=8 on-chain доказана на малом масштабе (generic depth-4, ~13.1M, `verify()==true`). Production полной V23 t=8 требует рекурсии (константный газ); широкая перестановка повышает стойкость, но не газовый бюджет
+  - Следующее: t=16 (8-словные узлы → полные 128 бит) для лестницы soundness; рекурсия для production-газа
+
+- **VFRI10 в пайплайне агрегатора (2026-06-16)**: продакшн-нода теперь генерирует VFRI10 witness-proofs (раньше только VFRI7/8/9)
+  - `aggregator/batcher.py`: `BatchResult` несёт поля `vfri10_{proof,commitment,hints}_{log10,log8}`, свойство `has_vfri10`, добавлено в `has_witness`; генерация через `prove_mldsa_sig_vfri10_stark` с `Batcher.VFRI10_NUM_FOLDS = 6` (gas budget BatchRegistryV6)
+  - `aggregator/api.py`: все 6 witness-эндпоинтов отдают `has_vfri10` / `vfri10_commitment_log{10,8}`
+  - Python SDK (`models.py` `WitnessStatus`/`BatchStatus`, `client.py` Local+HTTP): поля VFRI10 проброшены; `_prove_witness_local` гоняет VFRI10
+  - JS SDK (`types.ts`, `client.ts`): `hasVfri10` / `vfri10CommitmentLog{10,8}` в `BatchStatus`/`WitnessStatus` + snake_case маппинг
+  - Тесты: интеграционный `test_vfri10_populated_and_version4_when_proving` (проверяет marker==4, реальный прувер), расширены aggregator/sdk Python + JS client/types тесты
+  - Проверено: 264 Python (aggregator+sdk+api) + 66 JS + mypy strict + tsc --noEmit — всё зелёное
 
 ### Что готово
 
@@ -188,13 +263,14 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 - Rust: **323 тестов** (cargo test, non-ignored) + **90 ignored** (slow STARK integration tests incl. V23)
 - Python (stark_stwo): **210 тестов** (+8 VFRI10 V23)
 - TypeScript SDK: **~71 тестов** (jest)
-- Solidity/Hardhat: **950 тестов** (+10 QLSAVerifierVFRI10CrossBoundE2E.test.js)
+- Solidity/Hardhat: **958 тестов** (+8 BatchRegistryV6E2E.test.js)
 - mypy --strict: `core/ aggregator/` (exclude `aggregator/api`) — чистые
 
 #### Деплой
 - Сеть: **Ethereum Sepolia** (2026-05-05)
 - Первый батч финализирован: 4 транзакции, 3234 байт proof, 9.16 секунды
-- `testnet/e2e.py` — end-to-end тест с реальными подписями
+- `testnet/e2e.py --stack v6` — end-to-end тест с реальными подписями (VFRI10 + BatchRegistryV6 по умолчанию; `--stack v4` для MVP-5)
+- Деплой продакшн-стека: `bash testnet/deploy_v6.sh` (VFRI10 + BatchRegistryV6); MVP-5: `bash testnet/deploy.sh`
 
 ---
 
@@ -278,8 +354,10 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **VFRI10 hash backend** | **✅ Done** | **t=4 wide Merkle (`Poseidon2MerkleVerifierT4`) + Fiat-Shamir channel (`Poseidon2ChannelT4`) + Rust refs, cross-checked; 321 Rust + 929 Solidity (2026-06-13)** |
 | **VFRI10 верификатор** | **✅ Done** | **`QLSAVerifierVFRI10.sol` — VFRI9-протокол на t=4 backend; `gen_vfri10_hints_from_cols_nfolds`; on-chain verify()==true; 323 Rust + 940 Solidity (2026-06-13)** |
 | **VFRI10 production pipeline** | **✅ Done** | **V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E; per-group verify ≤16.7M; 210 Python + 950 Solidity (2026-06-14)** |
-| MVP-6 next | ⏳ Next | Per-group реестр (split dual-verify по двум tx для 16.7M cap) либо RPO256 hash AIR (128-бит за один проход) |
-| MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
+| **BatchRegistryV6** | **✅ Done** | **Per-group split: 1 verify()/tx (LOG=10 ~10.6M, LOG=8 ~7.9M gas, оба ≤16.7M); полный V23 t=4 deployable через 2 tx (2026-06-14)** |
+| **VFRI11 (t=8)** | **✅ Done** | **VFRI10-протокол на Poseidon2 t=8 backend (4-словные/124-бит узлы → 2^62); generic verify()~13.1M; full-V23 t=8 >100M газа on-chain (2026-06-16)** |
+| **t=16 standalone** | **⏭️ SKIPPED** | **Решение 2026-06-17: газовая стена ~×4 хуже t=8; t=16 переезжает внутрь рекурсии как inner hash AIR** |
+| **Рекурсия** | **⏳ IN PROGRESS** | **STARK, доказывающий VFRI11-верификацию → константный ~5M газа on-chain + inner hash любой ширины (t=16/RPO256) бесплатно. `docs/roadmap/recursion.md`, `stark_stwo/src/recursive/`** |
 
 ---
 

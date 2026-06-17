@@ -49,6 +49,7 @@ describe("BatchStatus", () => {
       hasVfri7: false,
       hasVfri8: false,
       hasVfri9: false,
+      hasVfri10: false,
     };
     expect(s.isProven).toBe(true);
     expect(s.hasWitness).toBe(true);
@@ -66,6 +67,7 @@ describe("BatchStatus", () => {
       hasVfri7: false,
       hasVfri8: false,
       hasVfri9: false,
+      hasVfri10: false,
     };
     expect(s.starkCommitment).toBeUndefined();
     expect(s.witnessCommitment).toBeUndefined();
@@ -84,6 +86,7 @@ describe("BatchStatus", () => {
       hasVfri7: true,
       hasVfri8: false,
       hasVfri9: false,
+      hasVfri10: false,
       vfri7CommitmentLog10: "d".repeat(32),
       vfri7CommitmentLog8: "e".repeat(32),
     };
@@ -103,6 +106,7 @@ describe("BatchStatus", () => {
       hasVfri7: true,
       hasVfri8: true,
       hasVfri9: true,
+      hasVfri10: false,
       vfri9CommitmentLog10: "1".repeat(32),
       vfri9CommitmentLog8: "2".repeat(32),
     };
@@ -115,7 +119,7 @@ describe("BatchStatus", () => {
 describe("WitnessStatus", () => {
   it("no-witness status has empty maxNorms, no vfri7, zero security fields", () => {
     const ws: WitnessStatus = {
-      hasWitness: false, maxNorms: [], hasVfri7: false, hasVfri8: false, hasVfri9: false,
+      hasWitness: false, maxNorms: [], hasVfri7: false, hasVfri8: false, hasVfri9: false, hasVfri10: false,
       nFriQueries: 0, friSecurityBits: 0,
     };
     expect(ws.hasWitness).toBe(false);
@@ -137,6 +141,7 @@ describe("WitnessStatus", () => {
       hasVfri7: true,
       hasVfri8: false,
       hasVfri9: false,
+      hasVfri10: false,
       vfri7CommitmentLog10: "d".repeat(32),
       vfri7CommitmentLog8: "e".repeat(32),
       nFriQueries: 1,
@@ -154,7 +159,7 @@ describe("WitnessStatus", () => {
     const cases: Array<[number, number]> = [[1, 16], [3, 28], [20, 130]];
     for (const [n, bits] of cases) {
       const ws: WitnessStatus = {
-        hasWitness: true, maxNorms: [], hasVfri7: true, hasVfri8: false, hasVfri9: false,
+        hasWitness: true, maxNorms: [], hasVfri7: true, hasVfri8: false, hasVfri9: false, hasVfri10: false,
         nFriQueries: n, friSecurityBits: bits,
       };
       expect(ws.friSecurityBits).toBe(6 * ws.nFriQueries + 10);

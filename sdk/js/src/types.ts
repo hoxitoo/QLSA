@@ -48,6 +48,10 @@ export interface WitnessStatus {
   hasVfri9: boolean;
   vfri9CommitmentLog10?: string;  // 32-char hex (Poseidon2W backend)
   vfri9CommitmentLog8?: string;   // 32-char hex (Poseidon2W backend)
+  // VFRI10 (VFRI9 protocol on the Poseidon2 t=4 hash backend; num_folds=6)
+  hasVfri10: boolean;
+  vfri10CommitmentLog10?: string;  // 32-char hex (Poseidon2 t=4 backend)
+  vfri10CommitmentLog8?: string;   // 32-char hex (Poseidon2 t=4 backend)
 }
 
 export interface BatchStatus {
@@ -70,6 +74,10 @@ export interface BatchStatus {
   hasVfri9: boolean;
   vfri9CommitmentLog10?: string;  // 32-char hex (Poseidon2W backend)
   vfri9CommitmentLog8?: string;   // 32-char hex (Poseidon2W backend)
+  // VFRI10 (VFRI9 protocol on the Poseidon2 t=4 hash backend; num_folds=6)
+  hasVfri10: boolean;
+  vfri10CommitmentLog10?: string;  // 32-char hex (Poseidon2 t=4 backend)
+  vfri10CommitmentLog8?: string;   // 32-char hex (Poseidon2 t=4 backend)
 }
 
 export interface NodeStats {

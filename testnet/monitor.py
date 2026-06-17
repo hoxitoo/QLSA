@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-QLSA Testnet Monitor — polls BatchRegistryV4 for BatchFinalized events.
+QLSA Testnet Monitor — polls the registry for BatchFinalized events.
 
-BatchRegistryV4 emits:
+Compatible with BatchRegistryV4 (VFRI7) and BatchRegistryV6 (VFRI10); both emit
+an identical BatchFinalized event:
   BatchFinalized(bytes32 indexed merkleRoot,
                  bytes16  indexed commitmentLog10,
                  bytes16          commitmentLog8,
@@ -13,7 +14,7 @@ Usage:
 
 Environment (.env):
   RPC_URL          — L2 RPC endpoint
-  REGISTRY_ADDRESS — deployed BatchRegistryV4 address
+  REGISTRY_ADDRESS — deployed BatchRegistryV4 or BatchRegistryV6 address
 """
 
 from __future__ import annotations
