@@ -37,7 +37,7 @@ ML-DSA подпись
 | QM31 add/mul (поле расширения) | `recursive/qm31_mul_air.rs` | ✅ **готов (2026-06-17)** |
 | circleFold / lineFold | `recursive/fold_air.rs` | ✅ **готов (2026-06-17)** |
 | OODS quotient check | `recursive/oods_air.rs` | ✅ **готов (2026-06-17)** |
-| Poseidon2 Merkle path (inner hash) | `poseidon2_merkle_air.rs` (есть, t=2) → t=16 вариант | 🟡 есть базовый, нужен t=16 |
+| Poseidon2 Merkle path (inner hash) | `recursive/merkle_path_air.rs` (t=2) → t=16 вариант | ✅ **t=2 готов (2026-06-17)**; t=16 — R2 |
 | Fiat-Shamir transcript replay | `recursive/channel_air.rs` | ⏳ Poseidon2 sponge как AIR |
 | FRI fold chain (K раундов) | `recursive/fri_chain_air.rs` | ⏳ цепочка fold-gadget |
 
@@ -75,11 +75,21 @@ ML-DSA подпись
   - **R1 завершён** — все три арифметических FRI-примитива (QM31-mul, fold, OODS) готовы и
     cross-checked против on-chain референса. 24 рекурсивных Rust теста. Следующее: R2 (inner-hash)
 
-### Этап R2 — inner hash AIR (t=16)
+### Этап R2 — Merkle path AIR + inner hash (t=16)
 
-- Poseidon2 t=16 как AIR (Stwo native Poseidon2-16) — 8-словные узлы, 128-бит
-- Merkle path verification поверх t=16 compress (адаптация `poseidon2_merkle_air.rs`)
-- **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт
+- **Merkle authentication-path AIR** (`recursive/merkle_path_air.rs`) — ✅ **t=2 готов (2026-06-17)**
+  - Доказывает путь аутентификации: `leaf @ index + siblings → root` через Poseidon2 t=2 compression
+    (on-chain `MerkleVerifier.verify` переведён в AIR; dual к full-tree `poseidon2_merkle_air`)
+  - 10 main + 4 preproc col; раскладка 8 раундов/компрессия. Новые структурные элементы поверх
+    раунд-ядра: выбор left/right по биту индекса (`bit·sib+(1−bit)·cur`), цепочка `cur` между
+    компрессиями (`cur = is_first·leaf + (1−is_first)·s0[-1]`), привязка `(leaf,index,root)` в канал
+  - Все ограничения ≤ степень 3 (как у базового Poseidon2 Merkle AIR)
+  - Кросс-чек `merkle_path_root` против прямых `compress`; roundtrip depth 1/3/5; rejection
+    (wrong root/index/tampered/corrupted-trace). 10 Rust тестов
+  - **Самый дорогой блок рекурсивного верификатора** (один путь на запрос на FRI-слой)
+- **t=16 inner hash** (остаток R2): расширить compression до Poseidon2 t=16 (Stwo native, 128-бит).
+  Ширина хеша — pluggable backend (как VFRI10→VFRI11 t=4→t=8); path-структура AIR не меняется.
+  **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт
 
 ### Этап R3 — recursive verifier composition
 

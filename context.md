@@ -25,6 +25,13 @@
   - Кросс-чек против `vfri2_bridge`; алгебраический инвариант (fₚ=0 ⇒ compValue=oodsCombo); roundtrip + 2 rejection; 8 Rust тестов
   - **R1 полностью завершён**: все 3 арифметических FRI-примитива (QM31-mul, fold, OODS) готовы и cross-checked против on-chain референса; **24 рекурсивных Rust теста зелёные**. Следующее: R2 — Poseidon2-t16 inner-hash Merkle AIR
 
+- **Рекурсия R2 — Merkle auth-path AIR (2026-06-17)**: `stark_stwo/src/recursive/merkle_path_air.rs`
+  - Доказывает путь аутентификации: `leaf @ index + siblings → root` через Poseidon2 t=2 compression (on-chain `MerkleVerifier.verify` переведён в AIR; dual к full-tree `poseidon2_merkle_air`)
+  - 10 main + 4 preproc col; раскладка 8 раундов/компрессия. Новое поверх раунд-ядра: выбор left/right по биту индекса (`bit·sib+(1−bit)·cur`), цепочка `cur` между компрессиями (`cur = is_first·leaf + (1−is_first)·s0[-1]`), привязка `(leaf,index,root)` в Fiat-Shamir канал. Все ограничения ≤ deg 3
+  - Кросс-чек `merkle_path_root` ↔ прямые `compress`; roundtrip depth 1/3/5; rejection (wrong root/index/tampered/corrupted-trace). 10 Rust тестов
+  - Самый дорогой блок рекурсивного верификатора (путь на запрос на FRI-слой). **34 рекурсивных Rust теста зелёные**
+  - Следующее: расширить inner hash до t=16 (pluggable backend, 128-бит) + R3 композиция верификатора
+
 - **Аудит безопасности + code review (2026-06-17)**: 2 эксперта (crypto/blockchain + Rust/системы) по диффу VFRI11/t=8/рекурсия против main. **Нет Critical/High/Medium.** QM31-формула рекурсивного gadget проверена вручную — корректна, soundness-пробела нет (4 ограничения точно фиксируют каждый limb z). Исправлено/упрочнено:
   - **deploy_v6.sh (HIGH, fixed)**: флаг `--network` молча игнорировался (`NETWORK="${1:-sepolia}"` ставил `NETWORK="--network"`) → риск деплоя в неверную сеть. Добавлен полноценный парсинг `--network[=]val` + `-h`
   - **deploy_v6.sh (LOW, fixed)**: `.env.deployed` создаётся `umask 077` (0600) — гигиена перед append в `.env` (хранит `DEPLOYER_PRIVATE_KEY`)
