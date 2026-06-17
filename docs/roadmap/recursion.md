@@ -36,7 +36,7 @@ ML-DSA подпись
 |----------------------|-----------|--------|
 | QM31 add/mul (поле расширения) | `recursive/qm31_mul_air.rs` | ✅ **готов (2026-06-17)** |
 | circleFold / lineFold | `recursive/fold_air.rs` | ✅ **готов (2026-06-17)** |
-| OODS quotient check | `recursive/oods_air.rs` | ⏳ построен на QM31-gadget |
+| OODS quotient check | `recursive/oods_air.rs` | ✅ **готов (2026-06-17)** |
 | Poseidon2 Merkle path (inner hash) | `poseidon2_merkle_air.rs` (есть, t=2) → t=16 вариант | 🟡 есть базовый, нужен t=16 |
 | Fiat-Shamir transcript replay | `recursive/channel_air.rs` | ⏳ Poseidon2 sponge как AIR |
 | FRI fold chain (K раундов) | `recursive/fri_chain_air.rs` | ⏳ цепочка fold-gadget |
@@ -66,7 +66,14 @@ ML-DSA подпись
   - 21 col, helper `p = (f₊−f₋)·inv` снижает степень 3→2: C_p (4) + C_f (4), все степени 2
   - Кросс-чек: `fold_ref` ≡ `vfri2_bridge::circle_fold`; алгебраические инварианты (α=0 ⇒ sum;
     f₊=f₋ ⇒ 2·f₊); полный prove/verify roundtrip + 3 rejection-теста. 8 Rust тестов
-- OODS quotient: `f₊·(p.x − z_x) == compValue − oodsCombo` (мультипликативная форма, без inv) — ⏳ next
+- **OODS quotient** (`recursive/oods_air.rs`) — ✅ **готов (2026-06-17)**
+  - Доказывает `fₚ·(px − z_x) = compValue − oodsCombo` (мультипликативная форма, без QM31-inv)
+  - 17 col, 4 ограничения степени 2; `px` (M31) встраивается в QM31 как `(px,0,0,0)`; одна форма
+    покрывает и позитивный (`px`), и антиподальный (`−px`) запрос
+  - Кросс-чек против перегруппированного `vfri2_bridge` quotient `fPlus=(rawComp−oodsCombo)/(px−z_x)`;
+    алгебраический инвариант (fₚ=0 ⇒ compValue=oodsCombo); roundtrip + 2 rejection. 8 Rust тестов
+  - **R1 завершён** — все три арифметических FRI-примитива (QM31-mul, fold, OODS) готовы и
+    cross-checked против on-chain референса. 24 рекурсивных Rust теста. Следующее: R2 (inner-hash)
 
 ### Этап R2 — inner hash AIR (t=16)
 

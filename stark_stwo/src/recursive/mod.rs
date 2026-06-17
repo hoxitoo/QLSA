@@ -15,9 +15,11 @@
 //! |--------|------|--------|
 //! | QM31 batch multiply | `qm31_mul_air` | `z = x · y` in QM31 = CM31[u]/(u²−R), R = 2+i |
 //! | FRI circle/line fold | `fold_air` | `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (one FRI fold step) |
+//! | OODS quotient | `oods_air` | `fₚ·(px − z_x) = compValue − oodsCombo` (multiplicative form) |
 //!
-//! Next (see roadmap R1+): OODS quotient, Poseidon2-t16 Merkle path,
-//! Fiat-Shamir transcript replay.
+//! Next (see roadmap R2+): Poseidon2-t16 Merkle path, Fiat-Shamir transcript
+//! replay, recursive verifier composition.
 
 pub mod fold_air;
+pub mod oods_air;
 pub mod qm31_mul_air;

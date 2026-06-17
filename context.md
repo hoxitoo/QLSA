@@ -18,7 +18,12 @@
   - `stark_stwo/src/recursive/fold_air.rs`: circle/line fold AIR — `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (единая формула; inv=y⁻¹ для circle, x⁻¹ для line). 21 col, helper-столбец `p=(f₊−f₋)·inv` снижает степень 3→2 (C_p:4 + C_f:4, все deg 2)
   - Кросс-чек `fold_ref ≡ vfri2_bridge::circle_fold`; алгебраические инварианты (α=0⇒sum, f₊=f₋⇒2·f₊); полный prove/verify roundtrip; 8 Rust тестов
   - **R0.3 rejection-харнесс**: оба gadget'а получили `prove_columns` (вынесен из prove) → тесты подают испорченный trace-столбец (product/folded/helper-p) и подтверждают, что proof не верифицируется (+байтовый tamper). Закрывает Low-1 аудита (раньше были только позитивные тесты)
-  - Всего 16 рекурсивных Rust тестов зелёные; следующее: OODS quotient gadget (R1 остаток)
+
+- **Рекурсия R1 завершён — OODS quotient (2026-06-17)**: `stark_stwo/src/recursive/oods_air.rs`
+  - OODS quotient AIR: доказывает `fₚ·(px − z_x) = compValue − oodsCombo` (мультипликативная форма, без QM31-inv) — перегруппировка верификаторного `fPlus=(rawComp−oodsCombo)/(px−z_x)`
+  - 17 col, 4 ограничения степени 2; `px` (M31) встраивается в QM31 как `(px,0,0,0)`; одна форма покрывает позитивный (`px`) и антиподальный (`−px`) запрос
+  - Кросс-чек против `vfri2_bridge`; алгебраический инвариант (fₚ=0 ⇒ compValue=oodsCombo); roundtrip + 2 rejection; 8 Rust тестов
+  - **R1 полностью завершён**: все 3 арифметических FRI-примитива (QM31-mul, fold, OODS) готовы и cross-checked против on-chain референса; **24 рекурсивных Rust теста зелёные**. Следующее: R2 — Poseidon2-t16 inner-hash Merkle AIR
 
 - **Аудит безопасности + code review (2026-06-17)**: 2 эксперта (crypto/blockchain + Rust/системы) по диффу VFRI11/t=8/рекурсия против main. **Нет Critical/High/Medium.** QM31-формула рекурсивного gadget проверена вручную — корректна, soundness-пробела нет (4 ограничения точно фиксируют каждый limb z). Исправлено/упрочнено:
   - **deploy_v6.sh (HIGH, fixed)**: флаг `--network` молча игнорировался (`NETWORK="${1:-sepolia}"` ставил `NETWORK="--network"`) → риск деплоя в неверную сеть. Добавлен полноценный парсинг `--network[=]val` + `-h`
