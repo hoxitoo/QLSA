@@ -34,8 +34,8 @@ ML-DSA подпись
 
 | Операция верификатора | AIR-gadget | Статус |
 |----------------------|-----------|--------|
-| QM31 add/mul (поле расширения) | `recursive/qm31_mul_air.rs` | ✅ **groundwork (2026-06-17)** |
-| circleFold / lineFold | `recursive/fold_air.rs` | ⏳ построен на QM31-gadget |
+| QM31 add/mul (поле расширения) | `recursive/qm31_mul_air.rs` | ✅ **готов (2026-06-17)** |
+| circleFold / lineFold | `recursive/fold_air.rs` | ✅ **готов (2026-06-17)** |
 | OODS quotient check | `recursive/oods_air.rs` | ⏳ построен на QM31-gadget |
 | Poseidon2 Merkle path (inner hash) | `poseidon2_merkle_air.rs` (есть, t=2) → t=16 вариант | 🟡 есть базовый, нужен t=16 |
 | Fiat-Shamir transcript replay | `recursive/channel_air.rs` | ⏳ Poseidon2 sponge как AIR |
@@ -53,13 +53,20 @@ ML-DSA подпись
   - 12 cols (x:4, y:4, z:4), 4 ограничения степени 2, без preproc
   - Кросс-чек: trace.z == `qm31_mul` (u128-референс); полный prove/verify==true
 - **R0.2 QM31-add/lin-combo AIR** — линейные комбинации `Σ αⱼ·colⱼ` (для OODS combo)
-- **R0.3 Constraint-satisfaction harness** — rejection-тесты (порча z → proof не верифицируется)
+- **R0.3 Constraint-satisfaction harness** — ✅ **готов (2026-06-17)** — rejection-тесты в обоих
+  gadget'ах: порча product/folded/helper-p в trace → proof не верифицируется (байтовый tamper +
+  witness-level порча столбца через `prove_columns`). Подтверждает, что ограничения реально
+  обеспечивают soundness (закрывает Low-1 аудита)
 
 ### Этап R1 — FRI fold + OODS gadgets
 
-- circleFold: `(f₊ + f₋) + α·(f₊ − f₋)·y⁻¹` как QM31-арифметика (y⁻¹ как witness + проверка `y·y⁻¹=1`)
-- lineFold: та же формула с x⁻¹ и twiddle T_{2^k}(x)
-- OODS quotient: `f₊·(p.x − z_x) == compValue − oodsCombo` (мультипликативная форма, без inv)
+- **circleFold / lineFold** (`recursive/fold_air.rs`) — ✅ **готов (2026-06-17)**
+  - Доказывает `folded = (f₊+f₋) + α·(f₊−f₋)·inv` для батча (одна формула на circle+line fold;
+    inv = y⁻¹ или x⁻¹ передаётся как witness-столбец)
+  - 21 col, helper `p = (f₊−f₋)·inv` снижает степень 3→2: C_p (4) + C_f (4), все степени 2
+  - Кросс-чек: `fold_ref` ≡ `vfri2_bridge::circle_fold`; алгебраические инварианты (α=0 ⇒ sum;
+    f₊=f₋ ⇒ 2·f₊); полный prove/verify roundtrip + 3 rejection-теста. 8 Rust тестов
+- OODS quotient: `f₊·(p.x − z_x) == compValue − oodsCombo` (мультипликативная форма, без inv) — ⏳ next
 
 ### Этап R2 — inner hash AIR (t=16)
 

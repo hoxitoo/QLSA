@@ -14,8 +14,10 @@
 //! | Gadget | File | Proves |
 //! |--------|------|--------|
 //! | QM31 batch multiply | `qm31_mul_air` | `z = x · y` in QM31 = CM31[u]/(u²−R), R = 2+i |
+//! | FRI circle/line fold | `fold_air` | `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (one FRI fold step) |
 //!
-//! Next (see roadmap R1+): QM31 linear combination, circle/line fold, OODS
-//! quotient, Poseidon2-t16 Merkle path, Fiat-Shamir transcript replay.
+//! Next (see roadmap R1+): OODS quotient, Poseidon2-t16 Merkle path,
+//! Fiat-Shamir transcript replay.
 
+pub mod fold_air;
 pub mod qm31_mul_air;

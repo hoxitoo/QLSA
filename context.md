@@ -12,7 +12,13 @@
 - **Рекурсия R0.1 (2026-06-17)**: первый foundational gadget — `stark_stwo/src/recursive/qm31_mul_air.rs`
   - QM31 batch-multiply AIR: доказывает `z = x·y` в QM31 = CM31[u]/(u²−R), R = 2+i; 12 cols (x:4,y:4,z:4), 4 ограничения степени 2, без preproc
   - Несущий примитив рекурсивного верификатора (circleFold/lineFold/OODS сводятся к QM31-арифметике)
-  - Полный Stwo prove/verify roundtrip + кросс-чек против u128-референса (`u²=R`, `1·y=y`); 6 Rust тестов
+  - Полный Stwo prove/verify roundtrip + кросс-чек против u128-референса (`u²=R`, `1·y=y`); 8 Rust тестов (вкл. 2 rejection)
+
+- **Рекурсия R1 + R0.3 (2026-06-17)**: FRI fold gadget + rejection-харнесс
+  - `stark_stwo/src/recursive/fold_air.rs`: circle/line fold AIR — `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (единая формула; inv=y⁻¹ для circle, x⁻¹ для line). 21 col, helper-столбец `p=(f₊−f₋)·inv` снижает степень 3→2 (C_p:4 + C_f:4, все deg 2)
+  - Кросс-чек `fold_ref ≡ vfri2_bridge::circle_fold`; алгебраические инварианты (α=0⇒sum, f₊=f₋⇒2·f₊); полный prove/verify roundtrip; 8 Rust тестов
+  - **R0.3 rejection-харнесс**: оба gadget'а получили `prove_columns` (вынесен из prove) → тесты подают испорченный trace-столбец (product/folded/helper-p) и подтверждают, что proof не верифицируется (+байтовый tamper). Закрывает Low-1 аудита (раньше были только позитивные тесты)
+  - Всего 16 рекурсивных Rust тестов зелёные; следующее: OODS quotient gadget (R1 остаток)
 
 - **Аудит безопасности + code review (2026-06-17)**: 2 эксперта (crypto/blockchain + Rust/системы) по диффу VFRI11/t=8/рекурсия против main. **Нет Critical/High/Medium.** QM31-формула рекурсивного gadget проверена вручную — корректна, soundness-пробела нет (4 ограничения точно фиксируют каждый limb z). Исправлено/упрочнено:
   - **deploy_v6.sh (HIGH, fixed)**: флаг `--network` молча игнорировался (`NETWORK="${1:-sepolia}"` ставил `NETWORK="--network"`) → риск деплоя в неверную сеть. Добавлен полноценный парсинг `--network[=]val` + `-h`
