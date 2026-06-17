@@ -1,6 +1,15 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-16 — VFRI11 V23 pipeline + верификатор + Poseidon2 t=8 backend)
+## Статус (обновлено 2026-06-17 — решение по пути: standalone t=16 пропущен, старт рекурсии)
+
+- **Решение по пути (2026-06-17)**: standalone **t=16-верификатор (VFRI12) ПРОПУЩЕН** — вместо него идём сразу к **рекурсии доказательств**.
+  - Обоснование: отдельный on-chain t=16-верификатор имеет ту же газовую стену, что t=8, но ~×4 хуже (~400M+ газа на полный V23) — доказал бы корректность только на depth-4 toy-масштабе, никогда не задеплоил бы production V23.
+  - t=16 (~2^124 ≈ 128-бит, = нативный Poseidon2-16 в Stwo) — целевой уровень коллизии узла, но его ценность **внутри inner hash AIR рекурсивного доказательства**, где on-chain газ константен независимо от ширины перестановки.
+  - Рекурсия даёт ОБА результата за один шаг: 128-бит soundness И production-feasible константный газ (~5M).
+  - Лестница t=2/t=4/t=8 остаётся в репо как кросс-проверенный soundness-сертификат; t=16 переезжает внутрь рекурсии.
+  - Полный план: `docs/roadmap/recursion.md`. Код: `stark_stwo/src/recursive/`.
+
+## Статус (2026-06-16 — VFRI11 V23 pipeline + верификатор + Poseidon2 t=8 backend)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -331,8 +340,9 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **VFRI10 верификатор** | **✅ Done** | **`QLSAVerifierVFRI10.sol` — VFRI9-протокол на t=4 backend; `gen_vfri10_hints_from_cols_nfolds`; on-chain verify()==true; 323 Rust + 940 Solidity (2026-06-13)** |
 | **VFRI10 production pipeline** | **✅ Done** | **V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E; per-group verify ≤16.7M; 210 Python + 950 Solidity (2026-06-14)** |
 | **BatchRegistryV6** | **✅ Done** | **Per-group split: 1 verify()/tx (LOG=10 ~10.6M, LOG=8 ~7.9M gas, оба ≤16.7M); полный V23 t=4 deployable через 2 tx (2026-06-14)** |
-| MVP-6 next | ⏳ Next | RPO256 hash AIR (single-tx 128-бит dual-verify) или recursive STARK |
-| MVP-4 | ⏳ Future | Recursive STARK (constant ~5M gas); RPO256 hash AIR (128-bit nodes) |
+| **VFRI11 (t=8)** | **✅ Done** | **VFRI10-протокол на Poseidon2 t=8 backend (4-словные/124-бит узлы → 2^62); generic verify()~13.1M; full-V23 t=8 >100M газа on-chain (2026-06-16)** |
+| **t=16 standalone** | **⏭️ SKIPPED** | **Решение 2026-06-17: газовая стена ~×4 хуже t=8; t=16 переезжает внутрь рекурсии как inner hash AIR** |
+| **Рекурсия** | **⏳ IN PROGRESS** | **STARK, доказывающий VFRI11-верификацию → константный ~5M газа on-chain + inner hash любой ширины (t=16/RPO256) бесплатно. `docs/roadmap/recursion.md`, `stark_stwo/src/recursive/`** |
 
 ---
 

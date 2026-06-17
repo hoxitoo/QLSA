@@ -23,6 +23,7 @@ pub mod poseidon2_air;
 pub mod poseidon2_merkle_air;
 pub mod poseidon2_t4;
 pub mod poseidon2_t8;
+pub mod recursive;
 pub mod trace;
 pub mod vfri2_bridge;
 
