@@ -96,6 +96,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **Poseidon2 t=8 (128-bit ladder groundwork)** — `poseidon2_t8.rs` + `Poseidon2M31T8.sol` cross-checked bit-exact: R_F=8, R_P=14, block external matrix, 4-word (124-bit) nodes → ~2^62 collision (vs t=4's 2^31). Next rung toward t=16 ≈ 128-bit (Stwo's native Poseidon2-16). 11 JS + 12 Rust tests | ✅ Done (2026-06-16) |
 | **Poseidon2 t=8 hash backend** — `Poseidon2MerkleVerifierT8` (4-word/124-bit nodes) + `Poseidon2ChannelT8` (217-bit capacity Fiat-Shamir) + Rust `hash_*_p2t8` / `P2T8Channel`, cross-checked bit-exact (13 JS + 6 Rust). Ready for a VFRI11 verifier | ✅ Done (2026-06-16) |
 | **QLSAVerifierVFRI11** — VFRI10 protocol on the t=8 backend (4-word nodes → ~2^62 node/transcript collision); identical ABI, version marker 5. On-chain `verify()==true` at ~13.1M gas (generic depth-4 fixture). 3 Rust + 11 JS E2E tests | ✅ Done (2026-06-16) |
+| **VFRI11 V23 pipeline** — cross-bound Rust/PyO3/Python wrappers (`prove_mldsa_sig_vfri11_stark`) + 7 Python + 8 JS structural E2E (BatchRegistryV5 wired to VFRI11). Gas finding: full-V23 t=8 verify exceeds 100M gas at depth-10 → production needs recursion (wider permutation raises security, not gas budget) | ✅ Done (2026-06-16) |
 
 ---
 

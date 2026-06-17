@@ -1,6 +1,6 @@
 # QLSA — Project Context
 
-## Статус (обновлено 2026-06-16 — VFRI11 верификатор + Poseidon2 t=8 backend/перестановка + VFRI10 в агрегаторе)
+## Статус (обновлено 2026-06-16 — VFRI11 V23 pipeline + верификатор + Poseidon2 t=8 backend)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.
 - **VFRI9**: `QLSAVerifierVFRI9.sol`, `Poseidon2MerkleVerifierW.sol` (62-бит узлы: `(s0<<32)|s1`), `Poseidon2Channel.mixRootW/mixRootFull`
@@ -103,7 +103,14 @@
   - `Poseidon2M31T8._matI` оптимизирован на 1 `mulmod`/ячейку (== Rust repeated-add reference) → generic `verify()` **~13.1M gas** (depth=4, 2 queries, 2 folds), влезает в 16.7M cap
   - Rust bridge `gen_vfri11_hints_from_cols_nfolds` (клон VFRI10 + 5 t8-замен); 3 Rust smoke + **11 JS E2E** (`QLSAVerifierVFRI11E2E.test.js`); фикстура `vfri11_e2e.json`
   - Backend-mismatch: VFRI11 хинты НЕ принимаются VFRI10 (разная перестановка → разный trace root)
-  - Следующее: V23 cross-bound обёртки + PyO3 + Python (`prove_mldsa_sig_vfri11_stark`) + реестр, зеркаля VFRI10 production pipeline; затем t=16 для полных 128 бит
+
+- **VFRI11 V23 production pipeline (2026-06-16)**: cross-bound обёртки + PyO3 + Python + structural E2E
+  - Rust: `gen_mldsa_v23_vfri11_hints[_log8]`, `gen_mldsa_v23_vfri11_cross_bound_hints` (клоны VFRI10-обёрток, вызывают `gen_vfri11_hints_from_cols_nfolds`)
+  - PyO3: `gen_mldsa_v23_vfri11_hints_py` / `_log8_py` / `_cross_bound_hints_py` (wheel пересобран и установлен)
+  - Python (`stark/prover.py`): `gen_mldsa_v23_vfri11_hints[_log8]`, `gen_mldsa_v23_vfri11_cross_bound_hints`, `prove_mldsa_sig_vfri11_stark` + dataclasses `MldsaV23VFRI11HintResult`/`...Log8...`/`FullV23VFRI11CrossBoundHintResult`
+  - **7 Python тестов** (markers==5) + **8 JS structural E2E** (`QLSAVerifierVFRI11CrossBoundE2E.test.js`, `BatchRegistryV5` подключён к VFRI11); фикстура `full_v23_vfri11_cross_bound_e2e.json` (seed=16600, num_folds=6) via `gen_full_v23_vfri11_fixture.py`
+  - **Gas finding**: on-chain `verify()` полной V23 t=8 группы **превышает 100M газа** на depth-10 (estimateGas упирается в 100M block limit) — t=8 перестановка ~3–4× t=4, плюс depth-10 Merkle paths + 6 fold rounds. Корректность t=8 on-chain доказана на малом масштабе (generic depth-4, ~13.1M, `verify()==true`). Production полной V23 t=8 требует рекурсии (константный газ); широкая перестановка повышает стойкость, но не газовый бюджет
+  - Следующее: t=16 (8-словные узлы → полные 128 бит) для лестницы soundness; рекурсия для production-газа
 
 - **VFRI10 в пайплайне агрегатора (2026-06-16)**: продакшн-нода теперь генерирует VFRI10 witness-proofs (раньше только VFRI7/8/9)
   - `aggregator/batcher.py`: `BatchResult` несёт поля `vfri10_{proof,commitment,hints}_{log10,log8}`, свойство `has_vfri10`, добавлено в `has_witness`; генерация через `prove_mldsa_sig_vfri10_stark` с `Batcher.VFRI10_NUM_FOLDS = 6` (gas budget BatchRegistryV6)

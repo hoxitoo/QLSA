@@ -719,8 +719,22 @@ VFRI11 — the VFRI10 proof protocol on the Poseidon2 **t=8** hash backend.
 - Tests: 3 Rust smoke (`test_vfri11_smoke_small` / `differs_from_vfri10` / `deterministic`) + 11 JS
   E2E (`QLSAVerifierVFRI11E2E.test.js`); fixture `vfri11_e2e.json` (regenerate via
   `cargo test write_vfri11_e2e_fixture -- --ignored`)
-- Next: V23 cross-bound wrappers + PyO3 + Python (`prove_mldsa_sig_vfri11_stark`) + a BatchRegistry
-  deployment, mirroring the VFRI10 production pipeline; then t=16 for full 128-bit.
+- **V23 production pipeline (2026-06-16):** V23 cross-bound wrappers
+  (`gen_mldsa_v23_vfri11_hints[_log8]`, `gen_mldsa_v23_vfri11_cross_bound_hints`) + PyO3 bindings +
+  Python wrappers (`gen_mldsa_v23_vfri11_hints[_log8]`, `gen_mldsa_v23_vfri11_cross_bound_hints`,
+  `prove_mldsa_sig_vfri11_stark`) mirroring the VFRI10 pipeline. 7 Python tests
+  (`tests/test_stark_stwo.py`, markers == 5) + 8 JS structural E2E
+  (`QLSAVerifierVFRI11CrossBoundE2E.test.js`, `BatchRegistryV5` wired to VFRI11). Fixture
+  `full_v23_vfri11_cross_bound_e2e.json` (seed=16600, n_queries=1, num_folds=6) via
+  `gen_full_v23_vfri11_fixture.py`.
+- **Gas finding (2026-06-16):** on-chain `verify()` of a FULL V23 t=8 group **exceeds 100M gas** at
+  depth-10 (estimateGas runs out at the 100M block limit) — the t=8 permutation is ~3–4× t=4 per
+  call, compounded by depth-10 Merkle paths + 6 fold rounds. t=8 on-chain *correctness* is proven at
+  small scale (generic depth-4 fixture, ~13.1M gas, `verify()==true`). Production full-V23 t=8
+  verification needs proof recursion (constant on-chain cost) — wider permutations raise security but
+  not the gas budget. The cross-bound E2E asserts the gas-cheap structural + binding invariants and
+  documents the wall.
+- Next: t=16 (8-word nodes → full 128-bit) for the soundness ladder; recursion for production gas.
 
 ### `contracts/src/verifier/Poseidon2MerkleVerifierT4.sol` (VFRI10 hash backend)
 Poseidon2 t=4 wide Merkle verification — the t=4 successor to `Poseidon2MerkleVerifierW`.
