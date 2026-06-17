@@ -76,6 +76,9 @@ pub type Qm31MulComponent = FrameworkComponent<Qm31MulEval>;
 
 // ── Scalar M31 / QM31 reference (cross-checked against vfri2_bridge::qm31_mul) ──
 
+// Inputs must be canonical M31 limbs (< M31_P, hence < 2^31): the product then
+// stays < 2^62 and fits a u64 before reduction. Callers guarantee this via the
+// `build_trace` precondition (debug-asserted) / the genuine-QM31 recursive use.
 #[inline]
 fn m31_mul(a: u64, b: u64) -> u64 { (a * b) % M31_P }
 #[inline]
@@ -191,6 +194,13 @@ pub fn compute_log_size(n_ops: usize) -> u32 {
 /// `u128` QM31).  Each row stores `x`, `y` and the correct product `z = x·y`.
 /// Unused rows are padded with zeros (`0·0 = 0`).  `log_n_rows` must be large
 /// enough to hold every op (use [`compute_log_size`]).
+///
+/// **Precondition:** every packed limb must be a canonical M31 element
+/// (`< M31_P`).  The AIR proves only `z = x·y` for the *committed* limbs; it does
+/// not range-check them, so a non-canonical packing would commit a non-reduced
+/// value.  Genuine QM31 inputs (the recursive-verifier use) always satisfy this;
+/// the bound is debug-asserted here.  When this gadget is later fed
+/// adversary-controlled packings, pair it with a `RangeM31` canonical check.
 pub fn build_trace(ops: &[(u128, u128)], log_n_rows: u32) -> TraceColumns {
     let n = 1usize << log_n_rows;
     debug_assert!(ops.len() <= n, "ops exceed trace capacity");
@@ -202,6 +212,10 @@ pub fn build_trace(ops: &[(u128, u128)], log_n_rows: u32) -> TraceColumns {
     for (r, &(x, y)) in ops.iter().enumerate() {
         let xl = limbs(x);
         let yl = limbs(y);
+        debug_assert!(
+            xl.iter().chain(yl.iter()).all(|&l| l < M31_P),
+            "non-canonical QM31 limb (>= M31_P) in build_trace input",
+        );
         let zl = mul_limbs(xl, yl);
         for k in 0..4 {
             cols[k][r] = BaseField::from_u32_unchecked(xl[k] as u32);

@@ -301,7 +301,12 @@ def _parse_args() -> argparse.Namespace:
             "(WARNING: n≥4 may exceed 15M gas on mainnet)."
         ),
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if args.n_queries < 1:
+        p.error("--n-queries must be >= 1 (security = 6×N+10 bits)")
+    if args.txs < 1:
+        p.error("--txs must be >= 1")
+    return args
 
 
 if __name__ == "__main__":

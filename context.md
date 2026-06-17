@@ -9,6 +9,21 @@
   - Лестница t=2/t=4/t=8 остаётся в репо как кросс-проверенный soundness-сертификат; t=16 переезжает внутрь рекурсии.
   - Полный план: `docs/roadmap/recursion.md`. Код: `stark_stwo/src/recursive/`.
 
+- **Рекурсия R0.1 (2026-06-17)**: первый foundational gadget — `stark_stwo/src/recursive/qm31_mul_air.rs`
+  - QM31 batch-multiply AIR: доказывает `z = x·y` в QM31 = CM31[u]/(u²−R), R = 2+i; 12 cols (x:4,y:4,z:4), 4 ограничения степени 2, без preproc
+  - Несущий примитив рекурсивного верификатора (circleFold/lineFold/OODS сводятся к QM31-арифметике)
+  - Полный Stwo prove/verify roundtrip + кросс-чек против u128-референса (`u²=R`, `1·y=y`); 6 Rust тестов
+
+- **Аудит безопасности + code review (2026-06-17)**: 2 эксперта (crypto/blockchain + Rust/системы) по диффу VFRI11/t=8/рекурсия против main. **Нет Critical/High/Medium.** QM31-формула рекурсивного gadget проверена вручную — корректна, soundness-пробела нет (4 ограничения точно фиксируют каждый limb z). Исправлено/упрочнено:
+  - **deploy_v6.sh (HIGH, fixed)**: флаг `--network` молча игнорировался (`NETWORK="${1:-sepolia}"` ставил `NETWORK="--network"`) → риск деплоя в неверную сеть. Добавлен полноценный парсинг `--network[=]val` + `-h`
+  - **deploy_v6.sh (LOW, fixed)**: `.env.deployed` создаётся `umask 077` (0600) — гигиена перед append в `.env` (хранит `DEPLOYER_PRIVATE_KEY`)
+  - **e2e.py (MED, fixed)**: `--n-queries`/`--txs` теперь валидируются `>= 1` (раньше `0`/негатив давали бессмысленный security_bits и UB на стороне прувера)
+  - **submit.py (MED, fixed)**: web3 `HTTPProvider(..., request_kwargs={"timeout":30})` на всех 3 провайдерах — зависший RPC больше не блокирует поток дольше `confirm_timeout_s`
+  - **Poseidon2M31T8.sol (LOW, fixed)**: `sponge` редуцирует входные слова `% P` — точное соответствие Rust `sponge_t8` даже для non-canonical слов ≥ P (defense-in-depth; в VFRI-пайплайне входы всегда — QM31-лимбы < P). Замороженные cross-check векторы не сдвинулись (24 T8-теста зелёные)
+  - **qm31_mul_air.rs (LOW, fixed)**: задокументирована предусловие каноничности limbs (< M31_P) + `debug_assert` в `build_trace`; комментарий о границе входов в `m31_mul`
+  - **Задокументировано как non-exploitable / accepted**: версия-маркер `proof[0:8]=5` не проверяется on-chain (уже связан через commitment Blake2s(proof[:32]‖root); идентично задеплоенному VFRI10); estimateGas-preflight в submit отсутствует намеренно (избегает падения на большом calldata); broad-except в PyO3-обёртках консистентен с VFRI10; OnchainSubmitterV6 не concurrency-safe (single-threaded e2e)
+  - **Verified-OK**: VFRI11 — точный backend-swap VFRI10 (Fiat-Shamir порядок, M31-редукция в `_absorb`, Merkle node encoding, cross-bound binding BatchRegistryV6, replay/nonce/griefing); poseidon2_t8 матрицы/RC/S-box bit-exact; PyO3-граница panic-safe; release build warning-free
+
 ## Статус (2026-06-16 — VFRI11 V23 pipeline + верификатор + Poseidon2 t=8 backend)
 
 - Фаза: **VFRI9 завершён** (2026-06-10) — last-layer FRI check + широкие (62-бит) Poseidon2 узлы + полное поглощение корней в Fiat-Shamir. Soundness-аргумент он-чейн FRI протокола завершён.

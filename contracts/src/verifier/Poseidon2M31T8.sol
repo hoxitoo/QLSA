@@ -183,23 +183,27 @@ library Poseidon2M31T8 {
     /// The odd-length flag lives in capacity cell 7 — outside the rate — so no
     /// choice of data words can imitate a padded final block.
     ///
-    /// @param values Array of M31 field elements (each < P).
+    /// @param values Array of M31 field elements. Inputs are reduced mod P on
+    ///        absorption so the on-chain hash matches the Rust `sponge_t8`
+    ///        reference (which reduces every word) bit-for-bit even for
+    ///        non-canonical words ≥ P — a defense-in-depth parity guard; in the
+    ///        VFRI pipeline every word is already a QM31 limb < P.
     /// @return out   The 4-word (124-bit) node: state cells 0..3 after absorption.
     function sponge(uint256[] memory values) internal pure returns (uint256[4] memory out) {
         uint256[8] memory s;
         uint256 n = values.length;
         uint256 i = 0;
         for (; i + 4 <= n; i += 4) {
-            s[0] = _add(s[0], values[i]);
-            s[1] = _add(s[1], values[i + 1]);
-            s[2] = _add(s[2], values[i + 2]);
-            s[3] = _add(s[3], values[i + 3]);
+            s[0] = _add(s[0], values[i] % P);
+            s[1] = _add(s[1], values[i + 1] % P);
+            s[2] = _add(s[2], values[i + 2] % P);
+            s[3] = _add(s[3], values[i + 3] % P);
             s = permute(s);
         }
         if (i < n) {
             uint256 k = 0;
             for (; i < n; i++) {
-                s[k] = _add(s[k], values[i]);
+                s[k] = _add(s[k], values[i] % P);
                 k++;
             }
             s[7] = _add(s[7], 1);

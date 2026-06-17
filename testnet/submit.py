@@ -93,7 +93,7 @@ class OnchainSubmitter:
         gas_limit: int = 5_000_000,
         confirm_timeout_s: int = 120,
     ) -> None:
-        self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
         # POA chains (Polygon zkEVM Cardona) inject extra fields in block headers.
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
@@ -285,7 +285,7 @@ class OnchainSubmitterV4:
         gas_limit: int = 15_000_000,
         confirm_timeout_s: int = 120,
     ) -> None:
-        self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         if not self.w3.is_connected():
             raise RuntimeError(f"Cannot connect to RPC: {rpc_url}")
@@ -474,7 +474,7 @@ class OnchainSubmitterV6:
         gas_limit: int = 16_700_000,
         confirm_timeout_s: int = 180,
     ) -> None:
-        self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         if not self.w3.is_connected():
             raise RuntimeError(f"Cannot connect to RPC: {rpc_url}")

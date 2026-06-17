@@ -60,7 +60,7 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 
 ## Current Status
 
-**VFRI10 complete + security/code audit** (2026-06-14). The Poseidon2 t=4 hash backend (124-bit nodes, collision ~2^62 vs t=2's ~2^31) is wired into the full proof path: `QLSAVerifierVFRI10` + V23 cross-bound Rust/PyO3/Python pipeline + on-chain dual-group E2E via `BatchRegistryV5` (each V23 group `verify()` ≤16.7M gas). A two-expert audit (crypto/blockchain + systems) closed an off-chain replay gap (re-batching an already-batched tx), hardened submit error-text leakage, surfaced mempool-overflow drops in `/stats`, gated stray test fixtures out of the release library, and added an FRI `tree_depth` guard. 323 Rust + 950 Solidity + 354 Python (no PyO3) tests.
+**Recursion started + security/code audit** (2026-06-17). The Poseidon2 ladder t=2/t=4/t=8 is complete (`QLSAVerifierVFRI11`, t=8 → ~2^62 node collision), but full-V23 t=8 on-chain `verify()` exceeds 100M gas at depth-10 — confirming that wider permutations raise soundness, not the gas budget. **Decision: the standalone t=16 verifier (VFRI12) is skipped in favour of proof recursion** (a STARK proving "I verified a VFRI11 STARK"; outer proof ~5M gas constant, inner hash any width for free). The first recursion gadget landed: `recursive/qm31_mul_air.rs` — a QM31 batch-multiply AIR (the load-bearing primitive for circleFold/lineFold/OODS), with a full prove/verify roundtrip + hand-verified soundness. A two-expert audit (crypto/blockchain + Rust/systems) of the VFRI11/t=8/recursion diff found **no Critical/High/Medium**; fixes: `deploy_v6.sh --network` flag (was silently ignored), `--n-queries`/`--txs` validation, web3 HTTP timeouts, `.env.deployed` 0600, t=8 sponge input reduction (Rust parity), and QM31 limb-canonicity preconditions. See `docs/roadmap/recursion.md`. 437 Rust (+6 recursive) + Solidity (+24 t=8 backend) tests green.
 
 | Component | Status |
 |-----------|--------|
@@ -97,6 +97,9 @@ It is a **post-quantum aggregation layer** that makes PQ signatures usable at sc
 | **Poseidon2 t=8 hash backend** — `Poseidon2MerkleVerifierT8` (4-word/124-bit nodes) + `Poseidon2ChannelT8` (217-bit capacity Fiat-Shamir) + Rust `hash_*_p2t8` / `P2T8Channel`, cross-checked bit-exact (13 JS + 6 Rust). Ready for a VFRI11 verifier | ✅ Done (2026-06-16) |
 | **QLSAVerifierVFRI11** — VFRI10 protocol on the t=8 backend (4-word nodes → ~2^62 node/transcript collision); identical ABI, version marker 5. On-chain `verify()==true` at ~13.1M gas (generic depth-4 fixture). 3 Rust + 11 JS E2E tests | ✅ Done (2026-06-16) |
 | **VFRI11 V23 pipeline** — cross-bound Rust/PyO3/Python wrappers (`prove_mldsa_sig_vfri11_stark`) + 7 Python + 8 JS structural E2E (BatchRegistryV5 wired to VFRI11). Gas finding: full-V23 t=8 verify exceeds 100M gas at depth-10 → production needs recursion (wider permutation raises security, not gas budget) | ✅ Done (2026-06-16) |
+| **Path decision: skip standalone t=16, go to recursion** — a standalone t=16 verifier hits the same gas wall ~4× worse; t=16 (128-bit) instead becomes the recursion's inner hash AIR (constant on-chain cost). `docs/roadmap/recursion.md` | ✅ Decided (2026-06-17) |
+| **Recursion R0.1 — QM31-mul AIR** — `recursive/qm31_mul_air.rs`: proves `z = x·y` in QM31 = CM31[u]/(u²−R); 4 degree-2 constraints, full prove/verify roundtrip + hand-verified soundness. Load-bearing primitive for circleFold/lineFold/OODS. 6 Rust tests | ✅ Done (2026-06-17) |
+| **Security + code audit (VFRI11/t=8/recursion)** — 2 experts, no Critical/High/Medium; fixed `deploy_v6.sh --network` flag, CLI arg validation, web3 timeouts, `.env.deployed` 0600, t=8 sponge `% P` parity, QM31 limb-canonicity precondition | ✅ Done (2026-06-17) |
 
 ---
 
