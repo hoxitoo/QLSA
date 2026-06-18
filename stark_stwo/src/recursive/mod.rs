@@ -17,10 +17,12 @@
 //! | FRI circle/line fold | `fold_air` | `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (one FRI fold step) |
 //! | OODS quotient | `oods_air` | `fₚ·(px − z_x) = compValue − oodsCombo` (multiplicative form) |
 //! | Merkle auth-path | `merkle_path_air` | `leaf @ index + siblings → root` (Poseidon2 t=2 compression) |
+//! | Fiat-Shamir transcript | `channel_air` | Poseidon2 t=2 sponge absorb (`mixU32s` core) → digest |
 //!
-//! Next (see roadmap R2+): widen the inner hash to t=16, Fiat-Shamir transcript
-//! replay, recursive verifier composition.
+//! Next (see roadmap R2+): widen the inner hash to t=16, recursive verifier
+//! composition (R3).
 
+pub mod channel_air;
 pub mod fold_air;
 pub mod merkle_path_air;
 pub mod oods_air;

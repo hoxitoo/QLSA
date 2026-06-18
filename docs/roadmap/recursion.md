@@ -38,7 +38,7 @@ ML-DSA подпись
 | circleFold / lineFold | `recursive/fold_air.rs` | ✅ **готов (2026-06-17)** |
 | OODS quotient check | `recursive/oods_air.rs` | ✅ **готов (2026-06-17)** |
 | Poseidon2 Merkle path (inner hash) | `recursive/merkle_path_air.rs` (t=2) → t=16 вариант | ✅ **t=2 готов (2026-06-17)**; t=16 — R2 |
-| Fiat-Shamir transcript replay | `recursive/channel_air.rs` | ⏳ Poseidon2 sponge как AIR |
+| Fiat-Shamir transcript replay | `recursive/channel_air.rs` (t=2) → t=16 вариант | ✅ **t=2 готов (2026-06-17)**; t=16 — R2 |
 | FRI fold chain (K раундов) | `recursive/fri_chain_air.rs` | ⏳ цепочка fold-gadget |
 
 ## Поэтапный план
@@ -87,11 +87,23 @@ ML-DSA подпись
   - Кросс-чек `merkle_path_root` против прямых `compress`; roundtrip depth 1/3/5; rejection
     (wrong root/index/tampered/corrupted-trace). 10 Rust тестов
   - **Самый дорогой блок рекурсивного верификатора** (один путь на запрос на FRI-слой)
-- **t=16 inner hash** (остаток R2): расширить compression до Poseidon2 t=16 (Stwo native, 128-бит).
-  Ширина хеша — pluggable backend (как VFRI10→VFRI11 t=4→t=8); path-структура AIR не меняется.
-  **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт
+- **Fiat-Shamir transcript replay** (`recursive/channel_air.rs`) — ✅ **t=2 готов (2026-06-17)**
+  - Доказывает поглощение Poseidon2 t=2 duplex-губки (`mixU32s`-ядро `Poseidon2Channel`/`P2T8Channel`):
+    `s0 += word; permute` на каждое слово → digest. Рекурсивный верификатор воспроизводит транскрипт
+    в схеме, чтобы доказать честный вывод challenge'ов/позиций запросов (а не cherry-pick)
+  - 7 main + 4 preproc col; init-wiring `inp0 = (is_first?0:s0[-1]) + word`, `inp1 = (is_first?0:s1[-1])`;
+    привязка `(n_words, digest)` в канал. Кросс-чек против прямого `permute`; roundtrip 1/8 слов;
+    rejection (wrong digest/count/tampered/corrupted-trace). 9 Rust тестов
+- **t=16 inner hash** (остаток R2): расширить compression обоих inner-hash AIR (`merkle_path_air`,
+  `channel_air`) до Poseidon2 t=16 (Stwo native, 128-бит). Ширина хеша — pluggable backend
+  (как VFRI10→VFRI11 t=4→t=8); структура AIR не меняется. **Здесь t=16 «возвращается»** — но как
+  inner circuit, on-chain газ не растёт
 
 ### Этап R3 — recursive verifier composition
+
+> **Полный набор gadget'ов готов (2026-06-17):** арифметика (QM31-mul), FRI-фолд, OODS-quotient,
+> inner-hash Merkle path, Fiat-Shamir transcript. 43 рекурсивных Rust теста. R3 собирает их в
+> единый AIR.
 
 - `recursive/recursive_verifier.rs` — собирает все gadgets в единый AIR верификатора VFRI11
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
