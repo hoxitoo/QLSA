@@ -14,8 +14,18 @@
 //! | Gadget | File | Proves |
 //! |--------|------|--------|
 //! | QM31 batch multiply | `qm31_mul_air` | `z = x · y` in QM31 = CM31[u]/(u²−R), R = 2+i |
+//! | FRI circle/line fold | `fold_air` | `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (one FRI fold step) |
+//! | OODS quotient | `oods_air` | `fₚ·(px − z_x) = compValue − oodsCombo` (multiplicative form) |
+//! | Merkle auth-path | `merkle_path_air` | `leaf @ index + siblings → root` (Poseidon2 t=2 compression) |
+//! | Fiat-Shamir transcript | `channel_air` | Poseidon2 t=2 sponge absorb (`mixU32s` core) → digest |
+//! | **Per-query FRI step** | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
 //!
-//! Next (see roadmap R1+): QM31 linear combination, circle/line fold, OODS
-//! quotient, Poseidon2-t16 Merkle path, Fiat-Shamir transcript replay.
+//! Next (see roadmap R3): widen the inner hash to t=16, then the full recursive
+//! verifier composition (per-query steps + Merkle + transcript in one proof).
 
+pub mod channel_air;
+pub mod fold_air;
+pub mod merkle_path_air;
+pub mod oods_air;
+pub mod query_step_air;
 pub mod qm31_mul_air;

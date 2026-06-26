@@ -80,11 +80,29 @@ pub type Qm31MulComponent = FrameworkComponent<Qm31MulEval>;
 // stays < 2^62 and fits a u64 before reduction. Callers guarantee this via the
 // `build_trace` precondition (debug-asserted) / the genuine-QM31 recursive use.
 #[inline]
-fn m31_mul(a: u64, b: u64) -> u64 { (a * b) % M31_P }
+pub(crate) fn m31_mul(a: u64, b: u64) -> u64 { (a * b) % M31_P }
 #[inline]
-fn m31_add(a: u64, b: u64) -> u64 { (a + b) % M31_P }
+pub(crate) fn m31_add(a: u64, b: u64) -> u64 { (a + b) % M31_P }
 #[inline]
-fn m31_sub(a: u64, b: u64) -> u64 { (a + M31_P - b) % M31_P }
+pub(crate) fn m31_sub(a: u64, b: u64) -> u64 { (a + M31_P - b) % M31_P }
+
+/// QM31 limb-wise addition `x + y`.
+#[inline]
+pub fn add_limbs(x: [u64; 4], y: [u64; 4]) -> [u64; 4] {
+    [m31_add(x[0], y[0]), m31_add(x[1], y[1]), m31_add(x[2], y[2]), m31_add(x[3], y[3])]
+}
+
+/// QM31 limb-wise subtraction `x − y`.
+#[inline]
+pub fn sub_limbs(x: [u64; 4], y: [u64; 4]) -> [u64; 4] {
+    [m31_sub(x[0], y[0]), m31_sub(x[1], y[1]), m31_sub(x[2], y[2]), m31_sub(x[3], y[3])]
+}
+
+/// QM31 scaled by an M31 scalar `s` (each limb × s) — matches `qm31_scale_m31`.
+#[inline]
+pub fn scale_limbs(x: [u64; 4], s: u64) -> [u64; 4] {
+    [m31_mul(x[0], s), m31_mul(x[1], s), m31_mul(x[2], s), m31_mul(x[3], s)]
+}
 
 /// Decode a packed-`u128` QM31 into its four M31 limbs `[c0.re, c0.im, c1.re, c1.im]`.
 #[inline]
@@ -245,8 +263,13 @@ pub fn prove_qm31_mul(ops: &[(u128, u128)]) -> Result<(Vec<u8>, u32), String> {
         return Err(format!("too many ops: log_size {log_size} exceeds {MAX_LOG_SIZE}"));
     }
 
-    let columns = build_trace(ops, log_size);
+    prove_columns(build_trace(ops, log_size), log_size)
+}
 
+/// Prove an already-built 12-column trace. Factored out of [`prove_qm31_mul`] so
+/// tests can submit a deliberately-corrupted trace and confirm the constraints
+/// reject it (no verifying proof can be produced).
+fn prove_columns(columns: TraceColumns, log_size: u32) -> Result<(Vec<u8>, u32), String> {
     let config = make_config(log_size);
     let lifting = log_size + LOG_BLOWUP;
     let twiddles = CpuBackend::precompute_twiddles(
@@ -394,5 +417,40 @@ mod tests {
     #[test]
     fn test_empty_ops_rejected() {
         assert!(prove_qm31_mul(&[]).is_err());
+    }
+
+    #[test]
+    fn test_tampered_proof_rejected() {
+        let mut seed = 0xABCD_EF01;
+        let ops: Vec<(u128, u128)> =
+            (0..8).map(|_| (rand_qm31(&mut seed), rand_qm31(&mut seed))).collect();
+        let (proof, log_size) = prove_qm31_mul(&ops).expect("prove");
+        let mut bad = proof.clone();
+        bad[proof.len() / 2] ^= 0xFF; // corrupt a middle byte of the FRI proof
+        assert!(
+            !verify_qm31_mul(&bad, log_size).unwrap_or(false),
+            "a tampered proof must not verify",
+        );
+    }
+
+    #[test]
+    fn test_wrong_product_rejected() {
+        // Build a valid trace, then corrupt one z-column value. The four AIR
+        // constraints pin z = x·y exactly, so no verifying proof can result —
+        // either prove() errors or the proof fails verification.
+        let ops = vec![(pack([3, 1, 4, 1]), pack([5, 9, 2, 6]))];
+        let log = compute_log_size(ops.len());
+        let mut cols = build_trace(&ops, log);
+        let domain = CanonicCoset::new(log).circle_domain();
+        let mut vals = cols[8].values.clone(); // column 8 = z0
+        vals[0] = vals[0] + BaseField::from_u32_unchecked(1); // flip the product
+        cols[8] = CircleEvaluation::new(domain, vals);
+        match prove_columns(cols, log) {
+            Ok((proof, ls)) => assert!(
+                !verify_qm31_mul(&proof, ls).unwrap_or(false),
+                "a trace with a wrong product must not yield a verifying proof",
+            ),
+            Err(_) => { /* prover rejected the unsatisfiable trace — also correct */ }
+        }
     }
 }

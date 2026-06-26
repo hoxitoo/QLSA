@@ -34,11 +34,11 @@ ML-DSA подпись
 
 | Операция верификатора | AIR-gadget | Статус |
 |----------------------|-----------|--------|
-| QM31 add/mul (поле расширения) | `recursive/qm31_mul_air.rs` | ✅ **groundwork (2026-06-17)** |
-| circleFold / lineFold | `recursive/fold_air.rs` | ⏳ построен на QM31-gadget |
-| OODS quotient check | `recursive/oods_air.rs` | ⏳ построен на QM31-gadget |
-| Poseidon2 Merkle path (inner hash) | `poseidon2_merkle_air.rs` (есть, t=2) → t=16 вариант | 🟡 есть базовый, нужен t=16 |
-| Fiat-Shamir transcript replay | `recursive/channel_air.rs` | ⏳ Poseidon2 sponge как AIR |
+| QM31 add/mul (поле расширения) | `recursive/qm31_mul_air.rs` | ✅ **готов (2026-06-17)** |
+| circleFold / lineFold | `recursive/fold_air.rs` | ✅ **готов (2026-06-17)** |
+| OODS quotient check | `recursive/oods_air.rs` | ✅ **готов (2026-06-17)** |
+| Poseidon2 Merkle path (inner hash) | `recursive/merkle_path_air.rs` (t=2) → t=16 вариант | ✅ **t=2 готов (2026-06-17)**; t=16 — R2 |
+| Fiat-Shamir transcript replay | `recursive/channel_air.rs` (t=2) → t=16 вариант | ✅ **t=2 готов (2026-06-17)**; t=16 — R2 |
 | FRI fold chain (K раундов) | `recursive/fri_chain_air.rs` | ⏳ цепочка fold-gadget |
 
 ## Поэтапный план
@@ -53,22 +53,66 @@ ML-DSA подпись
   - 12 cols (x:4, y:4, z:4), 4 ограничения степени 2, без preproc
   - Кросс-чек: trace.z == `qm31_mul` (u128-референс); полный prove/verify==true
 - **R0.2 QM31-add/lin-combo AIR** — линейные комбинации `Σ αⱼ·colⱼ` (для OODS combo)
-- **R0.3 Constraint-satisfaction harness** — rejection-тесты (порча z → proof не верифицируется)
+- **R0.3 Constraint-satisfaction harness** — ✅ **готов (2026-06-17)** — rejection-тесты в обоих
+  gadget'ах: порча product/folded/helper-p в trace → proof не верифицируется (байтовый tamper +
+  witness-level порча столбца через `prove_columns`). Подтверждает, что ограничения реально
+  обеспечивают soundness (закрывает Low-1 аудита)
 
 ### Этап R1 — FRI fold + OODS gadgets
 
-- circleFold: `(f₊ + f₋) + α·(f₊ − f₋)·y⁻¹` как QM31-арифметика (y⁻¹ как witness + проверка `y·y⁻¹=1`)
-- lineFold: та же формула с x⁻¹ и twiddle T_{2^k}(x)
-- OODS quotient: `f₊·(p.x − z_x) == compValue − oodsCombo` (мультипликативная форма, без inv)
+- **circleFold / lineFold** (`recursive/fold_air.rs`) — ✅ **готов (2026-06-17)**
+  - Доказывает `folded = (f₊+f₋) + α·(f₊−f₋)·inv` для батча (одна формула на circle+line fold;
+    inv = y⁻¹ или x⁻¹ передаётся как witness-столбец)
+  - 21 col, helper `p = (f₊−f₋)·inv` снижает степень 3→2: C_p (4) + C_f (4), все степени 2
+  - Кросс-чек: `fold_ref` ≡ `vfri2_bridge::circle_fold`; алгебраические инварианты (α=0 ⇒ sum;
+    f₊=f₋ ⇒ 2·f₊); полный prove/verify roundtrip + 3 rejection-теста. 8 Rust тестов
+- **OODS quotient** (`recursive/oods_air.rs`) — ✅ **готов (2026-06-17)**
+  - Доказывает `fₚ·(px − z_x) = compValue − oodsCombo` (мультипликативная форма, без QM31-inv)
+  - 17 col, 4 ограничения степени 2; `px` (M31) встраивается в QM31 как `(px,0,0,0)`; одна форма
+    покрывает и позитивный (`px`), и антиподальный (`−px`) запрос
+  - Кросс-чек против перегруппированного `vfri2_bridge` quotient `fPlus=(rawComp−oodsCombo)/(px−z_x)`;
+    алгебраический инвариант (fₚ=0 ⇒ compValue=oodsCombo); roundtrip + 2 rejection. 8 Rust тестов
+  - **R1 завершён** — все три арифметических FRI-примитива (QM31-mul, fold, OODS) готовы и
+    cross-checked против on-chain референса. 24 рекурсивных Rust теста. Следующее: R2 (inner-hash)
 
-### Этап R2 — inner hash AIR (t=16)
+### Этап R2 — Merkle path AIR + inner hash (t=16)
 
-- Poseidon2 t=16 как AIR (Stwo native Poseidon2-16) — 8-словные узлы, 128-бит
-- Merkle path verification поверх t=16 compress (адаптация `poseidon2_merkle_air.rs`)
-- **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт
+- **Merkle authentication-path AIR** (`recursive/merkle_path_air.rs`) — ✅ **t=2 готов (2026-06-17)**
+  - Доказывает путь аутентификации: `leaf @ index + siblings → root` через Poseidon2 t=2 compression
+    (on-chain `MerkleVerifier.verify` переведён в AIR; dual к full-tree `poseidon2_merkle_air`)
+  - 10 main + 4 preproc col; раскладка 8 раундов/компрессия. Новые структурные элементы поверх
+    раунд-ядра: выбор left/right по биту индекса (`bit·sib+(1−bit)·cur`), цепочка `cur` между
+    компрессиями (`cur = is_first·leaf + (1−is_first)·s0[-1]`), привязка `(leaf,index,root)` в канал
+  - Все ограничения ≤ степень 3 (как у базового Poseidon2 Merkle AIR)
+  - Кросс-чек `merkle_path_root` против прямых `compress`; roundtrip depth 1/3/5; rejection
+    (wrong root/index/tampered/corrupted-trace). 10 Rust тестов
+  - **Самый дорогой блок рекурсивного верификатора** (один путь на запрос на FRI-слой)
+- **Fiat-Shamir transcript replay** (`recursive/channel_air.rs`) — ✅ **t=2 готов (2026-06-17)**
+  - Доказывает поглощение Poseidon2 t=2 duplex-губки (`mixU32s`-ядро `Poseidon2Channel`/`P2T8Channel`):
+    `s0 += word; permute` на каждое слово → digest. Рекурсивный верификатор воспроизводит транскрипт
+    в схеме, чтобы доказать честный вывод challenge'ов/позиций запросов (а не cherry-pick)
+  - 7 main + 4 preproc col; init-wiring `inp0 = (is_first?0:s0[-1]) + word`, `inp1 = (is_first?0:s1[-1])`;
+    привязка `(n_words, digest)` в канал. Кросс-чек против прямого `permute`; roundtrip 1/8 слов;
+    rejection (wrong digest/count/tampered/corrupted-trace). 9 Rust тестов
+- **t=16 inner hash** (остаток R2): расширить compression обоих inner-hash AIR (`merkle_path_air`,
+  `channel_air`) до Poseidon2 t=16 (Stwo native, 128-бит). Ширина хеша — pluggable backend
+  (как VFRI10→VFRI11 t=4→t=8); структура AIR не меняется. **Здесь t=16 «возвращается»** — но как
+  inner circuit, on-chain газ не растёт
 
 ### Этап R3 — recursive verifier composition
 
+> **Полный набор gadget'ов готов (2026-06-17):** арифметика (QM31-mul), FRI-фолд, OODS-quotient,
+> inner-hash Merkle path, Fiat-Shamir transcript. R3 собирает их в единый AIR.
+
+- **R3.1 per-query FRI step** (`recursive/query_step_air.rs`) — ✅ **готов (2026-06-17)**
+  - Первый composition-gadget: в одной строке на запрос объединяет OODS± + circle fold, где
+    `fPlus`/`fMinus` текут из OODS в fold **через общие trace-столбцы** (реальная data-flow, не
+    отдельный proof): `OODS+: fPlus·(px−z_x)=compPos−comboPos`, `OODS−: fMinus·(−px−z_x)=compNeg−comboNeg`,
+    `fold: folded=(fPlus+fMinus)+α·(fPlus−fMinus)·yInv`
+  - 42 col, helper `p=(fPlus−fMinus)·yInv` держит все 16 ограничений ≤ deg 2; generic-хелпер `qmul`
+    дедуплицирует раскрытие QM31-mul (×3)
+  - Кросс-чек: куски шага ≡ `oods_air::comp_value_ref` (px и −px) + `fold_air::fold_ref`; roundtrip +
+    2 rejection (wrong folded/compPos). 7 Rust тестов. **50 рекурсивных Rust тестов**
 - `recursive/recursive_verifier.rs` — собирает все gadgets в единый AIR верификатора VFRI11
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8

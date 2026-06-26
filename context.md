@@ -12,7 +12,37 @@
 - **Рекурсия R0.1 (2026-06-17)**: первый foundational gadget — `stark_stwo/src/recursive/qm31_mul_air.rs`
   - QM31 batch-multiply AIR: доказывает `z = x·y` в QM31 = CM31[u]/(u²−R), R = 2+i; 12 cols (x:4,y:4,z:4), 4 ограничения степени 2, без preproc
   - Несущий примитив рекурсивного верификатора (circleFold/lineFold/OODS сводятся к QM31-арифметике)
-  - Полный Stwo prove/verify roundtrip + кросс-чек против u128-референса (`u²=R`, `1·y=y`); 6 Rust тестов
+  - Полный Stwo prove/verify roundtrip + кросс-чек против u128-референса (`u²=R`, `1·y=y`); 8 Rust тестов (вкл. 2 rejection)
+
+- **Рекурсия R1 + R0.3 (2026-06-17)**: FRI fold gadget + rejection-харнесс
+  - `stark_stwo/src/recursive/fold_air.rs`: circle/line fold AIR — `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (единая формула; inv=y⁻¹ для circle, x⁻¹ для line). 21 col, helper-столбец `p=(f₊−f₋)·inv` снижает степень 3→2 (C_p:4 + C_f:4, все deg 2)
+  - Кросс-чек `fold_ref ≡ vfri2_bridge::circle_fold`; алгебраические инварианты (α=0⇒sum, f₊=f₋⇒2·f₊); полный prove/verify roundtrip; 8 Rust тестов
+  - **R0.3 rejection-харнесс**: оба gadget'а получили `prove_columns` (вынесен из prove) → тесты подают испорченный trace-столбец (product/folded/helper-p) и подтверждают, что proof не верифицируется (+байтовый tamper). Закрывает Low-1 аудита (раньше были только позитивные тесты)
+
+- **Рекурсия R1 завершён — OODS quotient (2026-06-17)**: `stark_stwo/src/recursive/oods_air.rs`
+  - OODS quotient AIR: доказывает `fₚ·(px − z_x) = compValue − oodsCombo` (мультипликативная форма, без QM31-inv) — перегруппировка верификаторного `fPlus=(rawComp−oodsCombo)/(px−z_x)`
+  - 17 col, 4 ограничения степени 2; `px` (M31) встраивается в QM31 как `(px,0,0,0)`; одна форма покрывает позитивный (`px`) и антиподальный (`−px`) запрос
+  - Кросс-чек против `vfri2_bridge`; алгебраический инвариант (fₚ=0 ⇒ compValue=oodsCombo); roundtrip + 2 rejection; 8 Rust тестов
+  - **R1 полностью завершён**: все 3 арифметических FRI-примитива (QM31-mul, fold, OODS) готовы и cross-checked против on-chain референса; **24 рекурсивных Rust теста зелёные**. Следующее: R2 — Poseidon2-t16 inner-hash Merkle AIR
+
+- **Рекурсия R2 — Merkle auth-path AIR (2026-06-17)**: `stark_stwo/src/recursive/merkle_path_air.rs`
+  - Доказывает путь аутентификации: `leaf @ index + siblings → root` через Poseidon2 t=2 compression (on-chain `MerkleVerifier.verify` переведён в AIR; dual к full-tree `poseidon2_merkle_air`)
+  - 10 main + 4 preproc col; раскладка 8 раундов/компрессия. Новое поверх раунд-ядра: выбор left/right по биту индекса (`bit·sib+(1−bit)·cur`), цепочка `cur` между компрессиями (`cur = is_first·leaf + (1−is_first)·s0[-1]`), привязка `(leaf,index,root)` в Fiat-Shamir канал. Все ограничения ≤ deg 3
+  - Кросс-чек `merkle_path_root` ↔ прямые `compress`; roundtrip depth 1/3/5; rejection (wrong root/index/tampered/corrupted-trace). 10 Rust тестов
+  - Самый дорогой блок рекурсивного верификатора (путь на запрос на FRI-слой). **34 рекурсивных Rust теста зелёные**
+
+- **Рекурсия R2 — Fiat-Shamir transcript AIR (2026-06-17)**: `stark_stwo/src/recursive/channel_air.rs`
+  - Доказывает поглощение Poseidon2 t=2 duplex-губки (`mixU32s`-ядро `Poseidon2Channel`/`P2T8Channel`): `s0 += word; permute` → digest. Рекурсивный верификатор воспроизводит транскрипт в схеме, чтобы доказать честный вывод challenge'ов/позиций запросов
+  - 7 main + 4 preproc col; init-wiring `inp0 = (is_first?0:s0[-1]) + word`; привязка `(n_words, digest)` в канал. Кросс-чек ↔ прямой `permute`; roundtrip 1/8 слов; rejection (wrong digest/count/tampered/corrupted-trace). 9 Rust тестов
+  - **Полный набор gadget'ов готов**: арифметика (QM31-mul), FRI-фолд, OODS, inner-hash Merkle path, Fiat-Shamir transcript — все 5 категорий. **43 рекурсивных Rust теста зелёные**
+
+- **Рекурсия R3.1 — per-query FRI step (2026-06-17)**: `stark_stwo/src/recursive/query_step_air.rs`
+  - Первый composition-gadget: в одной строке на запрос объединяет OODS± + circle fold, где `fPlus`/`fMinus` текут из OODS в fold **через общие trace-столбцы** (реальная data-flow рекурсивного верификатора, не отдельный proof)
+  - `OODS+: fPlus·(px−z_x)=compPos−comboPos`, `OODS−: fMinus·(−px−z_x)=compNeg−comboNeg`, `fold: folded=(fPlus+fMinus)+α·(fPlus−fMinus)·yInv`. 42 col, helper `p=(fPlus−fMinus)·yInv` держит все 16 ограничений ≤ deg 2; generic `qmul` дедуплицирует раскрытие QM31-mul
+  - Кросс-чек: куски шага ≡ `oods_air::comp_value_ref` (px и −px) + `fold_air::fold_ref`; roundtrip + 2 rejection. 7 Rust тестов. **50 рекурсивных Rust тестов зелёные**
+  - Следующее: t=16 inner hash (pluggable backend) + полный recursive_verifier (per-query steps + Merkle + transcript в одном proof)
+
+- **⚠️ Git-инцидент (2026-06-17)**: между ходами контейнер пере-склонировался, локальные origin-ref'ы устарели до merge-коммита `36cfc3e` (казалось, R1/R2-коммиты потеряны). `git fetch` восстановил `origin/...E4kPW` до `657e87b` (forced update) — коммиты были на реальном remote. `git reset --hard` восстановил рабочее дерево. Урок: после «потери» коммитов сначала `git fetch`, прежде чем считать их утраченными
 
 - **Аудит безопасности + code review (2026-06-17)**: 2 эксперта (crypto/blockchain + Rust/системы) по диффу VFRI11/t=8/рекурсия против main. **Нет Critical/High/Medium.** QM31-формула рекурсивного gadget проверена вручную — корректна, soundness-пробела нет (4 ограничения точно фиксируют каждый limb z). Исправлено/упрочнено:
   - **deploy_v6.sh (HIGH, fixed)**: флаг `--network` молча игнорировался (`NETWORK="${1:-sepolia}"` ставил `NETWORK="--network"`) → риск деплоя в неверную сеть. Добавлен полноценный парсинг `--network[=]val` + `-h`
