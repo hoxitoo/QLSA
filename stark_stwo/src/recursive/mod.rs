@@ -19,15 +19,18 @@
 //! | Merkle auth-path | `merkle_path_air` | `leaf @ index + siblings → root` (Poseidon2 t=2 compression) |
 //! | Fiat-Shamir transcript | `channel_air` | Poseidon2 t=2 sponge absorb (`mixU32s` core) → digest |
 //! | Per-query FRI step | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
-//! | **FRI fold chain** | `fri_fold_chain_air` | **K line-fold rounds chained: output[k]=lineFold(output[k−1], …) (R3.2)** |
+//! | FRI fold chain | `fri_fold_chain_air` | K line-fold rounds chained: output[k]=lineFold(output[k−1], …) (R3.2) |
+//! | **Per-query recursive verifier** | `recursive_verifier` | **OODS± + circle fold + K line folds in ONE AIR; full per-query FRI chain, cross-row bound (R3.3)** |
 //!
-//! Next (see roadmap R3): full recursive verifier composition (channel + query_step +
-//! fri_fold_chain + merkle_path in one multi-component Stwo proof).
+//! Next (see roadmap R3): bind the final fold value to the FRI last-layer Merkle
+//! commitment (`merkle_path_air`), then aggregate N queries + the Fiat-Shamir
+//! transcript (`channel_air`) into the complete recursive VFRI11 verifier.
 
 pub mod channel_air;
 pub mod fold_air;
 pub mod fri_fold_chain_air;
 pub mod merkle_path_air;
 pub mod oods_air;
-pub mod query_step_air;
 pub mod qm31_mul_air;
+pub mod query_step_air;
+pub mod recursive_verifier;

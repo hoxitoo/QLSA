@@ -112,8 +112,27 @@ ML-DSA подпись
   - 42 col, helper `p=(fPlus−fMinus)·yInv` держит все 16 ограничений ≤ deg 2; generic-хелпер `qmul`
     дедуплицирует раскрытие QM31-mul (×3)
   - Кросс-чек: куски шага ≡ `oods_air::comp_value_ref` (px и −px) + `fold_air::fold_ref`; roundtrip +
-    2 rejection (wrong folded/compPos). 7 Rust тестов. **50 рекурсивных Rust тестов**
-- `recursive/recursive_verifier.rs` — собирает все gadgets в единый AIR верификатора VFRI11
+    2 rejection (wrong folded/compPos). 7 Rust тестов
+- **R3.2 FRI fold chain** (`recursive/fri_fold_chain_air.rs`) — ✅ **готов (2026-06-17)**
+  - K последовательных line-fold раундов, где вход каждого = выход предыдущего (cross-row chain):
+    `output[k] = lineFold(output[k−1], sibling_k, alpha_k, xInv_k)`
+  - 21 main + 1 preproc (`is_first`); C_p (deg2) + C_f (deg2) + C_chain `(1−is_first)·(input−out_prev)` (deg1);
+    первая padding-строка помечается `is_first=1`, чтобы chain не ломался на границе трейса
+  - Кросс-чек: single-round ≡ `fold_air::fold_ref`; 3-round chaining; roundtrip 1/4/6; 3 rejection
+    (tampered/wrong-output/broken-chain). 9 Rust тестов
+- **R3.3 per-query recursive verifier** (`recursive/recursive_verifier.rs`) — ✅ **готов (2026-06-17)**
+  - Объединяет R3.1 (OODS± + circle fold) и R3.2 (K line-fold раундов) в **ОДИН** AIR-компонент,
+    доказывающий полную per-query FRI-цепочку. Связь circleFold → lineFold₁ → … → lineFold_K
+    обеспечена **cross-row constraint** (a[r]=out[r−1]), а не fingerprint-сайдченнелом
+  - Унификация: оба фолда — одна формула `out=(a+b)+α·(a−b)·inv` через операнды `a`/`b`
+    (row0: a=fPlus, b=fMinus; rows≥1: a=прошлый выход, b=sibling)
+  - 42 main + 2 preproc (`is_step` гейтит OODS на row0, `chain_on` гейтит chain на rows 1..K);
+    OODS×is_step = deg 3 (в пределах `+1` bound, как у Poseidon2-гаджетов)
+  - Кросс-чек: `recursive_query_ref` ≡ `query_step_air::step_ref` (row0) + `fri_fold_chain_air::fold_chain_ref`
+    (rows≥1) + `oods_air::comp_value_ref` (px/−px); roundtrip 1/4/6; 3 rejection
+    (tampered/corrupted-row0-output/corrupted-compPos/broken-chain). 8 Rust тестов. **67 рекурсивных Rust тестов**
+- Осталось в R3: привязать финальный fold к FRI last-layer Merkle-корню (`merkle_path_air`), затем
+  агрегировать N запросов + Fiat-Shamir transcript (`channel_air`) в полный VFRI11-верификатор
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
