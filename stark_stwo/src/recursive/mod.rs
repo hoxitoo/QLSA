@@ -1,4 +1,4 @@
-//! Recursive STARK verifier — AIR gadgets (R0 groundwork, 2026-06-17).
+//! Recursive STARK verifier — AIR gadgets (R3.2, 2026-06-17).
 //!
 //! Production gas target: a STARK that proves "I verified a VFRI11 STARK".  The
 //! outer proof is constant-size (~5M gas on-chain) and the inner verifier
@@ -18,13 +18,15 @@
 //! | OODS quotient | `oods_air` | `fₚ·(px − z_x) = compValue − oodsCombo` (multiplicative form) |
 //! | Merkle auth-path | `merkle_path_air` | `leaf @ index + siblings → root` (Poseidon2 t=2 compression) |
 //! | Fiat-Shamir transcript | `channel_air` | Poseidon2 t=2 sponge absorb (`mixU32s` core) → digest |
-//! | **Per-query FRI step** | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
+//! | Per-query FRI step | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
+//! | **FRI fold chain** | `fri_fold_chain_air` | **K line-fold rounds chained: output[k]=lineFold(output[k−1], …) (R3.2)** |
 //!
-//! Next (see roadmap R3): widen the inner hash to t=16, then the full recursive
-//! verifier composition (per-query steps + Merkle + transcript in one proof).
+//! Next (see roadmap R3): full recursive verifier composition (channel + query_step +
+//! fri_fold_chain + merkle_path in one multi-component Stwo proof).
 
 pub mod channel_air;
 pub mod fold_air;
+pub mod fri_fold_chain_air;
 pub mod merkle_path_air;
 pub mod oods_air;
 pub mod query_step_air;
