@@ -35,7 +35,14 @@
   - Доказывает поглощение Poseidon2 t=2 duplex-губки (`mixU32s`-ядро `Poseidon2Channel`/`P2T8Channel`): `s0 += word; permute` → digest. Рекурсивный верификатор воспроизводит транскрипт в схеме, чтобы доказать честный вывод challenge'ов/позиций запросов
   - 7 main + 4 preproc col; init-wiring `inp0 = (is_first?0:s0[-1]) + word`; привязка `(n_words, digest)` в канал. Кросс-чек ↔ прямой `permute`; roundtrip 1/8 слов; rejection (wrong digest/count/tampered/corrupted-trace). 9 Rust тестов
   - **Полный набор gadget'ов готов**: арифметика (QM31-mul), FRI-фолд, OODS, inner-hash Merkle path, Fiat-Shamir transcript — все 5 категорий. **43 рекурсивных Rust теста зелёные**
-  - Следующее: t=16 inner hash (pluggable backend) + R3 — композиция всех gadget'ов в единый AIR верификатора VFRI11
+
+- **Рекурсия R3.1 — per-query FRI step (2026-06-17)**: `stark_stwo/src/recursive/query_step_air.rs`
+  - Первый composition-gadget: в одной строке на запрос объединяет OODS± + circle fold, где `fPlus`/`fMinus` текут из OODS в fold **через общие trace-столбцы** (реальная data-flow рекурсивного верификатора, не отдельный proof)
+  - `OODS+: fPlus·(px−z_x)=compPos−comboPos`, `OODS−: fMinus·(−px−z_x)=compNeg−comboNeg`, `fold: folded=(fPlus+fMinus)+α·(fPlus−fMinus)·yInv`. 42 col, helper `p=(fPlus−fMinus)·yInv` держит все 16 ограничений ≤ deg 2; generic `qmul` дедуплицирует раскрытие QM31-mul
+  - Кросс-чек: куски шага ≡ `oods_air::comp_value_ref` (px и −px) + `fold_air::fold_ref`; roundtrip + 2 rejection. 7 Rust тестов. **50 рекурсивных Rust тестов зелёные**
+  - Следующее: t=16 inner hash (pluggable backend) + полный recursive_verifier (per-query steps + Merkle + transcript в одном proof)
+
+- **⚠️ Git-инцидент (2026-06-17)**: между ходами контейнер пере-склонировался, локальные origin-ref'ы устарели до merge-коммита `36cfc3e` (казалось, R1/R2-коммиты потеряны). `git fetch` восстановил `origin/...E4kPW` до `657e87b` (forced update) — коммиты были на реальном remote. `git reset --hard` восстановил рабочее дерево. Урок: после «потери» коммитов сначала `git fetch`, прежде чем считать их утраченными
 
 - **Аудит безопасности + code review (2026-06-17)**: 2 эксперта (crypto/blockchain + Rust/системы) по диффу VFRI11/t=8/рекурсия против main. **Нет Critical/High/Medium.** QM31-формула рекурсивного gadget проверена вручную — корректна, soundness-пробела нет (4 ограничения точно фиксируют каждый limb z). Исправлено/упрочнено:
   - **deploy_v6.sh (HIGH, fixed)**: флаг `--network` молча игнорировался (`NETWORK="${1:-sepolia}"` ставил `NETWORK="--network"`) → риск деплоя в неверную сеть. Добавлен полноценный парсинг `--network[=]val` + `-h`

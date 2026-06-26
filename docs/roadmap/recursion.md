@@ -102,9 +102,17 @@ ML-DSA подпись
 ### Этап R3 — recursive verifier composition
 
 > **Полный набор gadget'ов готов (2026-06-17):** арифметика (QM31-mul), FRI-фолд, OODS-quotient,
-> inner-hash Merkle path, Fiat-Shamir transcript. 43 рекурсивных Rust теста. R3 собирает их в
-> единый AIR.
+> inner-hash Merkle path, Fiat-Shamir transcript. R3 собирает их в единый AIR.
 
+- **R3.1 per-query FRI step** (`recursive/query_step_air.rs`) — ✅ **готов (2026-06-17)**
+  - Первый composition-gadget: в одной строке на запрос объединяет OODS± + circle fold, где
+    `fPlus`/`fMinus` текут из OODS в fold **через общие trace-столбцы** (реальная data-flow, не
+    отдельный proof): `OODS+: fPlus·(px−z_x)=compPos−comboPos`, `OODS−: fMinus·(−px−z_x)=compNeg−comboNeg`,
+    `fold: folded=(fPlus+fMinus)+α·(fPlus−fMinus)·yInv`
+  - 42 col, helper `p=(fPlus−fMinus)·yInv` держит все 16 ограничений ≤ deg 2; generic-хелпер `qmul`
+    дедуплицирует раскрытие QM31-mul (×3)
+  - Кросс-чек: куски шага ≡ `oods_air::comp_value_ref` (px и −px) + `fold_air::fold_ref`; roundtrip +
+    2 rejection (wrong folded/compPos). 7 Rust тестов. **50 рекурсивных Rust тестов**
 - `recursive/recursive_verifier.rs` — собирает все gadgets в единый AIR верификатора VFRI11
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8

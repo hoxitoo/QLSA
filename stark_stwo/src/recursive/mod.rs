@@ -18,12 +18,14 @@
 //! | OODS quotient | `oods_air` | `fₚ·(px − z_x) = compValue − oodsCombo` (multiplicative form) |
 //! | Merkle auth-path | `merkle_path_air` | `leaf @ index + siblings → root` (Poseidon2 t=2 compression) |
 //! | Fiat-Shamir transcript | `channel_air` | Poseidon2 t=2 sponge absorb (`mixU32s` core) → digest |
+//! | **Per-query FRI step** | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
 //!
-//! Next (see roadmap R2+): widen the inner hash to t=16, recursive verifier
-//! composition (R3).
+//! Next (see roadmap R3): widen the inner hash to t=16, then the full recursive
+//! verifier composition (per-query steps + Merkle + transcript in one proof).
 
 pub mod channel_air;
 pub mod fold_air;
 pub mod merkle_path_air;
 pub mod oods_air;
+pub mod query_step_air;
 pub mod qm31_mul_air;
