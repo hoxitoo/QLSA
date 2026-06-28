@@ -41,7 +41,7 @@
 //! ```
 
 use stwo::core::air::Component;
-use stwo::core::channel::Blake2sM31Channel;
+use stwo::core::channel::{Blake2sM31Channel, Channel};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
@@ -395,6 +395,21 @@ pub fn build_trace(
 
 // ── Prove / verify roundtrip ────────────────────────────────────────────────────
 
+/// Bind the query's public I/O `(px, final_fold_value)` into the Fiat-Shamir
+/// channel after the trace commitment (codebase convention for sub-proof
+/// gadgets), so the proof is cryptographically specific to one claimed final
+/// fold value — the value a downstream Merkle / last-layer check consumes.
+fn mix_public(channel: &mut Blake2sM31Channel, px: u32, final_value: u128) {
+    let l = limbs(final_value);
+    channel.mix_u32s(&[
+        px,
+        l[0] as u32,
+        l[1] as u32,
+        l[2] as u32,
+        l[3] as u32,
+    ]);
+}
+
 /// Prove one query's full recursive FRI verification chain.
 /// Returns `(proof_bytes, log_size, final_fold_value)`.
 pub fn prove_recursive_query(
@@ -406,8 +421,9 @@ pub fn prove_recursive_query(
         return Err(format!("too many fold rounds: log_size {log_size} exceeds {MAX_LOG_SIZE}"));
     }
     let final_value = recursive_query_final(step, rounds);
+    let px = step.2;
     let (main_trace, preproc) = build_trace(step, rounds, log_size);
-    let proof_bytes = prove_columns(preproc, main_trace, log_size)?;
+    let proof_bytes = prove_columns(preproc, main_trace, log_size, px, final_value)?;
     Ok((proof_bytes, log_size, final_value))
 }
 
@@ -415,6 +431,8 @@ fn prove_columns(
     preproc: Vec<TraceCol>,
     main_trace: TraceColumns,
     log_size: u32,
+    px: u32,
+    final_value: u128,
 ) -> Result<Vec<u8>, String> {
     let config = make_config(log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -434,6 +452,8 @@ fn prove_columns(
     tree.extend_evals(main_trace);
     tree.commit(channel);
 
+    mix_public(channel, px, final_value);
+
     let component = new_component(log_size);
     let proof =
         prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
@@ -443,8 +463,15 @@ fn prove_columns(
         .map_err(|e| format!("serialization error: {e:?}"))
 }
 
-/// Verify a proof produced by [`prove_recursive_query`].
-pub fn verify_recursive_query(proof_bytes: &[u8], log_size: u32) -> Result<bool, String> {
+/// Verify a proof produced by [`prove_recursive_query`] against the claimed
+/// public I/O `(px, final_value)`. A wrong `final_value` (or `px`) replays a
+/// different transcript and fails verification.
+pub fn verify_recursive_query(
+    proof_bytes: &[u8],
+    log_size: u32,
+    px: u32,
+    final_value: u128,
+) -> Result<bool, String> {
     if !(MIN_LOG_SIZE..=MAX_LOG_SIZE).contains(&log_size) {
         return Err(format!("log_size {log_size} out of range"));
     }
@@ -475,6 +502,8 @@ pub fn verify_recursive_query(proof_bytes: &[u8], log_size: u32) -> Result<bool,
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    mix_public(verifier_channel, px, final_value);
 
     let result = verify::<Blake2sM31MerkleChannel>(
         &[&component],
@@ -566,7 +595,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 1);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
         assert_eq!(final_v, recursive_query_final(&step, &rounds));
     }
 
@@ -577,7 +606,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 4);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
         assert_eq!(final_v, recursive_query_final(&step, &rounds));
     }
 
@@ -587,8 +616,21 @@ mod tests {
         let mut s = 0x33u64;
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 6);
-        let (bytes, log_size, _) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size).unwrap());
+        let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
+        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
+    }
+
+    // Rejection: a wrong claimed final fold value replays a different transcript.
+    #[test]
+    fn test_wrong_final_value_rejected() {
+        let mut s = 0x99u64;
+        let step = sample_step(&mut s);
+        let rounds = sample_rounds(&mut s, 3);
+        let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
+        // Correct value verifies; a flipped value must not.
+        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
+        assert!(!verify_recursive_query(&bytes, log_size, step.2, final_v ^ 1)
+            .unwrap_or(false));
     }
 
     // Rejection: tampered proof bytes.
@@ -597,12 +639,12 @@ mod tests {
         let mut s = 0x44u64;
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 3);
-        let (mut bytes, log_size, _) = prove_recursive_query(&step, &rounds).unwrap();
+        let (mut bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
         let n = bytes.len();
         // Flip a load-bearing byte; a tampered proof must NOT verify
         // (either a decode error or a constraint/FRI failure → Ok(false)).
         bytes[n / 3] ^= 0xff;
-        assert!(!verify_recursive_query(&bytes, log_size).unwrap_or(false));
+        assert!(!verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap_or(false));
     }
 
     // Rejection: corrupted circle-fold output (row 0 out column) — breaks both
@@ -621,7 +663,7 @@ mod tests {
             let domain = CanonicCoset::new(log_size).circle_domain();
             *col = CircleEvaluation::new(domain, vals);
         }
-        assert!(prove_columns(preproc, main_trace, log_size).is_err());
+        assert!(prove_columns(preproc, main_trace, log_size, step.2, recursive_query_final(&step, &rounds)).is_err());
     }
 
     // Rejection: corrupted compPos (OODS+ binding) on row 0.
@@ -639,7 +681,7 @@ mod tests {
             let domain = CanonicCoset::new(log_size).circle_domain();
             *col = CircleEvaluation::new(domain, vals);
         }
-        assert!(prove_columns(preproc, main_trace, log_size).is_err());
+        assert!(prove_columns(preproc, main_trace, log_size, step.2, recursive_query_final(&step, &rounds)).is_err());
     }
 
     // Rejection: broken chain — corrupt line-fold input on row 1.
@@ -657,6 +699,6 @@ mod tests {
             let domain = CanonicCoset::new(log_size).circle_domain();
             *col = CircleEvaluation::new(domain, vals);
         }
-        assert!(prove_columns(preproc, main_trace, log_size).is_err());
+        assert!(prove_columns(preproc, main_trace, log_size, step.2, recursive_query_final(&step, &rounds)).is_err());
     }
 }

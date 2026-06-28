@@ -129,10 +129,20 @@ ML-DSA подпись
   - 42 main + 2 preproc (`is_step` гейтит OODS на row0, `chain_on` гейтит chain на rows 1..K);
     OODS×is_step = deg 3 (в пределах `+1` bound, как у Poseidon2-гаджетов)
   - Кросс-чек: `recursive_query_ref` ≡ `query_step_air::step_ref` (row0) + `fri_fold_chain_air::fold_chain_ref`
-    (rows≥1) + `oods_air::comp_value_ref` (px/−px); roundtrip 1/4/6; 3 rejection
-    (tampered/corrupted-row0-output/corrupted-compPos/broken-chain). 8 Rust тестов. **67 рекурсивных Rust тестов**
-- Осталось в R3: привязать финальный fold к FRI last-layer Merkle-корню (`merkle_path_air`), затем
-  агрегировать N запросов + Fiat-Shamir transcript (`channel_air`) в полный VFRI11-верификатор
+    (rows≥1) + `oods_air::comp_value_ref` (px/−px); roundtrip 1/4/6; rejection
+    (tampered/corrupted-row0-output/corrupted-compPos/broken-chain) + **public-binding finalFold в транскрипт**
+    (`mix_public(px, finalFold)`; wrong-final-value rejection). 9 Rust тестов
+- **R3.4 per-query integration** (`recursive/integration.rs`) — ✅ **готов (2026-06-17)**
+  - Сцепляет три sub-proof'а, верифицирующих ОДИН FRI-запрос, через общие public-значения:
+    `recursive_verifier` (finalFold, QM31) → `qm31_leaf_hash` (t=2 rate-1 sponge → M31 leaf) →
+    `merkle_path_air` (leaf @ idx + siblings → friLayerRoots[K])
+  - `qm31_leaf_hash(v) = sponge_absorb([v≫96,v≫64,v≫32,v]).0` — рекурсивный аналог on-chain
+    `Poseidon2MerkleVerifier.hashLeaf(qm31Words)` / `hash_leaf_qm31_p2`
+  - Тесты: leaf-hash ≡ channel sponge; end-to-end one-query (все 3 proof'а accept + связующие
+    значения совпадают); tampered-finalFold ломает цепочку (recursive proof reject + другой leaf).
+    3 Rust теста. **71 рекурсивный Rust тест**
+- Осталось в R3: агрегировать N per-query proof'ов + воспроизвести Fiat-Shamir transcript
+  (`channel_air`), выводящий query-индексы и fold-challenge'ы, → полный VFRI11-верификатор
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
