@@ -21,11 +21,13 @@
 //! | Per-query FRI step | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
 //! | FRI fold chain | `fri_fold_chain_air` | K line-fold rounds chained: output[k]=lineFold(output[k−1], …) (R3.2) |
 //! | Per-query recursive verifier | `recursive_verifier` | OODS± + circle fold + K line folds in ONE AIR; full per-query FRI chain, cross-row bound (R3.3) |
-//! | **Per-query integration** | `integration` | **recursive_verifier → `qm31_leaf_hash` → `merkle_path_air`: full per-query FRI verification, value-bound across 3 sub-proofs (R3.4)** |
+//! | Per-query integration | `integration` | recursive_verifier → `qm31_leaf_hash` → `merkle_path_air`: full per-query FRI verification, value-bound across 3 sub-proofs (R3.4) |
+//! | **Multi-query aggregation** | `recursive_verifier` | **N queries in ONE STARK (`prove_recursive_queries`): N blocks of (1+K) rows, same AIR, all finalFolds bound (R3.5)** |
 //!
-//! Next (see roadmap R3): aggregate N per-query proofs and replay the Fiat-Shamir
-//! transcript (`channel_air`) that derives the query indices + folding challenges,
-//! yielding the complete recursive VFRI11 verifier.
+//! Next (see roadmap R3): replay the Fiat-Shamir transcript (`channel_air`) that
+//! derives the query indices + folding challenges from the committed roots, so the
+//! aggregated queries are the *channel-derived* ones — the last piece of the
+//! complete recursive VFRI11 verifier.
 
 pub mod channel_air;
 pub mod fold_air;

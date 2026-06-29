@@ -140,9 +140,19 @@ ML-DSA подпись
     `Poseidon2MerkleVerifier.hashLeaf(qm31Words)` / `hash_leaf_qm31_p2`
   - Тесты: leaf-hash ≡ channel sponge; end-to-end one-query (все 3 proof'а accept + связующие
     значения совпадают); tampered-finalFold ломает цепочку (recursive proof reject + другой leaf).
-    3 Rust теста. **71 рекурсивный Rust тест**
-- Осталось в R3: агрегировать N per-query proof'ов + воспроизвести Fiat-Shamir transcript
-  (`channel_air`), выводящий query-индексы и fold-challenge'ы, → полный VFRI11-верификатор
+    3 Rust теста
+- **R3.5 multi-query aggregation** (`recursive_verifier::prove_recursive_queries`) — ✅ **готов (2026-06-17)**
+  - N запросов в ОДНОМ STARK: трейс — N блоков по `1+K` строк; **AIR не меняется** — per-row
+    селекторы `is_step`/`chain_on` гейтят каждый блок независимо (chain=0 на row0 каждого блока,
+    поэтому запрос не «перетекает» в следующий)
+  - `prove_recursive_queries(&[(StepOp, Vec<FoldRound>)])` → `(proof, log_size, Vec<finalFold>)`;
+    все запросы — одинаковый `num_folds`; `mix_public_multi` привязывает все N `(px, finalFold)`
+  - Рефакторинг: `fill_query_block(base, step, rounds)` переиспользуется single- и multi-путём
+  - Тесты: roundtrip 5 запросов; single через multi-путь == single-путь; wrong-final одного
+    запроса роняет весь proof; uneven-folds / empty — ошибки. 5 Rust тестов. **76 рекурсивных Rust тестов**
+- Осталось в R3: воспроизвести Fiat-Shamir transcript (`channel_air`), выводящий query-индексы и
+  fold-challenge'ы из закоммиченных корней, чтобы агрегированные запросы были *channel-derived* —
+  последний кусок полного VFRI11-верификатора
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
