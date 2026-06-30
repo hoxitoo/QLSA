@@ -149,10 +149,21 @@ ML-DSA подпись
     все запросы — одинаковый `num_folds`; `mix_public_multi` привязывает все N `(px, finalFold)`
   - Рефакторинг: `fill_query_block(base, step, rounds)` переиспользуется single- и multi-путём
   - Тесты: roundtrip 5 запросов; single через multi-путь == single-путь; wrong-final одного
-    запроса роняет весь proof; uneven-folds / empty — ошибки. 5 Rust тестов. **76 рекурсивных Rust тестов**
-- Осталось в R3: воспроизвести Fiat-Shamir transcript (`channel_air`), выводящий query-индексы и
-  fold-challenge'ы из закоммиченных корней, чтобы агрегированные запросы были *channel-derived* —
-  последний кусок полного VFRI11-верификатора
+    запроса роняет весь proof; uneven-folds / empty — ошибки. 5 Rust тестов
+- **R3.6 Fiat-Shamir draw (squeeze)** (`recursive/transcript_draw_air.rs`) — ✅ **готов (2026-06-17)**
+  - Дуал к `channel_air` (absorb): доказывает цепочку Poseidon2 t=2 duplex-squeeze — ядро
+    `drawSecureFelt` / `drawQueries`. Один draw из `(s0,s1)`, счётчик `d`:
+    `(w0,w1)←(s0,s1)`; `s0←(s0+d)%P`; `permute`; `d++` (точно `P2Channel::draw_pair`)
+  - 8 main + 7 preproc (rc0,rc1,is_init,is_first,**ndraws**,**dig0**,**dig1**): стартовый digest —
+    preprocessed-константа, squeeze `(w0,w1)=cur` на init-строках, `inp0=cur0+ndraws`
+  - `draw_chain(digest,m)` / `draw_secure_felt(digest)` — рекурсивные референсы; bind `(m,digest)`
+  - Тесты: draw0==digest; secure-felt пакует 2 draw'а; build_trace ≡ reference; roundtrip 1/10;
+    wrong-digest / wrong-count / tampered / corrupted-squeeze / zero — rejection. 11 Rust тестов.
+    **87 рекурсивных Rust тестов**
+- **Полный набор gadget'ов рекурсии готов (R3.6):** QM31-арифметика, FRI fold/OODS, inner-hash
+  Merkle path, Fiat-Shamir absorb + draw, per-query композиция (single + N-query) + leaf-hash
+  интеграция. Осталось (R3.7): top-level сборка — связать канал (absorb→draw), вывести
+  channel-bound query-индексы + fold-challenge'ы и подать в multi-query verifier
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
