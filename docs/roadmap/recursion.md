@@ -167,6 +167,33 @@ ML-DSA подпись
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
+### ⚠ R3.7 — блокеры soundness (аудит 2026-06-17, ДО любой прод-обвязки)
+
+Аудит (крипто + код) подтвердил: gadget'ы — корректные *relation*-провера (output-столбцы привязаны
+к input-столбцам, cross-checked против `vfri2_bridge.rs`), но **композиция ещё НЕ sound против
+злонамеренного prover'а**. Два подтверждённых пробела (оба — блокеры R3.7, закрыть ДО `QLSAVerifierRecursive`):
+
+- **[C1] Публичные выходы привязаны только через Fiat-Shamir, без in-circuit ограничения.**
+  `mix_public`/`mix_digest` делают proof *специфичным* к смешанному значению, но НЕ доказывают, что
+  трейс его *вычислил*. Prover может предъявить proof, где заявленный `root`/`finalFold`/`digest`
+  ≠ реальный выход трейса. Фикс: `is_output`-гейтед ограничение `(out_col − public)=0`, привязывающее
+  выходную строку к verifier-fixed public input.
+- **[C2] Preprocessed-столбцы (селекторы И round-константы) поставляются prover'ом в Tree 0 и не
+  пиннятся к каноническому спеку.** Верификатор коммитит `proof.commitments[0]` как есть → prover
+  может подделать селектор (`is_step≡0`) и отключить ограничения (подтверждено пробой: forged
+  `is_step` + испорченный `compPos` → `verify=true`). Фикс: верификатор должен регенерировать
+  канонические preprocessed-столбцы и пиннить их корень (reject при несовпадении), а не доверять
+  дереву prover'а.
+
+**Важно:** тот же паттepн `commit(proof.commitments[0], …)` используют зрелые верификаторы в
+`stark_stwo/src/lib.rs` (V23/VFRI). Эксплуатируемость каждого — отдельный per-circuit follow-up;
+C2 — review-item уровня всего репозитория, не только рекурсии. Тесты (88 рекурсивных) покрывают
+honest-prover + tampered-bytes, но НЕ malicious-preproc/trace forgery — поэтому пробелы не всплывали.
+
+Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
+guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест
+(`is_err()`→`!verify().unwrap_or(false)`).
+
 ### Этап R4 — on-chain + интеграция
 
 - `contracts/src/QLSAVerifierRecursive.sol` — верификация одного recursive STARK (~5M газа константа)

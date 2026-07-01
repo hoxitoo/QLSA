@@ -511,10 +511,10 @@ mod tests {
             .collect();
         let (mut bytes, log_size, _) = prove_fold_chain(&rounds).unwrap();
         let n = bytes.len();
-        if n > 8 {
-            bytes[n - 4] ^= 0xff;
-        }
-        assert!(verify_fold_chain(&bytes, log_size).is_err());
+        // Flip a load-bearing byte; a tampered proof must NOT verify — accept
+        // either a decode error or a constraint/FRI failure (Ok(false)).
+        bytes[n / 3] ^= 0xff;
+        assert!(!verify_fold_chain(&bytes, log_size).unwrap_or(false));
     }
 
     // Rejection: corrupted output column in trace

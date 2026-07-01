@@ -1,5 +1,27 @@
 # QLSA — Project Context
 
+## ⚠ Аудит рекурсии (2026-06-17) — 2 подтверждённых блокера soundness + robustness-фиксы
+
+Двухэкспертный аудит (крипто/блокчейн + код/системы) полного набора рекурсивных gadget'ов
+(`stark_stwo/src/recursive/`, R0.1–R3.6, 88 тестов). Итог: **gadget'ы корректны как *relation*-провера**
+(output-столбцы привязаны к input-столбцам, cross-checked против `vfri2_bridge.rs`), **но композиция ещё
+НЕ sound против злонамеренного prover'а**. Два подтверждённых пробела (блокеры R3.7, ДО прод-обвязки):
+
+- **[C1 — Critical] Публичные выходы привязаны только через Fiat-Shamir, без in-circuit ограничения.**
+  `mix_public`/`mix_digest` делают proof специфичным к смешанному значению, но не доказывают, что трейс
+  его вычислил → prover может заявить `root`/`finalFold`/`digest` ≠ реального выхода трейса. Фикс:
+  `is_output`-гейтед `(out_col − public)=0` к verifier-fixed public input.
+- **[C2 — Critical, подтверждён пробой] Preprocessed-столбцы (селекторы И round-константы) — prover'ские,
+  не пиннятся.** Верификатор коммитит `proof.commitments[0]` как есть; подделка `is_step≡0` +
+  испорченный `compPos` → `verify=true` (воспроизведено). Фикс: верификатор регенерирует канонические
+  preproc-столбцы и пиннит корень. **Тот же паттерн в зрелых V23/VFRI-верификаторах** (`lib.rs`) —
+  per-circuit follow-up на уровне всего репо (механизм тот же; эксплуатируемость там не подтверждена).
+
+Тесты (88) покрывают honest-prover + tampered-bytes, но НЕ malicious-preproc/trace forgery — поэтому не всплывали.
+**Исправлено сразу (robustness, код-аудит):** `MAX_QUERIES`/`MAX_NUM_FOLDS` cap'ы до size-multiply,
+guard пустого `build_trace_multi`, `bits_to_index` assert (depth>32), brittle tamper-тест
+(`is_err()`→`!verify().unwrap_or(false)`). Подробности: `docs/roadmap/recursion.md` § R3.7.
+
 ## Статус (обновлено 2026-06-17 — решение по пути: standalone t=16 пропущен, старт рекурсии)
 
 - **Решение по пути (2026-06-17)**: standalone **t=16-верификатор (VFRI12) ПРОПУЩЕН** — вместо него идём сразу к **рекурсии доказательств**.

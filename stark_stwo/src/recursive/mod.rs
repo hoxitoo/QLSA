@@ -31,6 +31,35 @@
 //! R3.7 → R4): a top-level assembly wiring the channel (absorb→draw) to derive the
 //! channel-bound query indices + fold challenges and feed them into the multi-query
 //! verifier, then on-chain `QLSAVerifierRecursive.sol` (~5M gas constant).
+//!
+//! # ⚠ Soundness status (audit 2026-06-17) — NOT YET COMPLETE
+//!
+//! These gadgets are **correct arithmetic *relation* provers** (each pins its
+//! output columns to its input columns; verified by the rejection tests and the
+//! cross-checks against `vfri2_bridge.rs`).  They are **not yet a sound
+//! *composition*** against a malicious prover.  Two confirmed gaps must be closed
+//! before any `QLSAVerifierRecursive` is wired to real proofs (both blockers for
+//! R3.7):
+//!
+//! - **[C1] Public outputs are bound only via Fiat-Shamir, not by an in-circuit
+//!   constraint.**  `mix_public` / `mix_digest` make a proof *specific to* a
+//!   mixed value but do NOT prove the trace *computed* it.  A malicious prover can
+//!   present a proof whose claimed public output (`root` / `finalFold` / `digest`)
+//!   differs from its trace's real output.  Fix: add an `is_output`-gated
+//!   `(out_col − public) = 0` constraint tying the trace output row to a
+//!   verifier-fixed public input.
+//! - **[C2] Preprocessed columns (selectors AND round constants) are prover-
+//!   supplied in Tree 0 and never pinned to a canonical spec.**  The verifier
+//!   commits `proof.commitments[0]` as given, so a prover can forge selectors
+//!   (e.g. `is_step ≡ 0`) to gate constraints off (confirmed: a forged `is_step`
+//!   with a corrupted `compPos` verifies `true`).  Fix: the verifier must
+//!   regenerate the canonical preprocessed columns and pin their root (reject a
+//!   mismatch) instead of trusting the prover's tree.
+//!
+//! NOTE: the same unpinned-preprocessed pattern (`commit(proof.commitments[0], …)`)
+//! is used by the mature `stark_stwo/src/lib.rs` verifiers; whether each is
+//! independently exploitable needs a per-circuit follow-up — treat C2 as a
+//! codebase-wide review item, not recursion-only.
 
 pub mod channel_air;
 pub mod fold_air;

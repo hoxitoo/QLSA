@@ -19,10 +19,17 @@
 //! ```
 //!
 //! Both folds share ONE formula by storing the two operands in `a`/`b`:
-//! `out = (a+b) + QM31_mul(alpha, (a−b)·inv)`.  This is genuinely sound — the
-//! recursive verifier's per-query computation is fully re-proved in one circuit,
-//! and the data flow `circleFold → lineFold₁ → … → lineFold_K` is enforced by the
-//! `chain` constraint, not asserted by the prover.
+//! `out = (a+b) + QM31_mul(alpha, (a−b)·inv)`.  The data flow
+//! `circleFold → lineFold₁ → … → lineFold_K` is enforced by the `chain`
+//! constraint rather than asserted by the prover — **given canonical selectors**.
+//!
+//! ⚠ Soundness (audit 2026-06-17): the `chain`/OODS constraints are gated by the
+//! preprocessed `is_step`/`chain_on` selectors, which are NOT yet pinned to a
+//! canonical spec (verifier trusts the prover's Tree 0 — gap **C2** in
+//! `super`'s module docs), and the claimed `final_value` is bound only via
+//! Fiat-Shamir, not an in-circuit constraint (gap **C1**).  This gadget is a
+//! correct per-query *relation* prover; both gaps must be closed before it is
+//! wired into a production recursive verifier.
 //!
 //! # Trace layout (42 main columns + 2 preprocessed)
 //!
@@ -65,6 +72,10 @@ use crate::{make_config, LOG_BLOWUP, MAX_PROOF_BYTES, N_FRI_QUERIES, POW_BITS};
 pub const N_MAIN_COLS: usize = 42;
 pub const MIN_LOG_SIZE: u32 = 1;
 pub const MAX_LOG_SIZE: u32 = 20;
+/// Caps enforced BEFORE any `n * (1+k)` size computation, so the `usize`
+/// multiply and the `1 << log` loop can never overflow on caller input.
+pub const MAX_NUM_FOLDS: usize = 64;
+pub const MAX_QUERIES: usize = 4096;
 
 const M31_P: u64 = (1u64 << 31) - 1;
 
@@ -423,6 +434,7 @@ pub fn build_trace_multi(
     queries: &[(StepOp, Vec<FoldRound>)],
     log_n_rows: u32,
 ) -> (TraceColumns, Vec<TraceCol>) {
+    assert!(!queries.is_empty(), "build_trace_multi requires ≥ 1 query");
     let n = 1usize << log_n_rows;
     let block = 1 + queries[0].1.len();
     debug_assert!(queries.len() * block <= n, "rows exceed trace capacity");
@@ -470,6 +482,9 @@ pub fn prove_recursive_query(
     step: &StepOp,
     rounds: &[FoldRound],
 ) -> Result<(Vec<u8>, u32, u128), String> {
+    if rounds.len() > MAX_NUM_FOLDS {
+        return Err(format!("num_folds {} exceeds MAX_NUM_FOLDS {MAX_NUM_FOLDS}", rounds.len()));
+    }
     let log_size = compute_log_size(1 + rounds.len());
     if log_size > MAX_LOG_SIZE {
         return Err(format!("too many fold rounds: log_size {log_size} exceeds {MAX_LOG_SIZE}"));
@@ -612,7 +627,13 @@ pub fn prove_recursive_queries(
     if queries.is_empty() {
         return Err("must have ≥ 1 query".into());
     }
+    if queries.len() > MAX_QUERIES {
+        return Err(format!("query count {} exceeds MAX_QUERIES {MAX_QUERIES}", queries.len()));
+    }
     let num_folds = queries[0].1.len();
+    if num_folds > MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {MAX_NUM_FOLDS}"));
+    }
     if queries.iter().any(|(_, r)| r.len() != num_folds) {
         return Err("all queries must share the same num_folds".into());
     }
@@ -966,5 +987,15 @@ mod tests {
     #[test]
     fn test_multi_query_empty_error() {
         assert!(prove_recursive_queries(&[]).is_err());
+    }
+
+    // Input caps reject oversized fold counts before any size computation.
+    #[test]
+    fn test_num_folds_cap_rejected() {
+        let mut s = 0xca9_u64;
+        let step = sample_step(&mut s);
+        let rounds = sample_rounds(&mut s, MAX_NUM_FOLDS + 1);
+        assert!(prove_recursive_query(&step, &rounds).is_err());
+        assert!(prove_recursive_queries(&[(step, rounds)]).is_err());
     }
 }

@@ -48,8 +48,16 @@
 //!
 //! `(leaf, index, root)` are mixed into the Fiat-Shamir channel after the trace
 //! commitment (the codebase convention for sub-proof gadgets), so the proof is
-//! specific to one `(leaf, index, root)` triple; a wrong root fails verification.
-//! Tighter trace↔output binding is composed at the recursive-verifier level (R3).
+//! *specific to* one mixed `(leaf, index, root)` triple.
+//!
+//! ⚠ Soundness (audit 2026-06-17): Fiat-Shamir mixing does NOT prove the trace
+//! computed that `root` — a malicious prover can mix (and claim) a `root` that
+//! differs from the trace's real output (gap **C1** in `super`'s module docs).
+//! Likewise `index` is not constrained to equal `bits_to_index(trace bits)`.
+//! A verifier-fixed public input + an in-circuit `(computed_root − root) = 0`
+//! constraint (and an index↔bits binding) are required before this gadget's
+//! `(leaf, index, root)` can be trusted; that binding is deferred to the
+//! recursive-verifier composition (R3.7).
 
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sM31Channel, Channel};
@@ -112,7 +120,11 @@ pub fn merkle_path_root(leaf: u64, sibs: &[u64], bits: &[bool]) -> u64 {
 }
 
 /// Pack index bits (LSB first) into a u32 index.
+///
+/// Panics if `bits.len() > 32` (a u32 index cannot hold more) — callers cap at
+/// [`MAX_DEPTH`] (≤ 28), so this only guards direct misuse of this `pub` helper.
 pub fn bits_to_index(bits: &[bool]) -> u32 {
+    assert!(bits.len() <= 32, "bits_to_index: depth {} exceeds 32-bit index", bits.len());
     let mut idx = 0u32;
     for (i, &b) in bits.iter().enumerate() {
         if b {
