@@ -112,10 +112,87 @@ ML-DSA подпись
   - 42 col, helper `p=(fPlus−fMinus)·yInv` держит все 16 ограничений ≤ deg 2; generic-хелпер `qmul`
     дедуплицирует раскрытие QM31-mul (×3)
   - Кросс-чек: куски шага ≡ `oods_air::comp_value_ref` (px и −px) + `fold_air::fold_ref`; roundtrip +
-    2 rejection (wrong folded/compPos). 7 Rust тестов. **50 рекурсивных Rust тестов**
-- `recursive/recursive_verifier.rs` — собирает все gadgets в единый AIR верификатора VFRI11
+    2 rejection (wrong folded/compPos). 7 Rust тестов
+- **R3.2 FRI fold chain** (`recursive/fri_fold_chain_air.rs`) — ✅ **готов (2026-06-17)**
+  - K последовательных line-fold раундов, где вход каждого = выход предыдущего (cross-row chain):
+    `output[k] = lineFold(output[k−1], sibling_k, alpha_k, xInv_k)`
+  - 21 main + 1 preproc (`is_first`); C_p (deg2) + C_f (deg2) + C_chain `(1−is_first)·(input−out_prev)` (deg1);
+    первая padding-строка помечается `is_first=1`, чтобы chain не ломался на границе трейса
+  - Кросс-чек: single-round ≡ `fold_air::fold_ref`; 3-round chaining; roundtrip 1/4/6; 3 rejection
+    (tampered/wrong-output/broken-chain). 9 Rust тестов
+- **R3.3 per-query recursive verifier** (`recursive/recursive_verifier.rs`) — ✅ **готов (2026-06-17)**
+  - Объединяет R3.1 (OODS± + circle fold) и R3.2 (K line-fold раундов) в **ОДИН** AIR-компонент,
+    доказывающий полную per-query FRI-цепочку. Связь circleFold → lineFold₁ → … → lineFold_K
+    обеспечена **cross-row constraint** (a[r]=out[r−1]), а не fingerprint-сайдченнелом
+  - Унификация: оба фолда — одна формула `out=(a+b)+α·(a−b)·inv` через операнды `a`/`b`
+    (row0: a=fPlus, b=fMinus; rows≥1: a=прошлый выход, b=sibling)
+  - 42 main + 2 preproc (`is_step` гейтит OODS на row0, `chain_on` гейтит chain на rows 1..K);
+    OODS×is_step = deg 3 (в пределах `+1` bound, как у Poseidon2-гаджетов)
+  - Кросс-чек: `recursive_query_ref` ≡ `query_step_air::step_ref` (row0) + `fri_fold_chain_air::fold_chain_ref`
+    (rows≥1) + `oods_air::comp_value_ref` (px/−px); roundtrip 1/4/6; rejection
+    (tampered/corrupted-row0-output/corrupted-compPos/broken-chain) + **public-binding finalFold в транскрипт**
+    (`mix_public(px, finalFold)`; wrong-final-value rejection). 9 Rust тестов
+- **R3.4 per-query integration** (`recursive/integration.rs`) — ✅ **готов (2026-06-17)**
+  - Сцепляет три sub-proof'а, верифицирующих ОДИН FRI-запрос, через общие public-значения:
+    `recursive_verifier` (finalFold, QM31) → `qm31_leaf_hash` (t=2 rate-1 sponge → M31 leaf) →
+    `merkle_path_air` (leaf @ idx + siblings → friLayerRoots[K])
+  - `qm31_leaf_hash(v) = sponge_absorb([v≫96,v≫64,v≫32,v]).0` — рекурсивный аналог on-chain
+    `Poseidon2MerkleVerifier.hashLeaf(qm31Words)` / `hash_leaf_qm31_p2`
+  - Тесты: leaf-hash ≡ channel sponge; end-to-end one-query (все 3 proof'а accept + связующие
+    значения совпадают); tampered-finalFold ломает цепочку (recursive proof reject + другой leaf).
+    3 Rust теста
+- **R3.5 multi-query aggregation** (`recursive_verifier::prove_recursive_queries`) — ✅ **готов (2026-06-17)**
+  - N запросов в ОДНОМ STARK: трейс — N блоков по `1+K` строк; **AIR не меняется** — per-row
+    селекторы `is_step`/`chain_on` гейтят каждый блок независимо (chain=0 на row0 каждого блока,
+    поэтому запрос не «перетекает» в следующий)
+  - `prove_recursive_queries(&[(StepOp, Vec<FoldRound>)])` → `(proof, log_size, Vec<finalFold>)`;
+    все запросы — одинаковый `num_folds`; `mix_public_multi` привязывает все N `(px, finalFold)`
+  - Рефакторинг: `fill_query_block(base, step, rounds)` переиспользуется single- и multi-путём
+  - Тесты: roundtrip 5 запросов; single через multi-путь == single-путь; wrong-final одного
+    запроса роняет весь proof; uneven-folds / empty — ошибки. 5 Rust тестов
+- **R3.6 Fiat-Shamir draw (squeeze)** (`recursive/transcript_draw_air.rs`) — ✅ **готов (2026-06-17)**
+  - Дуал к `channel_air` (absorb): доказывает цепочку Poseidon2 t=2 duplex-squeeze — ядро
+    `drawSecureFelt` / `drawQueries`. Один draw из `(s0,s1)`, счётчик `d`:
+    `(w0,w1)←(s0,s1)`; `s0←(s0+d)%P`; `permute`; `d++` (точно `P2Channel::draw_pair`)
+  - 8 main + 7 preproc (rc0,rc1,is_init,is_first,**ndraws**,**dig0**,**dig1**): стартовый digest —
+    preprocessed-константа, squeeze `(w0,w1)=cur` на init-строках, `inp0=cur0+ndraws`
+  - `draw_chain(digest,m)` / `draw_secure_felt(digest)` — рекурсивные референсы; bind `(m,digest)`
+  - Тесты: draw0==digest; secure-felt пакует 2 draw'а; build_trace ≡ reference; roundtrip 1/10;
+    wrong-digest / wrong-count / tampered / corrupted-squeeze / zero — rejection. 11 Rust тестов.
+    **87 рекурсивных Rust тестов**
+- **Полный набор gadget'ов рекурсии готов (R3.6):** QM31-арифметика, FRI fold/OODS, inner-hash
+  Merkle path, Fiat-Shamir absorb + draw, per-query композиция (single + N-query) + leaf-hash
+  интеграция. Осталось (R3.7): top-level сборка — связать канал (absorb→draw), вывести
+  channel-bound query-индексы + fold-challenge'ы и подать в multi-query verifier
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
+
+### ⚠ R3.7 — блокеры soundness (аудит 2026-06-17, ДО любой прод-обвязки)
+
+Аудит (крипто + код) подтвердил: gadget'ы — корректные *relation*-провера (output-столбцы привязаны
+к input-столбцам, cross-checked против `vfri2_bridge.rs`), но **композиция ещё НЕ sound против
+злонамеренного prover'а**. Два подтверждённых пробела (оба — блокеры R3.7, закрыть ДО `QLSAVerifierRecursive`):
+
+- **[C1] Публичные выходы привязаны только через Fiat-Shamir, без in-circuit ограничения.**
+  `mix_public`/`mix_digest` делают proof *специфичным* к смешанному значению, но НЕ доказывают, что
+  трейс его *вычислил*. Prover может предъявить proof, где заявленный `root`/`finalFold`/`digest`
+  ≠ реальный выход трейса. Фикс: `is_output`-гейтед ограничение `(out_col − public)=0`, привязывающее
+  выходную строку к verifier-fixed public input.
+- **[C2] Preprocessed-столбцы (селекторы И round-константы) поставляются prover'ом в Tree 0 и не
+  пиннятся к каноническому спеку.** Верификатор коммитит `proof.commitments[0]` как есть → prover
+  может подделать селектор (`is_step≡0`) и отключить ограничения (подтверждено пробой: forged
+  `is_step` + испорченный `compPos` → `verify=true`). Фикс: верификатор должен регенерировать
+  канонические preprocessed-столбцы и пиннить их корень (reject при несовпадении), а не доверять
+  дереву prover'а.
+
+**Важно:** тот же паттepн `commit(proof.commitments[0], …)` используют зрелые верификаторы в
+`stark_stwo/src/lib.rs` (V23/VFRI). Эксплуатируемость каждого — отдельный per-circuit follow-up;
+C2 — review-item уровня всего репозитория, не только рекурсии. Тесты (88 рекурсивных) покрывают
+honest-prover + tampered-bytes, но НЕ malicious-preproc/trace forgery — поэтому пробелы не всплывали.
+
+Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
+guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест
+(`is_err()`→`!verify().unwrap_or(false)`).
 
 ### Этап R4 — on-chain + интеграция
 

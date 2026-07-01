@@ -1,4 +1,4 @@
-//! Recursive STARK verifier — AIR gadgets (R0 groundwork, 2026-06-17).
+//! Recursive STARK verifier — AIR gadgets (R3.2, 2026-06-17).
 //!
 //! Production gas target: a STARK that proves "I verified a VFRI11 STARK".  The
 //! outer proof is constant-size (~5M gas on-chain) and the inner verifier
@@ -17,15 +17,57 @@
 //! | FRI circle/line fold | `fold_air` | `folded = (f₊+f₋) + α·(f₊−f₋)·inv` (one FRI fold step) |
 //! | OODS quotient | `oods_air` | `fₚ·(px − z_x) = compValue − oodsCombo` (multiplicative form) |
 //! | Merkle auth-path | `merkle_path_air` | `leaf @ index + siblings → root` (Poseidon2 t=2 compression) |
-//! | Fiat-Shamir transcript | `channel_air` | Poseidon2 t=2 sponge absorb (`mixU32s` core) → digest |
-//! | **Per-query FRI step** | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
+//! | Fiat-Shamir absorb | `channel_air` | Poseidon2 t=2 sponge absorb (`mixU32s` core) → digest |
+//! | **Fiat-Shamir draw** | `transcript_draw_air` | **Poseidon2 t=2 sponge squeeze (`drawSecureFelt`/`drawQueries` core): digest → drawn pairs (R3.6)** |
+//! | Per-query FRI step | `query_step_air` | OODS± + circle fold chained via shared fPlus/fMinus (R3.1) |
+//! | FRI fold chain | `fri_fold_chain_air` | K line-fold rounds chained: output[k]=lineFold(output[k−1], …) (R3.2) |
+//! | Per-query recursive verifier | `recursive_verifier` | OODS± + circle fold + K line folds in ONE AIR; full per-query FRI chain, cross-row bound (R3.3) |
+//! | Per-query integration | `integration` | recursive_verifier → `qm31_leaf_hash` → `merkle_path_air`: full per-query FRI verification, value-bound across 3 sub-proofs (R3.4) |
+//! | Multi-query aggregation | `recursive_verifier` | N queries in ONE STARK (`prove_recursive_queries`): N blocks of (1+K) rows, same AIR, all finalFolds bound (R3.5) |
 //!
-//! Next (see roadmap R3): widen the inner hash to t=16, then the full recursive
-//! verifier composition (per-query steps + Merkle + transcript in one proof).
+//! **The full recursion gadget set is complete (R3.6):** QM31 arithmetic, FRI
+//! fold/OODS, inner-hash Merkle path, Fiat-Shamir absorb + draw, per-query
+//! composition (single + N-query), and the leaf-hash integration.  Next (roadmap
+//! R3.7 → R4): a top-level assembly wiring the channel (absorb→draw) to derive the
+//! channel-bound query indices + fold challenges and feed them into the multi-query
+//! verifier, then on-chain `QLSAVerifierRecursive.sol` (~5M gas constant).
+//!
+//! # ⚠ Soundness status (audit 2026-06-17) — NOT YET COMPLETE
+//!
+//! These gadgets are **correct arithmetic *relation* provers** (each pins its
+//! output columns to its input columns; verified by the rejection tests and the
+//! cross-checks against `vfri2_bridge.rs`).  They are **not yet a sound
+//! *composition*** against a malicious prover.  Two confirmed gaps must be closed
+//! before any `QLSAVerifierRecursive` is wired to real proofs (both blockers for
+//! R3.7):
+//!
+//! - **[C1] Public outputs are bound only via Fiat-Shamir, not by an in-circuit
+//!   constraint.**  `mix_public` / `mix_digest` make a proof *specific to* a
+//!   mixed value but do NOT prove the trace *computed* it.  A malicious prover can
+//!   present a proof whose claimed public output (`root` / `finalFold` / `digest`)
+//!   differs from its trace's real output.  Fix: add an `is_output`-gated
+//!   `(out_col − public) = 0` constraint tying the trace output row to a
+//!   verifier-fixed public input.
+//! - **[C2] Preprocessed columns (selectors AND round constants) are prover-
+//!   supplied in Tree 0 and never pinned to a canonical spec.**  The verifier
+//!   commits `proof.commitments[0]` as given, so a prover can forge selectors
+//!   (e.g. `is_step ≡ 0`) to gate constraints off (confirmed: a forged `is_step`
+//!   with a corrupted `compPos` verifies `true`).  Fix: the verifier must
+//!   regenerate the canonical preprocessed columns and pin their root (reject a
+//!   mismatch) instead of trusting the prover's tree.
+//!
+//! NOTE: the same unpinned-preprocessed pattern (`commit(proof.commitments[0], …)`)
+//! is used by the mature `stark_stwo/src/lib.rs` verifiers; whether each is
+//! independently exploitable needs a per-circuit follow-up — treat C2 as a
+//! codebase-wide review item, not recursion-only.
 
 pub mod channel_air;
 pub mod fold_air;
+pub mod fri_fold_chain_air;
+pub mod integration;
 pub mod merkle_path_air;
 pub mod oods_air;
-pub mod query_step_air;
 pub mod qm31_mul_air;
+pub mod query_step_air;
+pub mod recursive_verifier;
+pub mod transcript_draw_air;
