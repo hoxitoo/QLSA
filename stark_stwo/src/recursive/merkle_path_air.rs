@@ -227,11 +227,71 @@ pub fn compute_log_size(depth: usize) -> u32 {
     log
 }
 
+// ── Preprocessed columns (witness-free canonical source) ───────────────────────
+
+/// Build the canonical preprocessed columns `[rc0, rc1, is_init, is_first]` from
+/// `log_size` alone (no witness): Poseidon2 round constants keyed by the in-round
+/// index, `is_init = 1` on each compression's row 0, `is_first = 1` on row 0.
+///
+/// This is the single source of truth for the preprocessed tree — [`build_trace`]
+/// commits exactly these, and [`verify_merkle_path`] recomputes their commitment
+/// root to PIN them (audit gap C2), so a prover cannot forge `is_init`/`is_first`
+/// (to break the sponge/leaf wiring) or `rc0`/`rc1` (to swap the hash function).
+pub fn build_preproc(log_size: u32) -> TraceColumns {
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let to_m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut rc0_c = vec![bf0; n];
+    let mut rc1_c = vec![bf0; n];
+    let mut init_c = vec![bf0; n];
+    let mut first_c = vec![bf0; n];
+
+    let n_comp = n / N_ROUNDS;
+    for i in 0..n_comp {
+        for r in 0..N_ROUNDS {
+            let row = i * N_ROUNDS + r;
+            rc0_c[row] = to_m31(RC[r][0] as u64);
+            rc1_c[row] = to_m31(RC[r][1] as u64);
+            init_c[row] = if r == 0 { to_m31(1) } else { bf0 };
+            first_c[row] = if row == 0 { to_m31(1) } else { bf0 };
+        }
+    }
+    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c] {
+        bit_reverse_coset_to_circle_domain_order(c);
+    }
+    [rc0_c, rc1_c, init_c, first_c]
+        .into_iter()
+        .map(|c| CircleEvaluation::new(domain, c))
+        .collect()
+}
+
+/// Recompute the canonical preprocessed-tree commitment root, mirroring the
+/// prover's Tree 0 commit. The verifier pins `proof.commitments[0]` to this.
+fn canonical_preproc_root(
+    log_size: u32,
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(build_preproc(log_size));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
 // ── Trace builder ──────────────────────────────────────────────────────────────
 
 /// Build the Merkle-path trace. Returns `(main_columns, preprocessed_columns,
 /// root)`. The first `sibs.len()` compressions are the real path; remaining rows
 /// are padded with valid `H(cur, 0)` compressions (constraints stay satisfied).
+/// The preprocessed columns come from [`build_preproc`] (the canonical source).
 pub fn build_trace(
     leaf: u64,
     sibs: &[u64],
@@ -248,10 +308,6 @@ pub fn build_trace(
     let bf0 = BaseField::from_u32_unchecked(0);
 
     let mut col: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-    let mut rc0_c = vec![bf0; n];
-    let mut rc1_c = vec![bf0; n];
-    let mut init_c = vec![bf0; n];
-    let mut first_c = vec![bf0; n];
 
     let n_comp = n / N_ROUNDS;
     let mut prev_out = 0u64; // s0 output of the previous compression
@@ -291,10 +347,6 @@ pub fn build_trace(
                 col[8][row] = if bit_val { to_m31(1) } else { bf0 }; // bit
                 col[9][row] = if i == 0 { to_m31(leaf) } else { bf0 }; // leaf
             }
-            rc0_c[row] = to_m31(RC[r][0] as u64);
-            rc1_c[row] = to_m31(RC[r][1] as u64);
-            init_c[row] = if r == 0 { to_m31(1) } else { bf0 };
-            first_c[row] = if row == 0 { to_m31(1) } else { bf0 };
 
             state = [s0n, s1n];
         }
@@ -308,15 +360,9 @@ pub fn build_trace(
     for c in main.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(c);
     }
-    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c] {
-        bit_reverse_coset_to_circle_domain_order(c);
-    }
 
     let main_cols: TraceColumns = main.into_iter().map(|c| CircleEvaluation::new(domain, c)).collect();
-    let preproc: TraceColumns = [rc0_c, rc1_c, init_c, first_c]
-        .into_iter()
-        .map(|c| CircleEvaluation::new(domain, c))
-        .collect();
+    let preproc = build_preproc(log_size); // single canonical source (C2)
     (main_cols, preproc, path_root)
 }
 
@@ -413,6 +459,13 @@ pub fn verify_merkle_path(
     if proof.commitments.len() < 2 {
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
+
+    // C2: pin the preprocessed (round-constant + selector) tree to its canonical
+    // value — a forged rc/is_init/is_first tree no longer verifies.
+    if proof.commitments[0] != canonical_preproc_root(log_size) {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -550,6 +603,31 @@ mod tests {
                 "a corrupted trace must not yield a verifying proof",
             ),
             Err(_) => {}
+        }
+    }
+
+    // C2 regression: a prover that forges the `is_init` preprocessed selector to
+    // all-zero must not verify — the verifier pins the canonical preprocessed root.
+    #[test]
+    fn test_forged_preproc_rejected() {
+        let mut seed = 0xC2;
+        let (leaf, sibs, bits) = rand_path(&mut seed, 2);
+        let log = compute_log_size(sibs.len());
+        let (main, mut preproc, root) = build_trace(leaf, &sibs, &bits, log);
+        let idx = bits_to_index(&bits);
+        let domain = CanonicCoset::new(log).circle_domain();
+        let n = 1usize << log;
+
+        // Forge is_init (preproc[2]) → all-zero (would disable the absorb wiring).
+        preproc[2] = CircleEvaluation::new(domain, vec![BaseField::from_u32_unchecked(0); n]);
+
+        // The forged trace may or may not still satisfy the (now differently-gated)
+        // constraints, but its preprocessed root ≠ canonical → verify must reject.
+        if let Ok(proof) = prove_columns(main, preproc, log, leaf, idx, root) {
+            assert!(
+                !verify_merkle_path(&proof, log, leaf, idx, root).unwrap_or(false),
+                "a forged preprocessed tree must not verify (C2 pinned)",
+            );
         }
     }
 }

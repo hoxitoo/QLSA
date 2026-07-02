@@ -52,13 +52,22 @@
 //!   verifies (regression test `test_forged_selector_rejected`; previously it
 //!   verified `true`).
 //!
-//! **Remaining (R3.7 follow-up):** the same pinning + output-binding mechanism
-//! still needs porting to the standalone sub-gadgets (`merkle_path_air`,
-//! `channel_air`, `transcript_draw_air`, `fri_fold_chain_air`) — they retain the
-//! documented Fiat-Shamir-only binding — and to the mature `stark_stwo/src/lib.rs`
-//! V23/VFRI verifiers, which use the same unpinned `commit(proof.commitments[0], …)`
-//! pattern (per-circuit codebase-wide review item). The `recursive_verifier`
-//! pattern is the reference implementation to follow.
+//! **C2 preprocessed pinning ported to all standalone sub-gadgets (2026-06-17):**
+//! `merkle_path_air`, `channel_air`, `transcript_draw_air`, and `fri_fold_chain_air`
+//! each expose a witness-free `build_preproc(...)` (the single canonical source for
+//! their round constants / selectors / counters / digest) and pin its commitment
+//! root in `verify_*` — a forged preprocessed tree no longer verifies (regression
+//! `test_forged_preproc_rejected` in each). `verify_fold_chain` / draw / merkle
+//! take the structural public params (`num_rounds` / `(m, digest)` / `log_size`)
+//! needed to rebuild the canonical tree.
+//!
+//! **Remaining (R3.7 follow-up):** (1) C1 output-binding is implemented only in
+//! `recursive_verifier`; the sub-gadgets still bind their public I/O via
+//! Fiat-Shamir (acceptable for sub-components, tightened at composition). (2) The
+//! mature `stark_stwo/src/lib.rs` V23/VFRI verifiers still use the unpinned
+//! `commit(proof.commitments[0], …)` pattern — the same `canonical_preproc_root`
+//! mechanism should be ported there (per-circuit codebase-wide review item). The
+//! `recursive_verifier` implementation is the reference.
 
 pub mod channel_air;
 pub mod fold_air;

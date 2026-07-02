@@ -248,6 +248,44 @@ pub fn compute_log_size(n_rounds: usize) -> u32 {
 ///
 /// Row k stores `actual_input[k]` (= `output[k-1]` for k≥1, `rounds[0].0` for k=0)
 /// in the input columns; the output column holds the computed fold output.
+/// Build the canonical `is_first` preprocessed column from `(num_rounds, log_size)`
+/// alone (no witness): `1` on row 0 and on the first padding row `num_rounds`
+/// (which breaks the cross-row chain over the all-zero padding).  Single source of
+/// truth — the verifier recomputes its commitment root to PIN it (audit gap C2),
+/// so a prover cannot forge `is_first` to relax the chain constraint.
+pub fn build_preproc(num_rounds: usize, log_size: u32) -> Vec<TraceCol> {
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let one = BaseField::from_u32_unchecked(1);
+    let mut is_first_col = vec![bf0; n];
+    is_first_col[0] = one;
+    if num_rounds < n {
+        is_first_col[num_rounds] = one;
+    }
+    bit_reverse_coset_to_circle_domain_order(&mut is_first_col);
+    vec![CircleEvaluation::new(domain, is_first_col)]
+}
+
+/// Recompute the canonical preprocessed-tree commitment root (verifier pins it).
+fn canonical_preproc_root(
+    num_rounds: usize,
+    log_size: u32,
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(build_preproc(num_rounds, log_size));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
 pub fn build_trace(
     rounds: &[FoldRound],
     log_n_rows: u32,
@@ -260,7 +298,6 @@ pub fn build_trace(
     let bf0 = BaseField::from_u32_unchecked(0);
 
     let mut cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-    let mut is_first_col: Vec<BaseField> = vec![bf0; n];
 
     let set_qm31 = |cols: &mut Vec<Vec<BaseField>>, base: usize, row: usize, q: u128| {
         let l = limbs(q);
@@ -289,30 +326,18 @@ pub fn build_trace(
         cols[12][r] = BaseField::from_u32_unchecked(x_inv);
         set_qm31(&mut cols, 13, r, pack(p_val));
         set_qm31(&mut cols, 17, r, output);
-
-        if r == 0 {
-            is_first_col[0] = BaseField::from_u32_unchecked(1);
-        }
         prev_output = output;
-    }
-
-    // Break the chain at the first padding row so the all-zero padding
-    // doesn't violate `input[k] = output[k-1]` (since output[last_actual] ≠ 0).
-    if rounds.len() < n {
-        is_first_col[rounds.len()] = BaseField::from_u32_unchecked(1);
     }
 
     for col in cols.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(col);
     }
-    bit_reverse_coset_to_circle_domain_order(&mut is_first_col);
 
     let main_trace: TraceColumns = cols
         .into_iter()
         .map(|col| CircleEvaluation::new(domain, col))
         .collect();
-    let preproc: Vec<TraceCol> =
-        vec![CircleEvaluation::new(domain, is_first_col)];
+    let preproc = build_preproc(rounds.len(), log_n_rows); // single canonical source (C2)
 
     (main_trace, preproc)
 }
@@ -368,8 +393,10 @@ fn prove_columns(
         .map_err(|e| format!("serialization error: {e:?}"))
 }
 
-/// Verify a proof produced by [`prove_fold_chain`].
-pub fn verify_fold_chain(proof_bytes: &[u8], log_size: u32) -> Result<bool, String> {
+/// Verify a proof produced by [`prove_fold_chain`]. `num_rounds` is the
+/// verifier-fixed structural parameter used to pin the canonical `is_first`
+/// preprocessed column (closes audit gap C2 for this gadget).
+pub fn verify_fold_chain(proof_bytes: &[u8], log_size: u32, num_rounds: usize) -> Result<bool, String> {
     if !(MIN_LOG_SIZE..=MAX_LOG_SIZE).contains(&log_size) {
         return Err(format!("log_size {log_size} out of range"));
     }
@@ -398,6 +425,12 @@ pub fn verify_fold_chain(proof_bytes: &[u8], log_size: u32) -> Result<bool, Stri
             proof.commitments.len()
         ));
     }
+
+    // C2: pin the preprocessed `is_first` column to its canonical value.
+    if proof.commitments[0] != canonical_preproc_root(num_rounds, log_size) {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -469,7 +502,7 @@ mod tests {
         let mut s = 0xaau64;
         let rounds = vec![(rand_qm31(&mut s), rand_qm31(&mut s), rand_qm31(&mut s), rand_m31(&mut s) as u32)];
         let (bytes, log_size, final_out) = prove_fold_chain(&rounds).unwrap();
-        assert!(verify_fold_chain(&bytes, log_size).unwrap());
+        assert!(verify_fold_chain(&bytes, log_size, rounds.len()).unwrap());
         assert_eq!(final_out, fold_chain_final(&rounds));
     }
 
@@ -483,7 +516,7 @@ mod tests {
             })
             .collect();
         let (bytes, log_size, final_out) = prove_fold_chain(&rounds).unwrap();
-        assert!(verify_fold_chain(&bytes, log_size).unwrap());
+        assert!(verify_fold_chain(&bytes, log_size, rounds.len()).unwrap());
         assert_eq!(final_out, fold_chain_final(&rounds));
     }
 
@@ -497,7 +530,7 @@ mod tests {
             })
             .collect();
         let (bytes, log_size, _) = prove_fold_chain(&rounds).unwrap();
-        assert!(verify_fold_chain(&bytes, log_size).unwrap());
+        assert!(verify_fold_chain(&bytes, log_size, rounds.len()).unwrap());
     }
 
     // Rejection: tampered proof bytes
@@ -514,7 +547,7 @@ mod tests {
         // Flip a load-bearing byte; a tampered proof must NOT verify — accept
         // either a decode error or a constraint/FRI failure (Ok(false)).
         bytes[n / 3] ^= 0xff;
-        assert!(!verify_fold_chain(&bytes, log_size).unwrap_or(false));
+        assert!(!verify_fold_chain(&bytes, log_size, rounds.len()).unwrap_or(false));
     }
 
     // Rejection: corrupted output column in trace
@@ -571,5 +604,29 @@ mod tests {
     #[test]
     fn test_empty_rounds_error() {
         assert!(prove_fold_chain(&[]).is_err());
+    }
+
+    // C2 regression: a forged `is_first` preprocessed column must not verify.
+    #[test]
+    fn test_forged_preproc_rejected() {
+        let mut s = 0xC2C2u64;
+        let rounds: Vec<FoldRound> = (0..3)
+            .map(|_| {
+                (rand_qm31(&mut s), rand_qm31(&mut s), rand_qm31(&mut s), rand_m31(&mut s) as u32)
+            })
+            .collect();
+        let log_size = compute_log_size(rounds.len());
+        let (main_trace, mut preproc) = build_trace(&rounds, log_size);
+        let domain = CanonicCoset::new(log_size).circle_domain();
+        let n = 1usize << log_size;
+        // Forge is_first (preproc[0]) → all-zero (would relax the chain constraint).
+        preproc[0] =
+            CircleEvaluation::new(domain, vec![BaseField::from_u32_unchecked(0); n]);
+        if let Ok(bytes) = prove_columns(preproc, main_trace, log_size) {
+            assert!(
+                !verify_fold_chain(&bytes, log_size, rounds.len()).unwrap_or(false),
+                "a forged preprocessed tree must not verify (C2 pinned)",
+            );
+        }
     }
 }

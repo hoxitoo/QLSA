@@ -182,11 +182,18 @@ ML-DSA подпись
   отличается — forged `is_step≡0` больше не верифицируется (regression `test_forged_selector_rejected`;
   раньше → `verify=true`). 90 рекурсивных тестов.
 
-**Остаётся (R3.7 follow-up):** портировать тот же pinning + output-binding на standalone sub-гаджеты
-(`merkle_path_air`, `channel_air`, `transcript_draw_air`, `fri_fold_chain_air` — пока документированная
-FS-only привязка) И на зрелые V23/VFRI-верификаторы в `stark_stwo/src/lib.rs` (тот же unpinned
-`commit(proof.commitments[0], …)` — per-circuit review-item на уровне всего репо). `recursive_verifier`
-— референс-реализация паттерна.
+**C2-пиннинг портирован на ВСЕ standalone sub-гаджеты (2026-06-17):** `merkle_path_air`, `channel_air`,
+`transcript_draw_air`, `fri_fold_chain_air` — у каждого witness-free `build_preproc(...)` (единый
+канонический источник round-констант / селекторов / счётчиков / digest) + пиннинг корня в `verify_*`;
+forged preprocessed-дерево больше не верифицируется (regression `test_forged_preproc_rejected` в каждом).
+`verify_fold_chain`/draw/merkle принимают структурные public-параметры (`num_rounds`/`(m,digest)`/`log_size`)
+для реконструкции канонического дерева. **94 рекурсивных теста.**
+
+**Остаётся (R3.7 follow-up):** (1) C1 output-binding реализован только в `recursive_verifier`; sub-гаджеты
+привязывают public I/O через Fiat-Shamir (приемлемо для sub-компонентов, ужесточается на композиции).
+(2) Зрелые V23/VFRI-верификаторы в `stark_stwo/src/lib.rs` — тот же unpinned `commit(proof.commitments[0], …)`;
+портировать `canonical_preproc_root` туда (per-circuit review-item уровня всего репо). `recursive_verifier`
+— референс.
 
 Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
 guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест
