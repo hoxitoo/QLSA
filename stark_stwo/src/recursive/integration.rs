@@ -106,7 +106,7 @@ mod tests {
         let (rv_bytes, rv_log, final_fold) = prove_recursive_query(&step, &rounds).unwrap();
         assert_eq!(final_fold, recursive_query_final(&step, &rounds));
         assert!(
-            verify_recursive_query(&rv_bytes, rv_log, px, final_fold).unwrap(),
+            verify_recursive_query(&rv_bytes, rv_log, rounds.len(), px, final_fold).unwrap(),
             "recursive per-query proof must verify against its bound final fold",
         );
 
@@ -147,7 +147,7 @@ mod tests {
 
         let wrong = final_fold ^ 0x10;
         // The recursive proof rejects the wrong claimed output.
-        assert!(!verify_recursive_query(&rv_bytes, rv_log, px, wrong).unwrap_or(false));
+        assert!(!verify_recursive_query(&rv_bytes, rv_log, rounds.len(), px, wrong).unwrap_or(false));
         // And the wrong output hashes to a different leaf, so any Merkle path
         // built for the honest leaf cannot authenticate it.
         assert_ne!(qm31_leaf_hash(final_fold), qm31_leaf_hash(wrong));

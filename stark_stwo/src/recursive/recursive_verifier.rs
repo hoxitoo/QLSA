@@ -21,17 +21,26 @@
 //! Both folds share ONE formula by storing the two operands in `a`/`b`:
 //! `out = (a+b) + QM31_mul(alpha, (a−b)·inv)`.  The data flow
 //! `circleFold → lineFold₁ → … → lineFold_K` is enforced by the `chain`
-//! constraint rather than asserted by the prover — **given canonical selectors**.
+//! constraint rather than asserted by the prover.
 //!
-//! ⚠ Soundness (audit 2026-06-17): the `chain`/OODS constraints are gated by the
-//! preprocessed `is_step`/`chain_on` selectors, which are NOT yet pinned to a
-//! canonical spec (verifier trusts the prover's Tree 0 — gap **C2** in
-//! `super`'s module docs), and the claimed `final_value` is bound only via
-//! Fiat-Shamir, not an in-circuit constraint (gap **C1**).  This gadget is a
-//! correct per-query *relation* prover; both gaps must be closed before it is
-//! wired into a production recursive verifier.
+//! # Soundness (audit gaps C1/C2 — CLOSED for this gadget, 2026-06-17)
 //!
-//! # Trace layout (42 main columns + 2 preprocessed)
+//! - **C2 (preprocessed pinning):** the constraint-gating selectors and the
+//!   claimed-output columns live in the preprocessed tree.  They are produced by
+//!   [`build_preproc`] (the single canonical source), and the verifier recomputes
+//!   their commitment root ([`canonical_preproc_root`]) and rejects any proof
+//!   whose `commitments[0]` differs — so a prover cannot forge a selector
+//!   (e.g. `is_step ≡ 0`) to gate constraints off.
+//! - **C1 (output binding):** the verifier-fixed claimed final value is carried
+//!   in the pinned `fin0..fin3` preprocessed columns, and an `is_output`-gated
+//!   in-circuit constraint forces the trace's real output row to equal it — a
+//!   prover whose trace computes X cannot claim Y ≠ X.
+//!
+//! (`px` is still bound via Fiat-Shamir `mix_public`; it is a query *identifier*,
+//! not a soundness-critical output.  The same pinning mechanism should be ported
+//! to the standalone sub-gadgets and the mature V23/VFRI verifiers — follow-up.)
+//!
+//! # Trace layout (42 main columns + 7 preprocessed)
 //!
 //! ```text
 //! Main:
@@ -42,9 +51,11 @@
 //! 26..30  compPos      30..34  compNeg
 //! 34..38  p (helper)   38..42  out  (fold output)
 //!
-//! Preprocessed:
-//!  is_step  — 1 on row 0, 0 elsewhere   (gates the OODS constraints)
-//!  chain_on — 1 on rows 1..K, 0 else     (gates the cross-row chain constraint)
+//! Preprocessed (all pinned by the verifier via canonical_preproc_root):
+//!  is_step   — 1 on each block's row 0        (gates the OODS constraints)
+//!  chain_on  — 1 on rows 1..K of each block    (gates the cross-row chain)
+//!  is_output — 1 on each block's output row     (gates the output-equality C1)
+//!  fin0..fin3 — claimed final fold limbs on the output row (verifier-fixed)
 //! ```
 
 use stwo::core::air::Component;
@@ -100,8 +111,26 @@ pub fn pc_is_step() -> PreProcessedColumnId {
 pub fn pc_chain_on() -> PreProcessedColumnId {
     PreProcessedColumnId { id: "rv_chain_on".into() }
 }
+/// `is_output = 1` on each block's final line-fold row (`base + num_folds`),
+/// gating the output-equality constraint (audit gap C1).
+pub fn pc_is_output() -> PreProcessedColumnId {
+    PreProcessedColumnId { id: "rv_is_output".into() }
+}
+/// `fin0..fin3` carry the verifier-fixed claimed final fold value (QM31 limbs) on
+/// each block's output row; the AIR pins the trace's output to them (C1).
+pub fn pc_fin(k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("rv_fin{k}") }
+}
 pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
-    vec![pc_is_step(), pc_chain_on()]
+    vec![
+        pc_is_step(),
+        pc_chain_on(),
+        pc_is_output(),
+        pc_fin(0),
+        pc_fin(1),
+        pc_fin(2),
+        pc_fin(3),
+    ]
 }
 
 // ── Generic QM31 multiply ──────────────────────────────────────────────────────
@@ -176,6 +205,13 @@ impl FrameworkEval for RecursiveVerifierEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let is_step = eval.get_preprocessed_column(pc_is_step());
         let chain_on = eval.get_preprocessed_column(pc_chain_on());
+        let is_output = eval.get_preprocessed_column(pc_is_output());
+        let fin = [
+            eval.get_preprocessed_column(pc_fin(0)),
+            eval.get_preprocessed_column(pc_fin(1)),
+            eval.get_preprocessed_column(pc_fin(2)),
+            eval.get_preprocessed_column(pc_fin(3)),
+        ];
 
         // Main columns. `a` (input/fPlus) and `out` need previous-row access for chaining.
         let [px] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
@@ -283,6 +319,13 @@ impl FrameworkEval for RecursiveVerifierEval {
             eval.add_constraint(chain_on.clone() * (a[k].clone() - out_prev[k].clone()));
         }
 
+        // ── C_output: out_k = fin_k  (block output row, gated by is_output, deg 2)
+        // Pins the trace's final fold value to the verifier-fixed claimed output
+        // (`fin` is a pinned preprocessed column) — closes audit gap C1.
+        for k in 0..4 {
+            eval.add_constraint(is_output.clone() * (out[k].clone() - fin[k].clone()));
+        }
+
         eval
     }
 }
@@ -313,14 +356,14 @@ fn set_qm31(cols: &mut [Vec<BaseField>], base: usize, row: usize, q: u128) {
     }
 }
 
-/// Fill one query's block (rows `base..base+1+rounds.len()`): row `base` is the
-/// OODS + circle-fold step; rows `base+1..` are the K line-fold rounds.  Sets the
-/// `is_step` / `chain_on` selectors for the block.  Blocks are independent — the
-/// chain selector is 0 on each block's row 0, so a query never folds into the next.
+/// Fill one query's block of MAIN columns (rows `base..base+1+rounds.len()`): row
+/// `base` is the OODS + circle-fold step; rows `base+1..` are the K line-fold
+/// rounds.  The `is_step` / `chain_on` selectors are NOT written here — they are
+/// produced independently by [`build_preproc`] (the single canonical source
+/// shared by the prover trace and the verifier's root-pinning check), so a
+/// prover cannot forge them (audit gap C2).
 fn fill_query_block(
     cols: &mut [Vec<BaseField>],
-    is_step_col: &mut [BaseField],
-    chain_on_col: &mut [BaseField],
     base: usize,
     step: &StepOp,
     rounds: &[FoldRound],
@@ -358,7 +401,6 @@ fn fill_query_block(
     set_qm31(cols, 30, base, comp_neg);
     set_qm31(cols, 34, base, pack(p0));
     set_qm31(cols, 38, base, outs[0]);
-    is_step_col[base] = BaseField::from_u32_unchecked(1);
 
     // ── Rows `base+1..`: line folds ──────────────────────────────────────────
     for (i, &(sibling, alpha, x_inv)) in rounds.iter().enumerate() {
@@ -378,31 +420,68 @@ fn fill_query_block(
         set_qm31(cols, 34, r, pack(p_r));
         set_qm31(cols, 38, r, outs[i + 1]); // local output index, not global row
         // z_x / combos / comps remain 0 (is_step = 0 ⇒ unconstrained)
-        chain_on_col[r] = BaseField::from_u32_unchecked(1);
     }
 }
 
-fn finalize_trace(
+/// Build the canonical preprocessed columns from PUBLIC data alone (no witness):
+/// the `is_step` / `chain_on` block selectors, plus the `is_output` selector and
+/// the claimed final-fold columns `fin0..fin3`.  Layout: `finals.len()` blocks of
+/// `1 + num_folds` rows; per block `q` at `base = q·(1+num_folds)`:
+/// `is_step[base]=1`, `chain_on[base+1..=base+num_folds]=1`,
+/// `is_output[base+num_folds]=1`, `fin_k[base+num_folds]=limbs(finals[q])[k]`.
+///
+/// This is the single source of truth for the preprocessed tree — the prover
+/// commits these and the verifier recomputes their commitment root to PIN them
+/// (audit gap C2), so a prover cannot forge a selector to gate constraints off.
+/// The pinned `fin` columns + the `is_output`-gated equality constraint tie the
+/// trace's real output to the verifier-fixed claimed value (audit gap C1).
+pub fn build_preproc(finals: &[u128], num_folds: usize, log_n_rows: u32) -> Vec<TraceCol> {
+    let n = 1usize << log_n_rows;
+    let block = 1 + num_folds;
+    let domain = CanonicCoset::new(log_n_rows).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let one = BaseField::from_u32_unchecked(1);
+
+    let mut is_step_col = vec![bf0; n];
+    let mut chain_on_col = vec![bf0; n];
+    let mut is_output_col = vec![bf0; n];
+    let mut fin_cols: [Vec<BaseField>; 4] =
+        [vec![bf0; n], vec![bf0; n], vec![bf0; n], vec![bf0; n]];
+
+    for (q, &final_v) in finals.iter().enumerate() {
+        let base = q * block;
+        is_step_col[base] = one;
+        for r in 1..=num_folds {
+            chain_on_col[base + r] = one;
+        }
+        let out_row = base + num_folds;
+        is_output_col[out_row] = one;
+        let fl = limbs(final_v);
+        for k in 0..4 {
+            fin_cols[k][out_row] = BaseField::from_u32_unchecked(fl[k] as u32);
+        }
+    }
+
+    let mut all = vec![is_step_col, chain_on_col, is_output_col];
+    all.extend(fin_cols);
+    for c in all.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(c);
+    }
+    all.into_iter()
+        .map(|c| CircleEvaluation::new(domain, c))
+        .collect()
+}
+
+fn finalize_main(
     mut cols: Vec<Vec<BaseField>>,
-    mut is_step_col: Vec<BaseField>,
-    mut chain_on_col: Vec<BaseField>,
     domain: stwo::core::poly::circle::CircleDomain,
-) -> (TraceColumns, Vec<TraceCol>) {
+) -> TraceColumns {
     for col in cols.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(col);
     }
-    bit_reverse_coset_to_circle_domain_order(&mut is_step_col);
-    bit_reverse_coset_to_circle_domain_order(&mut chain_on_col);
-
-    let main_trace: TraceColumns = cols
-        .into_iter()
+    cols.into_iter()
         .map(|col| CircleEvaluation::new(domain, col))
-        .collect();
-    let preproc: Vec<TraceCol> = vec![
-        CircleEvaluation::new(domain, is_step_col),
-        CircleEvaluation::new(domain, chain_on_col),
-    ];
-    (main_trace, preproc)
+        .collect()
 }
 
 /// Build the main trace + preprocessed columns for one query's full FRI chain.
@@ -417,13 +496,12 @@ pub fn build_trace(
 
     let domain = CanonicCoset::new(log_n_rows).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
-
     let mut cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-    let mut is_step_col: Vec<BaseField> = vec![bf0; n];
-    let mut chain_on_col: Vec<BaseField> = vec![bf0; n];
 
-    fill_query_block(&mut cols, &mut is_step_col, &mut chain_on_col, 0, step, rounds);
-    finalize_trace(cols, is_step_col, chain_on_col, domain)
+    fill_query_block(&mut cols, 0, step, rounds);
+    let main_trace = finalize_main(cols, domain);
+    let preproc = build_preproc(&[recursive_query_final(step, rounds)], rounds.len(), log_n_rows);
+    (main_trace, preproc)
 }
 
 /// Build a trace for N queries laid out in consecutive blocks of `1 + num_folds`
@@ -436,27 +514,42 @@ pub fn build_trace_multi(
 ) -> (TraceColumns, Vec<TraceCol>) {
     assert!(!queries.is_empty(), "build_trace_multi requires ≥ 1 query");
     let n = 1usize << log_n_rows;
-    let block = 1 + queries[0].1.len();
+    let num_folds = queries[0].1.len();
+    let block = 1 + num_folds;
     debug_assert!(queries.len() * block <= n, "rows exceed trace capacity");
 
     let domain = CanonicCoset::new(log_n_rows).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
-
     let mut cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-    let mut is_step_col: Vec<BaseField> = vec![bf0; n];
-    let mut chain_on_col: Vec<BaseField> = vec![bf0; n];
 
     for (q, (step, rounds)) in queries.iter().enumerate() {
-        fill_query_block(
-            &mut cols,
-            &mut is_step_col,
-            &mut chain_on_col,
-            q * block,
-            step,
-            rounds,
-        );
+        fill_query_block(&mut cols, q * block, step, rounds);
     }
-    finalize_trace(cols, is_step_col, chain_on_col, domain)
+    let main_trace = finalize_main(cols, domain);
+    let preproc = build_preproc(&recursive_queries_final(queries), num_folds, log_n_rows);
+    (main_trace, preproc)
+}
+
+/// Recompute the canonical preprocessed-tree commitment root for the given
+/// selector columns, mirroring the prover's Tree 0 commit exactly. The verifier
+/// asserts `proof.commitments[0]` equals this — pinning the preprocessed columns
+/// to their canonical values (audit gap C2).
+fn canonical_preproc_root(
+    preproc: Vec<TraceCol>,
+    log_size: u32,
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(preproc);
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
 }
 
 // ── Prove / verify roundtrip ────────────────────────────────────────────────────
@@ -533,11 +626,15 @@ fn prove_columns(
 }
 
 /// Verify a proof produced by [`prove_recursive_query`] against the claimed
-/// public I/O `(px, final_value)`. A wrong `final_value` (or `px`) replays a
-/// different transcript and fails verification.
+/// public I/O `(num_folds, px, final_value)`. `num_folds` is a verifier-fixed
+/// public structural parameter: the verifier recomputes the canonical selector
+/// commitment for a single block of `1 + num_folds` rows and PINS it against the
+/// proof's preprocessed root (closes audit gap C2 — a forged selector no longer
+/// verifies). A wrong `final_value`/`px` replays a different transcript and fails.
 pub fn verify_recursive_query(
     proof_bytes: &[u8],
     log_size: u32,
+    num_folds: usize,
     px: u32,
     final_value: u128,
 ) -> Result<bool, String> {
@@ -569,6 +666,14 @@ pub fn verify_recursive_query(
             proof.commitments.len()
         ));
     }
+
+    // C2: pin the preprocessed (selector) columns to their canonical values.
+    let canonical_root =
+        canonical_preproc_root(build_preproc(&[final_value], num_folds, log_size), log_size);
+    if proof.commitments[0] != canonical_root {
+        return Ok(false); // forged / non-canonical preprocessed tree
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -686,10 +791,14 @@ fn prove_columns_multi(
 }
 
 /// Verify a proof from [`prove_recursive_queries`] against the claimed per-query
-/// public I/O `(pxs, finals)` (same order as the proven queries).
+/// public I/O `(pxs, finals)` (same order as the proven queries) and the
+/// verifier-fixed structural parameter `num_folds`. The canonical selector
+/// commitment for `pxs.len()` blocks of `1 + num_folds` rows is pinned against
+/// the proof's preprocessed root (closes audit gap C2).
 pub fn verify_recursive_queries(
     proof_bytes: &[u8],
     log_size: u32,
+    num_folds: usize,
     pxs: &[u32],
     finals: &[u128],
 ) -> Result<bool, String> {
@@ -698,6 +807,9 @@ pub fn verify_recursive_queries(
     }
     if pxs.len() != finals.len() {
         return Err("pxs/finals length mismatch".into());
+    }
+    if pxs.is_empty() {
+        return Err("must have ≥ 1 query".into());
     }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
@@ -724,6 +836,14 @@ pub fn verify_recursive_queries(
             proof.commitments.len()
         ));
     }
+
+    // C2: pin the preprocessed (selector) columns to their canonical values.
+    let canonical_root =
+        canonical_preproc_root(build_preproc(finals, num_folds, log_size), log_size);
+    if proof.commitments[0] != canonical_root {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -819,7 +939,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 1);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
         assert_eq!(final_v, recursive_query_final(&step, &rounds));
     }
 
@@ -830,7 +950,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 4);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
         assert_eq!(final_v, recursive_query_final(&step, &rounds));
     }
 
@@ -841,7 +961,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 6);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
     }
 
     // Rejection: a wrong claimed final fold value replays a different transcript.
@@ -852,8 +972,8 @@ mod tests {
         let rounds = sample_rounds(&mut s, 3);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
         // Correct value verifies; a flipped value must not.
-        assert!(verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap());
-        assert!(!verify_recursive_query(&bytes, log_size, step.2, final_v ^ 1)
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
+        assert!(!verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v ^ 1)
             .unwrap_or(false));
     }
 
@@ -868,7 +988,7 @@ mod tests {
         // Flip a load-bearing byte; a tampered proof must NOT verify
         // (either a decode error or a constraint/FRI failure → Ok(false)).
         bytes[n / 3] ^= 0xff;
-        assert!(!verify_recursive_query(&bytes, log_size, step.2, final_v).unwrap_or(false));
+        assert!(!verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap_or(false));
     }
 
     // Rejection: corrupted circle-fold output (row 0 out column) — breaks both
@@ -944,7 +1064,7 @@ mod tests {
         for (i, (st, r)) in queries.iter().enumerate() {
             assert_eq!(finals[i], recursive_query_final(st, r));
         }
-        assert!(verify_recursive_queries(&bytes, log_size, &pxs, &finals).unwrap());
+        assert!(verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &pxs, &finals).unwrap());
     }
 
     // A single query through the multi path matches the single-query path's output.
@@ -956,7 +1076,7 @@ mod tests {
         let (bytes, log_size, finals) =
             prove_recursive_queries(&[(step, rounds.clone())]).unwrap();
         assert_eq!(finals[0], recursive_query_final(&step, &rounds));
-        assert!(verify_recursive_queries(&bytes, log_size, &[step.2], &finals).unwrap());
+        assert!(verify_recursive_queries(&bytes, log_size, rounds.len(), &[step.2], &finals).unwrap());
     }
 
     // Rejection: a wrong claimed final for one query fails the whole proof.
@@ -966,12 +1086,12 @@ mod tests {
         let queries = sample_queries(&mut s, 4, 2);
         let (bytes, log_size, finals) = prove_recursive_queries(&queries).unwrap();
         let pxs: Vec<u32> = queries.iter().map(|(st, _)| st.2).collect();
-        assert!(verify_recursive_queries(&bytes, log_size, &pxs, &finals).unwrap());
+        assert!(verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &pxs, &finals).unwrap());
 
         // Flip the 3rd query's final value.
         let mut bad = finals.clone();
         bad[2] ^= 1;
-        assert!(!verify_recursive_queries(&bytes, log_size, &pxs, &bad).unwrap_or(false));
+        assert!(!verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &pxs, &bad).unwrap_or(false));
     }
 
     // Rejection: mismatched num_folds across queries.
@@ -997,5 +1117,62 @@ mod tests {
         let rounds = sample_rounds(&mut s, MAX_NUM_FOLDS + 1);
         assert!(prove_recursive_query(&step, &rounds).is_err());
         assert!(prove_recursive_queries(&[(step, rounds)]).is_err());
+    }
+
+    // C2 regression: a prover that forges the `is_step` selector to all-zero
+    // (gating OODS off) and corrupts `compPos` must NOT verify — the verifier
+    // pins the canonical preprocessed root. (Before the fix, this verified true.)
+    #[test]
+    fn test_forged_selector_rejected() {
+        let mut s = 0x5eed_u64;
+        let step = sample_step(&mut s);
+        let rounds = sample_rounds(&mut s, 2);
+        let log_size = compute_log_size(1 + rounds.len());
+        let (mut main_trace, mut preproc) = build_trace(&step, &rounds, log_size);
+        let px = step.2;
+        let fin = recursive_query_final(&step, &rounds);
+        let domain = CanonicCoset::new(log_size).circle_domain();
+        let n = 1usize << log_size;
+
+        // Forge is_step (preproc[0]) → all-zero, gating the OODS constraints off.
+        preproc[0] =
+            CircleEvaluation::new(domain, vec![BaseField::from_u32_unchecked(0); n]);
+        // Corrupt compPos (col 26, row 0) — OODS+ would normally catch this.
+        {
+            let mut vals: Vec<BaseField> = main_trace[26].values.to_vec();
+            vals[0] = BaseField::from_u32_unchecked(0xdead);
+            main_trace[26] = CircleEvaluation::new(domain, vals);
+        }
+
+        let bytes = prove_columns(preproc, main_trace, log_size, px, fin)
+            .expect("forged-selector trace still satisfies the (gated-off) constraints");
+        // Honest num_folds → canonical selector root ≠ forged root → rejected.
+        assert!(
+            !verify_recursive_query(&bytes, log_size, rounds.len(), px, fin).unwrap_or(false),
+            "a forged preprocessed selector must not verify (C2 pinned)",
+        );
+    }
+
+    // C1 regression: a prover whose trace computes X but whose `fin` preprocessed
+    // column claims Y ≠ X cannot even build a valid proof — the is_output-gated
+    // equality constraint `out == fin` is violated, so prove fails.
+    #[test]
+    fn test_forged_output_cannot_prove() {
+        let mut s = 0x0117_u64;
+        let step = sample_step(&mut s);
+        let rounds = sample_rounds(&mut s, 2);
+        let log_size = compute_log_size(1 + rounds.len());
+        let real_final = recursive_query_final(&step, &rounds);
+
+        // Honest main trace (computes the real final X)...
+        let (main_trace, _honest_preproc) = build_trace(&step, &rounds, log_size);
+        // ...but preprocessed `fin` columns claim a DIFFERENT final Y.
+        let forged_preproc = build_preproc(&[real_final ^ 1], rounds.len(), log_size);
+
+        let res = prove_columns(forged_preproc, main_trace, log_size, step.2, real_final ^ 1);
+        assert!(
+            res.is_err(),
+            "trace output ≠ claimed fin must violate the is_output constraint (C1)",
+        );
     }
 }
