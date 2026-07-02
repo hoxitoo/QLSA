@@ -167,28 +167,26 @@ ML-DSA подпись
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
-### ⚠ R3.7 — блокеры soundness (аудит 2026-06-17, ДО любой прод-обвязки)
+### R3.7 — блокеры soundness: C1/C2 ЗАКРЫТЫ для `recursive_verifier` (2026-06-17)
 
-Аудит (крипто + код) подтвердил: gadget'ы — корректные *relation*-провера (output-столбцы привязаны
-к input-столбцам, cross-checked против `vfri2_bridge.rs`), но **композиция ещё НЕ sound против
-злонамеренного prover'а**. Два подтверждённых пробела (оба — блокеры R3.7, закрыть ДО `QLSAVerifierRecursive`):
+Аудит (крипто + код) выявил два composition-level пробела против злонамеренного prover'а. **Оба
+теперь закрыты для флагманского composition-гаджета `recursive_verifier`** (single + N-query):
 
-- **[C1] Публичные выходы привязаны только через Fiat-Shamir, без in-circuit ограничения.**
-  `mix_public`/`mix_digest` делают proof *специфичным* к смешанному значению, но НЕ доказывают, что
-  трейс его *вычислил*. Prover может предъявить proof, где заявленный `root`/`finalFold`/`digest`
-  ≠ реальный выход трейса. Фикс: `is_output`-гейтед ограничение `(out_col − public)=0`, привязывающее
-  выходную строку к verifier-fixed public input.
-- **[C2] Preprocessed-столбцы (селекторы И round-константы) поставляются prover'ом в Tree 0 и не
-  пиннятся к каноническому спеку.** Верификатор коммитит `proof.commitments[0]` как есть → prover
-  может подделать селектор (`is_step≡0`) и отключить ограничения (подтверждено пробой: forged
-  `is_step` + испорченный `compPos` → `verify=true`). Фикс: верификатор должен регенерировать
-  канонические preprocessed-столбцы и пиннить их корень (reject при несовпадении), а не доверять
-  дереву prover'а.
+- **[C1 — ИСПРАВЛЕНО] Привязка выхода.** Verifier-fixed заявленный final несётся в пиннутых
+  preprocessed-столбцах `fin0..fin3`, а in-circuit ограничение `is_output·(out − fin)=0` заставляет
+  реальную выходную строку трейса равняться ему. Prover, чей трейс вычислил X, не может заявить Y≠X
+  (regression `test_forged_output_cannot_prove` — prove падает на нарушении ограничения).
+- **[C2 — ИСПРАВЛЕНО] Пиннинг preprocessed.** Селекторы + столбцы заявленного выхода производит единый
+  канонический источник `build_preproc`; верификатор пересчитывает их commitment-корень через
+  `canonical_preproc_root` (`CommitmentSchemeProver::roots()`) и отклоняет proof, чей `commitments[0]`
+  отличается — forged `is_step≡0` больше не верифицируется (regression `test_forged_selector_rejected`;
+  раньше → `verify=true`). 90 рекурсивных тестов.
 
-**Важно:** тот же паттepн `commit(proof.commitments[0], …)` используют зрелые верификаторы в
-`stark_stwo/src/lib.rs` (V23/VFRI). Эксплуатируемость каждого — отдельный per-circuit follow-up;
-C2 — review-item уровня всего репозитория, не только рекурсии. Тесты (88 рекурсивных) покрывают
-honest-prover + tampered-bytes, но НЕ malicious-preproc/trace forgery — поэтому пробелы не всплывали.
+**Остаётся (R3.7 follow-up):** портировать тот же pinning + output-binding на standalone sub-гаджеты
+(`merkle_path_air`, `channel_air`, `transcript_draw_air`, `fri_fold_chain_air` — пока документированная
+FS-only привязка) И на зрелые V23/VFRI-верификаторы в `stark_stwo/src/lib.rs` (тот же unpinned
+`commit(proof.commitments[0], …)` — per-circuit review-item на уровне всего репо). `recursive_verifier`
+— референс-реализация паттерна.
 
 Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
 guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест

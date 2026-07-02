@@ -32,34 +32,33 @@
 //! channel-bound query indices + fold challenges and feed them into the multi-query
 //! verifier, then on-chain `QLSAVerifierRecursive.sol` (~5M gas constant).
 //!
-//! # ⚠ Soundness status (audit 2026-06-17) — NOT YET COMPLETE
+//! # Soundness status (audit 2026-06-17) — C1/C2 CLOSED for `recursive_verifier`
 //!
-//! These gadgets are **correct arithmetic *relation* provers** (each pins its
-//! output columns to its input columns; verified by the rejection tests and the
-//! cross-checks against `vfri2_bridge.rs`).  They are **not yet a sound
-//! *composition*** against a malicious prover.  Two confirmed gaps must be closed
-//! before any `QLSAVerifierRecursive` is wired to real proofs (both blockers for
-//! R3.7):
+//! These gadgets are correct arithmetic *relation* provers (each pins its output
+//! columns to its input columns; verified by the rejection tests and the
+//! cross-checks against `vfri2_bridge.rs`).  The audit found two composition-level
+//! gaps against a malicious prover; both are now **closed for the flagship
+//! composition gadget `recursive_verifier`** (single + N-query):
 //!
-//! - **[C1] Public outputs are bound only via Fiat-Shamir, not by an in-circuit
-//!   constraint.**  `mix_public` / `mix_digest` make a proof *specific to* a
-//!   mixed value but do NOT prove the trace *computed* it.  A malicious prover can
-//!   present a proof whose claimed public output (`root` / `finalFold` / `digest`)
-//!   differs from its trace's real output.  Fix: add an `is_output`-gated
-//!   `(out_col − public) = 0` constraint tying the trace output row to a
-//!   verifier-fixed public input.
-//! - **[C2] Preprocessed columns (selectors AND round constants) are prover-
-//!   supplied in Tree 0 and never pinned to a canonical spec.**  The verifier
-//!   commits `proof.commitments[0]` as given, so a prover can forge selectors
-//!   (e.g. `is_step ≡ 0`) to gate constraints off (confirmed: a forged `is_step`
-//!   with a corrupted `compPos` verifies `true`).  Fix: the verifier must
-//!   regenerate the canonical preprocessed columns and pin their root (reject a
-//!   mismatch) instead of trusting the prover's tree.
+//! - **[C1 — FIXED] Output binding.**  The verifier-fixed claimed final value is
+//!   carried in pinned `fin0..fin3` preprocessed columns, and an `is_output`-gated
+//!   in-circuit constraint forces the trace's real output row to equal it.  A
+//!   prover whose trace computes X cannot claim Y ≠ X (regression test
+//!   `test_forged_output_cannot_prove`).
+//! - **[C2 — FIXED] Preprocessed pinning.**  Selectors + claimed-output columns
+//!   are produced by the single canonical source `build_preproc`; the verifier
+//!   recomputes their commitment root (`canonical_preproc_root`) and rejects any
+//!   proof whose `commitments[0]` differs — a forged `is_step ≡ 0` no longer
+//!   verifies (regression test `test_forged_selector_rejected`; previously it
+//!   verified `true`).
 //!
-//! NOTE: the same unpinned-preprocessed pattern (`commit(proof.commitments[0], …)`)
-//! is used by the mature `stark_stwo/src/lib.rs` verifiers; whether each is
-//! independently exploitable needs a per-circuit follow-up — treat C2 as a
-//! codebase-wide review item, not recursion-only.
+//! **Remaining (R3.7 follow-up):** the same pinning + output-binding mechanism
+//! still needs porting to the standalone sub-gadgets (`merkle_path_air`,
+//! `channel_air`, `transcript_draw_air`, `fri_fold_chain_air`) — they retain the
+//! documented Fiat-Shamir-only binding — and to the mature `stark_stwo/src/lib.rs`
+//! V23/VFRI verifiers, which use the same unpinned `commit(proof.commitments[0], …)`
+//! pattern (per-circuit codebase-wide review item). The `recursive_verifier`
+//! pattern is the reference implementation to follow.
 
 pub mod channel_air;
 pub mod fold_air;
