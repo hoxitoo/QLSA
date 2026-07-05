@@ -16,12 +16,16 @@
   `commitments[0]` → forged `is_step≡0` больше не верифицируется (regression
   `test_forged_selector_rejected`; раньше → `verify=true`).
 
-**Остаётся (R3.7 follow-up):** тот же pinning + output-binding портировать на standalone sub-гаджеты
-(`merkle_path_air`, `channel_air`, `transcript_draw_air`, `fri_fold_chain_air`) И на зрелые
-V23/VFRI-верификаторы в `lib.rs` (тот же unpinned `commit(proof.commitments[0], …)` — per-circuit
-review-item уровня всего репо; `recursive_verifier` — референс). **Robustness (код-аудит):**
-`MAX_QUERIES`/`MAX_NUM_FOLDS` cap'ы до size-multiply, guard пустого `build_trace_multi`,
-`bits_to_index` assert (depth>32), brittle tamper-тест. Подробности: `docs/roadmap/recursion.md` § R3.7.
+**R3.7 follow-up — прогресс (2026-06-17):** C2-пиннинг портирован на **(а)** все 4 recursion sub-гаджета
+(`merkle_path_air`/`channel_air`/`transcript_draw_air`/`fri_fold_chain_air` — `build_preproc(...)` +
+`canonical_preproc_root` + `test_forged_preproc_rejected`) И **(б) все 5 production `is_init_uh`-верификаторов
+в `lib.rs`** (`verify_use_hint_batch_v2`, `verify_norm_use_hint_combined`, `verify_az_ct1_norm_use_hint_combined`,
+`verify_full_mldsa_witness_combined` V21/V22, `verify_full_mldsa_witness_v23`) через
+`canonical_uh_preproc_root(max_log)` + `build_preproc_v2`: forged `is_init_uh≡0` (ослабил бы сброс
+hint-weight-аккумулятора → мог обойти границу OMEGA) больше не верифицируется; honest V21/V22/V23
+roundtrip'ы проходят. Остаётся: C1 output-binding только в `recursive_verifier`; legacy `verify_hash_chain*`
+preproc не пиннут (низкий приоритет, прототипный путь). **Robustness (код-аудит):** `MAX_QUERIES`/`MAX_NUM_FOLDS`
+cap'ы, guard пустого `build_trace_multi`, `bits_to_index` assert (depth>32). `docs/roadmap/recursion.md` § R3.7.
 
 ## Статус (обновлено 2026-06-17 — решение по пути: standalone t=16 пропущен, старт рекурсии)
 

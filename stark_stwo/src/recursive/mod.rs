@@ -61,13 +61,22 @@
 //! take the structural public params (`num_rounds` / `(m, digest)` / `log_size`)
 //! needed to rebuild the canonical tree.
 //!
+//! **C2 pinning ported to the production V23 pipeline (2026-06-17):** all five
+//! mature `stark_stwo/src/lib.rs` verifiers that carry the `is_init_uh`
+//! preprocessed column — `verify_use_hint_batch_v2`, `verify_norm_use_hint_combined`,
+//! `verify_az_ct1_norm_use_hint_combined`, `verify_full_mldsa_witness_combined`
+//! (V21/V22), and `verify_full_mldsa_witness_v23` — now pin their preprocessed root
+//! via `canonical_uh_preproc_root(max_log)` (mirroring each prover's config).
+//! Forging `is_init_uh≡0` (which would relax the hint-weight accumulator reset and
+//! could bypass the OMEGA bound) no longer verifies; honest V21/V22/V23 roundtrips
+//! still pass. `build_preproc_v2` is the single canonical source.
+//!
 //! **Remaining (R3.7 follow-up):** (1) C1 output-binding is implemented only in
-//! `recursive_verifier`; the sub-gadgets still bind their public I/O via
-//! Fiat-Shamir (acceptable for sub-components, tightened at composition). (2) The
-//! mature `stark_stwo/src/lib.rs` V23/VFRI verifiers still use the unpinned
-//! `commit(proof.commitments[0], …)` pattern — the same `canonical_preproc_root`
-//! mechanism should be ported there (per-circuit codebase-wide review item). The
-//! `recursive_verifier` implementation is the reference.
+//! `recursive_verifier`; the sub-gadgets bind public I/O via Fiat-Shamir
+//! (acceptable for sub-components, tightened at composition). (2) The legacy
+//! Poseidon2 hash-chain verifiers (`verify_hash_chain*`, preproc rc0/rc1/is_init/
+//! init_row) remain unpinned — low priority (prototype path, not the V23 pipeline).
+//! `recursive_verifier` / `canonical_uh_preproc_root` are the reference.
 
 pub mod channel_air;
 pub mod fold_air;

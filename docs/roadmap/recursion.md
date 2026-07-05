@@ -189,11 +189,19 @@ forged preprocessed-дерево больше не верифицируется 
 `verify_fold_chain`/draw/merkle принимают структурные public-параметры (`num_rounds`/`(m,digest)`/`log_size`)
 для реконструкции канонического дерева. **94 рекурсивных теста.**
 
-**Остаётся (R3.7 follow-up):** (1) C1 output-binding реализован только в `recursive_verifier`; sub-гаджеты
-привязывают public I/O через Fiat-Shamir (приемлемо для sub-компонентов, ужесточается на композиции).
-(2) Зрелые V23/VFRI-верификаторы в `stark_stwo/src/lib.rs` — тот же unpinned `commit(proof.commitments[0], …)`;
-портировать `canonical_preproc_root` туда (per-circuit review-item уровня всего репо). `recursive_verifier`
-— референс.
+**C2-пиннинг портирован на production V23-конвейер (2026-06-17):** все 5 зрелых верификаторов в
+`stark_stwo/src/lib.rs`, несущих preprocessed-столбец `is_init_uh` — `verify_use_hint_batch_v2`,
+`verify_norm_use_hint_combined`, `verify_az_ct1_norm_use_hint_combined`, `verify_full_mldsa_witness_combined`
+(V21/V22), `verify_full_mldsa_witness_v23` — пиннят preprocessed-корень через `canonical_uh_preproc_root(max_log)`
+(зеркалит config каждого prover'а; `build_preproc_v2` — единый источник). Forged `is_init_uh≡0` (ослабил бы
+сброс hint-weight-аккумулятора на row 0 → мог обойти границу OMEGA=55) больше не верифицируется
+(`test_use_hint_batch_v2_forged_preproc_rejected`); honest V21/V22/V23 roundtrip'ы проходят
+(`test_prove_verify_mldsa_v2{1,2,3}_roundtrip`) + combined roundtrip.
+
+**Остаётся (R3.7 follow-up):** (1) C1 output-binding реализован только в `recursive_verifier`; sub-гаджеты и
+lib.rs-верификаторы привязывают public I/O через Fiat-Shamir (для V23 выход — fingerprint в канал, приемлемо).
+(2) Legacy Poseidon2 hash-chain верификаторы (`verify_hash_chain*`, preproc rc0/rc1/is_init/init_row) не пиннут —
+низкий приоритет (прототипный путь, не V23-конвейер). `recursive_verifier` / `canonical_uh_preproc_root` — референс.
 
 Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
 guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест
