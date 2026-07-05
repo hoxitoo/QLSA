@@ -198,10 +198,14 @@ forged preprocessed-дерево больше не верифицируется 
 (`test_use_hint_batch_v2_forged_preproc_rejected`); honest V21/V22/V23 roundtrip'ы проходят
 (`test_prove_verify_mldsa_v2{1,2,3}_roundtrip`) + combined roundtrip.
 
-**Остаётся (R3.7 follow-up):** (1) C1 output-binding реализован только в `recursive_verifier`; sub-гаджеты и
+**C2 закрыт для ВСЕХ preprocessed-верификаторов репозитория (2026-06-17):** + Poseidon2 hash-chain
+верификатор `verify_hash_chain_poseidon2` (`poseidon2_air::build_preprocessed` + `canonical_hashchain_preproc_root`,
+log_size-параметризован). Ни один верификатор больше не принимает непиннутое Tree 0. 443 быстрых Rust-теста
+зелёные (+`test_hash_chain_preproc_pin`, +`test_use_hint_batch_v2_forged_preproc_rejected`, honest V21/V22/V23).
+
+**Остаётся (R3.7 follow-up):** C1 output-binding реализован только в `recursive_verifier`; sub-гаджеты и
 lib.rs-верификаторы привязывают public I/O через Fiat-Shamir (для V23 выход — fingerprint в канал, приемлемо).
-(2) Legacy Poseidon2 hash-chain верификаторы (`verify_hash_chain*`, preproc rc0/rc1/is_init/init_row) не пиннут —
-низкий приоритет (прототипный путь, не V23-конвейер). `recursive_verifier` / `canonical_uh_preproc_root` — референс.
+`recursive_verifier` / `canonical_uh_preproc_root` — референс паттерна.
 
 Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
 guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест

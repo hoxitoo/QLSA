@@ -212,6 +212,35 @@ fn canonical_uh_preproc_root(
     scheme.roots()[0]
 }
 
+/// Recompute the canonical Tree-0 root for a Poseidon2 hash-chain proof (preproc
+/// columns `rc0, rc1, is_init, init_row`), committed at `log_size`.  Mirrors
+/// [`prove_hash_chain_poseidon2`]'s Tree-0 commit; the verifier pins
+/// `proof.commitments[0]` to this (audit gap C2).
+fn canonical_hashchain_preproc_root(
+    log_size: u32,
+) -> <stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleHasher
+        as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    use stwo::core::channel::Blake2sM31Channel;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::CommitmentSchemeProver;
+
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(poseidon2_air::build_preprocessed(log_size));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
 /// Prove a hash-chain over `leaves`.
 ///
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
@@ -378,6 +407,14 @@ pub fn verify_hash_chain_poseidon2(
             proof.commitments.len()
         ));
     }
+
+    // C2: pin the preprocessed (round-constant + init-selector) tree to its
+    // canonical value for this log_size — a forged rc/is_init/init_row tree
+    // (which could swap the hash function or disable the sponge init) is rejected.
+    if proof.commitments[0] != canonical_hashchain_preproc_root(log_size) {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -8894,6 +8931,27 @@ mod tests {
     fn test_canonical_uh_preproc_root_deterministic() {
         assert_eq!(canonical_uh_preproc_root(8), canonical_uh_preproc_root(8));
         assert_ne!(canonical_uh_preproc_root(8), canonical_uh_preproc_root(10));
+    }
+
+    // The hash-chain canonical preprocessed root is deterministic and
+    // log_size-sensitive; an honest hash-chain proof still verifies after pinning.
+    #[test]
+    fn test_hash_chain_preproc_pin() {
+        assert_eq!(
+            canonical_hashchain_preproc_root(6),
+            canonical_hashchain_preproc_root(6)
+        );
+        assert_ne!(
+            canonical_hashchain_preproc_root(6),
+            canonical_hashchain_preproc_root(7)
+        );
+        // Honest roundtrip through the pinned verifier.
+        let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
+        let (proof, cm, log) = prove_hash_chain_poseidon2(&leaves, &[]).unwrap();
+        assert!(
+            verify_hash_chain_poseidon2(&proof, &cm, log, &[]).unwrap(),
+            "an honest hash-chain proof must still verify after C2 pinning",
+        );
     }
 
     // C2 pinning must not break an honest COMBINED (Norm + UseHintBatchV2) proof —

@@ -71,12 +71,17 @@
 //! could bypass the OMEGA bound) no longer verifies; honest V21/V22/V23 roundtrips
 //! still pass. `build_preproc_v2` is the single canonical source.
 //!
-//! **Remaining (R3.7 follow-up):** (1) C1 output-binding is implemented only in
-//! `recursive_verifier`; the sub-gadgets bind public I/O via Fiat-Shamir
-//! (acceptable for sub-components, tightened at composition). (2) The legacy
-//! Poseidon2 hash-chain verifiers (`verify_hash_chain*`, preproc rc0/rc1/is_init/
-//! init_row) remain unpinned — low priority (prototype path, not the V23 pipeline).
-//! `recursive_verifier` / `canonical_uh_preproc_root` are the reference.
+//! **C2 is now closed for EVERY preprocessed-column verifier in the codebase**
+//! (2026-06-17): the 4 recursion sub-gadgets, `recursive_verifier`, all 5 V23-family
+//! `is_init_uh` verifiers, and the Poseidon2 hash-chain verifier
+//! (`verify_hash_chain_poseidon2` via `poseidon2_air::build_preprocessed` +
+//! `canonical_hashchain_preproc_root`). No verifier accepts an unpinned Tree 0.
+//!
+//! **Remaining (R3.7 follow-up):** C1 output-binding is implemented only in
+//! `recursive_verifier`; the sub-gadgets and the mature verifiers bind their public
+//! I/O via Fiat-Shamir (acceptable — for the sub-components it is tightened at
+//! composition, and for V23 the witness output is a fingerprint mixed into the
+//! channel). `recursive_verifier` / `canonical_uh_preproc_root` are the reference.
 
 pub mod channel_air;
 pub mod fold_air;

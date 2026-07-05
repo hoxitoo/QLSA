@@ -23,9 +23,11 @@
 `verify_full_mldsa_witness_combined` V21/V22, `verify_full_mldsa_witness_v23`) через
 `canonical_uh_preproc_root(max_log)` + `build_preproc_v2`: forged `is_init_uh≡0` (ослабил бы сброс
 hint-weight-аккумулятора → мог обойти границу OMEGA) больше не верифицируется; honest V21/V22/V23
-roundtrip'ы проходят. Остаётся: C1 output-binding только в `recursive_verifier`; legacy `verify_hash_chain*`
-preproc не пиннут (низкий приоритет, прототипный путь). **Robustness (код-аудит):** `MAX_QUERIES`/`MAX_NUM_FOLDS`
-cap'ы, guard пустого `build_trace_multi`, `bits_to_index` assert (depth>32). `docs/roadmap/recursion.md` § R3.7.
+roundtrip'ы проходят. **C2 закрыт для ВСЕХ preprocessed-верификаторов репо (2026-06-17):** + Poseidon2 hash-chain
+`verify_hash_chain_poseidon2` (`poseidon2_air::build_preprocessed` + `canonical_hashchain_preproc_root`). Ни один
+верификатор не принимает непиннутое Tree 0. Остаётся: C1 output-binding только в `recursive_verifier` (остальные —
+FS-привязка I/O, приемлемо). **Robustness:** `MAX_QUERIES`/`MAX_NUM_FOLDS` cap'ы, guard пустого `build_trace_multi`,
+`bits_to_index` assert (depth>32). 443 быстрых Rust-теста зелёные. `docs/roadmap/recursion.md` § R3.7.
 
 ## Статус (обновлено 2026-06-17 — решение по пути: standalone t=16 пропущен, старт рекурсии)
 
