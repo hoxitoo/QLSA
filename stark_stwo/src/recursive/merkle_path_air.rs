@@ -399,6 +399,156 @@ pub fn build_trace(
     (main_cols, preproc, path_root)
 }
 
+// ── Multi-path builders (N independent paths in one component) ───────────────────
+//
+// The AIR is unchanged — it is per-row with `is_first` gating each path's reset
+// (`cur = is_first·leaf + (1−is_first)·s0[-1]`). N paths of uniform `depth` are laid
+// out in consecutive blocks of `depth` compressions; `is_first`/`idx_bit`/`leaf` are
+// set per path. All paths authenticate their leaf into their own root (in the
+// recursive composition, all into the same committed FRI-layer root).
+
+/// Smallest `log_size` fitting `num_paths` paths of `depth` compressions.
+pub fn compute_log_size_multi(num_paths: usize, depth: usize) -> u32 {
+    let comps = num_paths.max(1) * depth.max(1);
+    compute_log_size(comps) // reuses: smallest 2^k ≥ comps·N_ROUNDS
+}
+
+/// Canonical preprocessed columns for `num_paths` paths of uniform `depth`:
+/// per-compression rc/is_init, `is_first` at each path's first compression, and
+/// the pinned `idx_bit`/`leaf` per path. Single source of truth (C1/C2).
+pub fn build_preproc_multi(
+    leaves: &[u64],
+    indices: &[u32],
+    depth: usize,
+    log_size: u32,
+) -> TraceColumns {
+    assert_eq!(leaves.len(), indices.len(), "leaves/indices length mismatch");
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let to_m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut rc0_c = vec![bf0; n];
+    let mut rc1_c = vec![bf0; n];
+    let mut init_c = vec![bf0; n];
+    let mut first_c = vec![bf0; n];
+    let mut idx_bit_c = vec![bf0; n];
+    let mut leaf_c = vec![bf0; n];
+
+    let n_comp = n / N_ROUNDS;
+    for comp in 0..n_comp {
+        // Which path/compression is this? (paths laid out in blocks of `depth`.)
+        let path = comp / depth;
+        let j = comp % depth; // compression within the path
+        let is_real = path < leaves.len();
+        for r in 0..N_ROUNDS {
+            let row = comp * N_ROUNDS + r;
+            rc0_c[row] = to_m31(RC[r][0] as u64);
+            rc1_c[row] = to_m31(RC[r][1] as u64);
+            init_c[row] = if r == 0 { to_m31(1) } else { bf0 };
+            if r == 0 && is_real {
+                if j == 0 {
+                    first_c[row] = to_m31(1); // path start
+                    leaf_c[row] = to_m31(leaves[path]);
+                }
+                let bit = if j < 32 { (indices[path] >> j) & 1 } else { 0 };
+                idx_bit_c[row] = to_m31(bit as u64);
+            }
+        }
+    }
+    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c, &mut idx_bit_c, &mut leaf_c] {
+        bit_reverse_coset_to_circle_domain_order(c);
+    }
+    [rc0_c, rc1_c, init_c, first_c, idx_bit_c, leaf_c]
+        .into_iter()
+        .map(|c| CircleEvaluation::new(domain, c))
+        .collect()
+}
+
+/// Build the multi-path main trace. `leaves[p]`, `sibs[p]`, `bits[p]` describe path
+/// `p` (all of uniform `depth`). Returns `(main_columns, preproc_columns, roots)`.
+pub fn build_trace_multi(
+    leaves: &[u64],
+    sibs: &[Vec<u64>],
+    bits: &[Vec<bool>],
+    log_size: u32,
+) -> (TraceColumns, TraceColumns, Vec<u64>) {
+    let num_paths = leaves.len();
+    assert!(num_paths >= 1, "need ≥ 1 path");
+    assert_eq!(sibs.len(), num_paths);
+    assert_eq!(bits.len(), num_paths);
+    let depth = sibs[0].len();
+    assert!(sibs.iter().all(|s| s.len() == depth), "paths must share depth");
+    assert!(bits.iter().all(|b| b.len() == depth), "paths must share depth");
+
+    let n = 1usize << log_size;
+    debug_assert!(num_paths * depth * N_ROUNDS <= n, "paths exceed trace capacity");
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let to_m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+    let bf0 = BaseField::from_u32_unchecked(0);
+
+    let mut col: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
+    let mut roots = Vec::with_capacity(num_paths);
+
+    let n_comp = n / N_ROUNDS;
+    let mut prev_out = 0u64;
+    for comp in 0..n_comp {
+        let path = comp / depth;
+        let j = comp % depth;
+        let is_real = path < num_paths;
+        let (leaf, sib_val, bit_val) = if is_real {
+            let leaf = leaves[path] % M31_P;
+            (leaf, sibs[path][j] % M31_P, bits[path][j])
+        } else {
+            (0, 0, false) // padding: H(cur, 0)
+        };
+        // cur: leaf at each path's first compression, else the previous output.
+        let cur_val = if is_real && j == 0 { leaf } else { prev_out };
+        let (lv, rv) = if bit_val { (sib_val, cur_val) } else { (cur_val, sib_val) };
+
+        let mut state = [lv, rv];
+        for r in 0..N_ROUNDS {
+            let row = comp * N_ROUNDS + r;
+            let inp0v = if r == 0 { lv } else { state[0] };
+            let inp1v = if r == 0 { rv } else { state[1] };
+            let x0 = m31_add(inp0v, RC[r][0] as u64);
+            let x1 = m31_add(inp1v, RC[r][1] as u64);
+            let t0v = m31_mul(x0, x0);
+            let t1v = m31_mul(x1, x1);
+            let sbox0 = m31_mul(m31_mul(t0v, t0v), x0);
+            let sbox1 = m31_mul(m31_mul(t1v, t1v), x1);
+            let s0n = m31_add(m31_add(m31_add(sbox0, sbox0), sbox0), sbox1);
+            let s1n = m31_add(sbox0, m31_add(m31_add(sbox1, sbox1), sbox1));
+
+            col[0][row] = to_m31(s0n);
+            col[1][row] = to_m31(s1n);
+            col[2][row] = to_m31(t0v);
+            col[3][row] = to_m31(t1v);
+            col[4][row] = to_m31(inp0v);
+            col[5][row] = to_m31(inp1v);
+            if r == 0 {
+                col[6][row] = to_m31(cur_val);
+                col[7][row] = to_m31(sib_val);
+                col[8][row] = if bit_val { to_m31(1) } else { bf0 };
+                col[9][row] = if is_real && j == 0 { to_m31(leaf) } else { bf0 };
+            }
+            state = [s0n, s1n];
+        }
+        prev_out = state[0];
+        if is_real && j == depth - 1 {
+            roots.push(prev_out); // path `path`'s root at its last compression
+        }
+    }
+
+    for c in col.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(c);
+    }
+    let main_cols: TraceColumns = col.into_iter().map(|c| CircleEvaluation::new(domain, c)).collect();
+    let indices: Vec<u32> = bits.iter().map(|b| bits_to_index(b)).collect();
+    let preproc = build_preproc_multi(leaves, &indices, depth, log_size);
+    (main_cols, preproc, roots)
+}
+
 // ── Prove / verify roundtrip ────────────────────────────────────────────────────
 
 fn mix_public(channel: &mut Blake2sM31Channel, leaf: u64, index: u32, root: u64) {
@@ -505,6 +655,133 @@ pub fn verify_merkle_path(
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
     mix_public(verifier_channel, leaf, index, root);
+
+    let result = verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof);
+    Ok(result.is_ok())
+}
+
+// ── Multi-path prove / verify ────────────────────────────────────────────────────
+
+fn canonical_preproc_root_multi(
+    leaves: &[u64],
+    indices: &[u32],
+    depth: usize,
+    log_size: u32,
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(build_preproc_multi(leaves, indices, depth, log_size));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
+fn mix_public_multi(channel: &mut Blake2sM31Channel, leaves: &[u64], indices: &[u32], roots: &[u64]) {
+    let mut words = Vec::with_capacity(leaves.len() * 3);
+    for p in 0..leaves.len() {
+        words.push((leaves[p] % M31_P) as u32);
+        words.push(indices[p]);
+        words.push((roots[p] % M31_P) as u32);
+    }
+    channel.mix_u32s(&words);
+}
+
+/// Prove `N` independent Merkle paths (uniform depth) in ONE component.
+/// Returns `(proof, log_size, roots)`.
+pub fn prove_paths_multi(
+    leaves: &[u64],
+    sibs: &[Vec<u64>],
+    bits: &[Vec<bool>],
+) -> Result<(Vec<u8>, u32, Vec<u64>), String> {
+    if leaves.is_empty() {
+        return Err("need ≥ 1 path".into());
+    }
+    let depth = sibs.first().map(|s| s.len()).unwrap_or(0);
+    if depth == 0 {
+        return Err("path depth must be ≥ 1".into());
+    }
+    let log_size = compute_log_size_multi(leaves.len(), depth);
+    if log_size > MAX_LOG_SIZE {
+        return Err(format!("multi-path log_size {log_size} exceeds {MAX_LOG_SIZE}"));
+    }
+    let (main_cols, preproc, roots) = build_trace_multi(leaves, sibs, bits, log_size);
+    let indices: Vec<u32> = bits.iter().map(|b| bits_to_index(b)).collect();
+
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let channel = &mut Blake2sM31Channel::default();
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(preproc);
+    tree.commit(channel);
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(main_cols);
+    tree.commit(channel);
+
+    mix_public_multi(channel, leaves, &indices, &roots);
+
+    let component = new_component(log_size);
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, scheme)
+        .map_err(|e| format!("multi-path prove error: {e:?}"))?;
+    let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("multi-path serialize error: {e:?}"))?;
+    Ok((bytes, log_size, roots))
+}
+
+/// Verify a multi-path proof against the claimed `(depth, leaves, indices, roots)`.
+pub fn verify_paths_multi(
+    proof_bytes: &[u8],
+    log_size: u32,
+    depth: usize,
+    leaves: &[u64],
+    indices: &[u32],
+    roots: &[u64],
+) -> Result<bool, String> {
+    if !(MIN_LOG_SIZE..=MAX_LOG_SIZE).contains(&log_size) {
+        return Err(format!("log_size {log_size} out of range"));
+    }
+    if leaves.len() != indices.len() || leaves.len() != roots.len() {
+        return Err("leaves/indices/roots length mismatch".into());
+    }
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("multi-path deserialize error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
+
+    let component = new_component(log_size);
+    let verifier_channel = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = component.trace_log_degree_bounds();
+    if proof.commitments.len() < 2 {
+        return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    if proof.commitments[0] != canonical_preproc_root_multi(leaves, indices, depth, log_size) {
+        return Ok(false);
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+
+    mix_public_multi(verifier_channel, leaves, indices, roots);
 
     let result = verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof);
     Ok(result.is_ok())
@@ -685,6 +962,33 @@ mod tests {
             res.is_err(),
             "trace bits ≠ claimed idx_bit must violate the index-binding constraint (C1)",
         );
+    }
+
+    // Multi-path: N independent paths of uniform depth in ONE component.
+    #[test]
+    fn test_multi_path_roundtrip() {
+        let mut seed = 0x3a7f_u64;
+        let num_paths = 3;
+        let depth = 2;
+        let leaves: Vec<u64> = (0..num_paths).map(|_| rand_m31(&mut seed)).collect();
+        let sibs: Vec<Vec<u64>> = (0..num_paths)
+            .map(|_| (0..depth).map(|_| rand_m31(&mut seed)).collect())
+            .collect();
+        let bits: Vec<Vec<bool>> = (0..num_paths)
+            .map(|_| (0..depth).map(|_| rand_m31(&mut seed) & 1 == 1).collect())
+            .collect();
+
+        let (proof, log, roots) = prove_paths_multi(&leaves, &sibs, &bits).unwrap();
+        // Each returned root matches the single-path reference.
+        for p in 0..num_paths {
+            assert_eq!(roots[p], merkle_path_root(leaves[p], &sibs[p], &bits[p]));
+        }
+        let indices: Vec<u32> = bits.iter().map(|b| bits_to_index(b)).collect();
+        assert!(verify_paths_multi(&proof, log, depth, &leaves, &indices, &roots).unwrap());
+        // A wrong claimed root for one path must fail.
+        let mut bad = roots.clone();
+        bad[1] ^= 1;
+        assert!(!verify_paths_multi(&proof, log, depth, &leaves, &indices, &bad).unwrap_or(false));
     }
 
     // C1 regression: a trace whose committed leaf is X but whose pinned `leaf`

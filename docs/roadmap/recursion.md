@@ -176,9 +176,18 @@ ML-DSA подпись
   - `prove_query_membership(step, rounds, sibs, bits)` → `QueryMembershipResult`;
     `verify_query_membership(...)`. Тесты: roundtrip, wrong-final rejection, wrong-root rejection.
     3 Rust теста. **99 рекурсивных Rust тестов.** Mini-scale композиция (roadmap #5) перед full VFRI11
-  - Осталось до полного верификатора: связать `channel` (absorb→draw) → вывести query-индексы +
-    fold-challenge'ы в композицию, масштабировать до N запросов, добавить проверку root против
-    committed FRI-layer корня
+- **R3.9 — N-query композиция (VFRI11-форма)** (`composition::prove_queries_membership`) — ✅ **готов (2026-06-17)**
+  - N per-query fold-цепочек + N Merkle-путей в ОДНОМ proof: N-query `recursive_verifier` +
+    **multi-path `merkle`** (`build_trace_multi`/`build_preproc_multi` — N путей в одном компоненте,
+    per-row `is_first` гейтит сброс каждого пути; AIR не меняется). Все finalFold_q → leaf_q → path_q
+    привязаны end-to-end
+  - Prerequisite: multi-path merkle (`prove_paths_multi`/`verify_paths_multi`, `test_multi_path_roundtrip`) —
+    N независимых путей единой depth, пиннутый preproc (leaf/idx_bit per path)
+  - `prove_queries_membership(queries, paths)` → `QueriesMembershipResult`; `verify_queries_membership(...)`.
+    Тест: N=3 roundtrip + wrong-final одного запроса роняет весь proof. **101 рекурсивный тест**
+  - Осталось до полного верификатора: (1) связать `channel` (absorb→draw) → вывести channel-derived
+    query-индексы + fold-challenge'ы в композицию (no cherry-pick; нужен logup или единый AIR); (2)
+    t=16 inner hash для 128-бит; (3) проверка root против committed FRI-layer корня
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
