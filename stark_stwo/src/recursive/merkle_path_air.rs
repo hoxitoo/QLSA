@@ -53,15 +53,16 @@
 //! Soundness (audit 2026-06-17):
 //! - **[C2 — fixed]** the preprocessed tree (round constants + selectors + the
 //!   claimed-index bits) is pinned by the verifier via `canonical_preproc_root`.
-//! - **[C1 index binding — fixed]** `index` is now bound in-circuit: the pinned
-//!   `idx_bit` preprocessed column carries the verifier-fixed index one bit per
-//!   compression, and `is_init·(bit − idx_bit) = 0` forces the trace's path bits
-//!   to equal it — a claimed `index` that disagrees with the committed path can't
-//!   be proven (`test_forged_index_bits_cannot_prove`).
-//! - **[C1 root/leaf binding — deferred]** `root`/`leaf` are still bound only via
-//!   Fiat-Shamir `mix_public`; a full in-circuit `(computed_root − root) = 0`
-//!   binding is tightened at the recursive-verifier composition (where the leaf is
-//!   the pinned per-query fold output and the root is a committed FRI-layer root).
+//! - **[C1 index + leaf binding — fixed]** `index` and `leaf` are bound in-circuit:
+//!   the pinned `idx_bit` column carries the verifier-fixed index (one bit per
+//!   compression) with `is_init·(bit − idx_bit) = 0`, and the pinned `leaf` column
+//!   carries the verifier-fixed leaf with `is_first·(leaf − leaf_pinned) = 0`. A
+//!   claimed `index`/`leaf` that disagrees with the committed path can't be proven
+//!   (`test_forged_index_bits_cannot_prove`, `test_forged_leaf_cannot_prove`).
+//! - **[C1 root binding — deferred]** `root` is still bound via Fiat-Shamir
+//!   `mix_public`; the full in-circuit `(computed_root − root) = 0` binding is
+//!   tightened at the recursive-verifier composition (where the root is a committed
+//!   FRI-layer root and the leaf is the pinned per-query fold output).
 
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sM31Channel, Channel};
@@ -107,9 +108,13 @@ pub fn pc_is_first() -> PreProcessedColumnId { PreProcessedColumnId { id: "rmp_i
 /// on its init row (`(index >> i) & 1`); the AIR pins the trace's index bits to it
 /// so `index` is bound in-circuit, not just via Fiat-Shamir (audit gap C1).
 pub fn pc_idx_bit() -> PreProcessedColumnId { PreProcessedColumnId { id: "rmp_idx_bit".into() } }
+/// `leaf_val` carries the verifier-fixed claimed `leaf` (row 0 only); the AIR pins
+/// the trace's leaf to it so `leaf` is bound in-circuit (audit gap C1). In the
+/// recursive composition this is the per-query fold output hashed to a leaf.
+pub fn pc_leaf() -> PreProcessedColumnId { PreProcessedColumnId { id: "rmp_leaf".into() } }
 
 pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
-    vec![pc_rc0(), pc_rc1(), pc_is_init(), pc_is_first(), pc_idx_bit()]
+    vec![pc_rc0(), pc_rc1(), pc_is_init(), pc_is_first(), pc_idx_bit(), pc_leaf()]
 }
 
 // ── Reference path hash ────────────────────────────────────────────────────────
@@ -163,6 +168,7 @@ impl FrameworkEval for MerklePathEval {
         let is_init = eval.get_preprocessed_column(pc_is_init());
         let is_first = eval.get_preprocessed_column(pc_is_first());
         let idx_bit = eval.get_preprocessed_column(pc_idx_bit());
+        let leaf_pinned = eval.get_preprocessed_column(pc_leaf());
 
         let [s0_curr, s0_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize, -1_isize]);
         let [s1_curr, s1_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize, -1_isize]);
@@ -192,7 +198,7 @@ impl FrameworkEval for MerklePathEval {
 
         // ── cur helper: chained current node ─────────────────────────────────
         // cur = is_first·leaf + (1−is_first)·s0[-1]    (only meaningful on init rows)
-        let cur_expected = is_first * leaf + not_first * s0_prev.clone();
+        let cur_expected = is_first.clone() * leaf.clone() + not_first * s0_prev.clone();
         eval.add_constraint(is_init.clone() * (cur.clone() - cur_expected));
 
         // ── Init-row wiring: index-bit child selection ───────────────────────
@@ -205,6 +211,10 @@ impl FrameworkEval for MerklePathEval {
         // C_idx: the trace's index bit equals the pinned claimed-index bit on each
         // init row — binds `index` in-circuit to the path bits (audit gap C1).
         eval.add_constraint(is_init.clone() * (bit - idx_bit));
+        // C_leaf: the trace's leaf equals the pinned verifier-fixed leaf (row 0) —
+        // binds `leaf` in-circuit (audit gap C1). In the recursive composition the
+        // pinned leaf is the per-query fold output hashed via hashLeaf.
+        eval.add_constraint(is_first.clone() * (leaf.clone() - leaf_pinned));
 
         // ── Non-init chaining: state carries within a compression ────────────
         eval.add_constraint(not_init.clone() * (inp0 - s0_prev)); // C_inp0_chain
@@ -249,7 +259,7 @@ pub fn compute_log_size(depth: usize) -> u32 {
 /// commits exactly these, and [`verify_merkle_path`] recomputes their commitment
 /// root to PIN them (audit gap C2), so a prover cannot forge `is_init`/`is_first`
 /// (to break the sponge/leaf wiring) or `rc0`/`rc1` (to swap the hash function).
-pub fn build_preproc(index: u32, log_size: u32) -> TraceColumns {
+pub fn build_preproc(leaf: u64, index: u32, log_size: u32) -> TraceColumns {
     let n = 1usize << log_size;
     let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
@@ -260,6 +270,8 @@ pub fn build_preproc(index: u32, log_size: u32) -> TraceColumns {
     let mut init_c = vec![bf0; n];
     let mut first_c = vec![bf0; n];
     let mut idx_bit_c = vec![bf0; n];
+    let mut leaf_c = vec![bf0; n];
+    leaf_c[0] = to_m31(leaf); // verifier-fixed leaf, row 0 only
 
     let n_comp = n / N_ROUNDS;
     for i in 0..n_comp {
@@ -276,10 +288,10 @@ pub fn build_preproc(index: u32, log_size: u32) -> TraceColumns {
             idx_bit_c[row] = if r == 0 { to_m31(idx_bit as u64) } else { bf0 };
         }
     }
-    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c, &mut idx_bit_c] {
+    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c, &mut idx_bit_c, &mut leaf_c] {
         bit_reverse_coset_to_circle_domain_order(c);
     }
-    [rc0_c, rc1_c, init_c, first_c, idx_bit_c]
+    [rc0_c, rc1_c, init_c, first_c, idx_bit_c, leaf_c]
         .into_iter()
         .map(|c| CircleEvaluation::new(domain, c))
         .collect()
@@ -287,8 +299,9 @@ pub fn build_preproc(index: u32, log_size: u32) -> TraceColumns {
 
 /// Recompute the canonical preprocessed-tree commitment root, mirroring the
 /// prover's Tree 0 commit. The verifier pins `proof.commitments[0]` to this.
-/// `index` is a verifier-fixed public input carried in the pinned `idx_bit` column.
+/// `leaf`/`index` are verifier-fixed public inputs carried in the pinned columns.
 fn canonical_preproc_root(
+    leaf: u64,
     index: u32,
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
@@ -301,7 +314,7 @@ fn canonical_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(build_preproc(index, log_size));
+    tree.extend_evals(build_preproc(leaf, index, log_size));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
@@ -382,7 +395,7 @@ pub fn build_trace(
     }
 
     let main_cols: TraceColumns = main.into_iter().map(|c| CircleEvaluation::new(domain, c)).collect();
-    let preproc = build_preproc(bits_to_index(bits), log_size); // single canonical source (C1/C2)
+    let preproc = build_preproc(leaf, bits_to_index(bits), log_size); // single canonical source (C1/C2)
     (main_cols, preproc, path_root)
 }
 
@@ -484,7 +497,7 @@ pub fn verify_merkle_path(
     // claimed-index bits) to its canonical value — a forged rc/is_init/is_first
     // tree, or a claimed `index` that disagrees with the committed path bits, no
     // longer verifies (the `idx_bit` constraint ties trace bits to this index).
-    if proof.commitments[0] != canonical_preproc_root(index, log_size) {
+    if proof.commitments[0] != canonical_preproc_root(leaf, index, log_size) {
         return Ok(false);
     }
 
@@ -534,7 +547,7 @@ mod tests {
         let log = compute_log_size(sibs.len());
         let (main, preproc, root) = build_trace(leaf, &sibs, &bits, log);
         assert_eq!(main.len(), N_MAIN_COLS);
-        assert_eq!(preproc.len(), 5); // rc0, rc1, is_init, is_first, idx_bit
+        assert_eq!(preproc.len(), 6); // rc0, rc1, is_init, is_first, idx_bit, leaf
         assert_eq!(root, merkle_path_root(leaf, &sibs, &bits), "trace root must match reference");
     }
 
@@ -666,11 +679,30 @@ mod tests {
 
         // Preprocessed idx_bit for a DIFFERENT index (flip bit 0) — inconsistent
         // with the trace's committed path bits.
-        let forged_preproc = build_preproc(idx ^ 1, log);
+        let forged_preproc = build_preproc(leaf, idx ^ 1, log);
         let res = prove_columns(main, forged_preproc, log, leaf, idx ^ 1, root);
         assert!(
             res.is_err(),
             "trace bits ≠ claimed idx_bit must violate the index-binding constraint (C1)",
+        );
+    }
+
+    // C1 regression: a trace whose committed leaf is X but whose pinned `leaf`
+    // preprocessed column claims Y ≠ X cannot be proven — the is_first-gated
+    // leaf-equality constraint is violated.
+    #[test]
+    fn test_forged_leaf_cannot_prove() {
+        let mut seed = 0xC1_1eaf;
+        let (leaf, sibs, bits) = rand_path(&mut seed, 3);
+        let log = compute_log_size(sibs.len());
+        let (main, _canonical, root) = build_trace(leaf, &sibs, &bits, log);
+        let idx = bits_to_index(&bits);
+        // Pinned leaf claims a different value than the trace's committed leaf.
+        let forged_preproc = build_preproc(leaf ^ 1, idx, log);
+        let res = prove_columns(main, forged_preproc, log, leaf ^ 1, idx, root);
+        assert!(
+            res.is_err(),
+            "trace leaf ≠ pinned leaf must violate the leaf-binding constraint (C1)",
         );
     }
 }

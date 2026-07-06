@@ -24,10 +24,14 @@
 `canonical_uh_preproc_root(max_log)` + `build_preproc_v2`: forged `is_init_uh≡0` (ослабил бы сброс
 hint-weight-аккумулятора → мог обойти границу OMEGA) больше не верифицируется; honest V21/V22/V23
 roundtrip'ы проходят. **C2 закрыт для ВСЕХ preprocessed-верификаторов репо (2026-06-17):** + Poseidon2 hash-chain
-`verify_hash_chain_poseidon2` (`poseidon2_air::build_preprocessed` + `canonical_hashchain_preproc_root`). Ни один
-верификатор не принимает непиннутое Tree 0. Остаётся: C1 output-binding только в `recursive_verifier` (остальные —
-FS-привязка I/O, приемлемо). **Robustness:** `MAX_QUERIES`/`MAX_NUM_FOLDS` cap'ы, guard пустого `build_trace_multi`,
-`bits_to_index` assert (depth>32). 443 быстрых Rust-теста зелёные. `docs/roadmap/recursion.md` § R3.7.
+`verify_hash_chain_poseidon2`. Ни один верификатор не принимает непиннутое Tree 0.
+**R3.8 — первая multi-gadget рекурсивная композиция (2026-06-17):** `recursive/composition.rs` доказывает
+`recursive_verifier` + `merkle_path` в ОДНОМ multi-component STARK — per-query fold-цепочка →
+`hashLeaf(finalFold)` → Merkle-корень, привязано end-to-end (finalFold пиннится fin-столбцами; leaf пиннится
+в merkle через C1 leaf-binding; объединённое Tree 0 пиннится). `prove_query_membership`/`verify_query_membership`,
+3 теста. **99 рекурсивных тестов.** Осталось до полного верификатора: связать `channel` (absorb→draw) для
+channel-derived challenges, масштабировать до N запросов, on-chain `QLSAVerifierRecursive.sol`.
+**Robustness:** cap'ы, guard'ы, assert'ы. `docs/roadmap/recursion.md` § R3.8.
 
 ## Статус (обновлено 2026-06-17 — решение по пути: standalone t=16 пропущен, старт рекурсии)
 

@@ -162,8 +162,23 @@ ML-DSA подпись
     **87 рекурсивных Rust тестов**
 - **Полный набор gadget'ов рекурсии готов (R3.6):** QM31-арифметика, FRI fold/OODS, inner-hash
   Merkle path, Fiat-Shamir absorb + draw, per-query композиция (single + N-query) + leaf-hash
-  интеграция. Осталось (R3.7): top-level сборка — связать канал (absorb→draw), вывести
-  channel-bound query-индексы + fold-challenge'ы и подать в multi-query verifier
+  интеграция.
+- **R3.8 — первая настоящая multi-gadget композиция** (`recursive/composition.rs`) — ✅ **готов (2026-06-17)**
+  - `recursive_verifier` + `merkle_path` в ОДНОМ multi-component STARK (shared `TraceLocationAllocator`,
+    объединённое пиннутое Tree 0 = оба preproc-набора, Tree 1 = оба main-трейса; одинаковый log_size)
+  - Связующее значение привязано end-to-end: `recursive_verifier` пиннит `finalFold` (fin-столбцы +
+    is_output constraint); верификатор считает `leaf = qm31_leaf_hash(finalFold)` (из пиннутого finalFold)
+    и пиннит его в `merkle_path` (leaf-столбец + is_first constraint); всё Tree 0 пиннится
+    `canonical_composition_preproc_root`. Prover не может (a) заявить finalFold ≠ выход fold-цепочки,
+    (b) подать leaf ≠ hashLeaf(finalFold), (c) подделать селектор
+  - Prerequisite: C1 leaf-binding для `merkle_path` (пиннутый leaf-столбец + `is_first·(leaf−leaf_pinned)=0`,
+    `test_forged_leaf_cannot_prove`) — merkle теперь полностью C1-bound по (leaf, index)
+  - `prove_query_membership(step, rounds, sibs, bits)` → `QueryMembershipResult`;
+    `verify_query_membership(...)`. Тесты: roundtrip, wrong-final rejection, wrong-root rejection.
+    3 Rust теста. **99 рекурсивных Rust тестов.** Mini-scale композиция (roadmap #5) перед full VFRI11
+  - Осталось до полного верификатора: связать `channel` (absorb→draw) → вывести query-индексы +
+    fold-challenge'ы в композицию, масштабировать до N запросов, добавить проверку root против
+    committed FRI-layer корня
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

@@ -24,13 +24,18 @@
 //! | Per-query recursive verifier | `recursive_verifier` | OODS± + circle fold + K line folds in ONE AIR; full per-query FRI chain, cross-row bound (R3.3) |
 //! | Per-query integration | `integration` | recursive_verifier → `qm31_leaf_hash` → `merkle_path_air`: full per-query FRI verification, value-bound across 3 sub-proofs (R3.4) |
 //! | Multi-query aggregation | `recursive_verifier` | N queries in ONE STARK (`prove_recursive_queries`): N blocks of (1+K) rows, same AIR, all finalFolds bound (R3.5) |
+//! | **Per-query membership composition** | `composition` | **recursive_verifier + merkle_path in ONE multi-component STARK; finalFold → hashLeaf → Merkle root bound end-to-end (R3.8)** |
 //!
 //! **The full recursion gadget set is complete (R3.6):** QM31 arithmetic, FRI
 //! fold/OODS, inner-hash Merkle path, Fiat-Shamir absorb + draw, per-query
-//! composition (single + N-query), and the leaf-hash integration.  Next (roadmap
-//! R3.7 → R4): a top-level assembly wiring the channel (absorb→draw) to derive the
-//! channel-bound query indices + fold challenges and feed them into the multi-query
-//! verifier, then on-chain `QLSAVerifierRecursive.sol` (~5M gas constant).
+//! composition (single + N-query), and the leaf-hash integration.
+//!
+//! **First genuine multi-gadget composition (R3.8, 2026-06-17):** `composition`
+//! proves per-query fold chain + Merkle membership as ONE proof (shared allocator,
+//! combined pinned Tree 0), with the connecting value bound in-circuit — the
+//! template for the full recursive verifier.  Next: wire `channel` (absorb→draw)
+//! to derive the query indices + fold challenges into this composition, scale to
+//! N queries, then on-chain `QLSAVerifierRecursive.sol` (~5M gas constant).
 //!
 //! # Soundness status (audit 2026-06-17) — C1/C2 CLOSED for `recursive_verifier`
 //!
@@ -84,6 +89,7 @@
 //! channel). `recursive_verifier` / `canonical_uh_preproc_root` are the reference.
 
 pub mod channel_air;
+pub mod composition;
 pub mod fold_air;
 pub mod fri_fold_chain_air;
 pub mod integration;
