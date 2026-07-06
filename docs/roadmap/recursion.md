@@ -203,9 +203,16 @@ forged preprocessed-дерево больше не верифицируется 
 log_size-параметризован). Ни один верификатор больше не принимает непиннутое Tree 0. 443 быстрых Rust-теста
 зелёные (+`test_hash_chain_preproc_pin`, +`test_use_hint_batch_v2_forged_preproc_rejected`, honest V21/V22/V23).
 
-**Остаётся (R3.7 follow-up):** C1 output-binding реализован только в `recursive_verifier`; sub-гаджеты и
-lib.rs-верификаторы привязывают public I/O через Fiat-Shamir (для V23 выход — fingerprint в канал, приемлемо).
-`recursive_verifier` / `canonical_uh_preproc_root` — референс паттерна.
+**C1 index-binding закрыт для `merkle_path_air` (2026-06-17):** claimed `index` привязан in-circuit —
+пиннутый preproc-столбец `idx_bit` несёт бит индекса на compression, ограничение `is_init·(bit − idx_bit)=0`
+заставляет trace-биты пути равняться ему; заявленный `index`, расходящийся с committed-путём, недоказуем
+(`test_forged_index_bits_cannot_prove`). Закрывает Medium-находку код-аудита («index не привязан к trace bits»).
+
+**Остаётся (R3.7 follow-up):** C1 output-binding (`root`/`finalFold`) реализован в `recursive_verifier`
+(finalFold) и `merkle_path_air` (index); остальные public-выходы sub-гаджетов и lib.rs-верификаторов
+привязаны через Fiat-Shamir (для V23 выход — fingerprint в канал; для merkle `root`/`leaf` — ужесточается
+на композиции, где leaf = пиннутый per-query fold-выход, root = committed FRI-layer корень). `recursive_verifier`
+/ `canonical_uh_preproc_root` — референс.
 
 Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
 guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест
