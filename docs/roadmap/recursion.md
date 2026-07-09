@@ -185,9 +185,20 @@ ML-DSA подпись
     N независимых путей единой depth, пиннутый preproc (leaf/idx_bit per path)
   - `prove_queries_membership(queries, paths)` → `QueriesMembershipResult`; `verify_queries_membership(...)`.
     Тест: N=3 roundtrip + wrong-final одного запроса роняет весь proof. **101 рекурсивный тест**
-  - Осталось до полного верификатора: (1) связать `channel` (absorb→draw) → вывести channel-derived
-    query-индексы + fold-challenge'ы в композицию (no cherry-pick; нужен logup или единый AIR); (2)
-    t=16 inner hash для 128-бит; (3) проверка root против committed FRI-layer корня
+- **R3.10 — FRI cherry-pick закрыт для fold-challenge (2026-06-17)** — ✅ **готов**
+  - **Дизайн-realization:** дешёвый Poseidon2-канал (absorb roots → draw challenges) остаётся
+    **on-chain**; challenges — public inputs рекурсивного proof'а. Значит **logup НЕ нужен** —
+    достаточно пиннить challenges (как finalFold). Это понижает 1a с «нужен logup-research» до
+    «механический pinning», что материально меняет production-оценку.
+  - `recursive_verifier`: fold-challenge `alpha` несётся в пиннутых `alpha_p0..3` preproc-столбцах,
+    ограничение `alpha − alpha_p = 0` (каждая fold-строка) заставляет trace-challenge равняться
+    verifier-fixed (Fiat-Shamir-drawn) значению — prover не может cherry-pick FRI-fold-challenge
+    (`test_forged_alpha_cannot_prove`). Пробрасывается через single/multi/composition (verify берёт
+    `alphas`). **102 рекурсивных теста**
+  - Осталось до полного верификатора: (1) допиннить остальные challenge-входы тем же способом —
+    `z_x` (OODS-точка) и `px`/`inv` (index-derived twiddles); (2) t=16 inner hash для 128-бит;
+    (3) проверка root против committed FRI-layer корня; (4) on-chain channel-replay в
+    `QLSAVerifierRecursive.sol`
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
