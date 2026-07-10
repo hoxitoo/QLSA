@@ -195,10 +195,17 @@ ML-DSA подпись
     verifier-fixed (Fiat-Shamir-drawn) значению — prover не может cherry-pick FRI-fold-challenge
     (`test_forged_alpha_cannot_prove`). Пробрасывается через single/multi/composition (verify берёт
     `alphas`). **102 рекурсивных теста**
-  - Осталось до полного верификатора: (1) допиннить остальные challenge-входы тем же способом —
-    `z_x` (OODS-точка) и `px`/`inv` (index-derived twiddles); (2) t=16 inner hash для 128-бит;
-    (3) проверка root против committed FRI-layer корня; (4) on-chain channel-replay в
-    `QLSAVerifierRecursive.sol`
+- **R3.11 — cherry-pick закрыт для ВСЕХ challenge-входов (2026-06-17)** — ✅ **готов**
+  - Все verifier-fixed challenge-входы теперь пиннятся in-circuit: `alpha` (fold-challenge, `alpha_p`),
+    `z_x` (OODS-точка, `zx_p`), `px` (query-точка, `px_p`), `inv` (twiddle, `inv_p`). `QueryChallenges`
+    бандл + `query_challenges(step, rounds)`; `build_preproc` эмитит 17 preproc-столбцов; ограничения
+    равенства заставляют trace использовать verifier'ские значения. Prover не может cherry-pick ни
+    fold-challenge, ни OODS-точку, ни query-точку, ни twiddles
+    (`test_forged_alpha_cannot_prove`, `test_forged_zx_inv_px_cannot_prove`). Пробрасывается через
+    single/multi/composition. **103 рекурсивных теста. 1a полностью закрыт для per-query верификатора.**
+  - Осталось до полного верификатора: (1) t=16 inner hash для 128-бит; (2) проверка root против
+    committed FRI-layer корня; (3) on-chain channel-replay (absorb roots → draw challenges) в
+    `QLSAVerifierRecursive.sol`, подающий challenges как public inputs
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

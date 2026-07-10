@@ -57,10 +57,11 @@ pub type FoldRound = rv::FoldRound;
 
 const RV_MAIN_COLS: usize = rv::N_MAIN_COLS; // 42
 const MERKLE_MAIN_COLS: usize = merkle::N_MAIN_COLS; // 10
-const RV_PREPROC_COLS: usize = 11; // is_step, chain_on, is_output, fin0..3, alpha_p0..3
+// is_step, chain_on, is_output, fin0..3, alpha_p0..3, px, zx0..3, inv
+const RV_PREPROC_COLS: usize = 17;
 const MERKLE_PREPROC_COLS: usize = 6; // rc0, rc1, is_init, is_first, idx_bit, leaf
 const TOTAL_MAIN_COLS: usize = RV_MAIN_COLS + MERKLE_MAIN_COLS; // 52
-const TOTAL_PREPROC_COLS: usize = RV_PREPROC_COLS + MERKLE_PREPROC_COLS; // 17
+const TOTAL_PREPROC_COLS: usize = RV_PREPROC_COLS + MERKLE_PREPROC_COLS; // 23
 
 /// Shared `log_size` that fits both a 1-query fold chain (`1 + num_folds` rows)
 /// and a `depth`-compression Merkle path (`depth · 8` rows).
@@ -82,13 +83,18 @@ fn combined_preproc_ids() -> Vec<stwo_constraint_framework::preprocessed_columns
 /// pinned `leaf`/`index`.
 fn combined_preproc(
     final_fold: u128,
-    alphas: &[u128],
+    challenges: &rv::QueryChallenges,
     num_folds: usize,
     leaf: u64,
     index: u32,
     log_size: u32,
 ) -> rv::TraceColumns {
-    let mut cols = rv::build_preproc(&[final_fold], &[alphas.to_vec()], num_folds, log_size);
+    let mut cols = rv::build_preproc(
+        &[final_fold],
+        std::slice::from_ref(challenges),
+        num_folds,
+        log_size,
+    );
     cols.extend(merkle::build_preproc(leaf, index, log_size));
     cols
 }
@@ -97,7 +103,7 @@ fn combined_preproc(
 /// by the verifier (audit gap C2 across the composition).
 fn canonical_composition_preproc_root(
     final_fold: u128,
-    alphas: &[u128],
+    challenges: &rv::QueryChallenges,
     num_folds: usize,
     leaf: u64,
     index: u32,
@@ -112,7 +118,7 @@ fn canonical_composition_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(combined_preproc(final_fold, alphas, num_folds, leaf, index, log_size));
+    tree.extend_evals(combined_preproc(final_fold, challenges, num_folds, leaf, index, log_size));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
@@ -129,7 +135,7 @@ pub struct QueryMembershipResult {
     pub log_size: u32,
     pub num_folds: usize,
     pub depth: usize,
-    pub alphas: Vec<u128>,
+    pub challenges: rv::QueryChallenges,
     pub final_fold: u128,
     pub leaf: u64,
     pub index: u32,
@@ -222,7 +228,7 @@ pub fn prove_query_membership(
         log_size,
         num_folds,
         depth,
-        alphas: rv::query_alphas(step, rounds),
+        challenges: rv::query_challenges(step, rounds),
         final_fold,
         leaf,
         index,
@@ -238,7 +244,7 @@ pub fn verify_query_membership(
     proof_bytes: &[u8],
     log_size: u32,
     num_folds: usize,
-    alphas: &[u128],
+    challenges: &rv::QueryChallenges,
     px: u32,
     final_fold: u128,
     index: u32,
@@ -283,7 +289,7 @@ pub fn verify_query_membership(
     // C1/C2: pin the combined preprocessed tree — selectors, the pinned finalFold
     // (recursive_verifier) and the pinned leaf/index (merkle) must all be canonical.
     let canonical_root =
-        canonical_composition_preproc_root(final_fold, alphas, num_folds, leaf, index, log_size);
+        canonical_composition_preproc_root(final_fold, challenges, num_folds, leaf, index, log_size);
     if proof.commitments[0] != canonical_root {
         return Ok(false);
     }
@@ -313,7 +319,7 @@ fn queries_log_size(n_queries: usize, num_folds: usize, depth: usize) -> u32 {
 
 fn canonical_queries_preproc_root(
     finals: &[u128],
-    alphas: &[Vec<u128>],
+    challenges: &[rv::QueryChallenges],
     num_folds: usize,
     leaves: &[u64],
     indices: &[u32],
@@ -328,7 +334,7 @@ fn canonical_queries_preproc_root(
         CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
-    let mut cols = rv::build_preproc(finals, alphas, num_folds, log_size);
+    let mut cols = rv::build_preproc(finals, challenges, num_folds, log_size);
     cols.extend(merkle::build_preproc_multi(leaves, indices, depth, log_size));
     let mut tree = scheme.tree_builder();
     tree.extend_evals(cols);
@@ -363,7 +369,7 @@ pub struct QueriesMembershipResult {
     pub log_size: u32,
     pub num_folds: usize,
     pub depth: usize,
-    pub alphas: Vec<Vec<u128>>,
+    pub challenges: Vec<rv::QueryChallenges>,
     pub finals: Vec<u128>,
     pub leaves: Vec<u64>,
     pub indices: Vec<u32>,
@@ -448,8 +454,8 @@ pub fn prove_queries_membership(
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("N-query composition serialize error: {e:?}"))?;
 
-    let alphas: Vec<Vec<u128>> = queries.iter().map(|(s, r)| rv::query_alphas(s, r)).collect();
-    Ok(QueriesMembershipResult { proof: bytes, log_size, num_folds, depth, alphas, finals, leaves, indices, roots })
+    let challenges: Vec<rv::QueryChallenges> = queries.iter().map(|(s, r)| rv::query_challenges(s, r)).collect();
+    Ok(QueriesMembershipResult { proof: bytes, log_size, num_folds, depth, challenges, finals, leaves, indices, roots })
 }
 
 /// Verify an N-query composition proof against the claimed per-query public I/O.
@@ -458,13 +464,13 @@ pub fn verify_queries_membership(
     log_size: u32,
     num_folds: usize,
     depth: usize,
-    alphas: &[Vec<u128>],
+    challenges: &[rv::QueryChallenges],
     pxs: &[u32],
     finals: &[u128],
     indices: &[u32],
     roots: &[u64],
 ) -> Result<bool, String> {
-    if finals.is_empty() || pxs.len() != finals.len() || indices.len() != finals.len() || roots.len() != finals.len() || alphas.len() != finals.len() {
+    if finals.is_empty() || pxs.len() != finals.len() || indices.len() != finals.len() || roots.len() != finals.len() || challenges.len() != finals.len() {
         return Err("public-input length mismatch".into());
     }
     let leaves: Vec<u64> = finals.iter().map(|&f| qm31_leaf_hash(f)).collect();
@@ -500,7 +506,7 @@ pub fn verify_queries_membership(
         return Err(format!("N-query: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
     let canonical_root =
-        canonical_queries_preproc_root(finals, alphas, num_folds, &leaves, indices, depth, log_size);
+        canonical_queries_preproc_root(finals, challenges, num_folds, &leaves, indices, depth, log_size);
     if proof.commitments[0] != canonical_root {
         return Ok(false);
     }
@@ -566,7 +572,7 @@ mod tests {
         assert_eq!(r.leaf, qm31_leaf_hash(r.final_fold));
         assert_eq!(r.root, merkle::merkle_path_root(r.leaf, &sibs, &bits));
         assert!(
-            verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.alphas, step.2, r.final_fold, r.index, r.root)
+            verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold, r.index, r.root)
                 .unwrap(),
             "an honest composition proof must verify",
         );
@@ -584,9 +590,9 @@ mod tests {
         let bits: Vec<bool> = (0..depth).map(|_| rand_m31(&mut s) & 1 == 1).collect();
 
         let r = prove_query_membership(&step, &rounds, &sibs, &bits).unwrap();
-        assert!(verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.alphas, step.2, r.final_fold, r.index, r.root).unwrap());
+        assert!(verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold, r.index, r.root).unwrap());
         assert!(
-            !verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.alphas, step.2, r.final_fold ^ 1, r.index, r.root)
+            !verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold ^ 1, r.index, r.root)
                 .unwrap_or(false),
             "a wrong final fold must not verify",
         );
@@ -617,7 +623,7 @@ mod tests {
             assert_eq!(r.finals[i], rv::recursive_query_final(st, rd));
         }
         assert!(
-            verify_queries_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.alphas, &pxs, &r.finals, &r.indices, &r.roots)
+            verify_queries_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, &pxs, &r.finals, &r.indices, &r.roots)
                 .unwrap(),
             "an honest N-query composition must verify",
         );
@@ -625,7 +631,7 @@ mod tests {
         let mut bad = r.finals.clone();
         bad[1] ^= 1;
         assert!(
-            !verify_queries_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.alphas, &pxs, &bad, &r.indices, &r.roots)
+            !verify_queries_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, &pxs, &bad, &r.indices, &r.roots)
                 .unwrap_or(false),
             "a wrong final fold must not verify",
         );
@@ -643,7 +649,7 @@ mod tests {
 
         let r = prove_query_membership(&step, &rounds, &sibs, &bits).unwrap();
         assert!(
-            !verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.alphas, step.2, r.final_fold, r.index, r.root ^ 1)
+            !verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold, r.index, r.root ^ 1)
                 .unwrap_or(false),
             "a wrong Merkle root must not verify",
         );
