@@ -51,7 +51,7 @@ mod tests {
         bits_to_index, merkle_path_root, prove_merkle_path, verify_merkle_path,
     };
     use crate::recursive::recursive_verifier::{
-        prove_recursive_query, recursive_query_final, verify_recursive_query, FoldRound, StepOp,
+        prove_recursive_query, query_challenges, recursive_query_final, verify_recursive_query, FoldRound, StepOp,
     };
 
     const M31_P: u64 = (1u64 << 31) - 1;
@@ -106,7 +106,7 @@ mod tests {
         let (rv_bytes, rv_log, final_fold) = prove_recursive_query(&step, &rounds).unwrap();
         assert_eq!(final_fold, recursive_query_final(&step, &rounds));
         assert!(
-            verify_recursive_query(&rv_bytes, rv_log, rounds.len(), px, final_fold).unwrap(),
+            verify_recursive_query(&rv_bytes, rv_log, rounds.len(), &query_challenges(&step, &rounds), px, final_fold).unwrap(),
             "recursive per-query proof must verify against its bound final fold",
         );
 
@@ -123,7 +123,7 @@ mod tests {
         let (mp_bytes, mp_log, mp_root) = prove_merkle_path(leaf, &sibs, &bits).unwrap();
         assert_eq!(mp_root, root, "merkle path root must match the reference fold");
         assert!(
-            verify_merkle_path(&mp_bytes, mp_log, leaf, index, root).unwrap(),
+            verify_merkle_path(&mp_bytes, mp_log, depth, leaf, index, root).unwrap(),
             "merkle path proof must verify the hashed final fold into the layer root",
         );
 
@@ -147,7 +147,7 @@ mod tests {
 
         let wrong = final_fold ^ 0x10;
         // The recursive proof rejects the wrong claimed output.
-        assert!(!verify_recursive_query(&rv_bytes, rv_log, rounds.len(), px, wrong).unwrap_or(false));
+        assert!(!verify_recursive_query(&rv_bytes, rv_log, rounds.len(), &query_challenges(&step, &rounds), px, wrong).unwrap_or(false));
         // And the wrong output hashes to a different leaf, so any Merkle path
         // built for the honest leaf cannot authenticate it.
         assert_ne!(qm31_leaf_hash(final_fold), qm31_leaf_hash(wrong));

@@ -193,6 +193,40 @@ pub fn new_component(log_n_rows: u32) -> Poseidon2Component {
 ///   - `main_columns`: 7 columns in circle-domain bit-reversed order
 ///   - `preprocessed_columns`: 4 columns in the same order
 ///   - `commitment`: s0 value at the last REAL row (row n_leaves·N_ROUNDS − 1)
+/// Build the canonical preprocessed columns `[rc0, rc1, is_init, init_row]` from
+/// `log_size` alone — **no witness** (they depend only on the row index / round).
+/// Single source of truth for the preprocessed tree: [`build_trace`] commits
+/// exactly these, and a verifier can recompute + pin their commitment root so a
+/// prover cannot forge the round constants or init selectors (audit gap C2).
+pub fn build_preprocessed(log_size: u32) -> TraceColumns {
+    let n = 1_usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let to_m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+    let bf_one = BaseField::from_u32_unchecked(1);
+    let bf_zero = BaseField::from_u32_unchecked(0);
+
+    let mut rc0_col = vec![bf_zero; n];
+    let mut rc1_col = vec![bf_zero; n];
+    let mut is_init_col = vec![bf_zero; n];
+    let mut init_row_col = vec![bf_zero; n];
+    for i in 0..n {
+        let r = i % N_ROUNDS;
+        rc0_col[i] = to_m31(RC[r][0] as u64);
+        rc1_col[i] = to_m31(RC[r][1] as u64);
+        is_init_col[i] = if r == 0 { bf_one } else { bf_zero };
+        init_row_col[i] = if i == 0 { bf_one } else { bf_zero };
+    }
+    for col in [&mut rc0_col, &mut rc1_col, &mut is_init_col, &mut init_row_col] {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    vec![
+        CircleEvaluation::new(domain, rc0_col),
+        CircleEvaluation::new(domain, rc1_col),
+        CircleEvaluation::new(domain, is_init_col),
+        CircleEvaluation::new(domain, init_row_col),
+    ]
+}
+
 pub fn build_trace(
     leaves: &[u64],
 ) -> (TraceColumns, TraceColumns, BaseField) {
@@ -205,7 +239,6 @@ pub fn build_trace(
     let domain = CanonicCoset::new(log_size).circle_domain();
 
     let to_m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
-    let bf_one  = BaseField::from_u32_unchecked(1);
     let bf_zero = BaseField::from_u32_unchecked(0);
 
     // ── Allocate columns ─────────────────────────────────────────────────
@@ -217,21 +250,6 @@ pub fn build_trace(
     let mut inp0_col = vec![bf_zero; n];
     let mut leaf_col = vec![bf_zero; n];
     let mut inp1_col = vec![bf_zero; n];
-
-    // Preprocessed
-    let mut rc0_col      = vec![bf_zero; n];
-    let mut rc1_col      = vec![bf_zero; n];
-    let mut is_init_col  = vec![bf_zero; n];
-    let mut init_row_col = vec![bf_zero; n];
-
-    // ── Fill preprocessed columns (depend only on row index) ─────────────
-    for i in 0..n {
-        let r = i % N_ROUNDS;
-        rc0_col[i]      = to_m31(RC[r][0] as u64);
-        rc1_col[i]      = to_m31(RC[r][1] as u64);
-        is_init_col[i]  = if r == 0 { bf_one } else { bf_zero };
-        init_row_col[i] = if i == 0 { bf_one } else { bf_zero };
-    }
 
     // ── Fill main trace ───────────────────────────────────────────────────
     // `state` tracks (s0, s1) flowing through the sponge.  It starts at (0,0)
@@ -300,11 +318,10 @@ pub fn build_trace(
     // Commitment = s0 at the last REAL row.
     let commitment = s0_col[n_real - 1];
 
-    // ── Bit-reverse all columns to circle-domain storage order ────────────
+    // ── Bit-reverse main columns to circle-domain storage order ────────────
     for col in [
         &mut s0_col, &mut s1_col, &mut t0_col, &mut t1_col,
         &mut inp0_col, &mut leaf_col, &mut inp1_col,
-        &mut rc0_col, &mut rc1_col, &mut is_init_col, &mut init_row_col,
     ] {
         bit_reverse_coset_to_circle_domain_order(col);
     }
@@ -318,12 +335,7 @@ pub fn build_trace(
         CircleEvaluation::new(domain, leaf_col),
         CircleEvaluation::new(domain, inp1_col),
     ];
-    let preproc_cols = vec![
-        CircleEvaluation::new(domain, rc0_col),
-        CircleEvaluation::new(domain, rc1_col),
-        CircleEvaluation::new(domain, is_init_col),
-        CircleEvaluation::new(domain, init_row_col),
-    ];
+    let preproc_cols = build_preprocessed(log_size); // single canonical source (C2)
 
     (main_cols, preproc_cols, commitment)
 }

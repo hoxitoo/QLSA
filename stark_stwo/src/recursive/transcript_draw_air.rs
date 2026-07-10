@@ -202,6 +202,66 @@ pub fn compute_log_size(n_draws: usize) -> u32 {
 /// Build the draw trace. Returns `(main_columns, preprocessed_columns,
 /// squeezed_pairs, final_state)`. The first `m` draws are real; remaining rows
 /// continue the sponge (constraints stay satisfied) and are not returned.
+/// Build the canonical preprocessed columns `[rc0, rc1, is_init, is_first, ndraws,
+/// dig0, dig1]` from `(log_size, digest)` alone (no witness): round constants +
+/// per-compression `is_init`/`is_first`, the draw counter `ndraws = i` on each
+/// draw's init row, and the starting `digest` broadcast on `dig0`/`dig1`.  Single
+/// source of truth — the verifier recomputes their commitment root to PIN them
+/// (audit gap C2), so a prover cannot forge the counter, digest, or round
+/// constants to fake the challenge/query derivation.
+pub fn build_preproc(log_size: u32, digest: (u64, u64)) -> TraceColumns {
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let to_m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut rc0_c = vec![bf0; n];
+    let mut rc1_c = vec![bf0; n];
+    let mut init_c = vec![bf0; n];
+    let mut first_c = vec![bf0; n];
+    let mut ndraws_c = vec![bf0; n];
+    let dig0_c = vec![to_m31(digest.0); n];
+    let dig1_c = vec![to_m31(digest.1); n];
+
+    let n_draw_blocks = n / N_ROUNDS;
+    for i in 0..n_draw_blocks {
+        for r in 0..N_ROUNDS {
+            let row = i * N_ROUNDS + r;
+            rc0_c[row] = to_m31(RC[r][0] as u64);
+            rc1_c[row] = to_m31(RC[r][1] as u64);
+            init_c[row] = if r == 0 { to_m31(1) } else { bf0 };
+            first_c[row] = if row == 0 { to_m31(1) } else { bf0 };
+            ndraws_c[row] = if r == 0 { to_m31(i as u64) } else { bf0 };
+        }
+    }
+    let mut cols = [rc0_c, rc1_c, init_c, first_c, ndraws_c, dig0_c, dig1_c];
+    for c in cols.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(c);
+    }
+    cols.into_iter()
+        .map(|c| CircleEvaluation::new(domain, c))
+        .collect()
+}
+
+/// Recompute the canonical preprocessed-tree commitment root (verifier pins it).
+fn canonical_preproc_root(
+    log_size: u32,
+    digest: (u64, u64),
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(build_preproc(log_size, digest));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
 pub fn build_trace(
     digest: (u64, u64),
     m: usize,
@@ -215,15 +275,6 @@ pub fn build_trace(
     let bf0 = BaseField::from_u32_unchecked(0);
 
     let mut col: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-    let mut rc0_c = vec![bf0; n];
-    let mut rc1_c = vec![bf0; n];
-    let mut init_c = vec![bf0; n];
-    let mut first_c = vec![bf0; n];
-    let mut ndraws_c = vec![bf0; n];
-    let dig0 = to_m31(digest.0);
-    let dig1 = to_m31(digest.1);
-    let dig0_c = vec![dig0; n];
-    let dig1_c = vec![dig1; n];
 
     let n_draw_blocks = n / N_ROUNDS;
     let mut cur = [digest.0 % M31_P, digest.1 % M31_P];
@@ -263,11 +314,6 @@ pub fn build_trace(
                 col[6][row] = to_m31(w0);
                 col[7][row] = to_m31(w1);
             }
-            rc0_c[row] = to_m31(RC[r][0] as u64);
-            rc1_c[row] = to_m31(RC[r][1] as u64);
-            init_c[row] = if r == 0 { to_m31(1) } else { bf0 };
-            first_c[row] = if row == 0 { to_m31(1) } else { bf0 };
-            ndraws_c[row] = if r == 0 { to_m31(i as u64) } else { bf0 };
 
             state = [s0n, s1n];
         }
@@ -281,16 +327,9 @@ pub fn build_trace(
     for c in main.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(c);
     }
-    let mut preproc_cols = [rc0_c, rc1_c, init_c, first_c, ndraws_c, dig0_c, dig1_c];
-    for c in preproc_cols.iter_mut() {
-        bit_reverse_coset_to_circle_domain_order(c);
-    }
 
     let main_cols: TraceColumns = main.into_iter().map(|c| CircleEvaluation::new(domain, c)).collect();
-    let preproc: TraceColumns = preproc_cols
-        .into_iter()
-        .map(|c| CircleEvaluation::new(domain, c))
-        .collect();
+    let preproc = build_preproc(log_size, digest); // single canonical source (C2)
     (main_cols, preproc, squeezed, final_state)
 }
 
@@ -383,6 +422,13 @@ pub fn verify_draws(
     if proof.commitments.len() < 2 {
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
+
+    // C2: pin the preprocessed tree (round constants, selectors, draw counter, and
+    // the starting digest) to its canonical value for this (log_size, digest).
+    if proof.commitments[0] != canonical_preproc_root(log_size, digest) {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -524,6 +570,27 @@ mod tests {
             *col = CircleEvaluation::new(domain, vals);
         }
         assert!(prove_columns(main, preproc, log, m as u32, digest).is_err());
+    }
+
+    // C2 regression: a forged `ndraws` preprocessed column (the draw counter) must
+    // not verify — the verifier pins the canonical preprocessed root.
+    #[test]
+    fn test_forged_preproc_rejected() {
+        let digest = (55u64, 66u64);
+        let m = 3;
+        let log = compute_log_size(m);
+        let (main, mut preproc, _, _) = build_trace(digest, m, log);
+        let domain = CanonicCoset::new(log).circle_domain();
+        let n = 1usize << log;
+        // Forge the ndraws counter (preproc[4]) → all-zero.
+        preproc[4] =
+            CircleEvaluation::new(domain, vec![BaseField::from_u32_unchecked(0); n]);
+        if let Ok(proof) = prove_columns(main, preproc, log, m as u32, digest) {
+            assert!(
+                !verify_draws(&proof, log, m as u32, digest).unwrap_or(false),
+                "a forged preprocessed tree must not verify (C2 pinned)",
+            );
+        }
     }
 
     // Error on zero draws.

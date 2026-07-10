@@ -162,8 +162,69 @@ ML-DSA подпись
     **87 рекурсивных Rust тестов**
 - **Полный набор gadget'ов рекурсии готов (R3.6):** QM31-арифметика, FRI fold/OODS, inner-hash
   Merkle path, Fiat-Shamir absorb + draw, per-query композиция (single + N-query) + leaf-hash
-  интеграция. Осталось (R3.7): top-level сборка — связать канал (absorb→draw), вывести
-  channel-bound query-индексы + fold-challenge'ы и подать в multi-query verifier
+  интеграция.
+- **R3.8 — первая настоящая multi-gadget композиция** (`recursive/composition.rs`) — ✅ **готов (2026-06-17)**
+  - `recursive_verifier` + `merkle_path` в ОДНОМ multi-component STARK (shared `TraceLocationAllocator`,
+    объединённое пиннутое Tree 0 = оба preproc-набора, Tree 1 = оба main-трейса; одинаковый log_size)
+  - Связующее значение привязано end-to-end: `recursive_verifier` пиннит `finalFold` (fin-столбцы +
+    is_output constraint); верификатор считает `leaf = qm31_leaf_hash(finalFold)` (из пиннутого finalFold)
+    и пиннит его в `merkle_path` (leaf-столбец + is_first constraint); всё Tree 0 пиннится
+    `canonical_composition_preproc_root`. Prover не может (a) заявить finalFold ≠ выход fold-цепочки,
+    (b) подать leaf ≠ hashLeaf(finalFold), (c) подделать селектор
+  - Prerequisite: C1 leaf-binding для `merkle_path` (пиннутый leaf-столбец + `is_first·(leaf−leaf_pinned)=0`,
+    `test_forged_leaf_cannot_prove`) — merkle теперь полностью C1-bound по (leaf, index)
+  - `prove_query_membership(step, rounds, sibs, bits)` → `QueryMembershipResult`;
+    `verify_query_membership(...)`. Тесты: roundtrip, wrong-final rejection, wrong-root rejection.
+    3 Rust теста. **99 рекурсивных Rust тестов.** Mini-scale композиция (roadmap #5) перед full VFRI11
+- **R3.9 — N-query композиция (VFRI11-форма)** (`composition::prove_queries_membership`) — ✅ **готов (2026-06-17)**
+  - N per-query fold-цепочек + N Merkle-путей в ОДНОМ proof: N-query `recursive_verifier` +
+    **multi-path `merkle`** (`build_trace_multi`/`build_preproc_multi` — N путей в одном компоненте,
+    per-row `is_first` гейтит сброс каждого пути; AIR не меняется). Все finalFold_q → leaf_q → path_q
+    привязаны end-to-end
+  - Prerequisite: multi-path merkle (`prove_paths_multi`/`verify_paths_multi`, `test_multi_path_roundtrip`) —
+    N независимых путей единой depth, пиннутый preproc (leaf/idx_bit per path)
+  - `prove_queries_membership(queries, paths)` → `QueriesMembershipResult`; `verify_queries_membership(...)`.
+    Тест: N=3 roundtrip + wrong-final одного запроса роняет весь proof. **101 рекурсивный тест**
+- **R3.10 — FRI cherry-pick закрыт для fold-challenge (2026-06-17)** — ✅ **готов**
+  - **Дизайн-realization:** дешёвый Poseidon2-канал (absorb roots → draw challenges) остаётся
+    **on-chain**; challenges — public inputs рекурсивного proof'а. Значит **logup НЕ нужен** —
+    достаточно пиннить challenges (как finalFold). Это понижает 1a с «нужен logup-research» до
+    «механический pinning», что материально меняет production-оценку.
+  - `recursive_verifier`: fold-challenge `alpha` несётся в пиннутых `alpha_p0..3` preproc-столбцах,
+    ограничение `alpha − alpha_p = 0` (каждая fold-строка) заставляет trace-challenge равняться
+    verifier-fixed (Fiat-Shamir-drawn) значению — prover не может cherry-pick FRI-fold-challenge
+    (`test_forged_alpha_cannot_prove`). Пробрасывается через single/multi/composition (verify берёт
+    `alphas`). **102 рекурсивных теста**
+- **R3.11 — cherry-pick закрыт для ВСЕХ challenge-входов (2026-06-17)** — ✅ **готов**
+  - Все verifier-fixed challenge-входы теперь пиннятся in-circuit: `alpha` (fold-challenge, `alpha_p`),
+    `z_x` (OODS-точка, `zx_p`), `px` (query-точка, `px_p`), `inv` (twiddle, `inv_p`). `QueryChallenges`
+    бандл + `query_challenges(step, rounds)`; `build_preproc` эмитит 17 preproc-столбцов; ограничения
+    равенства заставляют trace использовать verifier'ские значения. Prover не может cherry-pick ни
+    fold-challenge, ни OODS-точку, ни query-точку, ни twiddles
+    (`test_forged_alpha_cannot_prove`, `test_forged_zx_inv_px_cannot_prove`). Пробрасывается через
+    single/multi/composition. **103 рекурсивных теста. 1a полностью закрыт для per-query верификатора.**
+  - Осталось до полного верификатора: (1) t=16 inner hash для 128-бит; (2) проверка root против
+    committed FRI-layer корня; (3) on-chain channel-replay (absorb roots → draw challenges) в
+    `QLSAVerifierRecursive.sol`, подающий challenges как public inputs
+- **R3.12 — аудит: C1 root-binding закрыт для `merkle_path_air` (2026-07-10)** — ✅ **готов**
+  - **[Крипто] Merkle `root` теперь пиннится in-circuit**: preproc-столбцы `is_root`/`root`
+    (на last-round-строке последней РЕАЛЬНОЙ компрессии каждого пути) + ограничение
+    `is_root·(s0 − root_pinned) = 0`. До этого root был привязан только через Fiat-Shamir
+    `mix_public` — это исключало переиспользование честного доказательства с другим root, но
+    НЕ мешало злонамеренному prover'у построить СВЕЖЕЕ доказательство для ложного root-клейма
+    (siblings — свободный witness, ограничения «вычисленный корень = заявленный» не было).
+    Регрессия: `test_forged_root_cannot_prove`. `depth` стал явным public input
+    `verify_merkle_path` / `verify_query_membership` (фиксирует строку пиннинга root),
+    зеркально on-chain `MerkleVerifier.verify(root, leaf, index, depth, siblings)`.
+    Композиция single/N-query теперь value-bound end-to-end ПОЛНОСТЬЮ in-circuit:
+    fin (fold output) → hashLeaf → leaf (pinned) → path → root (pinned).
+  - **[Код] Капы входов** добавлены в `composition::prove/verify_query(-ies)_membership`,
+    `merkle::prove/verify_paths_multi`: `MAX_QUERIES`/`MAX_NUM_FOLDS`/`MAX_DEPTH`/диапазон
+    `log_size`/ёмкость трейса. Закрыты паники и OOM на враждебных входах: деление на ноль при
+    `depth=0`, OOB-записи в `build_preproc` при большом `num_folds`, аллокация `2^40` при
+    `log_size=40`. **104 рекурсивных теста (453 всего), сборка без предупреждений.**
+  - После R3.12 остаётся: root vs *committed FRI-layer root* (on-chain интеграция), t=16
+    inner hash, `QLSAVerifierRecursive.sol`.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
@@ -182,11 +243,37 @@ ML-DSA подпись
   отличается — forged `is_step≡0` больше не верифицируется (regression `test_forged_selector_rejected`;
   раньше → `verify=true`). 90 рекурсивных тестов.
 
-**Остаётся (R3.7 follow-up):** портировать тот же pinning + output-binding на standalone sub-гаджеты
-(`merkle_path_air`, `channel_air`, `transcript_draw_air`, `fri_fold_chain_air` — пока документированная
-FS-only привязка) И на зрелые V23/VFRI-верификаторы в `stark_stwo/src/lib.rs` (тот же unpinned
-`commit(proof.commitments[0], …)` — per-circuit review-item на уровне всего репо). `recursive_verifier`
-— референс-реализация паттерна.
+**C2-пиннинг портирован на ВСЕ standalone sub-гаджеты (2026-06-17):** `merkle_path_air`, `channel_air`,
+`transcript_draw_air`, `fri_fold_chain_air` — у каждого witness-free `build_preproc(...)` (единый
+канонический источник round-констант / селекторов / счётчиков / digest) + пиннинг корня в `verify_*`;
+forged preprocessed-дерево больше не верифицируется (regression `test_forged_preproc_rejected` в каждом).
+`verify_fold_chain`/draw/merkle принимают структурные public-параметры (`num_rounds`/`(m,digest)`/`log_size`)
+для реконструкции канонического дерева. **94 рекурсивных теста.**
+
+**C2-пиннинг портирован на production V23-конвейер (2026-06-17):** все 5 зрелых верификаторов в
+`stark_stwo/src/lib.rs`, несущих preprocessed-столбец `is_init_uh` — `verify_use_hint_batch_v2`,
+`verify_norm_use_hint_combined`, `verify_az_ct1_norm_use_hint_combined`, `verify_full_mldsa_witness_combined`
+(V21/V22), `verify_full_mldsa_witness_v23` — пиннят preprocessed-корень через `canonical_uh_preproc_root(max_log)`
+(зеркалит config каждого prover'а; `build_preproc_v2` — единый источник). Forged `is_init_uh≡0` (ослабил бы
+сброс hint-weight-аккумулятора на row 0 → мог обойти границу OMEGA=55) больше не верифицируется
+(`test_use_hint_batch_v2_forged_preproc_rejected`); honest V21/V22/V23 roundtrip'ы проходят
+(`test_prove_verify_mldsa_v2{1,2,3}_roundtrip`) + combined roundtrip.
+
+**C2 закрыт для ВСЕХ preprocessed-верификаторов репозитория (2026-06-17):** + Poseidon2 hash-chain
+верификатор `verify_hash_chain_poseidon2` (`poseidon2_air::build_preprocessed` + `canonical_hashchain_preproc_root`,
+log_size-параметризован). Ни один верификатор больше не принимает непиннутое Tree 0. 443 быстрых Rust-теста
+зелёные (+`test_hash_chain_preproc_pin`, +`test_use_hint_batch_v2_forged_preproc_rejected`, honest V21/V22/V23).
+
+**C1 index-binding закрыт для `merkle_path_air` (2026-06-17):** claimed `index` привязан in-circuit —
+пиннутый preproc-столбец `idx_bit` несёт бит индекса на compression, ограничение `is_init·(bit − idx_bit)=0`
+заставляет trace-биты пути равняться ему; заявленный `index`, расходящийся с committed-путём, недоказуем
+(`test_forged_index_bits_cannot_prove`). Закрывает Medium-находку код-аудита («index не привязан к trace bits»).
+
+**Остаётся (R3.7 follow-up):** C1 output-binding (`root`/`finalFold`) реализован в `recursive_verifier`
+(finalFold) и `merkle_path_air` (index); остальные public-выходы sub-гаджетов и lib.rs-верификаторов
+привязаны через Fiat-Shamir (для V23 выход — fingerprint в канал; для merkle `root`/`leaf` — ужесточается
+на композиции, где leaf = пиннутый per-query fold-выход, root = committed FRI-layer корень). `recursive_verifier`
+/ `canonical_uh_preproc_root` — референс.
 
 Исправлено в этом аудите (robustness): input-cap'ы `MAX_QUERIES`/`MAX_NUM_FOLDS` (до size-multiply),
 guard пустого `build_trace_multi`, `bits_to_index` assert для depth>32, brittle tamper-тест

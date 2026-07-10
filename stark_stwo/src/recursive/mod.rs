@@ -24,13 +24,20 @@
 //! | Per-query recursive verifier | `recursive_verifier` | OODS± + circle fold + K line folds in ONE AIR; full per-query FRI chain, cross-row bound (R3.3) |
 //! | Per-query integration | `integration` | recursive_verifier → `qm31_leaf_hash` → `merkle_path_air`: full per-query FRI verification, value-bound across 3 sub-proofs (R3.4) |
 //! | Multi-query aggregation | `recursive_verifier` | N queries in ONE STARK (`prove_recursive_queries`): N blocks of (1+K) rows, same AIR, all finalFolds bound (R3.5) |
+//! | **Query membership composition** | `composition` | **recursive_verifier + merkle_path in ONE multi-component STARK; finalFold → hashLeaf → Merkle root bound end-to-end; single- AND N-query (VFRI11 shape) (R3.8/R3.9)** |
 //!
 //! **The full recursion gadget set is complete (R3.6):** QM31 arithmetic, FRI
 //! fold/OODS, inner-hash Merkle path, Fiat-Shamir absorb + draw, per-query
-//! composition (single + N-query), and the leaf-hash integration.  Next (roadmap
-//! R3.7 → R4): a top-level assembly wiring the channel (absorb→draw) to derive the
-//! channel-bound query indices + fold challenges and feed them into the multi-query
-//! verifier, then on-chain `QLSAVerifierRecursive.sol` (~5M gas constant).
+//! composition (single + N-query), and the leaf-hash integration.
+//!
+//! **Multi-gadget composition (R3.8/R3.9, 2026-06-17):** `composition` proves
+//! per-query fold chain + Merkle membership as ONE proof (shared allocator,
+//! combined pinned Tree 0), with the connecting value bound in-circuit —
+//! **both single-query (`prove_query_membership`) and N-query
+//! (`prove_queries_membership`, the VFRI11 shape: N fold chains + N Merkle paths in
+//! one proof via multi-path merkle).**  Next: wire `channel` (absorb→draw) to derive
+//! the query indices + fold challenges into the composition (no cherry-pick), swap
+//! the inner hash to t=16 for 128-bit, then on-chain `QLSAVerifierRecursive.sol`.
 //!
 //! # Soundness status (audit 2026-06-17) — C1/C2 CLOSED for `recursive_verifier`
 //!
@@ -52,15 +59,53 @@
 //!   verifies (regression test `test_forged_selector_rejected`; previously it
 //!   verified `true`).
 //!
-//! **Remaining (R3.7 follow-up):** the same pinning + output-binding mechanism
-//! still needs porting to the standalone sub-gadgets (`merkle_path_air`,
-//! `channel_air`, `transcript_draw_air`, `fri_fold_chain_air`) — they retain the
-//! documented Fiat-Shamir-only binding — and to the mature `stark_stwo/src/lib.rs`
-//! V23/VFRI verifiers, which use the same unpinned `commit(proof.commitments[0], …)`
-//! pattern (per-circuit codebase-wide review item). The `recursive_verifier`
-//! pattern is the reference implementation to follow.
+//! **C2 preprocessed pinning ported to all standalone sub-gadgets (2026-06-17):**
+//! `merkle_path_air`, `channel_air`, `transcript_draw_air`, and `fri_fold_chain_air`
+//! each expose a witness-free `build_preproc(...)` (the single canonical source for
+//! their round constants / selectors / counters / digest) and pin its commitment
+//! root in `verify_*` — a forged preprocessed tree no longer verifies (regression
+//! `test_forged_preproc_rejected` in each). `verify_fold_chain` / draw / merkle
+//! take the structural public params (`num_rounds` / `(m, digest)` / `log_size`)
+//! needed to rebuild the canonical tree.
+//!
+//! **C2 pinning ported to the production V23 pipeline (2026-06-17):** all five
+//! mature `stark_stwo/src/lib.rs` verifiers that carry the `is_init_uh`
+//! preprocessed column — `verify_use_hint_batch_v2`, `verify_norm_use_hint_combined`,
+//! `verify_az_ct1_norm_use_hint_combined`, `verify_full_mldsa_witness_combined`
+//! (V21/V22), and `verify_full_mldsa_witness_v23` — now pin their preprocessed root
+//! via `canonical_uh_preproc_root(max_log)` (mirroring each prover's config).
+//! Forging `is_init_uh≡0` (which would relax the hint-weight accumulator reset and
+//! could bypass the OMEGA bound) no longer verifies; honest V21/V22/V23 roundtrips
+//! still pass. `build_preproc_v2` is the single canonical source.
+//!
+//! **C2 is now closed for EVERY preprocessed-column verifier in the codebase**
+//! (2026-06-17): the 4 recursion sub-gadgets, `recursive_verifier`, all 5 V23-family
+//! `is_init_uh` verifiers, and the Poseidon2 hash-chain verifier
+//! (`verify_hash_chain_poseidon2` via `poseidon2_air::build_preprocessed` +
+//! `canonical_hashchain_preproc_root`). No verifier accepts an unpinned Tree 0.
+//!
+//! **Remaining (R3.7 follow-up):** C1 output-binding is implemented only in
+//! `recursive_verifier`; the sub-gadgets and the mature verifiers bind their public
+//! I/O via Fiat-Shamir (acceptable — for the sub-components it is tightened at
+//! composition, and for V23 the witness output is a fingerprint mixed into the
+//! channel). `recursive_verifier` / `canonical_uh_preproc_root` are the reference.
+//!
+//! **Audit 2026-07-10 (R3.12):** the Merkle `root` claim is now bound IN-CIRCUIT
+//! in `merkle_path_air` (pinned `is_root`/`root` preprocessed columns +
+//! `is_root·(s0 − root_pinned) = 0` on each path's last compression's last round
+//! row). Previously it was only Fiat-Shamir-mixed — a malicious prover could
+//! prove a FALSE root claim with adversarial siblings (fresh proof, not reuse);
+//! `test_forged_root_cannot_prove` is the regression. `depth` became an explicit
+//! public input of `verify_merkle_path` / `verify_query_membership`. The same
+//! audit added the missing input caps (`MAX_QUERIES` / `MAX_NUM_FOLDS` /
+//! `MAX_DEPTH` / log_size range / trace-capacity checks) to `composition`'s and
+//! `merkle_path_air`'s prove/verify entry points, closing panic/OOM paths on
+//! hostile inputs (division-by-zero at depth 0, OOB preproc writes, 2^40 allocs).
+//! Remaining after R3.12: root vs the *committed FRI-layer root* (on-chain
+//! integration), t=16 inner hash, `QLSAVerifierRecursive.sol`.
 
 pub mod channel_air;
+pub mod composition;
 pub mod fold_air;
 pub mod fri_fold_chain_air;
 pub mod integration;

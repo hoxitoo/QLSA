@@ -36,11 +36,20 @@
 //!   in-circuit constraint forces the trace's real output row to equal it — a
 //!   prover whose trace computes X cannot claim Y ≠ X.
 //!
-//! (`px` is still bound via Fiat-Shamir `mix_public`; it is a query *identifier*,
-//! not a soundness-critical output.  The same pinning mechanism should be ported
-//! to the standalone sub-gadgets and the mature V23/VFRI verifiers — follow-up.)
+//! - **[1a FRI cherry-pick — CLOSED]** every verifier-fixed challenge input is
+//!   pinned in-circuit: `alpha` (fold challenge, `alpha_p`), `z_x` (OODS point,
+//!   `zx_p`, is_step-gated), `px` (query point, `px_p`, is_step-gated), and `inv`
+//!   (twiddle inverse, `inv_p`).  In-circuit equality constraints force the trace
+//!   to use the verifier's values, so the prover cannot cherry-pick the FRI folding
+//!   challenge, the OODS point, the query point, or the twiddles
+//!   (`test_forged_alpha_cannot_prove`, `test_forged_zx_inv_px_cannot_prove`).
+//!   Design note: the cheap Poseidon2 channel (absorb roots → draw challenges) stays
+//!   **on-chain**; the challenges are public inputs to this recursive proof, so no
+//!   in-circuit `logup` binding is needed.
 //!
-//! # Trace layout (42 main columns + 7 preprocessed)
+//! (`px`/`finalFold` are also mixed via Fiat-Shamir `mix_public` as an outer bind.)
+//!
+//! # Trace layout (42 main columns + 17 preprocessed)
 //!
 //! ```text
 //! Main:
@@ -55,7 +64,10 @@
 //!  is_step   — 1 on each block's row 0        (gates the OODS constraints)
 //!  chain_on  — 1 on rows 1..K of each block    (gates the cross-row chain)
 //!  is_output — 1 on each block's output row     (gates the output-equality C1)
-//!  fin0..fin3 — claimed final fold limbs on the output row (verifier-fixed)
+//!  fin0..fin3 — claimed final fold limbs on the output row (verifier-fixed, C1)
+//!  alpha_p0..3 — verifier-fixed fold challenge on every fold row (1a)
+//!  px_p, zx_p0..3 — verifier-fixed query point x / OODS point x, row 0 (1a)
+//!  inv_p — verifier-fixed twiddle inverse on every fold row (1a)
 //! ```
 
 use stwo::core::air::Component;
@@ -121,6 +133,21 @@ pub fn pc_is_output() -> PreProcessedColumnId {
 pub fn pc_fin(k: usize) -> PreProcessedColumnId {
     PreProcessedColumnId { id: format!("rv_fin{k}") }
 }
+/// `alpha_p0..3` carry the verifier-fixed fold challenge (QM31 limbs) on every fold
+/// row; the AIR pins the trace's `alpha` to them so the FRI folding challenges are
+/// Fiat-Shamir-derived, not prover-chosen (closes the FRI cherry-pick gap, 1a).
+pub fn pc_alpha(k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("rv_alpha{k}") }
+}
+/// `px_p` — verifier-fixed query point x (row 0); pins the trace's `px` (1a).
+pub fn pc_px() -> PreProcessedColumnId { PreProcessedColumnId { id: "rv_px".into() } }
+/// `zx_p0..3` — verifier-fixed OODS point x (QM31, row 0); pins the trace's `z_x` (1a).
+pub fn pc_zx(k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("rv_zx{k}") }
+}
+/// `inv_p` — verifier-fixed twiddle inverse on every fold row; pins the trace's
+/// `inv` (yInv/xInv), which is index-derived, not prover-chosen (1a).
+pub fn pc_inv() -> PreProcessedColumnId { PreProcessedColumnId { id: "rv_inv".into() } }
 pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     vec![
         pc_is_step(),
@@ -130,6 +157,16 @@ pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
         pc_fin(1),
         pc_fin(2),
         pc_fin(3),
+        pc_alpha(0),
+        pc_alpha(1),
+        pc_alpha(2),
+        pc_alpha(3),
+        pc_px(),
+        pc_zx(0),
+        pc_zx(1),
+        pc_zx(2),
+        pc_zx(3),
+        pc_inv(),
     ]
 }
 
@@ -212,6 +249,20 @@ impl FrameworkEval for RecursiveVerifierEval {
             eval.get_preprocessed_column(pc_fin(2)),
             eval.get_preprocessed_column(pc_fin(3)),
         ];
+        let alpha_p = [
+            eval.get_preprocessed_column(pc_alpha(0)),
+            eval.get_preprocessed_column(pc_alpha(1)),
+            eval.get_preprocessed_column(pc_alpha(2)),
+            eval.get_preprocessed_column(pc_alpha(3)),
+        ];
+        let px_p = eval.get_preprocessed_column(pc_px());
+        let zx_p = [
+            eval.get_preprocessed_column(pc_zx(0)),
+            eval.get_preprocessed_column(pc_zx(1)),
+            eval.get_preprocessed_column(pc_zx(2)),
+            eval.get_preprocessed_column(pc_zx(3)),
+        ];
+        let inv_p = eval.get_preprocessed_column(pc_inv());
 
         // Main columns. `a` (input/fPlus) and `out` need previous-row access for chaining.
         let [px] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
@@ -275,6 +326,22 @@ impl FrameworkEval for RecursiveVerifierEval {
         let out_prev = [out0_p, out1_p, out2_p, out3_p];
 
         let zero = px.clone() - px.clone();
+
+        // ── C_alpha / C_inv: alpha_k = alpha_p_k ; inv = inv_p  (ALL rows, deg 1) ─
+        // Pins the fold challenge AND the twiddle inverse to the verifier-fixed
+        // (channel-drawn / index-derived) values — cannot be cherry-picked (1a).
+        // Padding rows are 0 = 0.
+        for k in 0..4 {
+            eval.add_constraint(alpha[k].clone() - alpha_p[k].clone());
+        }
+        eval.add_constraint(inv.clone() - inv_p);
+
+        // ── C_px / C_zx: px = px_p ; z_x_k = zx_p_k  (row 0 only, is_step-gated) ──
+        // Pin the query point x and the OODS point x to their verifier-fixed values.
+        eval.add_constraint(is_step.clone() * (px.clone() - px_p));
+        for k in 0..4 {
+            eval.add_constraint(is_step.clone() * (zx[k].clone() - zx_p[k].clone()));
+        }
 
         // ── C_p: p_k = (a_k − b_k)·inv  (ALL rows, deg 2) ────────────────────────
         for k in 0..4 {
@@ -435,21 +502,79 @@ fn fill_query_block(
 /// (audit gap C2), so a prover cannot forge a selector to gate constraints off.
 /// The pinned `fin` columns + the `is_output`-gated equality constraint tie the
 /// trace's real output to the verifier-fixed claimed value (audit gap C1).
-pub fn build_preproc(finals: &[u128], num_folds: usize, log_n_rows: u32) -> Vec<TraceCol> {
+/// The verifier-fixed public challenge inputs for one query (all derived on-chain
+/// from the committed roots + the query index — NOT prover-chosen):
+/// - `px`  — query point x-coordinate = `cosetAt(index).x` (row 0)
+/// - `z_x` — OODS point x (drawn from the channel, QM31, row 0)
+/// - `alphas` — `1 + num_folds` fold challenges (row 0 = friAlpha, rows 1..K = line
+///   folds; drawn from the channel)
+/// - `invs` — `1 + num_folds` twiddle inverses (row 0 = yInv, rows 1..K = xInv;
+///   `cosetAt(...)` derivations, index-fixed)
+///
+/// Pinning all four (via `px_p` / `z_x_p` / `alpha_p` / `inv_p` preprocessed columns
+/// + in-circuit equality constraints) makes every soundness-critical FRI input
+/// verifier-fixed — the prover cannot cherry-pick the folding challenge, the OODS
+/// point, the query point, or the twiddles (closes FRI cherry-pick gap 1a).
+#[derive(Clone)]
+pub struct QueryChallenges {
+    pub px: u32,
+    pub z_x: u128,
+    pub alphas: Vec<u128>,
+    pub invs: Vec<u32>,
+}
+
+/// Extract query `q`'s verifier-fixed challenges from its `(step, rounds)`.
+pub fn query_challenges(step: &StepOp, rounds: &[FoldRound]) -> QueryChallenges {
+    let mut alphas = Vec::with_capacity(1 + rounds.len());
+    alphas.push(step.6); // friAlpha (circle fold challenge)
+    alphas.extend(rounds.iter().map(|&(_, alpha, _)| alpha));
+    let mut invs = Vec::with_capacity(1 + rounds.len());
+    invs.push(step.7); // yInv (circle fold twiddle)
+    invs.extend(rounds.iter().map(|&(_, _, x_inv)| x_inv));
+    QueryChallenges { px: step.2, z_x: step.3, alphas, invs }
+}
+
+/// Just the fold challenges of a query (`[friAlpha, round_alpha_1, …]`).
+pub fn query_alphas(step: &StepOp, rounds: &[FoldRound]) -> Vec<u128> {
+    query_challenges(step, rounds).alphas
+}
+
+/// Build the canonical preprocessed columns from PUBLIC data alone (no witness):
+/// the `is_step`/`chain_on` selectors, the `is_output` selector + claimed `fin`
+/// output, AND the pinned verifier-fixed challenges (`px_p`, `z_x_p`, `alpha_p`,
+/// `inv_p`). Single source of truth for the preprocessed tree (audit gaps C1/C2/1a).
+pub fn build_preproc(
+    finals: &[u128],
+    challenges: &[QueryChallenges],
+    num_folds: usize,
+    log_n_rows: u32,
+) -> Vec<TraceCol> {
+    assert_eq!(finals.len(), challenges.len(), "finals/challenges length mismatch");
     let n = 1usize << log_n_rows;
     let block = 1 + num_folds;
     let domain = CanonicCoset::new(log_n_rows).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
     let one = BaseField::from_u32_unchecked(1);
+    let m31 = |v: u64| BaseField::from_u32_unchecked((v % ((1u64 << 31) - 1)) as u32);
 
     let mut is_step_col = vec![bf0; n];
     let mut chain_on_col = vec![bf0; n];
     let mut is_output_col = vec![bf0; n];
     let mut fin_cols: [Vec<BaseField>; 4] =
         [vec![bf0; n], vec![bf0; n], vec![bf0; n], vec![bf0; n]];
+    let mut alpha_cols: [Vec<BaseField>; 4] =
+        [vec![bf0; n], vec![bf0; n], vec![bf0; n], vec![bf0; n]];
+    let mut px_col = vec![bf0; n];
+    let mut zx_cols: [Vec<BaseField>; 4] =
+        [vec![bf0; n], vec![bf0; n], vec![bf0; n], vec![bf0; n]];
+    let mut inv_col = vec![bf0; n];
 
     for (q, &final_v) in finals.iter().enumerate() {
         let base = q * block;
+        let ch = &challenges[q];
+        debug_assert_eq!(ch.alphas.len(), block, "challenges[q].alphas must have 1+num_folds entries");
+        debug_assert_eq!(ch.invs.len(), block, "challenges[q].invs must have 1+num_folds entries");
+
         is_step_col[base] = one;
         for r in 1..=num_folds {
             chain_on_col[base + r] = one;
@@ -460,10 +585,29 @@ pub fn build_preproc(finals: &[u128], num_folds: usize, log_n_rows: u32) -> Vec<
         for k in 0..4 {
             fin_cols[k][out_row] = BaseField::from_u32_unchecked(fl[k] as u32);
         }
+
+        // Row-0-only challenges: px, z_x.
+        px_col[base] = m31(ch.px as u64);
+        let zl = limbs(ch.z_x);
+        for k in 0..4 {
+            zx_cols[k][base] = BaseField::from_u32_unchecked(zl[k] as u32);
+        }
+        // Per-fold-row challenges: alpha, inv.
+        for r in 0..block {
+            let al = limbs(ch.alphas[r]);
+            for k in 0..4 {
+                alpha_cols[k][base + r] = BaseField::from_u32_unchecked(al[k] as u32);
+            }
+            inv_col[base + r] = m31(ch.invs[r] as u64);
+        }
     }
 
     let mut all = vec![is_step_col, chain_on_col, is_output_col];
     all.extend(fin_cols);
+    all.extend(alpha_cols);
+    all.push(px_col);
+    all.extend(zx_cols);
+    all.push(inv_col);
     for c in all.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(c);
     }
@@ -500,7 +644,12 @@ pub fn build_trace(
 
     fill_query_block(&mut cols, 0, step, rounds);
     let main_trace = finalize_main(cols, domain);
-    let preproc = build_preproc(&[recursive_query_final(step, rounds)], rounds.len(), log_n_rows);
+    let preproc = build_preproc(
+        &[recursive_query_final(step, rounds)],
+        &[query_challenges(step, rounds)],
+        rounds.len(),
+        log_n_rows,
+    );
     (main_trace, preproc)
 }
 
@@ -526,7 +675,8 @@ pub fn build_trace_multi(
         fill_query_block(&mut cols, q * block, step, rounds);
     }
     let main_trace = finalize_main(cols, domain);
-    let preproc = build_preproc(&recursive_queries_final(queries), num_folds, log_n_rows);
+    let chs: Vec<QueryChallenges> = queries.iter().map(|(s, r)| query_challenges(s, r)).collect();
+    let preproc = build_preproc(&recursive_queries_final(queries), &chs, num_folds, log_n_rows);
     (main_trace, preproc)
 }
 
@@ -635,11 +785,15 @@ pub fn verify_recursive_query(
     proof_bytes: &[u8],
     log_size: u32,
     num_folds: usize,
+    challenges: &QueryChallenges,
     px: u32,
     final_value: u128,
 ) -> Result<bool, String> {
     if !(MIN_LOG_SIZE..=MAX_LOG_SIZE).contains(&log_size) {
         return Err(format!("log_size {log_size} out of range"));
+    }
+    if challenges.alphas.len() != 1 + num_folds || challenges.invs.len() != 1 + num_folds {
+        return Err("challenges must have 1 + num_folds alphas/invs".into());
     }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
@@ -667,9 +821,12 @@ pub fn verify_recursive_query(
         ));
     }
 
-    // C2: pin the preprocessed (selector) columns to their canonical values.
-    let canonical_root =
-        canonical_preproc_root(build_preproc(&[final_value], num_folds, log_size), log_size);
+    // C2 + 1a: pin the preprocessed columns — selectors, claimed final fold, AND
+    // the verifier-fixed challenges (px, z_x, alpha, inv) — to their canonical values.
+    let canonical_root = canonical_preproc_root(
+        build_preproc(&[final_value], std::slice::from_ref(challenges), num_folds, log_size),
+        log_size,
+    );
     if proof.commitments[0] != canonical_root {
         return Ok(false); // forged / non-canonical preprocessed tree
     }
@@ -799,14 +956,15 @@ pub fn verify_recursive_queries(
     proof_bytes: &[u8],
     log_size: u32,
     num_folds: usize,
+    challenges: &[QueryChallenges],
     pxs: &[u32],
     finals: &[u128],
 ) -> Result<bool, String> {
     if !(MIN_LOG_SIZE..=MAX_LOG_SIZE).contains(&log_size) {
         return Err(format!("log_size {log_size} out of range"));
     }
-    if pxs.len() != finals.len() {
-        return Err("pxs/finals length mismatch".into());
+    if pxs.len() != finals.len() || challenges.len() != finals.len() {
+        return Err("pxs/finals/challenges length mismatch".into());
     }
     if pxs.is_empty() {
         return Err("must have ≥ 1 query".into());
@@ -837,9 +995,9 @@ pub fn verify_recursive_queries(
         ));
     }
 
-    // C2: pin the preprocessed (selector) columns to their canonical values.
+    // C2 + 1a: pin the preprocessed columns (selectors, finals, challenges).
     let canonical_root =
-        canonical_preproc_root(build_preproc(finals, num_folds, log_size), log_size);
+        canonical_preproc_root(build_preproc(finals, challenges, num_folds, log_size), log_size);
     if proof.commitments[0] != canonical_root {
         return Ok(false);
     }
@@ -939,7 +1097,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 1);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), &query_challenges(&step, &rounds), step.2, final_v).unwrap());
         assert_eq!(final_v, recursive_query_final(&step, &rounds));
     }
 
@@ -950,7 +1108,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 4);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), &query_challenges(&step, &rounds), step.2, final_v).unwrap());
         assert_eq!(final_v, recursive_query_final(&step, &rounds));
     }
 
@@ -961,7 +1119,7 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 6);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
-        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), &query_challenges(&step, &rounds), step.2, final_v).unwrap());
     }
 
     // Rejection: a wrong claimed final fold value replays a different transcript.
@@ -972,8 +1130,8 @@ mod tests {
         let rounds = sample_rounds(&mut s, 3);
         let (bytes, log_size, final_v) = prove_recursive_query(&step, &rounds).unwrap();
         // Correct value verifies; a flipped value must not.
-        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap());
-        assert!(!verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v ^ 1)
+        assert!(verify_recursive_query(&bytes, log_size, rounds.len(), &query_challenges(&step, &rounds), step.2, final_v).unwrap());
+        assert!(!verify_recursive_query(&bytes, log_size, rounds.len(), &query_challenges(&step, &rounds), step.2, final_v ^ 1)
             .unwrap_or(false));
     }
 
@@ -988,7 +1146,7 @@ mod tests {
         // Flip a load-bearing byte; a tampered proof must NOT verify
         // (either a decode error or a constraint/FRI failure → Ok(false)).
         bytes[n / 3] ^= 0xff;
-        assert!(!verify_recursive_query(&bytes, log_size, rounds.len(), step.2, final_v).unwrap_or(false));
+        assert!(!verify_recursive_query(&bytes, log_size, rounds.len(), &query_challenges(&step, &rounds), step.2, final_v).unwrap_or(false));
     }
 
     // Rejection: corrupted circle-fold output (row 0 out column) — breaks both
@@ -1064,7 +1222,7 @@ mod tests {
         for (i, (st, r)) in queries.iter().enumerate() {
             assert_eq!(finals[i], recursive_query_final(st, r));
         }
-        assert!(verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &pxs, &finals).unwrap());
+        assert!(verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &queries.iter().map(|(st,r)| query_challenges(st,r)).collect::<Vec<_>>(), &pxs, &finals).unwrap());
     }
 
     // A single query through the multi path matches the single-query path's output.
@@ -1076,7 +1234,7 @@ mod tests {
         let (bytes, log_size, finals) =
             prove_recursive_queries(&[(step, rounds.clone())]).unwrap();
         assert_eq!(finals[0], recursive_query_final(&step, &rounds));
-        assert!(verify_recursive_queries(&bytes, log_size, rounds.len(), &[step.2], &finals).unwrap());
+        assert!(verify_recursive_queries(&bytes, log_size, rounds.len(), &[query_challenges(&step, &rounds)], &[step.2], &finals).unwrap());
     }
 
     // Rejection: a wrong claimed final for one query fails the whole proof.
@@ -1086,12 +1244,12 @@ mod tests {
         let queries = sample_queries(&mut s, 4, 2);
         let (bytes, log_size, finals) = prove_recursive_queries(&queries).unwrap();
         let pxs: Vec<u32> = queries.iter().map(|(st, _)| st.2).collect();
-        assert!(verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &pxs, &finals).unwrap());
+        assert!(verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &queries.iter().map(|(st,r)| query_challenges(st,r)).collect::<Vec<_>>(), &pxs, &finals).unwrap());
 
         // Flip the 3rd query's final value.
         let mut bad = finals.clone();
         bad[2] ^= 1;
-        assert!(!verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &pxs, &bad).unwrap_or(false));
+        assert!(!verify_recursive_queries(&bytes, log_size, queries[0].1.len(), &queries.iter().map(|(st,r)| query_challenges(st,r)).collect::<Vec<_>>(), &pxs, &bad).unwrap_or(false));
     }
 
     // Rejection: mismatched num_folds across queries.
@@ -1148,7 +1306,7 @@ mod tests {
             .expect("forged-selector trace still satisfies the (gated-off) constraints");
         // Honest num_folds → canonical selector root ≠ forged root → rejected.
         assert!(
-            !verify_recursive_query(&bytes, log_size, rounds.len(), px, fin).unwrap_or(false),
+            !verify_recursive_query(&bytes, log_size, rounds.len(), &query_challenges(&step, &rounds), px, fin).unwrap_or(false),
             "a forged preprocessed selector must not verify (C2 pinned)",
         );
     }
@@ -1166,13 +1324,66 @@ mod tests {
 
         // Honest main trace (computes the real final X)...
         let (main_trace, _honest_preproc) = build_trace(&step, &rounds, log_size);
-        // ...but preprocessed `fin` columns claim a DIFFERENT final Y.
-        let forged_preproc = build_preproc(&[real_final ^ 1], rounds.len(), log_size);
+        // ...but preprocessed `fin` columns claim a DIFFERENT final Y (alphas honest).
+        let forged_preproc =
+            build_preproc(&[real_final ^ 1], &[query_challenges(&step, &rounds)], rounds.len(), log_size);
 
         let res = prove_columns(forged_preproc, main_trace, log_size, step.2, real_final ^ 1);
         assert!(
             res.is_err(),
             "trace output ≠ claimed fin must violate the is_output constraint (C1)",
         );
+    }
+
+    // 1a regression (FRI cherry-pick): a prover whose trace folds with alpha X but
+    // whose pinned `alpha_p` claims Y ≠ X cannot prove — the alpha-equality
+    // constraint is violated. This is what forces the folding challenge to be the
+    // verifier's (Fiat-Shamir-drawn) value.
+    #[test]
+    fn test_forged_alpha_cannot_prove() {
+        let mut s = 0x1a1a_u64;
+        let step = sample_step(&mut s);
+        let rounds = sample_rounds(&mut s, 2);
+        let log_size = compute_log_size(1 + rounds.len());
+        let fin = recursive_query_final(&step, &rounds);
+
+        // Honest main trace (folds with the real alphas)...
+        let (main_trace, _honest_preproc) = build_trace(&step, &rounds, log_size);
+        // ...but pinned alpha_p claims a different friAlpha (flip row-0 challenge).
+        let mut ch = query_challenges(&step, &rounds);
+        ch.alphas[0] ^= 1;
+        let forged_preproc = build_preproc(&[fin], &[ch], rounds.len(), log_size);
+
+        let res = prove_columns(forged_preproc, main_trace, log_size, step.2, fin);
+        assert!(
+            res.is_err(),
+            "trace alpha ≠ pinned alpha_p must violate the FRI-challenge constraint (1a)",
+        );
+    }
+
+    // 1a regression: forging the pinned OODS point z_x, the twiddle inv, or the
+    // query point px (away from the trace's values) must all fail to prove.
+    #[test]
+    fn test_forged_zx_inv_px_cannot_prove() {
+        let mut s = 0x2b2b_u64;
+        let step = sample_step(&mut s);
+        let rounds = sample_rounds(&mut s, 2);
+        let log_size = compute_log_size(1 + rounds.len());
+        let fin = recursive_query_final(&step, &rounds);
+        let (main_trace, _p) = build_trace(&step, &rounds, log_size);
+
+        for mutate in 0..3 {
+            let mut ch = query_challenges(&step, &rounds);
+            match mutate {
+                0 => ch.z_x ^= 1,    // OODS point
+                1 => ch.invs[1] ^= 1, // a line-fold twiddle
+                _ => ch.px ^= 1,     // query point x
+            }
+            let forged = build_preproc(&[fin], &[ch], rounds.len(), log_size);
+            assert!(
+                prove_columns(forged, main_trace.clone(), log_size, step.2, fin).is_err(),
+                "forged z_x/inv/px (mutate={mutate}) must violate a pin constraint (1a)",
+            );
+        }
     }
 }

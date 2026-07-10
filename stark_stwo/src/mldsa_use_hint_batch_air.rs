@@ -351,9 +351,26 @@ pub fn new_component_v2(log_n_rows: u32) -> UseHintBatchV2Component {
     )
 }
 
+/// Build the canonical `is_init_uh` preprocessed column (row 0 = 1, else 0) from
+/// the fixed `LOG_N_ROWS` alone — **no witness**. This is the single source of
+/// truth for the preprocessed tree: [`build_trace_v2`] commits exactly this, and
+/// a verifier can recompute + pin its commitment root so a prover cannot forge
+/// `is_init_uh` (which gates the hint-weight accumulator reset at row 0).
+pub fn build_preproc_v2() -> TraceColumns {
+    let n_rows = 1_usize << LOG_N_ROWS;
+    let domain = CanonicCoset::new(LOG_N_ROWS).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let mut col_is_init = vec![bf0; n_rows];
+    col_is_init[0] = BaseField::from_u32_unchecked(1);
+    use stwo::core::utils::bit_reverse_coset_to_circle_domain_order;
+    bit_reverse_coset_to_circle_domain_order(&mut col_is_init);
+    vec![CircleEvaluation::new(domain, col_is_init)]
+}
+
 /// Build the V2 trace: UseHint (60 cols) + hw_sum (1 col) + is_init_uh preproc.
 ///
 /// Returns `(main_columns, preproc_columns, w1_out, hint_weight_total)`.
+/// The preprocessed column comes from [`build_preproc_v2`] (the canonical source).
 pub fn build_trace_v2(
     w_prime: &[[i64; N]; K],
     hints:   &[[bool; N]; K],
@@ -379,7 +396,6 @@ pub fn build_trace_v2(
     let mut col_carry_dn:  Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
     let mut col_w1:        Vec<Vec<BaseField>> = (0..K).map(|_| new_buf()).collect();
     let mut col_hw_sum:    Vec<BaseField>       = new_buf();
-    let mut col_is_init:   Vec<BaseField>       = new_buf();
 
     let mut w1_out: [[i64; N]; K] = [[0i64; N]; K];
 
@@ -418,9 +434,6 @@ pub fn build_trace_v2(
     }
     let hint_weight_total = running_sum as usize;
 
-    // is_init_uh: 1 at row 0, 0 elsewhere.
-    col_is_init[0] = bfu(1);
-
     // Apply bit-reversal for Circle domain ordering.
     use stwo::core::utils::bit_reverse_coset_to_circle_domain_order;
     for i in 0..K {
@@ -433,7 +446,6 @@ pub fn build_trace_v2(
         }
     }
     bit_reverse_coset_to_circle_domain_order(&mut col_hw_sum);
-    bit_reverse_coset_to_circle_domain_order(&mut col_is_init);
 
     let mut main_columns: TraceColumns = Vec::with_capacity(N_COLS_V2);
     for i in 0..K {
@@ -451,8 +463,7 @@ pub fn build_trace_v2(
     main_columns.push(CircleEvaluation::new(domain, col_hw_sum));
     debug_assert_eq!(main_columns.len(), N_COLS_V2);
 
-    let preproc_columns: TraceColumns =
-        vec![CircleEvaluation::new(domain, col_is_init)];
+    let preproc_columns = build_preproc_v2(); // single canonical source (C2)
 
     (main_columns, preproc_columns, w1_out, hint_weight_total)
 }

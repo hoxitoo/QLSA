@@ -180,6 +180,67 @@ fn make_config(log_size: u32) -> PcsConfig {
     }
 }
 
+/// Recompute the canonical Tree-0 (preprocessed) commitment root for a proof whose
+/// only preprocessed column is UseHintBatchV2's `is_init_uh`, committed within a
+/// scheme sized for `max_log` (`make_config(max_log)` + twiddles at
+/// `max_log + LOG_BLOWUP + 1`, mirroring the prover exactly).  A verifier pins
+/// `proof.commitments[0]` to this — a forged `is_init_uh` (which would relax the
+/// hint-weight accumulator reset and could bypass the OMEGA bound) no longer
+/// verifies (audit gap C2, ported from the recursion gadgets).
+fn canonical_uh_preproc_root(
+    max_log: u32,
+) -> <stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleHasher
+        as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    use stwo::core::channel::Blake2sM31Channel;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::CommitmentSchemeProver;
+
+    let config = make_config(max_log);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(max_log + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(mldsa_use_hint_batch_air::build_preproc_v2());
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
+/// Recompute the canonical Tree-0 root for a Poseidon2 hash-chain proof (preproc
+/// columns `rc0, rc1, is_init, init_row`), committed at `log_size`.  Mirrors
+/// [`prove_hash_chain_poseidon2`]'s Tree-0 commit; the verifier pins
+/// `proof.commitments[0]` to this (audit gap C2).
+fn canonical_hashchain_preproc_root(
+    log_size: u32,
+) -> <stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleHasher
+        as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    use stwo::core::channel::Blake2sM31Channel;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::CommitmentSchemeProver;
+
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(poseidon2_air::build_preprocessed(log_size));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
 /// Prove a hash-chain over `leaves`.
 ///
 /// Returns `(proof_bytes, commitment_hex, log_size)`.
@@ -346,6 +407,14 @@ pub fn verify_hash_chain_poseidon2(
             proof.commitments.len()
         ));
     }
+
+    // C2: pin the preprocessed (round-constant + init-selector) tree to its
+    // canonical value for this log_size — a forged rc/is_init/init_row tree
+    // (which could swap the hash function or disable the sponge init) is rejected.
+    if proof.commitments[0] != canonical_hashchain_preproc_root(log_size) {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -2184,6 +2253,12 @@ pub fn verify_use_hint_batch_v2(
     if proof.commitments.len() < 2 {
         return Err(format!("verify_use_hint_batch_v2: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
+
+    // C2: pin the preprocessed `is_init_uh` tree to its canonical value.
+    if proof.commitments[0] != canonical_uh_preproc_root(log_size) {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -2367,6 +2442,10 @@ pub fn verify_norm_use_hint_combined(
     // Tree 1: NORM_N_COLS + UH_N_COLS = 15+61=76 main cols at log_size=8.
     if proof.commitments.len() < 2 {
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    // C2: pin the preprocessed is_init_uh tree to its canonical value.
+    if proof.commitments[0] != canonical_uh_preproc_root(log_size) {
+        return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &[log_size; 1], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &[log_size; NORM_N_COLS + UH_N_COLS], verifier_channel);
@@ -2658,6 +2737,10 @@ pub fn verify_az_ct1_norm_use_hint_combined(
     // Tree 0: 1 preproc col; Tree 1: 1894 main cols.
     if proof.commitments.len() < 2 {
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    // C2: pin the preprocessed is_init_uh tree to its canonical value.
+    if proof.commitments[0] != canonical_uh_preproc_root(log_size) {
+        return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &[log_size; 1], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &[log_size; AZ_N_COLS + CT1_N_COLS + NORM_N_COLS + UH_N_COLS], verifier_channel);
@@ -3413,6 +3496,10 @@ pub fn verify_full_mldsa_witness_combined(
         }
     }
 
+    // C2: pin the preprocessed is_init_uh tree to its canonical value.
+    if proof.commitments[0] != canonical_uh_preproc_root(NTT_LOG) {
+        return Ok(false);
+    }
     commitment_scheme.commit(proof.commitments[0], &[NORM_LOG; 1], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &tree1_sizes, verifier_channel);
 
@@ -3896,6 +3983,10 @@ pub fn verify_full_mldsa_witness_v23(
         }
     }
 
+    // C2: pin the preprocessed is_init_uh tree to its canonical value.
+    if proof.commitments[0] != canonical_uh_preproc_root(NTT_LOG) {
+        return Ok(false);
+    }
     commitment_scheme.commit(proof.commitments[0], &[NORM_LOG; 1], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &tree1_sizes, verifier_channel);
 
@@ -8817,6 +8908,129 @@ mod tests {
     use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::TreeVec;
     use stwo_constraint_framework::{assert_constraints_on_trace, FrameworkEval};
+
+    // C2 pinning must NOT break honest UseHintBatchV2 proofs — the verifier now
+    // recomputes the canonical preprocessed root and pins it; a valid proof (whose
+    // Tree 0 IS canonical) must still verify.
+    #[test]
+    fn test_use_hint_batch_v2_preproc_pin_roundtrip() {
+        use crate::mldsa::N;
+        use crate::mldsa::params::K;
+        let w_prime = [[0i64; N]; K];
+        let hints = [[false; N]; K];
+        let (bytes, cm, w1_out, hw) = prove_use_hint_batch_v2(&w_prime, &hints).unwrap();
+        assert!(
+            verify_use_hint_batch_v2(&bytes, &cm, &w1_out, hw).unwrap(),
+            "an honest UseHintBatchV2 proof must still verify after C2 pinning",
+        );
+    }
+
+    // The canonical preprocessed root is deterministic and max_log-sensitive
+    // (config lifting depends on max_log), so the pin must use the verifier's max_log.
+    #[test]
+    fn test_canonical_uh_preproc_root_deterministic() {
+        assert_eq!(canonical_uh_preproc_root(8), canonical_uh_preproc_root(8));
+        assert_ne!(canonical_uh_preproc_root(8), canonical_uh_preproc_root(10));
+    }
+
+    // The hash-chain canonical preprocessed root is deterministic and
+    // log_size-sensitive; an honest hash-chain proof still verifies after pinning.
+    #[test]
+    fn test_hash_chain_preproc_pin() {
+        assert_eq!(
+            canonical_hashchain_preproc_root(6),
+            canonical_hashchain_preproc_root(6)
+        );
+        assert_ne!(
+            canonical_hashchain_preproc_root(6),
+            canonical_hashchain_preproc_root(7)
+        );
+        // Honest roundtrip through the pinned verifier.
+        let leaves = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
+        let (proof, cm, log) = prove_hash_chain_poseidon2(&leaves, &[]).unwrap();
+        assert!(
+            verify_hash_chain_poseidon2(&proof, &cm, log, &[]).unwrap(),
+            "an honest hash-chain proof must still verify after C2 pinning",
+        );
+    }
+
+    // C2 pinning must not break an honest COMBINED (Norm + UseHintBatchV2) proof —
+    // validates the pin across the multi-component verifier code path.
+    #[test]
+    fn test_norm_use_hint_combined_preproc_pin_roundtrip() {
+        use crate::mldsa::N;
+        use crate::mldsa::params::{K, L};
+        let z = [[0i64; N]; L];
+        let w_prime = [[0i64; N]; K];
+        let hints = [[false; N]; K];
+        let (bytes, norm_cm, uh_cm, _max_norms, w1_out, hw) =
+            prove_norm_use_hint_combined(&z, &w_prime, &hints).unwrap();
+        assert!(
+            verify_norm_use_hint_combined(&bytes, &norm_cm, &uh_cm, &w1_out, hw).unwrap(),
+            "an honest combined Norm+UseHint proof must still verify after C2 pinning",
+        );
+    }
+
+    // C2 regression: a malicious prover that commits a FORGED (zeroed) `is_init_uh`
+    // preprocessed column must not verify — even when the forged trace satisfies all
+    // constraints (which it does for the trivial all-zero witness, since the
+    // hint-weight constraint is 0=0 there). Only the canonical-root pin catches it.
+    #[test]
+    fn test_use_hint_batch_v2_forged_preproc_rejected() {
+        use crate::mldsa::N;
+        use crate::mldsa::params::K;
+        use mldsa_use_hint_batch_air::{build_trace_v2, new_component_v2, LOG_N_ROWS};
+        use stwo::core::channel::Blake2sM31Channel;
+        use stwo::core::poly::circle::CanonicCoset;
+        use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+        use stwo::prover::backend::CpuBackend;
+        use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
+        use stwo::prover::{prove, CommitmentSchemeProver};
+
+        let w_prime = [[0i64; N]; K];
+        let hints = [[false; N]; K];
+        let log_size = LOG_N_ROWS;
+        let (main_cols, _canonical_preproc, w1_out, hw) = build_trace_v2(&w_prime, &hints);
+
+        let mut combined_flat: Vec<i64> = w1_out.iter().flat_map(|r| r.iter().copied()).collect();
+        combined_flat.push(hw as i64);
+        let output_fp = output_fingerprint(&combined_flat);
+        let commitment_hex = build_poly_commitment(&output_fp);
+
+        // Forge: an all-zero is_init_uh preprocessed column.
+        let domain = CanonicCoset::new(log_size).circle_domain();
+        let n = 1usize << log_size;
+        let forged_preproc =
+            vec![CircleEvaluation::new(domain, vec![BaseField::from_u32_unchecked(0); n])];
+
+        let config = make_config(log_size);
+        let twiddles = CpuBackend::precompute_twiddles(
+            CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+        );
+        let channel = &mut Blake2sM31Channel::default();
+        let mut scheme =
+            CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+        scheme.set_store_polynomials_coefficients();
+        let mut tb = scheme.tree_builder();
+        tb.extend_evals(forged_preproc);
+        tb.commit(channel);
+        let mut tb = scheme.tree_builder();
+        tb.extend_evals(main_cols);
+        tb.commit(channel);
+        channel.mix_u32s(&output_fp);
+
+        let component = new_component_v2(log_size);
+        if let Ok(proof) =
+            prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, scheme)
+        {
+            let bytes =
+                bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap();
+            assert!(
+                !verify_use_hint_batch_v2(&bytes, &commitment_hex, &w1_out, hw).unwrap_or(false),
+                "a forged is_init_uh proof must not verify (C2 pinned)",
+            );
+        }
+    }
 
     #[test]
     fn test_constraints_on_trace() {

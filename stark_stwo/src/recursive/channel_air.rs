@@ -169,11 +169,65 @@ pub fn compute_log_size(n_words: usize) -> u32 {
     log
 }
 
+// ── Preprocessed columns (witness-free canonical source) ───────────────────────
+
+/// Build the canonical preprocessed columns `[rc0, rc1, is_init, is_first]` from
+/// `log_size` alone. Single source of truth for the preprocessed tree — the
+/// verifier recomputes their commitment root to PIN them (audit gap C2), so a
+/// prover cannot forge `is_init`/`is_first` (absorb wiring) or `rc0`/`rc1` (hash).
+pub fn build_preproc(log_size: u32) -> TraceColumns {
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let to_m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut rc0_c = vec![bf0; n];
+    let mut rc1_c = vec![bf0; n];
+    let mut init_c = vec![bf0; n];
+    let mut first_c = vec![bf0; n];
+    let n_absorb = n / N_ROUNDS;
+    for i in 0..n_absorb {
+        for r in 0..N_ROUNDS {
+            let row = i * N_ROUNDS + r;
+            rc0_c[row] = to_m31(RC[r][0] as u64);
+            rc1_c[row] = to_m31(RC[r][1] as u64);
+            init_c[row] = if r == 0 { to_m31(1) } else { bf0 };
+            first_c[row] = if row == 0 { to_m31(1) } else { bf0 };
+        }
+    }
+    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c] {
+        bit_reverse_coset_to_circle_domain_order(c);
+    }
+    [rc0_c, rc1_c, init_c, first_c]
+        .into_iter()
+        .map(|c| CircleEvaluation::new(domain, c))
+        .collect()
+}
+
+/// Recompute the canonical preprocessed-tree commitment root (verifier pins it).
+fn canonical_preproc_root(
+    log_size: u32,
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(build_preproc(log_size));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
 // ── Trace builder ──────────────────────────────────────────────────────────────
 
 /// Build the sponge-absorb trace. Returns `(main_columns, preprocessed_columns,
 /// digest)`. The first `words.len()` absorbs are real; remaining rows are padded
-/// with `absorb(0)` (the sponge keeps running; constraints stay satisfied).
+/// with `absorb(0)` (the sponge keeps running; constraints stay satisfied). The
+/// preprocessed columns come from [`build_preproc`] (the canonical source).
 pub fn build_trace(words: &[u64], log_size: u32) -> (TraceColumns, TraceColumns, (u64, u64)) {
     let n_words = words.len();
     let n = 1usize << log_size;
@@ -184,10 +238,6 @@ pub fn build_trace(words: &[u64], log_size: u32) -> (TraceColumns, TraceColumns,
     let bf0 = BaseField::from_u32_unchecked(0);
 
     let mut col: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-    let mut rc0_c = vec![bf0; n];
-    let mut rc1_c = vec![bf0; n];
-    let mut init_c = vec![bf0; n];
-    let mut first_c = vec![bf0; n];
 
     let n_absorb = n / N_ROUNDS;
     let mut prev = [0u64, 0u64];
@@ -221,10 +271,6 @@ pub fn build_trace(words: &[u64], log_size: u32) -> (TraceColumns, TraceColumns,
             if r == 0 {
                 col[6][row] = to_m31(w); // word
             }
-            rc0_c[row] = to_m31(RC[r][0] as u64);
-            rc1_c[row] = to_m31(RC[r][1] as u64);
-            init_c[row] = if r == 0 { to_m31(1) } else { bf0 };
-            first_c[row] = if row == 0 { to_m31(1) } else { bf0 };
 
             state = [s0n, s1n];
         }
@@ -238,15 +284,9 @@ pub fn build_trace(words: &[u64], log_size: u32) -> (TraceColumns, TraceColumns,
     for c in main.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(c);
     }
-    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c] {
-        bit_reverse_coset_to_circle_domain_order(c);
-    }
 
     let main_cols: TraceColumns = main.into_iter().map(|c| CircleEvaluation::new(domain, c)).collect();
-    let preproc: TraceColumns = [rc0_c, rc1_c, init_c, first_c]
-        .into_iter()
-        .map(|c| CircleEvaluation::new(domain, c))
-        .collect();
+    let preproc = build_preproc(log_size); // single canonical source (C2)
     (main_cols, preproc, digest)
 }
 
@@ -337,6 +377,12 @@ pub fn verify_channel(
     if proof.commitments.len() < 2 {
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
+
+    // C2: pin the preprocessed (round-constant + selector) tree to its canonical value.
+    if proof.commitments[0] != canonical_preproc_root(log_size) {
+        return Ok(false);
+    }
+
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
@@ -457,6 +503,25 @@ mod tests {
                 "a corrupted transcript trace must not yield a verifying proof",
             ),
             Err(_) => {}
+        }
+    }
+
+    // C2 regression: a forged `is_init` preprocessed selector must not verify.
+    #[test]
+    fn test_forged_preproc_rejected() {
+        let mut seed = 0xC2C2;
+        let words: Vec<u64> = (0..3).map(|_| rand_m31(&mut seed)).collect();
+        let log = compute_log_size(words.len());
+        let (main, mut preproc, digest) = build_trace(&words, log);
+        let domain = CanonicCoset::new(log).circle_domain();
+        let n = 1usize << log;
+        preproc[2] =
+            CircleEvaluation::new(domain, vec![BaseField::from_u32_unchecked(0); n]);
+        if let Ok(proof) = prove_columns(main, preproc, log, words.len() as u32, digest) {
+            assert!(
+                !verify_channel(&proof, log, words.len() as u32, digest).unwrap_or(false),
+                "a forged preprocessed tree must not verify (C2 pinned)",
+            );
         }
     }
 }
