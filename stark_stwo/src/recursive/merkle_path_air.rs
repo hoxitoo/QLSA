@@ -42,7 +42,8 @@
 //! 9 leaf (the leaf value; meaningful on row 0 only — the path input)
 //! ```
 //!
-//! Preprocessed trace (4 columns): `rc0, rc1, is_init (r==0), is_first (row 0)`.
+//! Preprocessed trace (8 columns): `rc0, rc1, is_init (r==0), is_first (row 0),
+//! idx_bit, leaf, is_root, root` (the last four are verifier-pinned public inputs).
 //!
 //! # Public-input binding
 //!
@@ -59,10 +60,16 @@
 //!   carries the verifier-fixed leaf with `is_first·(leaf − leaf_pinned) = 0`. A
 //!   claimed `index`/`leaf` that disagrees with the committed path can't be proven
 //!   (`test_forged_index_bits_cannot_prove`, `test_forged_leaf_cannot_prove`).
-//! - **[C1 root binding — deferred]** `root` is still bound via Fiat-Shamir
-//!   `mix_public`; the full in-circuit `(computed_root − root) = 0` binding is
-//!   tightened at the recursive-verifier composition (where the root is a committed
-//!   FRI-layer root and the leaf is the pinned per-query fold output).
+//! - **[C1 root binding — fixed, audit 2026-07-10]** the claimed `root` is bound
+//!   in-circuit: the pinned `root_val` column carries the verifier-fixed root on
+//!   each path's LAST compression's last round row (`is_root`-gated), and
+//!   `is_root·(s0 − root_pinned) = 0` forces the trace's computed root to equal
+//!   it. Previously `root` was only Fiat-Shamir-mixed, which made an honest
+//!   proof non-reusable for another root but did NOT stop a malicious prover
+//!   from proving a FALSE root claim with fresh adversarial siblings
+//!   (`test_forged_root_cannot_prove`). `depth` becomes an explicit public
+//!   input of [`verify_merkle_path`] (it fixes the pinned root row), matching
+//!   the on-chain `MerkleVerifier.verify(root, leaf, index, depth, siblings)`.
 
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sM31Channel, Channel};
@@ -112,9 +119,25 @@ pub fn pc_idx_bit() -> PreProcessedColumnId { PreProcessedColumnId { id: "rmp_id
 /// the trace's leaf to it so `leaf` is bound in-circuit (audit gap C1). In the
 /// recursive composition this is the per-query fold output hashed to a leaf.
 pub fn pc_leaf() -> PreProcessedColumnId { PreProcessedColumnId { id: "rmp_leaf".into() } }
+/// `is_root = 1` on each path's last compression's last round row — gates the
+/// root-equality constraint (audit gap C1, root binding).
+pub fn pc_is_root() -> PreProcessedColumnId { PreProcessedColumnId { id: "rmp_is_root".into() } }
+/// `root_val` carries the verifier-fixed claimed `root` on the `is_root` row; the
+/// AIR pins the trace's computed root (`s0` of the last real compression) to it,
+/// so `root` is bound in-circuit, not just via Fiat-Shamir (audit gap C1).
+pub fn pc_root() -> PreProcessedColumnId { PreProcessedColumnId { id: "rmp_root".into() } }
 
 pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
-    vec![pc_rc0(), pc_rc1(), pc_is_init(), pc_is_first(), pc_idx_bit(), pc_leaf()]
+    vec![
+        pc_rc0(),
+        pc_rc1(),
+        pc_is_init(),
+        pc_is_first(),
+        pc_idx_bit(),
+        pc_leaf(),
+        pc_is_root(),
+        pc_root(),
+    ]
 }
 
 // ── Reference path hash ────────────────────────────────────────────────────────
@@ -169,6 +192,8 @@ impl FrameworkEval for MerklePathEval {
         let is_first = eval.get_preprocessed_column(pc_is_first());
         let idx_bit = eval.get_preprocessed_column(pc_idx_bit());
         let leaf_pinned = eval.get_preprocessed_column(pc_leaf());
+        let is_root = eval.get_preprocessed_column(pc_is_root());
+        let root_pinned = eval.get_preprocessed_column(pc_root());
 
         let [s0_curr, s0_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize, -1_isize]);
         let [s1_curr, s1_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize, -1_isize]);
@@ -193,7 +218,7 @@ impl FrameworkEval for MerklePathEval {
         let three = BaseField::from_u32_unchecked(3);
         eval.add_constraint(t0 - x0.clone() * x0); // C_t0: t0 = (inp0+rc0)²
         eval.add_constraint(t1 - x1.clone() * x1); // C_t1
-        eval.add_constraint(s0_curr - (sbox0.clone() * three + sbox1.clone())); // C_s0: MDS row0
+        eval.add_constraint(s0_curr.clone() - (sbox0.clone() * three + sbox1.clone())); // C_s0: MDS row0
         eval.add_constraint(s1_curr - (sbox0 + sbox1 * three)); // C_s1: MDS row1
 
         // ── cur helper: chained current node ─────────────────────────────────
@@ -219,6 +244,11 @@ impl FrameworkEval for MerklePathEval {
         // ── Non-init chaining: state carries within a compression ────────────
         eval.add_constraint(not_init.clone() * (inp0 - s0_prev)); // C_inp0_chain
         eval.add_constraint(not_init * (inp1 - s1_prev)); // C_inp1_chain
+
+        // ── C_root: the trace's computed root equals the pinned claimed root ──
+        // On each path's last compression's last round row, s0 IS the path root;
+        // pin it to the verifier-fixed `root_val` (audit gap C1, root binding).
+        eval.add_constraint(is_root * (s0_curr - root_pinned));
 
         eval
     }
@@ -259,7 +289,7 @@ pub fn compute_log_size(depth: usize) -> u32 {
 /// commits exactly these, and [`verify_merkle_path`] recomputes their commitment
 /// root to PIN them (audit gap C2), so a prover cannot forge `is_init`/`is_first`
 /// (to break the sponge/leaf wiring) or `rc0`/`rc1` (to swap the hash function).
-pub fn build_preproc(leaf: u64, index: u32, log_size: u32) -> TraceColumns {
+pub fn build_preproc(leaf: u64, index: u32, root: u64, depth: usize, log_size: u32) -> TraceColumns {
     let n = 1usize << log_size;
     let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
@@ -271,7 +301,14 @@ pub fn build_preproc(leaf: u64, index: u32, log_size: u32) -> TraceColumns {
     let mut first_c = vec![bf0; n];
     let mut idx_bit_c = vec![bf0; n];
     let mut leaf_c = vec![bf0; n];
+    let mut is_root_c = vec![bf0; n];
+    let mut root_c = vec![bf0; n];
     leaf_c[0] = to_m31(leaf); // verifier-fixed leaf, row 0 only
+    // Verifier-fixed claimed root on the LAST real compression's last round row —
+    // the row whose s0 is the path root (audit gap C1, root binding).
+    let root_row = (depth.max(1) - 1) * N_ROUNDS + (N_ROUNDS - 1);
+    is_root_c[root_row] = to_m31(1);
+    root_c[root_row] = to_m31(root);
 
     let n_comp = n / N_ROUNDS;
     for i in 0..n_comp {
@@ -288,10 +325,19 @@ pub fn build_preproc(leaf: u64, index: u32, log_size: u32) -> TraceColumns {
             idx_bit_c[row] = if r == 0 { to_m31(idx_bit as u64) } else { bf0 };
         }
     }
-    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c, &mut idx_bit_c, &mut leaf_c] {
+    for c in [
+        &mut rc0_c,
+        &mut rc1_c,
+        &mut init_c,
+        &mut first_c,
+        &mut idx_bit_c,
+        &mut leaf_c,
+        &mut is_root_c,
+        &mut root_c,
+    ] {
         bit_reverse_coset_to_circle_domain_order(c);
     }
-    [rc0_c, rc1_c, init_c, first_c, idx_bit_c, leaf_c]
+    [rc0_c, rc1_c, init_c, first_c, idx_bit_c, leaf_c, is_root_c, root_c]
         .into_iter()
         .map(|c| CircleEvaluation::new(domain, c))
         .collect()
@@ -303,6 +349,8 @@ pub fn build_preproc(leaf: u64, index: u32, log_size: u32) -> TraceColumns {
 fn canonical_preproc_root(
     leaf: u64,
     index: u32,
+    root: u64,
+    depth: usize,
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
     let config = make_config(log_size);
@@ -314,7 +362,7 @@ fn canonical_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(build_preproc(leaf, index, log_size));
+    tree.extend_evals(build_preproc(leaf, index, root, depth, log_size));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
@@ -395,7 +443,8 @@ pub fn build_trace(
     }
 
     let main_cols: TraceColumns = main.into_iter().map(|c| CircleEvaluation::new(domain, c)).collect();
-    let preproc = build_preproc(leaf, bits_to_index(bits), log_size); // single canonical source (C1/C2)
+    // Single canonical source (C1/C2); the computed root is the honest pin value.
+    let preproc = build_preproc(leaf, bits_to_index(bits), path_root, depth, log_size);
     (main_cols, preproc, path_root)
 }
 
@@ -419,10 +468,12 @@ pub fn compute_log_size_multi(num_paths: usize, depth: usize) -> u32 {
 pub fn build_preproc_multi(
     leaves: &[u64],
     indices: &[u32],
+    roots: &[u64],
     depth: usize,
     log_size: u32,
 ) -> TraceColumns {
     assert_eq!(leaves.len(), indices.len(), "leaves/indices length mismatch");
+    assert_eq!(leaves.len(), roots.len(), "leaves/roots length mismatch");
     let n = 1usize << log_size;
     let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
@@ -434,6 +485,8 @@ pub fn build_preproc_multi(
     let mut first_c = vec![bf0; n];
     let mut idx_bit_c = vec![bf0; n];
     let mut leaf_c = vec![bf0; n];
+    let mut is_root_c = vec![bf0; n];
+    let mut root_c = vec![bf0; n];
 
     let n_comp = n / N_ROUNDS;
     for comp in 0..n_comp {
@@ -454,12 +507,27 @@ pub fn build_preproc_multi(
                 let bit = if j < 32 { (indices[path] >> j) & 1 } else { 0 };
                 idx_bit_c[row] = to_m31(bit as u64);
             }
+            // Pin the claimed root on each path's LAST compression's last round
+            // row — the row whose s0 is that path's root (C1, root binding).
+            if r == N_ROUNDS - 1 && is_real && j == depth - 1 {
+                is_root_c[row] = to_m31(1);
+                root_c[row] = to_m31(roots[path]);
+            }
         }
     }
-    for c in [&mut rc0_c, &mut rc1_c, &mut init_c, &mut first_c, &mut idx_bit_c, &mut leaf_c] {
+    for c in [
+        &mut rc0_c,
+        &mut rc1_c,
+        &mut init_c,
+        &mut first_c,
+        &mut idx_bit_c,
+        &mut leaf_c,
+        &mut is_root_c,
+        &mut root_c,
+    ] {
         bit_reverse_coset_to_circle_domain_order(c);
     }
-    [rc0_c, rc1_c, init_c, first_c, idx_bit_c, leaf_c]
+    [rc0_c, rc1_c, init_c, first_c, idx_bit_c, leaf_c, is_root_c, root_c]
         .into_iter()
         .map(|c| CircleEvaluation::new(domain, c))
         .collect()
@@ -545,7 +613,7 @@ pub fn build_trace_multi(
     }
     let main_cols: TraceColumns = col.into_iter().map(|c| CircleEvaluation::new(domain, c)).collect();
     let indices: Vec<u32> = bits.iter().map(|b| bits_to_index(b)).collect();
-    let preproc = build_preproc_multi(leaves, &indices, depth, log_size);
+    let preproc = build_preproc_multi(leaves, &indices, &roots, depth, log_size);
     (main_cols, preproc, roots)
 }
 
@@ -610,16 +678,24 @@ fn prove_columns(
 }
 
 /// Verify a proof produced by [`prove_merkle_path`] against the claimed
-/// `(leaf, index, root)`.
+/// `(depth, leaf, index, root)`. `depth` is a verifier-fixed public input — it
+/// fixes the pinned-root row (audit gap C1, root binding).
 pub fn verify_merkle_path(
     proof_bytes: &[u8],
     log_size: u32,
+    depth: usize,
     leaf: u64,
     index: u32,
     root: u64,
 ) -> Result<bool, String> {
     if !(MIN_LOG_SIZE..=MAX_LOG_SIZE).contains(&log_size) {
         return Err(format!("log_size {log_size} out of range [{MIN_LOG_SIZE}, {MAX_LOG_SIZE}]"));
+    }
+    if !(1..=MAX_DEPTH).contains(&depth) {
+        return Err(format!("depth {depth} out of range [1, {MAX_DEPTH}]"));
+    }
+    if depth * N_ROUNDS > (1usize << log_size) {
+        return Err(format!("depth {depth} exceeds trace capacity at log_size {log_size}"));
     }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
@@ -643,11 +719,12 @@ pub fn verify_merkle_path(
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
 
-    // C2 + C1: pin the preprocessed tree (round constants, selectors, AND the
-    // claimed-index bits) to its canonical value — a forged rc/is_init/is_first
-    // tree, or a claimed `index` that disagrees with the committed path bits, no
-    // longer verifies (the `idx_bit` constraint ties trace bits to this index).
-    if proof.commitments[0] != canonical_preproc_root(leaf, index, log_size) {
+    // C2 + C1: pin the preprocessed tree (round constants, selectors, the
+    // claimed-index bits, AND the claimed root) to its canonical value — a forged
+    // rc/is_init/is_first tree, a claimed `index` that disagrees with the
+    // committed path bits, or a claimed `root` the trace didn't compute, no
+    // longer verifies (idx_bit/leaf/root constraints tie the trace to them).
+    if proof.commitments[0] != canonical_preproc_root(leaf, index, root, depth, log_size) {
         return Ok(false);
     }
 
@@ -665,6 +742,7 @@ pub fn verify_merkle_path(
 fn canonical_preproc_root_multi(
     leaves: &[u64],
     indices: &[u32],
+    roots: &[u64],
     depth: usize,
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
@@ -677,7 +755,7 @@ fn canonical_preproc_root_multi(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(build_preproc_multi(leaves, indices, depth, log_size));
+    tree.extend_evals(build_preproc_multi(leaves, indices, roots, depth, log_size));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
@@ -702,9 +780,18 @@ pub fn prove_paths_multi(
     if leaves.is_empty() {
         return Err("need ≥ 1 path".into());
     }
+    if sibs.len() != leaves.len() || bits.len() != leaves.len() {
+        return Err("leaves/sibs/bits length mismatch".into());
+    }
     let depth = sibs.first().map(|s| s.len()).unwrap_or(0);
     if depth == 0 {
         return Err("path depth must be ≥ 1".into());
+    }
+    if depth > MAX_DEPTH {
+        return Err(format!("path depth {depth} exceeds MAX_DEPTH {MAX_DEPTH}"));
+    }
+    if sibs.iter().any(|s| s.len() != depth) || bits.iter().any(|b| b.len() != depth) {
+        return Err("all paths must share the same depth".into());
     }
     let log_size = compute_log_size_multi(leaves.len(), depth);
     if log_size > MAX_LOG_SIZE {
@@ -754,6 +841,18 @@ pub fn verify_paths_multi(
     if leaves.len() != indices.len() || leaves.len() != roots.len() {
         return Err("leaves/indices/roots length mismatch".into());
     }
+    if leaves.is_empty() {
+        return Err("need ≥ 1 path".into());
+    }
+    if !(1..=MAX_DEPTH).contains(&depth) {
+        return Err(format!("depth {depth} out of range [1, {MAX_DEPTH}]"));
+    }
+    if leaves.len().saturating_mul(depth).saturating_mul(N_ROUNDS) > (1usize << log_size) {
+        return Err(format!(
+            "{} paths of depth {depth} exceed trace capacity at log_size {log_size}",
+            leaves.len()
+        ));
+    }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
@@ -775,7 +874,7 @@ pub fn verify_paths_multi(
     if proof.commitments.len() < 2 {
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
-    if proof.commitments[0] != canonical_preproc_root_multi(leaves, indices, depth, log_size) {
+    if proof.commitments[0] != canonical_preproc_root_multi(leaves, indices, roots, depth, log_size) {
         return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
@@ -824,7 +923,7 @@ mod tests {
         let log = compute_log_size(sibs.len());
         let (main, preproc, root) = build_trace(leaf, &sibs, &bits, log);
         assert_eq!(main.len(), N_MAIN_COLS);
-        assert_eq!(preproc.len(), 6); // rc0, rc1, is_init, is_first, idx_bit, leaf
+        assert_eq!(preproc.len(), 8); // rc0, rc1, is_init, is_first, idx_bit, leaf, is_root, root
         assert_eq!(root, merkle_path_root(leaf, &sibs, &bits), "trace root must match reference");
     }
 
@@ -840,7 +939,7 @@ mod tests {
         let (leaf, sibs, bits) = rand_path(&mut seed, 1);
         let (proof, log, root) = prove_merkle_path(leaf, &sibs, &bits).expect("prove");
         let idx = bits_to_index(&bits);
-        assert!(verify_merkle_path(&proof, log, leaf, idx, root).expect("verify"));
+        assert!(verify_merkle_path(&proof, log, sibs.len(), leaf, idx, root).expect("verify"));
     }
 
     #[test]
@@ -849,7 +948,7 @@ mod tests {
         let (leaf, sibs, bits) = rand_path(&mut seed, 3);
         let (proof, log, root) = prove_merkle_path(leaf, &sibs, &bits).expect("prove");
         let idx = bits_to_index(&bits);
-        assert!(verify_merkle_path(&proof, log, leaf, idx, root).expect("verify"), "valid path must verify");
+        assert!(verify_merkle_path(&proof, log, sibs.len(), leaf, idx, root).expect("verify"), "valid path must verify");
     }
 
     #[test]
@@ -858,7 +957,7 @@ mod tests {
         let (leaf, sibs, bits) = rand_path(&mut seed, 5);
         let (proof, log, root) = prove_merkle_path(leaf, &sibs, &bits).expect("prove");
         let idx = bits_to_index(&bits);
-        assert!(verify_merkle_path(&proof, log, leaf, idx, root).expect("verify"));
+        assert!(verify_merkle_path(&proof, log, sibs.len(), leaf, idx, root).expect("verify"));
     }
 
     #[test]
@@ -869,7 +968,7 @@ mod tests {
         let (proof, log, root) = prove_merkle_path(leaf, &sibs, &bits).expect("prove");
         let idx = bits_to_index(&bits);
         assert!(
-            !verify_merkle_path(&proof, log, leaf, idx, root ^ 1).unwrap_or(false),
+            !verify_merkle_path(&proof, log, sibs.len(), leaf, idx, root ^ 1).unwrap_or(false),
             "a wrong root must not verify",
         );
     }
@@ -881,7 +980,7 @@ mod tests {
         let (proof, log, root) = prove_merkle_path(leaf, &sibs, &bits).expect("prove");
         let idx = bits_to_index(&bits);
         assert!(
-            !verify_merkle_path(&proof, log, leaf, idx ^ 1, root).unwrap_or(false),
+            !verify_merkle_path(&proof, log, sibs.len(), leaf, idx ^ 1, root).unwrap_or(false),
             "a wrong index must not verify",
         );
     }
@@ -894,7 +993,7 @@ mod tests {
         let idx = bits_to_index(&bits);
         let mut bad = proof.clone();
         bad[proof.len() / 2] ^= 0xFF;
-        assert!(!verify_merkle_path(&bad, log, leaf, idx, root).unwrap_or(false), "tampered proof must not verify");
+        assert!(!verify_merkle_path(&bad, log, sibs.len(), leaf, idx, root).unwrap_or(false), "tampered proof must not verify");
     }
 
     #[test]
@@ -911,7 +1010,7 @@ mod tests {
         let idx = bits_to_index(&bits);
         match prove_columns(main, preproc, log, leaf, idx, root) {
             Ok(proof) => assert!(
-                !verify_merkle_path(&proof, log, leaf, idx, root).unwrap_or(false),
+                !verify_merkle_path(&proof, log, sibs.len(), leaf, idx, root).unwrap_or(false),
                 "a corrupted trace must not yield a verifying proof",
             ),
             Err(_) => {}
@@ -937,7 +1036,7 @@ mod tests {
         // constraints, but its preprocessed root ≠ canonical → verify must reject.
         if let Ok(proof) = prove_columns(main, preproc, log, leaf, idx, root) {
             assert!(
-                !verify_merkle_path(&proof, log, leaf, idx, root).unwrap_or(false),
+                !verify_merkle_path(&proof, log, sibs.len(), leaf, idx, root).unwrap_or(false),
                 "a forged preprocessed tree must not verify (C2 pinned)",
             );
         }
@@ -956,7 +1055,7 @@ mod tests {
 
         // Preprocessed idx_bit for a DIFFERENT index (flip bit 0) — inconsistent
         // with the trace's committed path bits.
-        let forged_preproc = build_preproc(leaf, idx ^ 1, log);
+        let forged_preproc = build_preproc(leaf, idx ^ 1, root, sibs.len(), log);
         let res = prove_columns(main, forged_preproc, log, leaf, idx ^ 1, root);
         assert!(
             res.is_err(),
@@ -991,6 +1090,27 @@ mod tests {
         assert!(!verify_paths_multi(&proof, log, depth, &leaves, &indices, &bad).unwrap_or(false));
     }
 
+    // C1 root-binding regression: a malicious prover with an internally-valid
+    // trace (honest siblings → actual root R) who pins/claims a DIFFERENT root
+    // R^1 cannot even build a proof — the is_root-gated root-equality
+    // constraint is violated. Before this fix, `root` was only Fiat-Shamir
+    // mixed and such a false claim would have VERIFIED.
+    #[test]
+    fn test_forged_root_cannot_prove() {
+        let mut seed = 0xC1_007;
+        let (leaf, sibs, bits) = rand_path(&mut seed, 3);
+        let log = compute_log_size(sibs.len());
+        let (main, _canonical, root) = build_trace(leaf, &sibs, &bits, log);
+        let idx = bits_to_index(&bits);
+        // Pinned root claims a different value than the trace's computed root.
+        let forged_preproc = build_preproc(leaf, idx, root ^ 1, sibs.len(), log);
+        let res = prove_columns(main, forged_preproc, log, leaf, idx, root ^ 1);
+        assert!(
+            res.is_err(),
+            "trace root ≠ pinned root must violate the root-binding constraint (C1)",
+        );
+    }
+
     // C1 regression: a trace whose committed leaf is X but whose pinned `leaf`
     // preprocessed column claims Y ≠ X cannot be proven — the is_first-gated
     // leaf-equality constraint is violated.
@@ -1002,7 +1122,7 @@ mod tests {
         let (main, _canonical, root) = build_trace(leaf, &sibs, &bits, log);
         let idx = bits_to_index(&bits);
         // Pinned leaf claims a different value than the trace's committed leaf.
-        let forged_preproc = build_preproc(leaf ^ 1, idx, log);
+        let forged_preproc = build_preproc(leaf ^ 1, idx, root, sibs.len(), log);
         let res = prove_columns(main, forged_preproc, log, leaf ^ 1, idx, root);
         assert!(
             res.is_err(),

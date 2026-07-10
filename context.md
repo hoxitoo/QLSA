@@ -1,5 +1,36 @@
 # QLSA — Project Context
 
+## Аудит (2026-07-10) — C1 root-binding закрыт для `merkle_path_air` (R3.12) + капы входов
+
+Двухчастный аудит (крипто/блокчейн + код/высоконагруженные системы) свежей recursion-поверхности
+R3.8–R3.11 (`composition.rs`, `recursive_verifier.rs`, `merkle_path_air.rs`, `QueryChallenges`).
+
+- **[Крипто — ИСПРАВЛЕНО] Merkle `root` теперь пиннится in-circuit.** До фикса заявленный `root`
+  был привязан только через Fiat-Shamir `mix_public`: честное доказательство нельзя было
+  переиспользовать с другим root, но злонамеренный prover мог построить СВЕЖЕЕ доказательство для
+  ЛОЖНОГО root-клейма — siblings являются свободным witness, а ограничения «вычисленный корень =
+  заявленный» в схеме не было (тест `test_wrong_root_rejected` давал ложную уверенность: он
+  проверял только неперееиспользуемость). Фикс — установленный паттерн пиннинга: preproc-столбцы
+  `is_root`/`root` (единица на last-round-строке последней реальной компрессии каждого пути) +
+  ограничение `is_root·(s0 − root_pinned) = 0`; `depth` стал явным public input
+  `verify_merkle_path`/`verify_query_membership` (фиксирует строку пиннинга), зеркально on-chain
+  `MerkleVerifier.verify(root, leaf, index, depth, siblings)`. Регрессия:
+  `test_forged_root_cannot_prove`. Композиция single/N-query теперь value-bound end-to-end
+  ПОЛНОСТЬЮ in-circuit: fin (fold output) → hashLeaf → leaf (pinned) → path → root (pinned).
+- **[Код — ИСПРАВЛЕНО] Капы и валидации входов** добавлены в `composition::prove/verify_query(-ies)_membership`
+  и `merkle::prove/verify_paths_multi` (в одиночных путях уже были): `MAX_QUERIES`/`MAX_NUM_FOLDS`/
+  `MAX_DEPTH`/диапазон `log_size`/ёмкость трейса. Закрытые падения на враждебных входах: деление на
+  ноль при `depth=0` (`comp / depth` в `build_preproc_multi`), OOB-запись в `build_preproc` при
+  `num_folds` больше ёмкости блока, OOM-аллокация `1 << 40` при непроверенном `log_size`,
+  паника-assert вместо `Err` при неоднородной глубине путей в `prove_paths_multi`.
+- **Чистые зоны:** пиннинг Tree 0 во всех 6 верификаторах `lib.rs` подтверждён
+  (`canonical_uh_preproc_root`×5 + `canonical_hashchain_preproc_root`); гейтинг селекторов,
+  цепочка `out_prev`, границы блоков и degree-bound в `recursive_verifier` корректны; сканирование
+  секретов (ключи/.env/private keys) — чисто; aggregator/sdk/testnet не менялись с аудита 2026-06-14.
+- **Итог: 104 рекурсивных теста (453 всего), 0 предупреждений сборки.** После R3.12 остаётся:
+  root vs *committed FRI-layer root* (on-chain интеграция), t=16 inner hash,
+  `QLSAVerifierRecursive.sol`. `docs/roadmap/recursion.md` § R3.12.
+
 ## Аудит рекурсии (2026-06-17) — C1/C2 ЗАКРЫТЫ для `recursive_verifier` + robustness-фиксы
 
 Двухэкспертный аудит (крипто/блокчейн + код/системы) полного набора рекурсивных gadget'ов

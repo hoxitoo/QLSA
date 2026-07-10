@@ -123,7 +123,7 @@ mod tests {
         let (mp_bytes, mp_log, mp_root) = prove_merkle_path(leaf, &sibs, &bits).unwrap();
         assert_eq!(mp_root, root, "merkle path root must match the reference fold");
         assert!(
-            verify_merkle_path(&mp_bytes, mp_log, leaf, index, root).unwrap(),
+            verify_merkle_path(&mp_bytes, mp_log, depth, leaf, index, root).unwrap(),
             "merkle path proof must verify the hashed final fold into the layer root",
         );
 

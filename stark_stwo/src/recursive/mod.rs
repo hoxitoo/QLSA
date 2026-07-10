@@ -89,6 +89,20 @@
 //! I/O via Fiat-Shamir (acceptable — for the sub-components it is tightened at
 //! composition, and for V23 the witness output is a fingerprint mixed into the
 //! channel). `recursive_verifier` / `canonical_uh_preproc_root` are the reference.
+//!
+//! **Audit 2026-07-10 (R3.12):** the Merkle `root` claim is now bound IN-CIRCUIT
+//! in `merkle_path_air` (pinned `is_root`/`root` preprocessed columns +
+//! `is_root·(s0 − root_pinned) = 0` on each path's last compression's last round
+//! row). Previously it was only Fiat-Shamir-mixed — a malicious prover could
+//! prove a FALSE root claim with adversarial siblings (fresh proof, not reuse);
+//! `test_forged_root_cannot_prove` is the regression. `depth` became an explicit
+//! public input of `verify_merkle_path` / `verify_query_membership`. The same
+//! audit added the missing input caps (`MAX_QUERIES` / `MAX_NUM_FOLDS` /
+//! `MAX_DEPTH` / log_size range / trace-capacity checks) to `composition`'s and
+//! `merkle_path_air`'s prove/verify entry points, closing panic/OOM paths on
+//! hostile inputs (division-by-zero at depth 0, OOB preproc writes, 2^40 allocs).
+//! Remaining after R3.12: root vs the *committed FRI-layer root* (on-chain
+//! integration), t=16 inner hash, `QLSAVerifierRecursive.sol`.
 
 pub mod channel_air;
 pub mod composition;

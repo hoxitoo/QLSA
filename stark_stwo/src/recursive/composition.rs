@@ -27,8 +27,9 @@
 //! So a malicious prover cannot (a) claim a `finalFold` its fold chain didn't
 //! produce, (b) feed a `leaf ≠ hashLeaf(finalFold)` into the Merkle path, or
 //! (c) forge any selector — the composition proves the *whole* per-query FRI
-//! membership check as one recursive statement.  `root` is still bound via
-//! Fiat-Shamir (it is the committed FRI-layer root the caller checks).
+//! membership check as one recursive statement.  Since the 2026-07-10 audit,
+//! `root` is ALSO pinned in-circuit (merkle's `is_root`-gated root-equality
+//! constraint), so the claimed root must be the one the path actually computes.
 //!
 //! This is the mini-scale composition the roadmap calls for before scaling to the
 //! full N-query VFRI11 verifier (reduces gadget-composition risk).
@@ -59,9 +60,9 @@ const RV_MAIN_COLS: usize = rv::N_MAIN_COLS; // 42
 const MERKLE_MAIN_COLS: usize = merkle::N_MAIN_COLS; // 10
 // is_step, chain_on, is_output, fin0..3, alpha_p0..3, px, zx0..3, inv
 const RV_PREPROC_COLS: usize = 17;
-const MERKLE_PREPROC_COLS: usize = 6; // rc0, rc1, is_init, is_first, idx_bit, leaf
+const MERKLE_PREPROC_COLS: usize = 8; // rc0, rc1, is_init, is_first, idx_bit, leaf, is_root, root
 const TOTAL_MAIN_COLS: usize = RV_MAIN_COLS + MERKLE_MAIN_COLS; // 52
-const TOTAL_PREPROC_COLS: usize = RV_PREPROC_COLS + MERKLE_PREPROC_COLS; // 23
+const TOTAL_PREPROC_COLS: usize = RV_PREPROC_COLS + MERKLE_PREPROC_COLS; // 25
 
 /// Shared `log_size` that fits both a 1-query fold chain (`1 + num_folds` rows)
 /// and a `depth`-compression Merkle path (`depth · 8` rows).
@@ -87,6 +88,8 @@ fn combined_preproc(
     num_folds: usize,
     leaf: u64,
     index: u32,
+    root: u64,
+    depth: usize,
     log_size: u32,
 ) -> rv::TraceColumns {
     let mut cols = rv::build_preproc(
@@ -95,7 +98,7 @@ fn combined_preproc(
         num_folds,
         log_size,
     );
-    cols.extend(merkle::build_preproc(leaf, index, log_size));
+    cols.extend(merkle::build_preproc(leaf, index, root, depth, log_size));
     cols
 }
 
@@ -107,6 +110,8 @@ fn canonical_composition_preproc_root(
     num_folds: usize,
     leaf: u64,
     index: u32,
+    root: u64,
+    depth: usize,
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
     let config = make_config(log_size);
@@ -118,7 +123,7 @@ fn canonical_composition_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(combined_preproc(final_fold, challenges, num_folds, leaf, index, log_size));
+    tree.extend_evals(combined_preproc(final_fold, challenges, num_folds, leaf, index, root, depth, log_size));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
@@ -158,6 +163,12 @@ pub fn prove_query_membership(
     }
     let num_folds = rounds.len();
     let depth = sibs.len();
+    if num_folds > rv::MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
+    }
+    if depth > merkle::MAX_DEPTH {
+        return Err(format!("path depth {depth} exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
+    }
     let log_size = composition_log_size(num_folds, depth);
     if log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE) {
         return Err(format!("composition log_size {log_size} too large"));
@@ -244,12 +255,27 @@ pub fn verify_query_membership(
     proof_bytes: &[u8],
     log_size: u32,
     num_folds: usize,
+    depth: usize,
     challenges: &rv::QueryChallenges,
     px: u32,
     final_fold: u128,
     index: u32,
     root: u64,
 ) -> Result<bool, String> {
+    let max_log = rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE);
+    if !(merkle::MIN_LOG_SIZE..=max_log).contains(&log_size) {
+        return Err(format!("log_size {log_size} out of range"));
+    }
+    if num_folds > rv::MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
+    }
+    if !(1..=merkle::MAX_DEPTH).contains(&depth) {
+        return Err(format!("depth {depth} out of range [1, {}]", merkle::MAX_DEPTH));
+    }
+    let n = 1usize << log_size;
+    if 1 + num_folds > n || depth * 8 > n {
+        return Err(format!("blocks exceed trace capacity at log_size {log_size}"));
+    }
     let leaf = qm31_leaf_hash(final_fold);
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
@@ -289,7 +315,7 @@ pub fn verify_query_membership(
     // C1/C2: pin the combined preprocessed tree — selectors, the pinned finalFold
     // (recursive_verifier) and the pinned leaf/index (merkle) must all be canonical.
     let canonical_root =
-        canonical_composition_preproc_root(final_fold, challenges, num_folds, leaf, index, log_size);
+        canonical_composition_preproc_root(final_fold, challenges, num_folds, leaf, index, root, depth, log_size);
     if proof.commitments[0] != canonical_root {
         return Ok(false);
     }
@@ -323,6 +349,7 @@ fn canonical_queries_preproc_root(
     num_folds: usize,
     leaves: &[u64],
     indices: &[u32],
+    roots: &[u64],
     depth: usize,
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
@@ -335,7 +362,7 @@ fn canonical_queries_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut cols = rv::build_preproc(finals, challenges, num_folds, log_size);
-    cols.extend(merkle::build_preproc_multi(leaves, indices, depth, log_size));
+    cols.extend(merkle::build_preproc_multi(leaves, indices, roots, depth, log_size));
     let mut tree = scheme.tree_builder();
     tree.extend_evals(cols);
     tree.commit(&mut throwaway);
@@ -393,12 +420,27 @@ pub fn prove_queries_membership(
     if queries.iter().any(|(_, r)| r.len() != num_folds) {
         return Err("all queries must share num_folds".into());
     }
+    if queries.len() > rv::MAX_QUERIES {
+        return Err(format!("query count {} exceeds MAX_QUERIES {}", queries.len(), rv::MAX_QUERIES));
+    }
+    if num_folds > rv::MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
+    }
     let depth = paths[0].0.len();
+    if depth == 0 {
+        return Err("path depth must be ≥ 1".into());
+    }
+    if depth > merkle::MAX_DEPTH {
+        return Err(format!("path depth {depth} exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
+    }
     if paths.iter().any(|(s, b)| s.len() != depth || b.len() != depth) {
         return Err("all paths must share depth".into());
     }
     let n = queries.len();
     let log_size = queries_log_size(n, num_folds, depth);
+    if log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE) {
+        return Err(format!("N-query composition log_size {log_size} too large"));
+    }
 
     let finals = rv::recursive_queries_final(queries);
     let leaves: Vec<u64> = finals.iter().map(|&f| qm31_leaf_hash(f)).collect();
@@ -473,6 +515,25 @@ pub fn verify_queries_membership(
     if finals.is_empty() || pxs.len() != finals.len() || indices.len() != finals.len() || roots.len() != finals.len() || challenges.len() != finals.len() {
         return Err("public-input length mismatch".into());
     }
+    let max_log = rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE);
+    if !(merkle::MIN_LOG_SIZE..=max_log).contains(&log_size) {
+        return Err(format!("log_size {log_size} out of range"));
+    }
+    if finals.len() > rv::MAX_QUERIES {
+        return Err(format!("query count {} exceeds MAX_QUERIES {}", finals.len(), rv::MAX_QUERIES));
+    }
+    if num_folds > rv::MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
+    }
+    if !(1..=merkle::MAX_DEPTH).contains(&depth) {
+        return Err(format!("depth {depth} out of range [1, {}]", merkle::MAX_DEPTH));
+    }
+    let n = 1usize << log_size;
+    if finals.len().saturating_mul(1 + num_folds) > n
+        || finals.len().saturating_mul(depth).saturating_mul(8) > n
+    {
+        return Err(format!("blocks exceed trace capacity at log_size {log_size}"));
+    }
     let leaves: Vec<u64> = finals.iter().map(|&f| qm31_leaf_hash(f)).collect();
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
@@ -506,7 +567,7 @@ pub fn verify_queries_membership(
         return Err(format!("N-query: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
     let canonical_root =
-        canonical_queries_preproc_root(finals, challenges, num_folds, &leaves, indices, depth, log_size);
+        canonical_queries_preproc_root(finals, challenges, num_folds, &leaves, indices, roots, depth, log_size);
     if proof.commitments[0] != canonical_root {
         return Ok(false);
     }
@@ -572,7 +633,7 @@ mod tests {
         assert_eq!(r.leaf, qm31_leaf_hash(r.final_fold));
         assert_eq!(r.root, merkle::merkle_path_root(r.leaf, &sibs, &bits));
         assert!(
-            verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold, r.index, r.root)
+            verify_query_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, step.2, r.final_fold, r.index, r.root)
                 .unwrap(),
             "an honest composition proof must verify",
         );
@@ -590,9 +651,9 @@ mod tests {
         let bits: Vec<bool> = (0..depth).map(|_| rand_m31(&mut s) & 1 == 1).collect();
 
         let r = prove_query_membership(&step, &rounds, &sibs, &bits).unwrap();
-        assert!(verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold, r.index, r.root).unwrap());
+        assert!(verify_query_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, step.2, r.final_fold, r.index, r.root).unwrap());
         assert!(
-            !verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold ^ 1, r.index, r.root)
+            !verify_query_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, step.2, r.final_fold ^ 1, r.index, r.root)
                 .unwrap_or(false),
             "a wrong final fold must not verify",
         );
@@ -649,7 +710,7 @@ mod tests {
 
         let r = prove_query_membership(&step, &rounds, &sibs, &bits).unwrap();
         assert!(
-            !verify_query_membership(&r.proof, r.log_size, r.num_folds, &r.challenges, step.2, r.final_fold, r.index, r.root ^ 1)
+            !verify_query_membership(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, step.2, r.final_fold, r.index, r.root ^ 1)
                 .unwrap_or(false),
             "a wrong Merkle root must not verify",
         );

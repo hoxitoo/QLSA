@@ -206,6 +206,25 @@ ML-DSA подпись
   - Осталось до полного верификатора: (1) t=16 inner hash для 128-бит; (2) проверка root против
     committed FRI-layer корня; (3) on-chain channel-replay (absorb roots → draw challenges) в
     `QLSAVerifierRecursive.sol`, подающий challenges как public inputs
+- **R3.12 — аудит: C1 root-binding закрыт для `merkle_path_air` (2026-07-10)** — ✅ **готов**
+  - **[Крипто] Merkle `root` теперь пиннится in-circuit**: preproc-столбцы `is_root`/`root`
+    (на last-round-строке последней РЕАЛЬНОЙ компрессии каждого пути) + ограничение
+    `is_root·(s0 − root_pinned) = 0`. До этого root был привязан только через Fiat-Shamir
+    `mix_public` — это исключало переиспользование честного доказательства с другим root, но
+    НЕ мешало злонамеренному prover'у построить СВЕЖЕЕ доказательство для ложного root-клейма
+    (siblings — свободный witness, ограничения «вычисленный корень = заявленный» не было).
+    Регрессия: `test_forged_root_cannot_prove`. `depth` стал явным public input
+    `verify_merkle_path` / `verify_query_membership` (фиксирует строку пиннинга root),
+    зеркально on-chain `MerkleVerifier.verify(root, leaf, index, depth, siblings)`.
+    Композиция single/N-query теперь value-bound end-to-end ПОЛНОСТЬЮ in-circuit:
+    fin (fold output) → hashLeaf → leaf (pinned) → path → root (pinned).
+  - **[Код] Капы входов** добавлены в `composition::prove/verify_query(-ies)_membership`,
+    `merkle::prove/verify_paths_multi`: `MAX_QUERIES`/`MAX_NUM_FOLDS`/`MAX_DEPTH`/диапазон
+    `log_size`/ёмкость трейса. Закрыты паники и OOM на враждебных входах: деление на ноль при
+    `depth=0`, OOB-записи в `build_preproc` при большом `num_folds`, аллокация `2^40` при
+    `log_size=40`. **104 рекурсивных теста (453 всего), сборка без предупреждений.**
+  - После R3.12 остаётся: root vs *committed FRI-layer root* (on-chain интеграция), t=16
+    inner hash, `QLSAVerifierRecursive.sol`.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
