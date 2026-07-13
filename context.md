@@ -1,5 +1,32 @@
 # QLSA — Project Context
 
+## Рекурсия R3.15 (2026-07-13) — широкая (t=8) композиция: recursive_verifier + merkle_path_t8
+
+Интеграционный шаг: подключает t=8 path AIR (R3.14) как inner hash композиции рекурсии.
+`recursive/composition_t8.rs` доказывает `recursive_verifier` (fold-цепочка, QM31) + `merkle_path_t8`
+(4-словный путь) в ОДНОМ STARK — t=8-аналог `composition.rs`, меняющий inner hash с t=2 (31-битные
+узлы, коллизия 2^15.5) на t=8 (4-словные узлы, 2^62). Это та самая per-query FRI-membership проверка,
+которую делает VFRI11 on-chain, но теперь на широком хеше, который VFRI11 реально использует.
+
+- **Связка (value-bound end-to-end, полностью in-circuit):** `finalFold` пиннится в `recursive_verifier`
+  (fin-столбцы + is_output, C1) → верификатор off-circuit считает `leaf4 = qm31_leaf_hash_t8(finalFold)`
+  (детерминированная публичная функция от пиннутого finalFold; `sponge_t8` над 4 лимбами, совпадает
+  с `hash_leaf_qm31_p2t8` VFRI11-backend) → пиннит leaf4 в 4-словные leaf-столбцы `merkle_path_t8`
+  (C1 leaf-binding) → t=8 путь аутентифицирует leaf4 @ index + siblings → root (C1 root-binding).
+  Цепочка: finalFold (pinned) → hashLeaf_t8 → leaf4 (pinned) → t=8 path → root (pinned).
+- **Тот же паттерн, что composition.rs (t=2):** меняется ТОЛЬКО inner-hash-гаджет; QM31 fold-цепочка
+  и паттерн finalFold→leaf идентичны. 87 main + 39 preproc столбцов в объединённом STARK (rv 42/17 +
+  merkle_t8 45/22). Объединённое Tree 0 пиннится одним каноническим корнем (C2). `qm31_leaf_hash_t8`
+  добавлен в `integration.rs`.
+- **Валидация:** roundtrip (fold-цепочка + t=8 membership в одном proof) + wrong-final (меняет пиннутый
+  finalFold И пересчитанный leaf4 → иной канонический preproc-корень → reject) + wrong-root.
+  `prove_query_membership_t8`/`verify_query_membership_t8`. **3 теста, 125 рекурсивных (474 всего),
+  0 предупреждений.**
+- **Эффект:** коллизия узла inner-hash рекурсии поднята с 2^15.5 (t=2) до **2^62** (t=8). t=16
+  (полные 128 бит) — тот же swap, как только появится t=16 path AIR.
+- **Дальше:** N-query t=8 композиция (форма VFRI11, как R3.9 после R3.8), затем t=16.
+  `docs/roadmap/recursion.md` § R3.15.
+
 ## Рекурсия R3.14 (2026-07-13) — широкий inner-hash Merkle path: t=8 path AIR
 
 Дуал R3.13 (`poseidon2_t8_air`), как `merkle_path_air` (t=2) к `poseidon2_merkle_air`.

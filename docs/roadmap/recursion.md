@@ -273,6 +273,21 @@ ML-DSA подпись
     -index/tampered + forged-root-cannot-prove (C1) + forged-preproc (C2). **11 тестов, 122 рекурсивных
     (471 всего), 0 предупреждений.** Дальше: подключить как inner hash композиции рекурсии (заменить/
     параметризовать t=2 `merkle_path_air` в `composition.rs`), затем t=16 для полных 128 бит.
+- **R3.15 — широкая (t=8) композиция: recursive_verifier + merkle_path_t8 (2026-07-13)** — ✅ **готов**
+  - `recursive/composition_t8.rs` доказывает `recursive_verifier` (fold-цепочка, QM31) + `merkle_path_t8`
+    (4-словный путь) в ОДНОМ STARK — t=8-аналог `composition.rs`, меняющий inner hash с t=2 (узлы 31 бит,
+    коллизия 2^15.5) на t=8 (4-словные узлы, 2^62), тот самый хеш, который VFRI11 FRI-layer decommitment
+    реально использует. Меняется ТОЛЬКО inner-hash-гаджет; QM31 fold-цепочка и паттерн finalFold→leaf
+    идентичны composition.rs. **Связка (полностью in-circuit):** `finalFold` пиннится в `recursive_verifier`
+    → верификатор off-circuit считает `leaf4 = qm31_leaf_hash_t8(finalFold)` (детерминированная публичная
+    функция от пиннутого finalFold; `sponge_t8` над 4 лимбами, == `hash_leaf_qm31_p2t8`) → пиннит leaf4
+    в 4-словные leaf-столбцы `merkle_path_t8` → путь аутентифицирует leaf4 @ index + siblings → root.
+    Value-bound end-to-end: finalFold (pinned) → hashLeaf_t8 → leaf4 (pinned) → t=8 path → root (pinned).
+    87 main + 39 preproc столбцов (rv 42/17 + merkle_t8 45/22), объединённое Tree 0 пиннится (C2).
+    `qm31_leaf_hash_t8` добавлен в `integration.rs`. Валидация: roundtrip + wrong-final (меняет пиннутый
+    finalFold И пересчитанный leaf4) + wrong-root. **3 теста, 125 рекурсивных (474 всего), 0 предупреждений.**
+    Поднимает коллизию узла inner-hash рекурсии с 2^15.5 до **2^62**. Дальше: N-query t=8 композиция
+    (форма VFRI11, как R3.9 после R3.8), затем t=16 (полные 128 бит — тот же swap с t=16 path AIR).
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

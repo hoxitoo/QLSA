@@ -126,12 +126,25 @@
 //! C1 index/leaf/root binding (all pinned in-circuit, matching on-chain
 //! `Poseidon2MerkleVerifierT8.verify`) + C2 preprocessed pinning.  Reference-driven
 //! validation + roundtrip depth 1/3/5 + wrong-root/-leaf/-index/tampered +
-//! forged-root/-preproc rejection. 11 tests.  Next: wire it as the recursion inner
-//! hash (replace/parameterize the t=2 `merkle_path_air` in the composition), then
-//! t=16 for full 128-bit.
+//! forged-root/-preproc rejection. 11 tests.
+//!
+//! **R3.15 (2026-07-13) — wide (t=8) composition:** `composition_t8` proves
+//! `recursive_verifier` + `merkle_path_t8` in ONE STARK — the t=8 analogue of
+//! `composition`, swapping the inner hash from t=2 (31-bit nodes) to t=8 (4-word
+//! nodes → 2^62 collision), the hash a VFRI11 FRI-layer decommitment uses. The
+//! fold-chain component (QM31) is unchanged; the connection binds
+//! `leaf4 = qm31_leaf_hash_t8(finalFold)` (a deterministic public function of the
+//! pinned finalFold) into `merkle_path_t8`'s pinned 4-word `leaf` columns, so the
+//! wide path authenticates exactly the fold-chain output. Value-bound end-to-end
+//! fully in-circuit: finalFold (pinned) → hashLeaf_t8 → leaf4 (pinned) → t=8 path →
+//! root (pinned). `prove_query_membership_t8` / `verify_query_membership_t8`,
+//! 3 tests. This lifts the recursion's inner-hash node collision to ~2^62; t=16
+//! (128-bit) is the same swap once a t=16 path AIR exists. Next: N-query t=8
+//! composition (VFRI11 shape), then t=16.
 
 pub mod channel_air;
 pub mod composition;
+pub mod composition_t8;
 pub mod fold_air;
 pub mod fri_fold_chain_air;
 pub mod integration;
