@@ -1,5 +1,34 @@
 # QLSA — Project Context
 
+## Рекурсия R3.13 (2026-07-13) — широкий inner-hash: Poseidon2 t=8 compression AIR
+
+Первый широкий inner-hash-примитив рекурсии. `recursive/poseidon2_t8_air.rs` арифметизирует
+Poseidon2 **t=8** компрессию (`compress_t8`: 8-словное состояние → 4-словный/124-битный узел,
+коллизия узла ~2^62) как доказуемый AIR — широкий аналог t=2 `poseidon2_merkle_air` и та самая
+хеш-функция, которой пользуется backend **VFRI11** (его FRI-layer Merkle-деревья на t=8). Это
+следующая ступень на пути к 128-битной привязке (ограничение #6, лестница t=2→t=8→t=16) и
+обязательный кирпич, чтобы рекурсия могла верифицировать реальное VFRI11-доказательство.
+
+- **Раскладка:** один раунд на строку (4 внешних + 14 внутренних + 4 внешних = 22, паддинг до 32
+  = LOG_SIZE 5). 40 main-столбцов (`in`/`sq`/`sbox`/`out`/`raw` ×8) + 11 preproc (`rc`×8 +
+  `is_ext`/`is_int`/`is_first`). Helper-столбцы `sq=(in+rc)²`, `sbox=sq²·(in+rc)` держат S-box (x^5)
+  на степени 3, поэтому out-констрейнт линеен → bound log+1 (как во всех AIR репо).
+- **Линейные слои — точные выражения:** `mat_external` M_E=[[2M4,M4],[M4,2M4]] (M4=[[5,7,1,3],[4,6,1,1],
+  [1,3,5,7],[1,1,4,6]]) и `mat_internal` J+diag(1..8). Начальный pre-mix `mat_external(raw)` инжектится
+  на строке 0 через `is_first`; узел = `out[0..4]` на строке 21. Паддинг-строки продолжают chain
+  (in=out_prev, out форсится в 0 нулевыми селекторами).
+- **C2-пиннинг:** preproc — единый канонический источник `build_preproc`; верификатор пересчитывает
+  корень Tree 0 (`canonical_preproc_root`) и отклоняет несовпадение (`test_forged_preproc_rejected`).
+- **Валидация корректности (защита от soundness-бага):** honest trace строится из уже кросс-чекнутого
+  эталона `permute_t8` (бит-в-бит совпадает с on-chain `Poseidon2M31T8.sol`) → неверный констрейнт
+  роняет honest-proof на `ConstraintsNotSatisfied`, а не молча проходит. Тесты:
+  `test_round_schedule_reproduces_permutation`, `test_trace_node_matches_reference`, roundtrip,
+  wrong-node / wrong-input / corrupted-trace / forged-preproc. **7 тестов, 111 рекурсивных (460 всего),
+  0 предупреждений сборки.**
+- **Дальше:** t=8 Merkle-*path* AIR (дуал `poseidon2_t8_air`, как `merkle_path_air` к
+  `poseidon2_merkle_air`) → подключить как inner hash рекурсии (коллизия узла 2^15.5 t=2 → 2^62 t=8)
+  → t=16 (Stwo native, ~2^124 ≈ 128-бит). `docs/roadmap/recursion.md` § R3.13.
+
 ## Аудит (2026-07-10) — C1 root-binding закрыт для `merkle_path_air` (R3.12) + капы входов
 
 Двухчастный аудит (крипто/блокчейн + код/высоконагруженные системы) свежей recursion-поверхности

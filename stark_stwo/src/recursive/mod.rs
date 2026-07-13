@@ -103,6 +103,19 @@
 //! hostile inputs (division-by-zero at depth 0, OOB preproc writes, 2^40 allocs).
 //! Remaining after R3.12: root vs the *committed FRI-layer root* (on-chain
 //! integration), t=16 inner hash, `QLSAVerifierRecursive.sol`.
+//!
+//! **R3.13 (2026-07-13) — wide inner-hash primitive:** `poseidon2_t8_air`
+//! arithmetizes the Poseidon2 **t=8** compression (`compress_t8`, 4-word/124-bit
+//! nodes → ~2^62 node collision) as a provable AIR — the wide analogue of the t=2
+//! `poseidon2_merkle_air`, and the hash the recursion must replicate to verify a
+//! VFRI11 inner proof (whose FRI-layer trees use the t=8 backend). One round per
+//! row (4 external + 14 internal + 4 external), S-box square/output helper columns,
+//! exact `mat_external`/`mat_internal` linear layers, C2 preprocessed pinning.
+//! Validated by rebuilding the honest trace from the already-cross-checked
+//! `permute_t8` reference (a wrong constraint fails the honest proof, not silently
+//! passes). 7 tests. Next: the t=8 Merkle-*path* AIR (dual of `poseidon2_t8_air`,
+//! as `merkle_path_air` is to `poseidon2_merkle_air`), then wire it as the
+//! recursion inner hash.
 
 pub mod channel_air;
 pub mod composition;
@@ -111,6 +124,7 @@ pub mod fri_fold_chain_air;
 pub mod integration;
 pub mod merkle_path_air;
 pub mod oods_air;
+pub mod poseidon2_t8_air;
 pub mod qm31_mul_air;
 pub mod query_step_air;
 pub mod recursive_verifier;

@@ -94,10 +94,16 @@ ML-DSA подпись
   - 7 main + 4 preproc col; init-wiring `inp0 = (is_first?0:s0[-1]) + word`, `inp1 = (is_first?0:s1[-1])`;
     привязка `(n_words, digest)` в канал. Кросс-чек против прямого `permute`; roundtrip 1/8 слов;
     rejection (wrong digest/count/tampered/corrupted-trace). 9 Rust тестов
-- **t=16 inner hash** (остаток R2): расширить compression обоих inner-hash AIR (`merkle_path_air`,
-  `channel_air`) до Poseidon2 t=16 (Stwo native, 128-бит). Ширина хеша — pluggable backend
-  (как VFRI10→VFRI11 t=4→t=8); структура AIR не меняется. **Здесь t=16 «возвращается»** — но как
-  inner circuit, on-chain газ не растёт
+- **Wide inner hash — t=8 compression AIR** (`recursive/poseidon2_t8_air.rs`) — ✅ **готов (2026-07-13, R3.13)**
+  - Первый широкий inner-hash: арифметизирует `compress_t8` (4-словные/124-битные узлы, коллизия ~2^62) —
+    хеш, которым пользуется VFRI11 backend. 40 main + 11 preproc col; 22 раунда/строку (4 внешних +
+    14 внутренних + 4 внешних); helper-столбцы `sq`/`sbox` (степень ≤3); точные `mat_external`/`mat_internal`.
+    C2-пиннинг. Валидация против эталона `permute_t8`. 7 тестов. Детали — § R3.13 ниже.
+- **t=8/t=16 inner-hash Merkle path** (остаток R2): построить t=8 Merkle-*path* AIR (дуал
+  `poseidon2_t8_air`, как `merkle_path_air` к `poseidon2_merkle_air`) и подключить как inner hash
+  рекурсии → коллизия узла 2^15.5 (t=2) → 2^62 (t=8); затем t=16 (Stwo native, ~2^124 ≈ 128-бит).
+  Ширина хеша — pluggable backend (как VFRI10→VFRI11 t=4→t=8); структура path-AIR не меняется.
+  **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт
 
 ### Этап R3 — recursive verifier composition
 
@@ -225,6 +231,21 @@ ML-DSA подпись
     `log_size=40`. **104 рекурсивных теста (453 всего), сборка без предупреждений.**
   - После R3.12 остаётся: root vs *committed FRI-layer root* (on-chain интеграция), t=16
     inner hash, `QLSAVerifierRecursive.sol`.
+- **R3.13 — широкий inner-hash примитив: t=8 compression AIR (2026-07-13)** — ✅ **готов**
+  - `recursive/poseidon2_t8_air.rs` арифметизирует Poseidon2 **t=8** компрессию (`compress_t8`,
+    4-словные/124-битные узлы → коллизия узла ~2^62) как доказуемый AIR — широкий аналог t=2
+    `poseidon2_merkle_air` и та самая хеш-функция, которую рекурсия должна воспроизвести для
+    верификации VFRI11-доказательства (его FRI-layer-деревья используют t=8 backend). Один раунд
+    на строку (4 внешних + 14 внутренних + 4 внешних = 22, паддинг до 32); helper-столбцы
+    `sq`/`sbox` держат S-box (x^5) степени ≤3; точные линейные слои `mat_external` (M_E=[[2M4,M4],[M4,2M4]])
+    и `mat_internal` (J+diag(1..8)); начальный pre-mix инжектится на строке 0 через `is_first`;
+    C2-пиннинг preproc (rc + is_ext/is_int/is_first) через `canonical_preproc_root`. **40 main + 11
+    preproc столбцов.** Валидация: honest trace строится из уже кросс-чекнутого эталона `permute_t8`
+    → неверный констрейнт роняет honest-proof, а не молча проходит (`test_round_schedule_reproduces_permutation`,
+    `test_trace_node_matches_reference`, roundtrip, wrong-node/-input/corrupted/forged-preproc). **7 тестов,
+    111 рекурсивных всего.** Дальше: t=8 Merkle-*path* AIR (дуал `poseidon2_t8_air`, как `merkle_path_air`
+    к `poseidon2_merkle_air`), затем подключить как inner hash рекурсии, поднимая коллизию узла с
+    2^15.5 (текущий t=2) до 2^62.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
