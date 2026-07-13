@@ -111,7 +111,7 @@ pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
 // ── Linear layers as generic expressions ───────────────────────────────────────
 
 /// `m4(s)[i] = Σ_j M4[i][j]·s[j]`, M4 = [[5,7,1,3],[4,6,1,1],[1,3,5,7],[1,1,4,6]].
-fn m4_expr<F>(s: &[F; 4]) -> [F; 4]
+pub(crate) fn m4_expr<F>(s: &[F; 4]) -> [F; 4]
 where
     F: Clone + std::ops::Add<Output = F> + Mul<BaseField, Output = F>,
 {
@@ -127,7 +127,7 @@ where
 use std::ops::Mul;
 
 /// External linear layer `M_E = [[2·M4, M4],[M4, 2·M4]]` on an 8-vector.
-fn mat_external_expr<F>(a: &[F; 8]) -> [F; 8]
+pub(crate) fn mat_external_expr<F>(a: &[F; 8]) -> [F; 8]
 where
     F: Clone + std::ops::Add<Output = F> + Mul<BaseField, Output = F>,
 {
@@ -147,7 +147,7 @@ where
 }
 
 /// Internal linear layer `M_I = J + diag(1..8)`: `out_i = Σ_j a_j + (i+1)·a_i`.
-fn mat_internal_expr<F>(a: &[F; 8]) -> [F; 8]
+pub(crate) fn mat_internal_expr<F>(a: &[F; 8]) -> [F; 8]
 where
     F: Clone + std::ops::Add<Output = F> + Mul<BaseField, Output = F>,
 {
@@ -259,7 +259,7 @@ fn new_component(log_n_rows: u32) -> Poseidon2T8Component {
 
 /// For trace row `row < N_REAL_ROWS`, return `(is_ext, rc[0..8])`.
 /// External rounds S-box all 8 cells; internal rounds add/S-box cell 0 only.
-fn round_schedule(row: usize) -> (bool, [u64; T]) {
+pub(crate) fn round_schedule(row: usize) -> (bool, [u64; T]) {
     let mut rc = [0u64; T];
     if row < R_F / 2 {
         // external rounds 0..4 → K_RC[8*row .. +8]

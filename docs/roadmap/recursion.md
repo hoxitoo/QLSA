@@ -99,11 +99,21 @@ ML-DSA подпись
     хеш, которым пользуется VFRI11 backend. 40 main + 11 preproc col; 22 раунда/строку (4 внешних +
     14 внутренних + 4 внешних); helper-столбцы `sq`/`sbox` (степень ≤3); точные `mat_external`/`mat_internal`.
     C2-пиннинг. Валидация против эталона `permute_t8`. 7 тестов. Детали — § R3.13 ниже.
-- **t=8/t=16 inner-hash Merkle path** (остаток R2): построить t=8 Merkle-*path* AIR (дуал
-  `poseidon2_t8_air`, как `merkle_path_air` к `poseidon2_merkle_air`) и подключить как inner hash
-  рекурсии → коллизия узла 2^15.5 (t=2) → 2^62 (t=8); затем t=16 (Stwo native, ~2^124 ≈ 128-бит).
-  Ширина хеша — pluggable backend (как VFRI10→VFRI11 t=4→t=8); структура path-AIR не меняется.
-  **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт
+- **Wide inner-hash Merkle path — t=8 path AIR** (`recursive/merkle_path_t8_air.rs`) — ✅ **готов (2026-07-13, R3.14)**
+  - Аутентифицирует путь по **4-словным/124-битным узлам** через `compress_t8` — дуал
+    `poseidon2_t8_air` (как `merkle_path_air` к `poseidon2_merkle_air`) и путь, который рекурсия
+    воспроизводит для верификации VFRI11 FRI-layer decommitment (коллизия узла 2^15.5 → 2^62).
+    Переиспользует раунд-арифметизацию t=8 (`round_schedule`/`mat_external_expr`/`mat_internal_expr`),
+    цепочка из `depth` компрессий по 22 раунда; кросс-компрессионная цепочка `cur` использует тот же
+    трюк смежности `out[-1]`, что и t=2 путь. 45 main + 22 preproc col; C1-привязка index/leaf/root
+    (все пиннятся in-circuit, зеркально on-chain `Poseidon2MerkleVerifierT8.verify`) + C2-пиннинг.
+    Reference-driven валидация + roundtrip depth 1/3/5 + rejection (wrong-root/-leaf/-index/tampered/
+    forged-root/-preproc). 11 тестов. Детали — § R3.14 ниже.
+- **t=16 inner hash** (остаток R2): расширить до Poseidon2 t=16 (Stwo native, ~2^124 ≈ 128-бит) —
+  и compression, и path AIR. Ширина хеша — pluggable backend (как VFRI10→VFRI11 t=4→t=8); структура
+  AIR не меняется. **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт.
+  Ближайший шаг перед t=16: подключить t=8 path AIR как inner hash композиции рекурсии (заменить/
+  параметризовать t=2 `merkle_path_air` в `composition.rs`)
 
 ### Этап R3 — recursive verifier composition
 
@@ -246,6 +256,23 @@ ML-DSA подпись
     111 рекурсивных всего.** Дальше: t=8 Merkle-*path* AIR (дуал `poseidon2_t8_air`, как `merkle_path_air`
     к `poseidon2_merkle_air`), затем подключить как inner hash рекурсии, поднимая коллизию узла с
     2^15.5 (текущий t=2) до 2^62.
+- **R3.14 — широкий inner-hash Merkle path: t=8 path AIR (2026-07-13)** — ✅ **готов**
+  - `recursive/merkle_path_t8_air.rs` доказывает путь аутентификации по **4-словным/124-битным узлам**
+    через `compress_t8` — дуал `poseidon2_t8_air` (как `merkle_path_air` к `poseidon2_merkle_air`) и
+    та самая структура, которую рекурсия воспроизводит для VFRI11 FRI-layer decommitment. Ключевая
+    архитектурная деталь: выход компрессии ложится на её последнюю раунд-строку, смежную с первой
+    строкой следующей компрессии, поэтому кросс-компрессионная цепочка `cur` использует маску
+    `out[-1]` (тот же трюк, что и t=2 путь), несмотря на 22 раунда/компрессию. **45 main + 22 preproc
+    столбцов.** Раунд-ядро (in/sq/sbox/out ×8) переиспользует `round_schedule`/`mat_external_expr`/
+    `mat_internal_expr` из R3.13. Node-level wiring: `cur = is_first_path·leaf + (1−is_first_path)·out_prev`,
+    выбор left/right по биту индекса на 4-словных узлах, C1-привязка index (`is_first_comp·(bit−idx_bit)`),
+    leaf (`is_first_path·(leaf−leaf_pin)`), root (`is_root·(out−root_pin)` на последней реальной компрессии).
+    Все ограничения ≤ степень 3. C2-пиннинг preproc. Зеркально on-chain
+    `Poseidon2MerkleVerifierT8.verify(root, leaf, index, depth, siblings)`. Валидация: reference-driven
+    (trace из `merkle_path_root_t8`/`compress_t8`) + roundtrip depth 1/3/5 + rejection wrong-root/-leaf/
+    -index/tampered + forged-root-cannot-prove (C1) + forged-preproc (C2). **11 тестов, 122 рекурсивных
+    (471 всего), 0 предупреждений.** Дальше: подключить как inner hash композиции рекурсии (заменить/
+    параметризовать t=2 `merkle_path_air` в `composition.rs`), затем t=16 для полных 128 бит.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

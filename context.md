@@ -1,5 +1,34 @@
 # QLSA — Project Context
 
+## Рекурсия R3.14 (2026-07-13) — широкий inner-hash Merkle path: t=8 path AIR
+
+Дуал R3.13 (`poseidon2_t8_air`), как `merkle_path_air` (t=2) к `poseidon2_merkle_air`.
+`recursive/merkle_path_t8_air.rs` доказывает путь аутентификации Меркла по **4-словным/124-битным
+узлам** через `compress_t8` — та самая структура, которую рекурсия воспроизводит для верификации
+VFRI11 FRI-layer decommitment (узлы t=8). Поднимает коллизию узла inner-hash с 2^15.5 (текущий t=2
+`merkle_path_air`) до 2^62.
+
+- **Архитектурный ключ:** выход каждой компрессии (`out[0..4]`) ложится на её последнюю раунд-строку,
+  которая смежна с первой строкой следующей компрессии → кросс-компрессионная цепочка `cur` использует
+  маску `out[-1]` (тот же приём, что и t=2 путь), несмотря на 22 раунда/компрессию. Компрессия `c`
+  занимает строки `c·22 .. c·22+22`; round-schedule периодичен с периодом 22.
+- **Раскладка:** 45 main-столбцов — раунд-ядро `in`/`sq`/`sbox`/`out` ×8 (32, переиспользует
+  `round_schedule`/`mat_external_expr`/`mat_internal_expr` из R3.13) + `cur[0..4]`/`sib[0..4]`/`bit`/
+  `leaf[0..4]` (13, node-level). 22 preproc: `rc`×8 + `is_ext`/`is_int`/`is_first_comp`/`is_first_path`
+  + `idx_bit` + `leaf_pin[0..4]` + `is_root` + `root_pin[0..4]`.
+- **Node-level wiring:** `cur = is_first_path·leaf + (1−is_first_path)·out_prev[0..4]`; выбор left/right
+  по биту (`raw = bit? (sib,cur):(cur,sib)`, 4-словные); `in[row0] = mat_external(raw)` через
+  `is_first_comp`. Все ограничения ≤ степень 3.
+- **C1 (всё in-circuit, зеркально on-chain `Poseidon2MerkleVerifierT8.verify(root,leaf,index,depth,siblings)`):**
+  index (`is_first_comp·(bit−idx_bit)`), leaf (`is_first_path·(leaf−leaf_pin)`), root
+  (`is_root·(out−root_pin)` на последней реальной компрессии). **C2:** пиннинг всего preproc через
+  `canonical_preproc_root`.
+- **Валидация:** reference-driven (honest trace из `merkle_path_root_t8`/`compress_t8`) + roundtrip
+  depth 1/3/5 + rejection wrong-root/-leaf/-index/tampered + forged-root-cannot-prove (C1) +
+  forged-preproc (C2). **11 тестов, 122 рекурсивных (471 всего), 0 предупреждений.**
+- **Дальше:** подключить t=8 path AIR как inner hash композиции рекурсии (заменить/параметризовать
+  t=2 `merkle_path_air` в `composition.rs`) → t=16 для полных 128 бит. `docs/roadmap/recursion.md` § R3.14.
+
 ## Рекурсия R3.13 (2026-07-13) — широкий inner-hash: Poseidon2 t=8 compression AIR
 
 Первый широкий inner-hash-примитив рекурсии. `recursive/poseidon2_t8_air.rs` арифметизирует

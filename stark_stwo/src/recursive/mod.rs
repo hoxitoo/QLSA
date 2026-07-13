@@ -113,9 +113,22 @@
 //! exact `mat_external`/`mat_internal` linear layers, C2 preprocessed pinning.
 //! Validated by rebuilding the honest trace from the already-cross-checked
 //! `permute_t8` reference (a wrong constraint fails the honest proof, not silently
-//! passes). 7 tests. Next: the t=8 Merkle-*path* AIR (dual of `poseidon2_t8_air`,
-//! as `merkle_path_air` is to `poseidon2_merkle_air`), then wire it as the
-//! recursion inner hash.
+//! passes). 7 tests.
+//!
+//! **R3.14 (2026-07-13) — wide Merkle-path AIR:** `merkle_path_t8_air`
+//! authenticates a path over **4-word (124-bit) nodes** via `compress_t8` — the
+//! wide analogue of `merkle_path_air` (t=2), and the path the recursion must
+//! replicate to verify a VFRI11 FRI-layer decommitment (node collision 2^15.5 →
+//! 2^62).  Reuses `poseidon2_t8_air`'s round arithmetization
+//! (`round_schedule`/`mat_external_expr`/`mat_internal_expr`), chained across
+//! `depth` compressions of 22 rounds each; the cross-compression `cur` chain uses
+//! the same `out[-1]` adjacency trick as the t=2 path.  45 main + 22 preproc cols;
+//! C1 index/leaf/root binding (all pinned in-circuit, matching on-chain
+//! `Poseidon2MerkleVerifierT8.verify`) + C2 preprocessed pinning.  Reference-driven
+//! validation + roundtrip depth 1/3/5 + wrong-root/-leaf/-index/tampered +
+//! forged-root/-preproc rejection. 11 tests.  Next: wire it as the recursion inner
+//! hash (replace/parameterize the t=2 `merkle_path_air` in the composition), then
+//! t=16 for full 128-bit.
 
 pub mod channel_air;
 pub mod composition;
@@ -123,6 +136,7 @@ pub mod fold_air;
 pub mod fri_fold_chain_air;
 pub mod integration;
 pub mod merkle_path_air;
+pub mod merkle_path_t8_air;
 pub mod oods_air;
 pub mod poseidon2_t8_air;
 pub mod qm31_mul_air;
