@@ -5165,13 +5165,39 @@ pub fn gen_vfri10_hints_from_cols_nfolds(
 ///   P2T4Channel         → P2T8Channel
 /// The ABI layout is identical to VFRI9/VFRI10 (Merkle siblings are still
 /// bytes32; only the node *contents* widen to 4 words → ~2^62 collision).
-pub fn gen_vfri11_hints_from_cols_nfolds(
+/// Intermediate FRI-chain data of the VFRI11 (t=8 backend) hint pipeline —
+/// the SINGLE shared implementation behind both the ABI hint generator
+/// [`gen_vfri11_hints_from_cols_nfolds`] and the recursion-input bridge
+/// [`gen_vfri11_recursion_inputs`] (R4.1), so the two can never drift.
+struct Vfri11Chain {
+    trace_root: [u8; 32],
+    z_x: u128,
+    #[allow(dead_code)]
+    comp_alpha: u128,
+    oods_combo_pos: u128,
+    oods_combo_neg: u128,
+    comp_values: Vec<u128>,
+    comp_levels: Vec<Vec<[u8; 32]>>,
+    comp_root: [u8; 32],
+    fri_alpha: u128,
+    fri_alphas: Vec<u128>,
+    layer_values: Vec<Vec<u128>>,
+    layer_levels: Vec<Vec<Vec<[u8; 32]>>>,
+    layer_roots: Vec<[u8; 32]>,
+    num_folds: usize,
+    derived_indices: Vec<usize>,
+}
+
+/// Run the full VFRI11 Fiat-Shamir + FRI fold chain (t=8 backend) and return
+/// every intermediate the hint generator / recursion bridge needs.  Pure code
+/// motion from `gen_vfri11_hints_from_cols_nfolds` — behavior-identical.
+fn vfri11_fri_chain(
     cols:              &[Vec<u32>],
     tree_depth:        u32,
     batch_merkle_root: &[u8],
     n_queries:         usize,
     num_folds_opt:     Option<usize>,
-) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+) -> Result<Vfri11Chain, String> {
     if cols.is_empty() {
         return Err("cols must not be empty".into());
     }
@@ -5304,13 +5330,166 @@ pub fn gen_vfri11_hints_from_cols_nfolds(
         layer_levels.push(new_levels);
     }
 
-    let last_layer_evals: Vec<u128> = layer_values[num_folds].clone();
-
     let mut batch_root_arr = [0u8; 32];
     batch_root_arr.copy_from_slice(batch_merkle_root);
     chan.mix_root_full(&batch_root_arr);
 
     let derived_indices = chan.draw_queries(tree_depth, n_queries);
+    Ok(Vfri11Chain {
+        trace_root,
+        z_x,
+        comp_alpha,
+        oods_combo_pos,
+        oods_combo_neg,
+        comp_values,
+        comp_levels,
+        comp_root,
+        fri_alpha,
+        fri_alphas,
+        layer_values,
+        layer_levels,
+        layer_roots,
+        num_folds,
+        derived_indices,
+    })
+}
+
+
+/// Recursion inputs extracted from a REAL VFRI11 FRI chain (R4.1) — the bridge
+/// between the production t=8 hint pipeline and the recursive composition
+/// (`prove_queries_membership_t8`): for each Fiat-Shamir-derived query, the
+/// OODS + fold-chain step data, the fold rounds (sibling / channel alpha /
+/// index-oriented twiddle inverse), and the final fold's Merkle path into the
+/// COMMITTED last FRI-layer root.  Proving `queries_membership_t8` over these
+/// inputs and checking `roots == last_layer_root` verifies the inner proof's
+/// per-query decommitments against genuine committed data — closing the
+/// "root vs committed FRI-layer root" gap at the Rust level.
+pub struct Vfri11RecursionInputs {
+    pub queries: Vec<(crate::recursive::recursive_verifier::StepOp, Vec<crate::recursive::recursive_verifier::FoldRound>)>,
+    /// Per query: (4-word sibling nodes bottom-up, index bits LSB-first) for the
+    /// final fold value's membership path in the LAST FRI layer's tree.
+    pub paths: Vec<(Vec<[u64; 4]>, Vec<bool>)>,
+    /// The committed last FRI-layer root (`friLayerRoots[num_folds]`) as 4 M31 words.
+    pub last_layer_root: [u64; 4],
+    /// Expected final fold value per query (== the last FoldHint's folded_value).
+    pub finals: Vec<u128>,
+    /// The embedded Stwo-style trace root (proof[8..40] of the ABI generator).
+    pub trace_root: [u8; 32],
+}
+
+/// Extract recursion inputs from the same (cols, tree_depth, batch_merkle_root,
+/// n_queries, num_folds) the VFRI11 ABI hint generator consumes — via the SHARED
+/// [`vfri11_fri_chain`], so transcript, challenges, and trees are identical by
+/// construction.
+pub fn gen_vfri11_recursion_inputs(
+    cols:              &[Vec<u32>],
+    tree_depth:        u32,
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds_opt:     Option<usize>,
+) -> Result<Vfri11RecursionInputs, String> {
+    use crate::poseidon2::M31_P;
+    let ch = vfri11_fri_chain(cols, tree_depth, batch_merkle_root, n_queries, num_folds_opt)?;
+
+    let mut queries = Vec::with_capacity(ch.derived_indices.len());
+    let mut paths = Vec::with_capacity(ch.derived_indices.len());
+    let mut finals = Vec::with_capacity(ch.derived_indices.len());
+
+    for &idx in &ch.derived_indices {
+        let anti = antipodal_of(idx, tree_depth);
+        let (qp_x, qp_y) = coset_at(tree_depth, idx as u64);
+        let px_qm31 = qm31_from_m31(qp_x);
+        let f_plus = qm31_div(qm31_sub(ch.comp_values[idx], ch.oods_combo_pos), qm31_sub(px_qm31, ch.z_x));
+        let f_minus = qm31_div(
+            qm31_sub(ch.comp_values[anti], ch.oods_combo_neg),
+            qm31_sub(qm31_neg(px_qm31), ch.z_x),
+        );
+        let step: crate::recursive::recursive_verifier::StepOp = (
+            f_plus,
+            f_minus,
+            qp_x,
+            ch.z_x,
+            ch.oods_combo_pos,
+            ch.oods_combo_neg,
+            ch.fri_alpha,
+            m31_inv(qp_y),
+        );
+
+        let mut rounds: Vec<crate::recursive::recursive_verifier::FoldRound> = Vec::with_capacity(ch.num_folds);
+        let mut cur_idx = idx;
+        for k in 0..ch.num_folds {
+            let layer_sz = ch.layer_values[k].len() / 2;
+            let sib_idx = if cur_idx < layer_sz { cur_idx + layer_sz } else { cur_idx - layer_sz };
+            let new_idx = cur_idx & (layer_sz - 1);
+            let sib_val = ch.layer_values[k][sib_idx];
+            let x_j = coset_at(tree_depth, new_idx as u64).0;
+            let inv = m31_inv(chebyshev_twiddle(x_j, k));
+            // Orientation: line_fold pairs (cur, sib) when cur is in the low half
+            // and (sib, cur) otherwise. The recursion always chains cur as operand
+            // `a`; a swapped pair equals the same fold with a NEGATED twiddle
+            // inverse, since (b−a)·inv = (a−b)·(P−inv).
+            let inv_oriented = if cur_idx < layer_sz {
+                inv
+            } else {
+                ((M31_P - inv as u64) % M31_P) as u32
+            };
+            rounds.push((sib_val, ch.fri_alphas[k], inv_oriented));
+            cur_idx = new_idx;
+        }
+
+        // Hard invariant (not debug-only): the extracted chain must reproduce the
+        // REAL final layer value — any orientation/extraction bug fails here.
+        let final_val = crate::recursive::recursive_verifier::recursive_query_final(&step, &rounds);
+        if final_val != ch.layer_values[ch.num_folds][cur_idx] {
+            return Err(format!(
+                "recursion-input extraction mismatch at query idx {idx}: final fold != committed layer value"
+            ));
+        }
+
+        // Final fold membership path in the LAST layer's committed tree.
+        let sibs_packed = proof_path(&ch.layer_levels[ch.num_folds], cur_idx);
+        let sibs: Vec<[u64; 4]> = sibs_packed.iter().map(p2t8_node_words).collect();
+        let bits: Vec<bool> = (0..sibs.len()).map(|i| (cur_idx >> i) & 1 == 1).collect();
+
+        queries.push((step, rounds));
+        paths.push((sibs, bits));
+        finals.push(final_val);
+    }
+
+    Ok(Vfri11RecursionInputs {
+        queries,
+        paths,
+        last_layer_root: p2t8_node_words(&ch.layer_roots[ch.num_folds]),
+        finals,
+        trace_root: ch.trace_root,
+    })
+}
+
+pub fn gen_vfri11_hints_from_cols_nfolds(
+    cols:              &[Vec<u32>],
+    tree_depth:        u32,
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds_opt:     Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    let Vfri11Chain {
+        trace_root,
+        z_x,
+        oods_combo_pos,
+        oods_combo_neg,
+        comp_values,
+        comp_levels,
+        comp_root,
+        fri_alpha,
+        fri_alphas,
+        layer_values,
+        layer_levels,
+        layer_roots,
+        num_folds,
+        derived_indices,
+        ..
+    } = vfri11_fri_chain(cols, tree_depth, batch_merkle_root, n_queries, num_folds_opt)?;
+    let last_layer_evals: Vec<u128> = layer_values[num_folds].clone();
 
     let mut hint_structs: Vec<QueryHintDataV5> = Vec::new();
     for &idx in &derived_indices {
@@ -7509,6 +7688,81 @@ mod tests_vfri8 {
         let r1 = gen_vfri11_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
         let r2 = gen_vfri11_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
         assert_eq!(r1, r2);
+    }
+
+    // R4.1: the recursion bridge extracts per-query inputs from the REAL VFRI11
+    // FRI chain, and the t=8 recursive composition proves + verifies the inner
+    // proof's decommitments against the GENUINE committed last-layer root.
+    #[test]
+    fn test_vfri11_recursion_inputs_end_to_end() {
+        use crate::recursive::composition_t8::{
+            prove_queries_membership_t8, verify_queries_membership_t8,
+        };
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..6)
+            .map(|j| (0..n).map(|i| ((i * 7 + j * 13 + 1) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x22u8; 32];
+
+        let inputs = gen_vfri11_recursion_inputs(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        assert_eq!(inputs.queries.len(), 2);
+        assert_eq!(inputs.paths.len(), 2);
+        // Last layer at depth 4 with 2 folds: 16/4 = 4 leaves → path depth 2.
+        assert_eq!(inputs.paths[0].0.len(), 2);
+
+        // Shared-chain consistency: the ABI generator embeds the SAME trace root.
+        let (proof_bytes, _, _) =
+            gen_vfri11_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        assert_eq!(&proof_bytes[8..40], &inputs.trace_root, "bridge and ABI generator must share the chain");
+
+        // The recursion proves the REAL decommitments in ONE STARK…
+        let r = prove_queries_membership_t8(&inputs.queries, &inputs.paths).unwrap();
+        assert_eq!(r.finals, inputs.finals, "recursion finals must equal the real fold-chain outputs");
+        // …and every query's path lands on the GENUINE committed last-layer root.
+        for root in &r.roots {
+            assert_eq!(*root, inputs.last_layer_root, "path must authenticate into friLayerRoots[K]");
+        }
+        let pxs: Vec<u32> = inputs.queries.iter().map(|(s, _)| s.2).collect();
+        assert!(
+            verify_queries_membership_t8(
+                &r.proof, r.log_size, r.num_folds, r.depth, &r.challenges,
+                &pxs, &r.finals, &r.indices, &r.roots,
+            )
+            .unwrap(),
+            "the recursive proof over REAL VFRI11 data must verify",
+        );
+        // A tampered claimed root (≠ the committed one) must not verify.
+        let mut bad = r.roots.clone();
+        bad[0][0] ^= 1;
+        assert!(
+            !verify_queries_membership_t8(
+                &r.proof, r.log_size, r.num_folds, r.depth, &r.challenges,
+                &pxs, &r.finals, &r.indices, &bad,
+            )
+            .unwrap_or(false),
+            "a root ≠ the committed FRI-layer root must not verify",
+        );
+    }
+
+    // The bridge must work at the odd-orientation edge too: many queries so some
+    // fold rounds hit the high half (cur_idx ≥ layer_sz → negated twiddle inverse).
+    #[test]
+    fn test_vfri11_recursion_inputs_orientation_coverage() {
+        use crate::recursive::composition_t8::prove_queries_membership_t8;
+        let n = 32usize;
+        let cols: Vec<Vec<u32>> = (0..3)
+            .map(|j| (0..n).map(|i| ((i * 11 + j * 17 + 5) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x9Au8; 32];
+        // depth 5, 3 folds, 6 queries → high odds of both fold orientations.
+        let inputs = gen_vfri11_recursion_inputs(&cols, 5, &batch_root, 6, Some(3)).unwrap();
+        // The hard invariant inside the bridge already rejects any orientation
+        // error; proving must then succeed over the real data.
+        let r = prove_queries_membership_t8(&inputs.queries, &inputs.paths).unwrap();
+        assert_eq!(r.finals, inputs.finals);
+        for root in &r.roots {
+            assert_eq!(*root, inputs.last_layer_root);
+        }
     }
 
     /// Writes the VFRI11 E2E fixture consumed by QLSAVerifierVFRI11E2E.test.js.

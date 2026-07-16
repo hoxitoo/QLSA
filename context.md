@@ -1,5 +1,35 @@
 # QLSA — Project Context
 
+## Рекурсия R4.1 (2026-07-16) — рекурсия верифицирует РЕАЛЬНЫЙ VFRI11-конвейер
+
+Старт финальной фазы (R4, on-chain интеграция) с её первого пункта: **«root vs committed FRI-layer
+root» закрыт на Rust-уровне** — рекурсивная композиция доказывает per-query decommitments настоящего
+VFRI11-конвейера против подлинного committed-корня последнего FRI-слоя (не синтетических данных).
+Это же закрывает критическое замечание роадмапа №5 (bootstrapping: сперва рекурсия мини-proof на
+реальных данных).
+
+- **Рефакторинг без изменения поведения:** FRI-цепочка `gen_vfri11_hints_from_cols_nfolds`
+  (транскрипт t=8-канала: mix trace root → z_x → comp_alpha → combos → comp root → friAlpha →
+  fold-слои → batch root → draw indices) вынесена в общий helper `vfri11_fri_chain` — ABI-генератор
+  и мост рекурсии потребляют ОДНУ реализацию, дрейф невозможен по построению. Существующие
+  VFRI11-тесты зелёные без правок.
+- **`gen_vfri11_recursion_inputs`** извлекает per-query входы рекурсии: `StepOp` (f± из OODS-квотиентов,
+  px, z_x, combos, friAlpha, y⁻¹), fold-раунды (sibling из слоя k, channel-alpha_k,
+  index-ориентированный twiddle⁻¹), путь финального фолда в committed last-layer дерево (4-словные
+  t=8 узлы), `last_layer_root`, `trace_root`. **Тонкость ориентации:** VFRI кладёт cur в
+  (gp,gm)=(sib,cur) при cur_idx ≥ layer_sz; рекурсия всегда цепляет cur как операнд `a` — свап
+  эквивалентен отрицанию twiddle⁻¹ ((b−a)·inv = (a−b)·(P−inv)), знак детерминирован битом индекса.
+  **Жёсткий инвариант** (не debug-only): извлечённая цепочка обязана воспроизвести committed-значение
+  последнего слоя, иначе Err.
+- **E2E-тесты (2):** мост → `prove_queries_membership_t8` → `verify == true` над реальными данными;
+  `finals` == реальные fold-выходы; каждый путь аутентифицируется в подлинный `friLayerRoots[K]`;
+  `trace_root` моста == `proof[8..40]` ABI-генератора (доказательство общей цепочки); tamper root →
+  reject. Плюс orientation-coverage (depth 5 × 3 фолда × 6 запросов — обе ориентации).
+  **507 тестов (150 рекурсивных), 0 предупреждений.**
+- **Дальше:** on-chain channel-replay (дешёвый Poseidon2-канал absorb roots → draw challenges/indices,
+  сверка с public inputs рекурсивного proof) → `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
+  `docs/roadmap/recursion.md` § R4.1.
+
 ## Рекурсия R3.18 (2026-07-16) — 128-битный inner-hash стек ЗАВЕРШЁН (t=16 path + композиция)
 
 Завершение лестницы inner-hash: t=16 Merkle-path AIR + композиция — тот же механический swap, что

@@ -337,6 +337,26 @@ ML-DSA подпись
     раза — R3.15, R3.16, R3.18). **150 рекурсивных тестов (505 всего), 0 предупреждений.**
   - Дальше: on-chain интеграция — root vs committed FRI-layer root, channel-replay,
     `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
+- **R4.1 — рекурсия верифицирует РЕАЛЬНЫЙ VFRI11-конвейер: root vs committed FRI-layer root (2026-07-16)** — ✅ **готов**
+  - Рефакторинг (чистый code-motion): FRI-цепочка `gen_vfri11_hints_from_cols_nfolds` вынесена в общий
+    helper `vfri11_fri_chain` (транскрипт t=8-канала, OODS, comp-дерево, fold-слои, деревья слоёв,
+    derived indices) — ABI-генератор и новый мост потребляют ОДНУ реализацию и не могут разойтись
+    по построению. Существующие VFRI11-тесты (smoke/deterministic/differs) зелёные без изменений.
+  - **`gen_vfri11_recursion_inputs`** (vfri2_bridge.rs): извлекает из реального конвейера per-query
+    входы рекурсии — `StepOp` (f±, px, z_x, combos, friAlpha, y⁻¹), fold-раунды (sibling, channel-alpha,
+    index-ориентированный twiddle⁻¹) и Merkle-путь финального фолда в **committed** last-layer дерево.
+    Тонкость ориентации: `line_fold(sib, cur)` при cur в верхней половине = тот же фолд с ОТРИЦАННЫМ
+    twiddle⁻¹ ((b−a)·inv = (a−b)·(P−inv)) — знак детерминирован битом индекса (публичные данные).
+    Жёсткий инвариант (не debug-only): извлечённая цепочка обязана воспроизвести committed-значение
+    последнего слоя, иначе Err — любая ошибка ориентации/извлечения ловится немедленно.
+  - **E2E-тесты:** (1) мост + `prove_queries_membership_t8` над реальными данными → `verify == true`,
+    `finals == реальные fold-выходы`, каждый путь аутентифицируется в ПОДЛИННЫЙ `friLayerRoots[K]`;
+    трейс-корень моста == `proof[8..40]` ABI-генератора (общая цепочка); tamper root → reject.
+    (2) orientation-coverage: depth 5 × 3 фолда × 6 запросов — обе ориентации fold-раундов.
+    **«root vs committed FRI-layer root» закрыт на Rust-уровне. 507 тестов (150 рекурсивных),
+    0 предупреждений.**
+  - Дальше: on-chain channel-replay (absorb roots → draw challenges/indices, сверка с public inputs
+    рекурсивного proof) + `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
