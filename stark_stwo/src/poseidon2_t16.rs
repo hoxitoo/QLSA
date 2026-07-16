@@ -216,6 +216,126 @@ mod tests {
         assert_ne!(det, 0, "M_I = J + diag(1..16) must be invertible over M31");
     }
 
+    // ── 16×16 naive reference matrices + helpers (mirror poseidon2_t8.rs) ────────
+
+    fn det16(mat: [[u64; 16]; 16]) -> u64 {
+        let mut m = mat;
+        let mut det = 1u64;
+        for col in 0..16 {
+            let mut piv = col;
+            while piv < 16 && m[piv][col] % M31_P == 0 {
+                piv += 1;
+            }
+            if piv == 16 {
+                return 0;
+            }
+            if piv != col {
+                m.swap(piv, col);
+                det = m31_sub(0, det);
+            }
+            det = m31_mul(det, m[col][col]);
+            let inv_p = mod_inv(m[col][col]);
+            for row in (col + 1)..16 {
+                let factor = m31_mul(m[row][col], inv_p);
+                for k in col..16 {
+                    let sub = m31_mul(factor, m[col][k]);
+                    m[row][k] = m31_sub(m[row][k], sub);
+                }
+            }
+        }
+        det
+    }
+
+    // Naive M_E = circ(2·M4, M4, M4, M4): block (a,b) is 2·M4 on the diagonal
+    // (a==b), M4 off-diagonal — the circulant with first block-row [2·M4,M4,M4,M4].
+    fn external_matrix16() -> [[u64; 16]; 16] {
+        const M4: [[u64; 4]; 4] = [[5, 7, 1, 3], [4, 6, 1, 1], [1, 3, 5, 7], [1, 1, 4, 6]];
+        let mut m = [[0u64; 16]; 16];
+        for a in 0..4 {
+            for b in 0..4 {
+                let scale = if a == b { 2 } else { 1 };
+                for i in 0..4 {
+                    for j in 0..4 {
+                        m[4 * a + i][4 * b + j] = m31_mul(scale, M4[i][j]);
+                    }
+                }
+            }
+        }
+        m
+    }
+
+    fn internal_matrix16() -> [[u64; 16]; 16] {
+        let mut m = [[1u64; 16]; 16];
+        for i in 0..16 {
+            m[i][i] = (1 + (i as u64 + 1)) % M31_P; // J diagonal (1) + μ_i (i+1)
+        }
+        m
+    }
+
+    fn matvec16(m: &[[u64; 16]; 16], v: &[u64; 16]) -> [u64; 16] {
+        let mut out = [0u64; 16];
+        for i in 0..16 {
+            let mut acc = 0u64;
+            for j in 0..16 {
+                acc = m31_add(acc, m31_mul(m[i][j], v[j] % M31_P));
+            }
+            out[i] = acc;
+        }
+        out
+    }
+
+    #[test]
+    fn test_external_matrix_invertible() {
+        assert_ne!(det16(external_matrix16()), 0, "M_E must be invertible over M31");
+    }
+
+    #[test]
+    fn test_mat_external_matches_naive() {
+        let me = external_matrix16();
+        let inputs: [[u64; 16]; 3] = [
+            std::array::from_fn(|i| (i as u64) + 1),
+            {
+                let mut a = [0u64; 16];
+                a[9] = 1;
+                a
+            },
+            std::array::from_fn(|i| ((i as u64 + 1) * 123_456_789) % M31_P),
+        ];
+        for inp in inputs {
+            let mut fast = inp;
+            mat_external(&mut fast);
+            assert_eq!(fast, matvec16(&me, &inp), "fast M_E diverges for {inp:?}");
+        }
+    }
+
+    #[test]
+    fn test_mat_internal_matches_naive() {
+        let mi = internal_matrix16();
+        let inputs: [[u64; 16]; 3] = [
+            std::array::from_fn(|i| (i as u64) + 1),
+            {
+                let mut a = [0u64; 16];
+                a[3] = 1;
+                a
+            },
+            std::array::from_fn(|i| (M31_P - 1 - i as u64) % M31_P),
+        ];
+        for inp in inputs {
+            let mut fast = inp;
+            mat_internal(&mut fast);
+            assert_eq!(fast, matvec16(&mi, &inp), "fast M_I diverges for {inp:?}");
+        }
+    }
+
+    #[test]
+    fn test_rc_count_and_range() {
+        assert_eq!(K_RC.len(), T * R_F + R_P);
+        assert_eq!(K_RC.len(), 142);
+        for &c in K_RC.iter() {
+            assert!((c as u64) < M31_P);
+        }
+    }
+
     fn mod_inv(a: u64) -> u64 {
         // Fermat: a^(p-2) mod p
         let mut base = a % M31_P;

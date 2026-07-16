@@ -2,21 +2,21 @@
 //!
 //! The wide analogue of [`super::merkle_path_air`] (t=2, 31-bit nodes): proves a
 //! Merkle authentication path over **8-word (248-bit) M31 nodes** using the
-//! Poseidon2 t=16 2-to-1 compression [`crate::poseidon2_t8::compress_t16`] (node
+//! Poseidon2 t=16 2-to-1 compression [`crate::poseidon2_t16::compress_t16`] (node
 //! collision ~2^124 ≈ 128-bit — the ladder's target level).  This is the hash a **VFRI11** inner proof's
 //! FRI-layer Merkle trees use, so it is the path the recursion must replicate to
 //! verify a real VFRI11 decommitment.
 //!
-//! It is to [`super::poseidon2_t8_air`] (single t=8 compression) exactly what
+//! It is to [`super::poseidon2_t16_air`] (single t=8 compression) exactly what
 //! `merkle_path_air` is to `poseidon2_merkle_air`: the same round arithmetization,
 //! chained across `depth` compressions with per-compression child selection.
 //!
-//! # Path semantics (4-word nodes)
+//! # Path semantics (8-word nodes)
 //!
-//! For depth `D`, `cur₀ = leaf` (∈ M31⁴) and index bits `b₀ … b_{D-1}` (LSB first):
+//! For depth `D`, `cur₀ = leaf` (∈ M31⁸) and index bits `b₀ … b_{D-1}` (LSB first):
 //!
 //! ```text
-//! (left_i, right_i) = b_i ? (sib_i, cur_i) : (cur_i, sib_i)   // each ∈ M31⁴
+//! (left_i, right_i) = b_i ? (sib_i, cur_i) : (cur_i, sib_i)   // each ∈ M31⁸
 //! cur_{i+1}         = compress_t16(left_i, right_i)
 //! root              = cur_D
 //! ```
@@ -473,7 +473,7 @@ pub fn build_trace(
             state = out;
             carry_state = out;
         }
-        // Node = out[0..4] of this compression's last round.
+        // Node = out[0..8] of this compression's last round.
         cur = [state[0], state[1], state[2], state[3], state[4], state[5], state[6], state[7]];
         if c + 1 == depth {
             root = cur;
@@ -729,7 +729,7 @@ fn mix_public(channel: &mut Blake2sM31Channel, leaf: [u64; 8], index: u32, root:
     channel.mix_u32s(&words);
 }
 
-/// Prove a t=8 Merkle authentication path. Returns `(proof_bytes, log_size, root)`.
+/// Prove a t=16 Merkle authentication path. Returns `(proof_bytes, log_size, root)`.
 pub fn prove_merkle_path_t16(
     leaf: [u64; 8],
     sibs: &[[u64; 8]],
@@ -772,9 +772,9 @@ pub fn prove_merkle_path_t16(
 
     let component = new_component(log_size);
     let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
-        .map_err(|e| format!("t8 merkle-path proving error: {e:?}"))?;
+        .map_err(|e| format!("t16 merkle-path proving error: {e:?}"))?;
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
-        .map_err(|e| format!("t8 merkle-path serialize error: {e:?}"))?;
+        .map_err(|e| format!("t16 merkle-path serialize error: {e:?}"))?;
     Ok((bytes, log_size, root))
 }
 
@@ -802,7 +802,7 @@ pub fn verify_merkle_path_t16(
             proof_bytes,
             bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
         )
-        .map_err(|e| format!("t8 merkle-path deserialize error: {e:?}"))?;
+        .map_err(|e| format!("t16 merkle-path deserialize error: {e:?}"))?;
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;

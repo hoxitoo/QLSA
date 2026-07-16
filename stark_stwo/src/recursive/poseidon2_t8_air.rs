@@ -23,7 +23,7 @@
 //! → 14 internal rounds (AddRC cell 0, S-box cell 0, `mat_internal`) → 4 external
 //! rounds.  22 rounds total; one round per trace row.
 //!
-//! # Trace layout (32 main columns + 11 preprocessed)
+//! # Trace layout (40 main columns + 24 preprocessed)
 //!
 //! ```text
 //! Main (one round per row):
@@ -100,11 +100,32 @@ pub fn pc_is_int() -> PreProcessedColumnId {
 pub fn pc_is_first() -> PreProcessedColumnId {
     PreProcessedColumnId { id: "p2t8_is_first".into() }
 }
+/// `raw_pin[0..T]` — verifier-fixed compression input (left‖right); the AIR pins
+/// the trace's `raw` (row 0) to it so `(left, right)` are bound in-circuit (C1),
+/// not just via Fiat-Shamir (closes the standalone-gadget value-binding gap).
+pub fn pc_raw(i: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("p2t8_raw{i}") }
+}
+/// `node_pin[0..T/2]` — verifier-fixed output node; the AIR pins the trace's
+/// output row to it (C1). `is_node` marks the last real round row.
+pub fn pc_node(k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("p2t8_node{k}") }
+}
+pub fn pc_is_node() -> PreProcessedColumnId {
+    PreProcessedColumnId { id: "p2t8_is_node".into() }
+}
 pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     let mut ids: Vec<PreProcessedColumnId> = (0..T).map(pc_rc).collect();
     ids.push(pc_is_ext());
     ids.push(pc_is_int());
     ids.push(pc_is_first());
+    for i in 0..T {
+        ids.push(pc_raw(i));
+    }
+    for k in 0..(T / 2) {
+        ids.push(pc_node(k));
+    }
+    ids.push(pc_is_node());
     ids
 }
 
@@ -187,6 +208,9 @@ impl FrameworkEval for Poseidon2T8Eval {
         let is_ext = eval.get_preprocessed_column(pc_is_ext());
         let is_int = eval.get_preprocessed_column(pc_is_int());
         let is_first = eval.get_preprocessed_column(pc_is_first());
+        let raw_pin: Vec<E::F> = (0..T).map(|i| eval.get_preprocessed_column(pc_raw(i))).collect();
+        let node_pin: Vec<E::F> = (0..(T / 2)).map(|k| eval.get_preprocessed_column(pc_node(k))).collect();
+        let is_node = eval.get_preprocessed_column(pc_is_node());
 
         // Main columns. `out` needs previous-row access for the round chain.
         let inp: Vec<E::F> =
@@ -243,6 +267,17 @@ impl FrameworkEval for Poseidon2T8Eval {
             eval.add_constraint(inp[i].clone() - expected);
         }
 
+        // ── C1: pin the compression input (row 0) and output node (last row) ─────
+        // `is_first·(raw[i] − raw_pin[i]) = 0` binds (left, right); `is_node·(out[k]
+        // − node_pin[k]) = 0` binds the claimed node — a prover can no longer prove
+        // a false `compress(FAKE_left, FAKE_right) = node` claim.
+        for i in 0..T {
+            eval.add_constraint(is_first.clone() * (raw[i].clone() - raw_pin[i].clone()));
+        }
+        for k in 0..(T / 2) {
+            eval.add_constraint(is_node.clone() * (out[k].clone() - node_pin[k].clone()));
+        }
+
         eval
     }
 }
@@ -284,7 +319,7 @@ pub(crate) fn round_schedule(row: usize) -> (bool, [u64; T]) {
 
 // ── Preprocessed columns (witness-free canonical source, C2) ────────────────────
 
-pub fn build_preproc(log_size: u32) -> TraceColumns {
+pub fn build_preproc(left: [u64; 4], right: [u64; 4], node: [u64; 4], log_size: u32) -> TraceColumns {
     let n = 1usize << log_size;
     let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
@@ -295,6 +330,9 @@ pub fn build_preproc(log_size: u32) -> TraceColumns {
     let mut is_ext_c = vec![bf0; n];
     let mut is_int_c = vec![bf0; n];
     let mut is_first_c = vec![bf0; n];
+    let mut raw_cols: Vec<Vec<BaseField>> = (0..T).map(|_| vec![bf0; n]).collect();
+    let mut node_cols: Vec<Vec<BaseField>> = (0..(T / 2)).map(|_| vec![bf0; n]).collect();
+    let mut is_node_c = vec![bf0; n];
 
     for row in 0..N_REAL_ROWS.min(n) {
         let (is_ext, rc) = round_schedule(row);
@@ -309,12 +347,28 @@ pub fn build_preproc(log_size: u32) -> TraceColumns {
     }
     if n > 0 {
         is_first_c[0] = one;
+        // raw_pin = left‖right on row 0 (matches the trace's raw columns).
+        for i in 0..(T / 2) {
+            raw_cols[i][0] = m31(left[i]);
+            raw_cols[(T / 2) + i][0] = m31(right[i]);
+        }
+    }
+    // node_pin + is_node on the last real round row (out[0..T/2] = the node).
+    if N_REAL_ROWS <= n {
+        let node_row = N_REAL_ROWS - 1;
+        is_node_c[node_row] = one;
+        for k in 0..(T / 2) {
+            node_cols[k][node_row] = m31(node[k]);
+        }
     }
 
     let mut all = rc_cols;
     all.push(is_ext_c);
     all.push(is_int_c);
     all.push(is_first_c);
+    all.extend(raw_cols);
+    all.extend(node_cols);
+    all.push(is_node_c);
     for c in all.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(c);
     }
@@ -322,6 +376,9 @@ pub fn build_preproc(log_size: u32) -> TraceColumns {
 }
 
 fn canonical_preproc_root(
+    left: [u64; 4],
+    right: [u64; 4],
+    node: [u64; 4],
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
     let config = make_config(log_size);
@@ -333,7 +390,7 @@ fn canonical_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(build_preproc(log_size));
+    tree.extend_evals(build_preproc(left, right, node, log_size));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
@@ -447,7 +504,7 @@ pub fn prove_compress(left: [u64; 4], right: [u64; 4]) -> Result<(Vec<u8>, u32, 
     let log_size = LOG_SIZE;
     let (main_trace, node) = build_trace(left, right, log_size);
     debug_assert_eq!(node, compress_t8(left, right), "trace node must match reference");
-    let preproc = build_preproc(log_size);
+    let preproc = build_preproc(left, right, node, log_size);
 
     let config = make_config(log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -509,7 +566,7 @@ pub fn verify_compress(
         return Err(format!("malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
     // C2: pin the preprocessed tree (round constants + selectors) to canonical.
-    if proof.commitments[0] != canonical_preproc_root(log_size) {
+    if proof.commitments[0] != canonical_preproc_root(left, right, node, log_size) {
         return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
@@ -611,6 +668,41 @@ mod tests {
         assert!(!verify_compress(&proof, log, wrong_l, r, node).unwrap_or(false), "a wrong input must not verify");
     }
 
+    // C1 regression: a prover with an internally-valid trace for (X_left, X_right)
+    // who pins/claims a DIFFERENT (FAKE) input cannot build a proof — the
+    // is_first-gated raw-binding constraint is violated. Before the C1 fix, a
+    // false `compress(FAKE) = node` claim would have VERIFIED (only Fiat-Shamir).
+    #[test]
+    fn test_forged_input_cannot_prove() {
+        let mut s = 0xF00_C1_u64;
+        let l = rand_node(&mut s);
+        let r = rand_node(&mut s);
+        let log = LOG_SIZE;
+        let (main, node) = build_trace(l, r, log);
+        // Pin a DIFFERENT input than the trace's committed raw.
+        let mut fake_l = l;
+        fake_l[0] ^= 1;
+        let forged = build_preproc(fake_l, r, node, log);
+        let config = make_config(log);
+        let twiddles = CpuBackend::precompute_twiddles(
+            CanonicCoset::new(log + LOG_BLOWUP + 1).circle_domain().half_coset,
+        );
+        let channel = &mut Blake2sM31Channel::default();
+        let mut scheme =
+            CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+        scheme.set_store_polynomials_coefficients();
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(forged);
+        tree.commit(channel);
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(main);
+        tree.commit(channel);
+        mix_public(channel, fake_l, r, node);
+        let component = new_component(log);
+        let res = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, scheme);
+        assert!(res.is_err(), "trace raw != pinned raw_pin must violate the input-binding constraint (C1)");
+    }
+
     // A corrupted trace (perturbed s0 output) must not yield a verifying proof.
     #[test]
     fn test_corrupted_trace_rejected() {
@@ -624,7 +716,7 @@ mod tests {
         vals[1] = vals[1] + BaseField::from_u32_unchecked(1);
         main[3 * T] = CircleEvaluation::new(domain, vals);
 
-        let preproc = build_preproc(log);
+        let preproc = build_preproc(l, r, node, log);
         let config = make_config(log);
         let twiddles = CpuBackend::precompute_twiddles(
             CanonicCoset::new(log + LOG_BLOWUP + 1).circle_domain().half_coset,
@@ -659,7 +751,7 @@ mod tests {
         let r = rand_node(&mut s);
         let log = LOG_SIZE;
         let (main, node) = build_trace(l, r, log);
-        let mut preproc = build_preproc(log);
+        let mut preproc = build_preproc(l, r, node, log);
         let domain = CanonicCoset::new(log).circle_domain();
         let n = 1usize << log;
         // Forge is_ext (index T = 8) → all-zero.

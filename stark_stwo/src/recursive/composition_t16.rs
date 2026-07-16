@@ -3,11 +3,11 @@
 //!
 //! The t=16 analogue of [`super::composition`]: it swaps the inner hash from the
 //! t=8 path (8-word nodes → 2^62) to the
-//! [`super::merkle_path_t8_air`] (8-word/248-bit nodes → ~2^124 ≈ 128-bit collision), the hash
+//! [`super::merkle_path_t16_air`] (8-word/248-bit nodes → ~2^124 ≈ 128-bit collision), the hash
 //! a recursion's 128-bit target requires.  For one FRI query it proves:
 //!
 //! ```text
-//! ┌ recursive_verifier ┐  finalFold   (verifier)   leaf8     ┌ merkle_path_t8 ┐
+//! ┌ recursive_verifier ┐  finalFold   (verifier)   leaf8     ┌ merkle_path_t16 ┐
 //! │ OODS± + circle fold│ ───────────▶ hashLeaf_t16 ────────▶ │ leaf @ index    │──▶ root
 //! │ + K line folds     │  (pinned)                (pinned)   │ + siblings (t8) │
 //! └────────────────────┘                                     └─────────────────┘
@@ -129,7 +129,7 @@ fn mix_public(
     channel.mix_u32s(&words);
 }
 
-/// Result of a t=8 composition proof.
+/// Result of a t=16 composition proof.
 pub struct QueryMembershipT16Result {
     pub proof: Vec<u8>,
     pub log_size: u32,
@@ -220,9 +220,9 @@ pub fn prove_query_membership_t16(
     );
 
     let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&rv_comp, &merkle_comp], channel, scheme)
-        .map_err(|e| format!("t8 composition prove error: {e:?}"))?;
+        .map_err(|e| format!("t16 composition prove error: {e:?}"))?;
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
-        .map_err(|e| format!("t8 composition serialize error: {e:?}"))?;
+        .map_err(|e| format!("t16 composition serialize error: {e:?}"))?;
 
     Ok(QueryMembershipT16Result {
         proof: bytes,
@@ -274,7 +274,7 @@ pub fn verify_query_membership_t16(
             proof_bytes,
             bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
         )
-        .map_err(|e| format!("t8 composition deserialize error: {e:?}"))?;
+        .map_err(|e| format!("t16 composition deserialize error: {e:?}"))?;
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
@@ -297,7 +297,7 @@ pub fn verify_query_membership_t16(
     let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
     if proof.commitments.len() < 2 {
-        return Err(format!("t8 composition: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+        return Err(format!("t16 composition: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
 
     // C1/C2: pin the combined preprocessed tree — selectors, the pinned finalFold
@@ -367,7 +367,7 @@ fn mix_public_queries(
         words.extend_from_slice(&[pxs[i], l[0] as u32, l[1] as u32, l[2] as u32, l[3] as u32]);
     }
     channel.mix_u32s(&words);
-    let mut mwords = Vec::with_capacity(leaves.len() * 9);
+    let mut mwords = Vec::with_capacity(leaves.len() * 17);
     for p in 0..leaves.len() {
         mwords.extend(leaves[p].iter().map(|&v| w(v)));
         mwords.push(indices[p]);
@@ -476,9 +476,9 @@ pub fn prove_queries_membership_t16(
     );
 
     let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&rv_comp, &merkle_comp], channel, scheme)
-        .map_err(|e| format!("N-query t8 composition prove error: {e:?}"))?;
+        .map_err(|e| format!("N-query t16 composition prove error: {e:?}"))?;
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
-        .map_err(|e| format!("N-query t8 composition serialize error: {e:?}"))?;
+        .map_err(|e| format!("N-query t16 composition serialize error: {e:?}"))?;
 
     let challenges: Vec<rv::QueryChallenges> =
         queries.iter().map(|(s, r)| rv::query_challenges(s, r)).collect();
@@ -543,7 +543,7 @@ pub fn verify_queries_membership_t16(
             proof_bytes,
             bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
         )
-        .map_err(|e| format!("N-query t8 deserialize error: {e:?}"))?;
+        .map_err(|e| format!("N-query t16 deserialize error: {e:?}"))?;
 
     let mut config = PcsConfig::default();
     config.fri_config.log_blowup_factor = LOG_BLOWUP;
@@ -566,7 +566,7 @@ pub fn verify_queries_membership_t16(
     let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
     if proof.commitments.len() < 2 {
-        return Err(format!("N-query t8: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+        return Err(format!("N-query t16: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
     let canonical_root = canonical_queries_preproc_root(
         finals, challenges, num_folds, &leaves, indices, roots, depth, log_size,
@@ -629,7 +629,7 @@ mod tests {
         assert!(
             verify_query_membership_t16(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, step.2, r.final_fold, r.index, r.root)
                 .unwrap(),
-            "an honest t=8 composition proof must verify",
+            "an honest t=16 composition proof must verify",
         );
     }
 
