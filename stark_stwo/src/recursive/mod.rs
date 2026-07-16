@@ -103,14 +103,97 @@
 //! hostile inputs (division-by-zero at depth 0, OOB preproc writes, 2^40 allocs).
 //! Remaining after R3.12: root vs the *committed FRI-layer root* (on-chain
 //! integration), t=16 inner hash, `QLSAVerifierRecursive.sol`.
+//!
+//! **R3.13 (2026-07-13) — wide inner-hash primitive:** `poseidon2_t8_air`
+//! arithmetizes the Poseidon2 **t=8** compression (`compress_t8`, 4-word/124-bit
+//! nodes → ~2^62 node collision) as a provable AIR — the wide analogue of the t=2
+//! `poseidon2_merkle_air`, and the hash the recursion must replicate to verify a
+//! VFRI11 inner proof (whose FRI-layer trees use the t=8 backend). One round per
+//! row (4 external + 14 internal + 4 external), S-box square/output helper columns,
+//! exact `mat_external`/`mat_internal` linear layers, C2 preprocessed pinning.
+//! Validated by rebuilding the honest trace from the already-cross-checked
+//! `permute_t8` reference (a wrong constraint fails the honest proof, not silently
+//! passes). 7 tests.
+//!
+//! **R3.14 (2026-07-13) — wide Merkle-path AIR:** `merkle_path_t8_air`
+//! authenticates a path over **4-word (124-bit) nodes** via `compress_t8` — the
+//! wide analogue of `merkle_path_air` (t=2), and the path the recursion must
+//! replicate to verify a VFRI11 FRI-layer decommitment (node collision 2^15.5 →
+//! 2^62).  Reuses `poseidon2_t8_air`'s round arithmetization
+//! (`round_schedule`/`mat_external_expr`/`mat_internal_expr`), chained across
+//! `depth` compressions of 22 rounds each; the cross-compression `cur` chain uses
+//! the same `out[-1]` adjacency trick as the t=2 path.  45 main + 22 preproc cols;
+//! C1 index/leaf/root binding (all pinned in-circuit, matching on-chain
+//! `Poseidon2MerkleVerifierT8.verify`) + C2 preprocessed pinning.  Reference-driven
+//! validation + roundtrip depth 1/3/5 + wrong-root/-leaf/-index/tampered +
+//! forged-root/-preproc rejection. 11 tests.
+//!
+//! **R3.15 (2026-07-13) — wide (t=8) composition:** `composition_t8` proves
+//! `recursive_verifier` + `merkle_path_t8` in ONE STARK — the t=8 analogue of
+//! `composition`, swapping the inner hash from t=2 (31-bit nodes) to t=8 (4-word
+//! nodes → 2^62 collision), the hash a VFRI11 FRI-layer decommitment uses. The
+//! fold-chain component (QM31) is unchanged; the connection binds
+//! `leaf4 = qm31_leaf_hash_t8(finalFold)` (a deterministic public function of the
+//! pinned finalFold) into `merkle_path_t8`'s pinned 4-word `leaf` columns, so the
+//! wide path authenticates exactly the fold-chain output. Value-bound end-to-end
+//! fully in-circuit: finalFold (pinned) → hashLeaf_t8 → leaf4 (pinned) → t=8 path →
+//! root (pinned). `prove_query_membership_t8` / `verify_query_membership_t8`,
+//! 3 tests. This lifts the recursion's inner-hash node collision to ~2^62; t=16
+//! (128-bit) is the same swap once a t=16 path AIR exists.
+//!
+//! **R3.16 (2026-07-16) — N-query wide composition (VFRI11 shape on t=8):**
+//! `prove_queries_membership_t8` / `verify_queries_membership_t8` prove N fold
+//! chains + N wide (4-word-node) Merkle paths in ONE STARK — the t=8 analogue of
+//! R3.9's N-query composition, built on new multi-path t=8 builders
+//! (`merkle_path_t8_air::build_trace_multi` / `build_preproc_multi` /
+//! `compute_log_size_multi`; AIR unchanged — `is_first_path`/`is_root` gate each
+//! path's leaf reset and root pin per block). Per-query leaves are recomputed by
+//! the verifier as `qm31_leaf_hash_t8(final)` and pinned; every path's root is
+//! pinned in-circuit. Input caps included from the start (R3.12 lesson):
+//! MAX_QUERIES / MAX_NUM_FOLDS / MAX_DEPTH / log_size range / trace capacity.
+//! 2 tests (3-query roundtrip + per-query wrong-final/wrong-root rejection;
+//! hostile-input validation). Next: t=16 for full 128-bit; root vs committed
+//! FRI-layer root (on-chain integration); `QLSAVerifierRecursive.sol`.
+//!
+//! **R3.17 (2026-07-16) — the 128-bit inner hash: t=16 permutation + compression
+//! AIR:** `crate::poseidon2_t16` implements the Poseidon2 t=16 permutation
+//! (R_F=8, R_P=14, α=5; M_E = circ(2·M4, M4, M4, M4); M_I = J + diag(1..16),
+//! invertibility asserted; RC by the documented SHA-256 domain rule) with a
+//! rate-8/capacity-8 sponge and a 2-to-1 compression over **8-word (248-bit)
+//! nodes → ~2^124 ≈ 128-bit node collision** — the FINAL rung of the ladder,
+//! matching the width of Stwo's native Poseidon2-16. `poseidon2_t16_air`
+//! arithmetizes `compress_t16` (80 main + 19 preproc cols, same
+//! one-round-per-row + `sq`/`sbox` helper pattern as t=8; generic 16-cell
+//! `mat_external16_expr`/`mat_internal16_expr` cross-checked against the
+//! reference layers), C2-pinned. 6 + 7 tests.
+//!
+//! **R3.18 (2026-07-16) — the 128-bit inner-hash stack COMPLETE:**
+//! `merkle_path_t16_air` authenticates a path over **8-word (248-bit) nodes**
+//! via `compress_t16` (89 main + 38 preproc cols; C1 index/leaf/root binding +
+//! C2 pinning; same `out[-1]` adjacency chain, multi-path builders included),
+//! and `composition_t16` proves `recursive_verifier` + `merkle_path_t16` in ONE
+//! STARK — single-query AND N-query (VFRI11 shape) — binding
+//! `leaf8 = qm31_leaf_hash_t16(finalFold)` into the pinned 8-word leaf columns.
+//! Value-bound end-to-end fully in-circuit at **~2^124 ≈ 128-bit node
+//! collision**: finalFold (pinned) → hashLeaf_t16 → leaf8 (pinned) → t=16 path →
+//! root (pinned). The inner-hash ladder (t=2 → t=8 → t=16) is now complete
+//! in-circuit; each rung was a pure hash-backend swap with the composition
+//! pattern unchanged. 11 + 5 tests. Next: on-chain integration — root vs
+//! committed FRI-layer root, channel-replay, `QLSAVerifierRecursive.sol`.
 
 pub mod channel_air;
 pub mod composition;
+pub mod composition_t16;
+pub mod composition_t8;
 pub mod fold_air;
 pub mod fri_fold_chain_air;
 pub mod integration;
 pub mod merkle_path_air;
+pub mod merkle_path_t16_air;
+pub mod merkle_path_t8_air;
 pub mod oods_air;
+pub mod poseidon2_t16_air;
+pub mod poseidon2_t8_air;
 pub mod qm31_mul_air;
 pub mod query_step_air;
 pub mod recursive_verifier;

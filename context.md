@@ -1,5 +1,231 @@
 # QLSA — Project Context
 
+## Аудит (2026-07-16) — C1 input/output binding закрыт в compression-AIR (R3.13–R4.1)
+
+Двухчастный аудит (крипто + код) свежей поверхности R3.13–R4.1 (t=8/t=16 inner-hash стек ~5500 строк
++ VFRI11-мост рекурсии). Два эксперта-агента + инлайн-верификация. **Одна HIGH-находка исправлена**,
+остальное — LOW/MEDIUM-гигиена, всё закрыто.
+
+- **[HIGH, крипто — ИСПРАВЛЕНО] Пиннинг входа/выхода в standalone compression-гаджетах.**
+  `poseidon2_t8_air`/`poseidon2_t16_air`: `prove_compress`/`verify_compress` привязывали заявленный
+  триплет `(left,right,node)` к трейсу только через Fiat-Shamir `mix_public` — злонамеренный prover
+  мог доказать ЛОЖНОЕ `compress(FAKE_left, FAKE_right) = node` (тот же класс, что закрытый в R3.12
+  root-binding). **Не достижимо в production** (эти функции вызываются только из своих
+  `#[cfg(test)]`-модулей; композиция использует merkle-path AIR, где пиннинг уже был), но это была
+  латентная ловушка в публичном API, нарушавшая инвариант репо «ни один verify_* не принимает
+  непиннутую привязку». Фикс по паттерну R3.12: preproc-столбцы `raw_pin[0..T]` (is_first-gated) +
+  `node_pin[0..T/2]` (is_node-gated) + in-circuit равенства; `canonical_preproc_root`/`verify_compress`
+  строят их из переданных верификатором `(left,right,node)`. Регрессии `test_forged_input_cannot_prove`
+  в обоих файлах.
+- **[MEDIUM, код — ИСПРАВЛЕНО] Пробел в тестах t16 vs t8-шаблон.** Добавлены
+  `test_external_matrix_invertible` + naive-cross-check линейных слоёв (16×16 эталон с нуля) +
+  `test_rc_count_and_range` в `poseidon2_t16.rs` — независимо подтверждают, что M_E = circ(2·M4,…) и
+  M_I = J+diag(1..16) суть именно те матрицы.
+- **[LOW, код — ИСПРАВЛЕНО]** stale Vec-capacity `leaves.len()*9 → *17` в composition_t16; устаревшие
+  "t=8" doc-комментарии, intra-doc-ссылки и runtime `format!`-строки ошибок внутри t16-файлов →
+  t16/8-word/M31⁸; stale "32 main columns" в poseidon2_t8_air → 40.
+- **Чистые зоны (подтверждено обоими агентами + инлайн):** C1/C2 в merkle-path t8/t16 (index/leaf/root
+  пиннятся, canonical-root сверяется в обоих verify-путях); связка композиции finalFold→leaf→root
+  пиннутая end-to-end; ориентационный трюк R4.1 корректен (тождество проверено, жёсткий инвариант
+  ловит ошибки); рефакторинг vfri11_fri_chain — byte-for-byte behavior-preserving (фикстура
+  идентична); ширина узла (t8 124-бит / t16 248-бит) течёт без усечения; M_I обратима (det≠0);
+  секретов нет; входные капы в публичных entry-points на месте.
+- **Итог: 513 тестов (+6), 152 рекурсивных, 0 предупреждений. Находок soundness в production-пути нет.**
+
+## Рекурсия R4.1 (2026-07-16) — рекурсия верифицирует РЕАЛЬНЫЙ VFRI11-конвейер
+
+Старт финальной фазы (R4, on-chain интеграция) с её первого пункта: **«root vs committed FRI-layer
+root» закрыт на Rust-уровне** — рекурсивная композиция доказывает per-query decommitments настоящего
+VFRI11-конвейера против подлинного committed-корня последнего FRI-слоя (не синтетических данных).
+Это же закрывает критическое замечание роадмапа №5 (bootstrapping: сперва рекурсия мини-proof на
+реальных данных).
+
+- **Рефакторинг без изменения поведения:** FRI-цепочка `gen_vfri11_hints_from_cols_nfolds`
+  (транскрипт t=8-канала: mix trace root → z_x → comp_alpha → combos → comp root → friAlpha →
+  fold-слои → batch root → draw indices) вынесена в общий helper `vfri11_fri_chain` — ABI-генератор
+  и мост рекурсии потребляют ОДНУ реализацию, дрейф невозможен по построению. Существующие
+  VFRI11-тесты зелёные без правок.
+- **`gen_vfri11_recursion_inputs`** извлекает per-query входы рекурсии: `StepOp` (f± из OODS-квотиентов,
+  px, z_x, combos, friAlpha, y⁻¹), fold-раунды (sibling из слоя k, channel-alpha_k,
+  index-ориентированный twiddle⁻¹), путь финального фолда в committed last-layer дерево (4-словные
+  t=8 узлы), `last_layer_root`, `trace_root`. **Тонкость ориентации:** VFRI кладёт cur в
+  (gp,gm)=(sib,cur) при cur_idx ≥ layer_sz; рекурсия всегда цепляет cur как операнд `a` — свап
+  эквивалентен отрицанию twiddle⁻¹ ((b−a)·inv = (a−b)·(P−inv)), знак детерминирован битом индекса.
+  **Жёсткий инвариант** (не debug-only): извлечённая цепочка обязана воспроизвести committed-значение
+  последнего слоя, иначе Err.
+- **E2E-тесты (2):** мост → `prove_queries_membership_t8` → `verify == true` над реальными данными;
+  `finals` == реальные fold-выходы; каждый путь аутентифицируется в подлинный `friLayerRoots[K]`;
+  `trace_root` моста == `proof[8..40]` ABI-генератора (доказательство общей цепочки); tamper root →
+  reject. Плюс orientation-coverage (depth 5 × 3 фолда × 6 запросов — обе ориентации).
+  **507 тестов (150 рекурсивных), 0 предупреждений.**
+- **Дальше:** on-chain channel-replay (дешёвый Poseidon2-канал absorb roots → draw challenges/indices,
+  сверка с public inputs рекурсивного proof) → `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
+  `docs/roadmap/recursion.md` § R4.1.
+
+## Рекурсия R3.18 (2026-07-16) — 128-битный inner-hash стек ЗАВЕРШЁН (t=16 path + композиция)
+
+Завершение лестницы inner-hash: t=16 Merkle-path AIR + композиция — тот же механический swap, что
+R3.14/R3.15 (t=8), на **8-словных (248-битных) узлах → коллизия ~2^124 ≈ 128 бит** (целевой уровень).
+
+- **`recursive/merkle_path_t16_air.rs`** (11 тестов): путь аутентификации через `compress_t16`,
+  дуал `poseidon2_t16_air`. 89 main + 38 preproc столбцов; раунд-ядро переиспользует
+  `round_schedule`/`mat_external16_expr`/`mat_internal16_expr` из R3.17; кросс-компрессионная
+  цепочка `cur` — трюк смежности `out[-1]` (22 раунда/компрессия); C1-привязка index/leaf/root
+  in-circuit + C2-пиннинг preproc; multi-path builders включены сразу (для N-query).
+- **`recursive/composition_t16.rs`** (5 тестов): `recursive_verifier` + `merkle_path_t16` в ОДНОМ
+  STARK, single- И N-query (форма VFRI11). Связка `leaf8 = qm31_leaf_hash_t16(finalFold)` (rate-8
+  губка t=16 над 4 лимбами QM31, добавлена в `integration.rs`) пиннится в 8-словные leaf-столбцы.
+  Value-bound end-to-end полностью in-circuit: finalFold (pinned) → hashLeaf_t16 → leaf8 (pinned) →
+  t=16 путь → root (pinned). Капы входов с самого начала (урок R3.12).
+- **Метод:** файлы сгенерированы систематическим t8→t16 преобразованием (структурная параллельность
+  доказана паттерном) + ручная правка литеральных массивов; страховка — reference-driven тесты
+  (trace против `compress_t16`/`merkle_path_root_t16`), поймавшие бы любую ошибку преобразования.
+  Все 16 новых тестов прошли с первого прогона после исправления трёх size-аннотаций.
+- **Итог лестницы:** t=2 (2^15.5) → t=8 (2^62) → **t=16 (~2^124 ≈ 128 бит)** — все три ступени
+  in-circuit, каждая — чистый swap hash-backend'а при неизменном паттерне композиции.
+  **150 рекурсивных тестов (505 всего), 0 предупреждений.**
+- **Дальше (финальная фаза рекурсии):** on-chain интеграция — root vs committed FRI-layer root,
+  channel-replay (challenges как public inputs), `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
+  `docs/roadmap/recursion.md` § R3.18.
+
+## Рекурсия R3.17 (2026-07-16) — 128-битный inner hash: t=16 перестановка + compression AIR
+
+ФИНАЛЬНАЯ ступень лестницы inner-hash (t=2 → t=4 → t=8 → **t=16**): 8-словные (248-битные) узлы
+поднимают стоимость коллизии узла до **~2^124 ≈ 128 бит** — целевой уровень soundness и ширина
+нативного Stwo Poseidon2-16. По решению 2026-06-17 ценность t=16 — внутри рекурсии (on-chain газ
+константен), не как standalone верификатор (~400M+ газа).
+
+- **`poseidon2_t16.rs` — референс-перестановка:** R_F=8 (4+4), R_P=14, α=5 (Poseidon2 Table 1 для
+  31-битных полей, t=16); внешняя матрица M_E = circ(2·M4, M4, M4, M4) (§5.1 block construction,
+  M4 переиспользован из t=8); внутренняя M_I = J + diag(1..16) — обратимость доказана гауссовой
+  элиминацией в тесте (det ≠ 0 над M31); RC[i] = u32_be(SHA-256("QLSA-Poseidon2-t16" ‖ i_be4)[..4])
+  mod P для i∈0..142 (документированное правило деривации, литералы заморожены). Rate-8/capacity-8
+  губка с odd-length флагом в capacity-ячейке 15; `compress_t16(left[8], right[8]) → node[8]`.
+  Frozen reference-векторы (регрессионные якоря). 6 тестов.
+- **`recursive/poseidon2_t16_air.rs` — compression AIR:** арифметизация `compress_t16`, прямой
+  t=16-аналог `poseidon2_t8_air`: 80 main-столбцов (in/sq/sbox/out/raw ×16) + 19 preproc (rc×16 +
+  is_ext/is_int/is_first); один раунд на строку (22 раунда, LOG_SIZE=5); helper-столбцы `sq`/`sbox`
+  держат x^5 на степени ≤3; обобщённые 16-ячеечные `mat_external16_expr`/`mat_internal16_expr`
+  кросс-чекнуты против референс-слоёв ОТДЕЛЬНЫМ тестом (test_expr_layers_match_reference — прямая
+  защита от soundness-бага в арифметизации линейного слоя); C2-пиннинг preproc. 7 тестов.
+- **Валидация:** expr-слои ≡ референс; round-schedule ≡ permute_t16; trace node ≡ compress_t16
+  (случайные входы); roundtrip; wrong-node/-input; corrupted-trace; forged-preproc (C2).
+  **134 рекурсивных (489 всего), 0 предупреждений.**
+- **Дальше:** t=16 Merkle-path AIR + composition_t16 (механический swap по паттерну R3.14/R3.15,
+  оба раза сработавшему с первого прогона) → полный 128-битный inner-hash стек; затем on-chain
+  интеграция (root vs committed FRI-layer root, `QLSAVerifierRecursive.sol`).
+  `docs/roadmap/recursion.md` § R3.17.
+
+## Рекурсия R3.16 (2026-07-16) — N-query широкая композиция (форма VFRI11 на t=8)
+
+Масштабирование R3.15 до формы реального VFRI11-верификатора: N запросов + N широких путей в ОДНОМ
+STARK — t=8-аналог N-query композиции R3.9. `prove_queries_membership_t8`/`verify_queries_membership_t8`
+в `composition_t8.rs` + multi-path builders в `merkle_path_t8_air.rs`.
+
+- **Multi-path t=8 builders** (`build_trace_multi`/`build_preproc_multi`/`compute_log_size_multi`):
+  N путей однородной глубины в последовательных блоках по `depth` компрессий (22 строки каждая).
+  **AIR не меняется** — пер-строчные селекторы `is_first_path` (сброс cur=leaf + пиннинг листа) и
+  `is_root` (пиннинг корня) гейтят каждый путь в своём блоке; padding-строки продолжают round-chain
+  с нулевыми селекторами (out форсится в 0).
+- **Связка по каждому запросу q:** finalFold_q (pinned в rv) → leaf4_q = qm31_leaf_hash_t8(finalFold_q)
+  (пересчитывается верификатором) → пиннится в leaf-столбцы пути q → root_q (pinned in-circuit).
+- **Капы входов с самого начала (урок аудита R3.12):** MAX_QUERIES/MAX_NUM_FOLDS/MAX_DEPTH/диапазон
+  log_size/ёмкость трейса в обоих prove/verify — враждебные входы дают Err, не панику/OOM.
+- **Валидация:** 3-query roundtrip (finals/leaves/roots сверены с референсами) + пер-query rejection
+  (wrong-final меняет пиннутый fin И пересчитанный leaf4; wrong-root меняет пиннутый root_q) +
+  validation-errors (depth=0, mismatch, log_size=40). **2 теста, 127 рекурсивных (476 всего),
+  0 предупреждений.**
+- **Статус стека t=8:** compression AIR (R3.13) → path AIR (R3.14) → 1-query композиция (R3.15) →
+  **N-query композиция (R3.16)** — широкий inner-hash стек рекурсии полностью повторяет форму
+  верификации VFRI11 (N запросов, пути к FRI-layer корням) на коллизии узла 2^62.
+- **Дальше:** t=16 (полные 128 бит — тот же swap), root vs committed FRI-layer root (on-chain
+  интеграция), `QLSAVerifierRecursive.sol`. `docs/roadmap/recursion.md` § R3.16.
+
+## Рекурсия R3.15 (2026-07-13) — широкая (t=8) композиция: recursive_verifier + merkle_path_t8
+
+Интеграционный шаг: подключает t=8 path AIR (R3.14) как inner hash композиции рекурсии.
+`recursive/composition_t8.rs` доказывает `recursive_verifier` (fold-цепочка, QM31) + `merkle_path_t8`
+(4-словный путь) в ОДНОМ STARK — t=8-аналог `composition.rs`, меняющий inner hash с t=2 (31-битные
+узлы, коллизия 2^15.5) на t=8 (4-словные узлы, 2^62). Это та самая per-query FRI-membership проверка,
+которую делает VFRI11 on-chain, но теперь на широком хеше, который VFRI11 реально использует.
+
+- **Связка (value-bound end-to-end, полностью in-circuit):** `finalFold` пиннится в `recursive_verifier`
+  (fin-столбцы + is_output, C1) → верификатор off-circuit считает `leaf4 = qm31_leaf_hash_t8(finalFold)`
+  (детерминированная публичная функция от пиннутого finalFold; `sponge_t8` над 4 лимбами, совпадает
+  с `hash_leaf_qm31_p2t8` VFRI11-backend) → пиннит leaf4 в 4-словные leaf-столбцы `merkle_path_t8`
+  (C1 leaf-binding) → t=8 путь аутентифицирует leaf4 @ index + siblings → root (C1 root-binding).
+  Цепочка: finalFold (pinned) → hashLeaf_t8 → leaf4 (pinned) → t=8 path → root (pinned).
+- **Тот же паттерн, что composition.rs (t=2):** меняется ТОЛЬКО inner-hash-гаджет; QM31 fold-цепочка
+  и паттерн finalFold→leaf идентичны. 87 main + 39 preproc столбцов в объединённом STARK (rv 42/17 +
+  merkle_t8 45/22). Объединённое Tree 0 пиннится одним каноническим корнем (C2). `qm31_leaf_hash_t8`
+  добавлен в `integration.rs`.
+- **Валидация:** roundtrip (fold-цепочка + t=8 membership в одном proof) + wrong-final (меняет пиннутый
+  finalFold И пересчитанный leaf4 → иной канонический preproc-корень → reject) + wrong-root.
+  `prove_query_membership_t8`/`verify_query_membership_t8`. **3 теста, 125 рекурсивных (474 всего),
+  0 предупреждений.**
+- **Эффект:** коллизия узла inner-hash рекурсии поднята с 2^15.5 (t=2) до **2^62** (t=8). t=16
+  (полные 128 бит) — тот же swap, как только появится t=16 path AIR.
+- **Дальше:** N-query t=8 композиция (форма VFRI11, как R3.9 после R3.8), затем t=16.
+  `docs/roadmap/recursion.md` § R3.15.
+
+## Рекурсия R3.14 (2026-07-13) — широкий inner-hash Merkle path: t=8 path AIR
+
+Дуал R3.13 (`poseidon2_t8_air`), как `merkle_path_air` (t=2) к `poseidon2_merkle_air`.
+`recursive/merkle_path_t8_air.rs` доказывает путь аутентификации Меркла по **4-словным/124-битным
+узлам** через `compress_t8` — та самая структура, которую рекурсия воспроизводит для верификации
+VFRI11 FRI-layer decommitment (узлы t=8). Поднимает коллизию узла inner-hash с 2^15.5 (текущий t=2
+`merkle_path_air`) до 2^62.
+
+- **Архитектурный ключ:** выход каждой компрессии (`out[0..4]`) ложится на её последнюю раунд-строку,
+  которая смежна с первой строкой следующей компрессии → кросс-компрессионная цепочка `cur` использует
+  маску `out[-1]` (тот же приём, что и t=2 путь), несмотря на 22 раунда/компрессию. Компрессия `c`
+  занимает строки `c·22 .. c·22+22`; round-schedule периодичен с периодом 22.
+- **Раскладка:** 45 main-столбцов — раунд-ядро `in`/`sq`/`sbox`/`out` ×8 (32, переиспользует
+  `round_schedule`/`mat_external_expr`/`mat_internal_expr` из R3.13) + `cur[0..4]`/`sib[0..4]`/`bit`/
+  `leaf[0..4]` (13, node-level). 22 preproc: `rc`×8 + `is_ext`/`is_int`/`is_first_comp`/`is_first_path`
+  + `idx_bit` + `leaf_pin[0..4]` + `is_root` + `root_pin[0..4]`.
+- **Node-level wiring:** `cur = is_first_path·leaf + (1−is_first_path)·out_prev[0..4]`; выбор left/right
+  по биту (`raw = bit? (sib,cur):(cur,sib)`, 4-словные); `in[row0] = mat_external(raw)` через
+  `is_first_comp`. Все ограничения ≤ степень 3.
+- **C1 (всё in-circuit, зеркально on-chain `Poseidon2MerkleVerifierT8.verify(root,leaf,index,depth,siblings)`):**
+  index (`is_first_comp·(bit−idx_bit)`), leaf (`is_first_path·(leaf−leaf_pin)`), root
+  (`is_root·(out−root_pin)` на последней реальной компрессии). **C2:** пиннинг всего preproc через
+  `canonical_preproc_root`.
+- **Валидация:** reference-driven (honest trace из `merkle_path_root_t8`/`compress_t8`) + roundtrip
+  depth 1/3/5 + rejection wrong-root/-leaf/-index/tampered + forged-root-cannot-prove (C1) +
+  forged-preproc (C2). **11 тестов, 122 рекурсивных (471 всего), 0 предупреждений.**
+- **Дальше:** подключить t=8 path AIR как inner hash композиции рекурсии (заменить/параметризовать
+  t=2 `merkle_path_air` в `composition.rs`) → t=16 для полных 128 бит. `docs/roadmap/recursion.md` § R3.14.
+
+## Рекурсия R3.13 (2026-07-13) — широкий inner-hash: Poseidon2 t=8 compression AIR
+
+Первый широкий inner-hash-примитив рекурсии. `recursive/poseidon2_t8_air.rs` арифметизирует
+Poseidon2 **t=8** компрессию (`compress_t8`: 8-словное состояние → 4-словный/124-битный узел,
+коллизия узла ~2^62) как доказуемый AIR — широкий аналог t=2 `poseidon2_merkle_air` и та самая
+хеш-функция, которой пользуется backend **VFRI11** (его FRI-layer Merkle-деревья на t=8). Это
+следующая ступень на пути к 128-битной привязке (ограничение #6, лестница t=2→t=8→t=16) и
+обязательный кирпич, чтобы рекурсия могла верифицировать реальное VFRI11-доказательство.
+
+- **Раскладка:** один раунд на строку (4 внешних + 14 внутренних + 4 внешних = 22, паддинг до 32
+  = LOG_SIZE 5). 40 main-столбцов (`in`/`sq`/`sbox`/`out`/`raw` ×8) + 11 preproc (`rc`×8 +
+  `is_ext`/`is_int`/`is_first`). Helper-столбцы `sq=(in+rc)²`, `sbox=sq²·(in+rc)` держат S-box (x^5)
+  на степени 3, поэтому out-констрейнт линеен → bound log+1 (как во всех AIR репо).
+- **Линейные слои — точные выражения:** `mat_external` M_E=[[2M4,M4],[M4,2M4]] (M4=[[5,7,1,3],[4,6,1,1],
+  [1,3,5,7],[1,1,4,6]]) и `mat_internal` J+diag(1..8). Начальный pre-mix `mat_external(raw)` инжектится
+  на строке 0 через `is_first`; узел = `out[0..4]` на строке 21. Паддинг-строки продолжают chain
+  (in=out_prev, out форсится в 0 нулевыми селекторами).
+- **C2-пиннинг:** preproc — единый канонический источник `build_preproc`; верификатор пересчитывает
+  корень Tree 0 (`canonical_preproc_root`) и отклоняет несовпадение (`test_forged_preproc_rejected`).
+- **Валидация корректности (защита от soundness-бага):** honest trace строится из уже кросс-чекнутого
+  эталона `permute_t8` (бит-в-бит совпадает с on-chain `Poseidon2M31T8.sol`) → неверный констрейнт
+  роняет honest-proof на `ConstraintsNotSatisfied`, а не молча проходит. Тесты:
+  `test_round_schedule_reproduces_permutation`, `test_trace_node_matches_reference`, roundtrip,
+  wrong-node / wrong-input / corrupted-trace / forged-preproc. **7 тестов, 111 рекурсивных (460 всего),
+  0 предупреждений сборки.**
+- **Дальше:** t=8 Merkle-*path* AIR (дуал `poseidon2_t8_air`, как `merkle_path_air` к
+  `poseidon2_merkle_air`) → подключить как inner hash рекурсии (коллизия узла 2^15.5 t=2 → 2^62 t=8)
+  → t=16 (Stwo native, ~2^124 ≈ 128-бит). `docs/roadmap/recursion.md` § R3.13.
+
 ## Аудит (2026-07-10) — C1 root-binding закрыт для `merkle_path_air` (R3.12) + капы входов
 
 Двухчастный аудит (крипто/блокчейн + код/высоконагруженные системы) свежей recursion-поверхности

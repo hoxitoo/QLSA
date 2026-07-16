@@ -44,6 +44,34 @@ pub fn qm31_leaf_hash(value: u128) -> u64 {
     sponge_absorb(&[l[0], l[1], l[2], l[3]]).0
 }
 
+/// Wide (t=8) analogue: hash a QM31 value's four limbs into a **4-word (124-bit)**
+/// M31 leaf node via the Poseidon2 t=8 rate-4 sponge — the recursive analogue of
+/// the FRI tree's `hash_leaf_qm31_p2t8` (and on-chain
+/// `Poseidon2MerkleVerifierT8.hashLeaf`).  This is the leaf a VFRI11 FRI-layer
+/// Merkle path authenticates, so the t=8 composition binds
+/// `leaf = qm31_leaf_hash_t8(finalFold)` into `merkle_path_t8_air`.
+///
+/// `leaf = sponge_t8([v≫96, v≫64, v≫32, v])[0..4]` (limbs MSB-first, matching
+/// `qm31_words` and the gadgets' [`limbs`]).
+pub fn qm31_leaf_hash_t8(value: u128) -> [u64; 4] {
+    let l = limbs(value);
+    let s = crate::poseidon2_t8::sponge_t8(&[l[0], l[1], l[2], l[3]]);
+    [s[0], s[1], s[2], s[3]]
+}
+
+/// 128-bit (t=16) analogue: hash a QM31 value's four limbs into an **8-word
+/// (248-bit)** M31 leaf node via the Poseidon2 t=16 rate-8 sponge — the leaf a
+/// t=16 FRI-layer Merkle path authenticates (node collision ~2^124 ≈ 128-bit).
+///
+/// `leaf = sponge_t16([v≫96, v≫64, v≫32, v])[0..8]` (4 limbs < rate 8 → one
+/// padded block with the capacity-cell domain flag; limbs MSB-first, matching
+/// `qm31_words` and the gadgets' [`limbs`]).
+pub fn qm31_leaf_hash_t16(value: u128) -> [u64; 8] {
+    let l = limbs(value);
+    let s = crate::poseidon2_t16::sponge_t16(&[l[0], l[1], l[2], l[3]]);
+    [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
