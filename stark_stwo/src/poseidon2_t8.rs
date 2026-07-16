@@ -57,8 +57,9 @@ pub const K_RC: [u32; 78] = [
 ];
 
 /// The 4×4 M4 block multiply (Poseidon2 §5.1 fast path, 8 additions).
+/// Shared by the t=8 and t=16 external layers (§5.1 block construction).
 #[inline]
-fn m4(s: &mut [u64; 4]) {
+pub(crate) fn m4(s: &mut [u64; 4]) {
     let t0 = m31_add(s[0], s[1]);
     let t1 = m31_add(s[2], s[3]);
     let t2 = m31_add(m31_add(s[1], s[1]), t1);

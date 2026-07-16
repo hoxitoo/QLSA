@@ -1,5 +1,33 @@
 # QLSA — Project Context
 
+## Рекурсия R3.17 (2026-07-16) — 128-битный inner hash: t=16 перестановка + compression AIR
+
+ФИНАЛЬНАЯ ступень лестницы inner-hash (t=2 → t=4 → t=8 → **t=16**): 8-словные (248-битные) узлы
+поднимают стоимость коллизии узла до **~2^124 ≈ 128 бит** — целевой уровень soundness и ширина
+нативного Stwo Poseidon2-16. По решению 2026-06-17 ценность t=16 — внутри рекурсии (on-chain газ
+константен), не как standalone верификатор (~400M+ газа).
+
+- **`poseidon2_t16.rs` — референс-перестановка:** R_F=8 (4+4), R_P=14, α=5 (Poseidon2 Table 1 для
+  31-битных полей, t=16); внешняя матрица M_E = circ(2·M4, M4, M4, M4) (§5.1 block construction,
+  M4 переиспользован из t=8); внутренняя M_I = J + diag(1..16) — обратимость доказана гауссовой
+  элиминацией в тесте (det ≠ 0 над M31); RC[i] = u32_be(SHA-256("QLSA-Poseidon2-t16" ‖ i_be4)[..4])
+  mod P для i∈0..142 (документированное правило деривации, литералы заморожены). Rate-8/capacity-8
+  губка с odd-length флагом в capacity-ячейке 15; `compress_t16(left[8], right[8]) → node[8]`.
+  Frozen reference-векторы (регрессионные якоря). 6 тестов.
+- **`recursive/poseidon2_t16_air.rs` — compression AIR:** арифметизация `compress_t16`, прямой
+  t=16-аналог `poseidon2_t8_air`: 80 main-столбцов (in/sq/sbox/out/raw ×16) + 19 preproc (rc×16 +
+  is_ext/is_int/is_first); один раунд на строку (22 раунда, LOG_SIZE=5); helper-столбцы `sq`/`sbox`
+  держат x^5 на степени ≤3; обобщённые 16-ячеечные `mat_external16_expr`/`mat_internal16_expr`
+  кросс-чекнуты против референс-слоёв ОТДЕЛЬНЫМ тестом (test_expr_layers_match_reference — прямая
+  защита от soundness-бага в арифметизации линейного слоя); C2-пиннинг preproc. 7 тестов.
+- **Валидация:** expr-слои ≡ референс; round-schedule ≡ permute_t16; trace node ≡ compress_t16
+  (случайные входы); roundtrip; wrong-node/-input; corrupted-trace; forged-preproc (C2).
+  **134 рекурсивных (489 всего), 0 предупреждений.**
+- **Дальше:** t=16 Merkle-path AIR + composition_t16 (механический swap по паттерну R3.14/R3.15,
+  оба раза сработавшему с первого прогона) → полный 128-битный inner-hash стек; затем on-chain
+  интеграция (root vs committed FRI-layer root, `QLSAVerifierRecursive.sol`).
+  `docs/roadmap/recursion.md` § R3.17.
+
 ## Рекурсия R3.16 (2026-07-16) — N-query широкая композиция (форма VFRI11 на t=8)
 
 Масштабирование R3.15 до формы реального VFRI11-верификатора: N запросов + N широких путей в ОДНОМ

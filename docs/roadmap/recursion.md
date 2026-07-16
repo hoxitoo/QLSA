@@ -109,11 +109,12 @@ ML-DSA подпись
     (все пиннятся in-circuit, зеркально on-chain `Poseidon2MerkleVerifierT8.verify`) + C2-пиннинг.
     Reference-driven валидация + roundtrip depth 1/3/5 + rejection (wrong-root/-leaf/-index/tampered/
     forged-root/-preproc). 11 тестов. Детали — § R3.14 ниже.
-- **t=16 inner hash** (остаток R2): расширить до Poseidon2 t=16 (Stwo native, ~2^124 ≈ 128-бит) —
-  и compression, и path AIR. Ширина хеша — pluggable backend (как VFRI10→VFRI11 t=4→t=8); структура
-  AIR не меняется. **Здесь t=16 «возвращается»** — но как inner circuit, on-chain газ не растёт.
-  Ближайший шаг перед t=16: подключить t=8 path AIR как inner hash композиции рекурсии (заменить/
-  параметризовать t=2 `merkle_path_air` в `composition.rs`)
+- **t=16 inner hash — перестановка + compression AIR** (`poseidon2_t16.rs` + `recursive/poseidon2_t16_air.rs`)
+  — ✅ **готов (2026-07-16, R3.17)**: 8-словные (248-битные) узлы → коллизия ~2^124 ≈ **128 бит**
+  (ширина нативного Stwo Poseidon2-16). Детали — § R3.17 ниже.
+- **t=16 Merkle path + композиция** (остаток R2): t=16 path AIR (дуал `poseidon2_t16_air`, тот же
+  swap, что R3.14) + composition_t16 (как R3.15/R3.16). **Здесь t=16 «возвращается»** — но как
+  inner circuit, on-chain газ не растёт
 
 ### Этап R3 — recursive verifier composition
 
@@ -301,6 +302,23 @@ ML-DSA подпись
     rejection (wrong-final меняет пиннутый fin И leaf4; wrong-root меняет пиннутый root) +
     validation-errors. **2 теста, 127 рекурсивных (476 всего), 0 предупреждений.**
     Дальше: t=16 (полные 128 бит), root vs committed FRI-layer root (on-chain), `QLSAVerifierRecursive.sol`.
+- **R3.17 — 128-битный inner hash: t=16 перестановка + compression AIR (2026-07-16)** — ✅ **готов**
+  - `poseidon2_t16.rs`: Poseidon2 t=16 над M31 — ФИНАЛЬНАЯ ступень лестницы (t=2→t=4→t=8→**t=16**).
+    R_F=8 (4+4), R_P=14, α=5 (Poseidon2 Table 1 для 31-битных полей, t=16); M_E = circ(2·M4,M4,M4,M4)
+    (§5.1 block construction, M4 переиспользуется из t=8); M_I = J+diag(1..16) (обратимость доказана
+    Гауссом в тесте); RC[i] = u32_be(SHA-256("QLSA-Poseidon2-t16" ‖ i_be4)[..4]) mod P, i∈0..142.
+    Rate-8/capacity-8 губка (odd-length флаг в capacity-ячейке 15) + 2-to-1 компрессия по
+    **8-словным (248-битным) узлам → коллизия ~2^124 ≈ 128 бит** — целевой уровень, ширина нативного
+    Stwo Poseidon2-16. Frozen reference-векторы. 6 тестов.
+  - `recursive/poseidon2_t16_air.rs`: арифметизация `compress_t16` — 80 main + 19 preproc столбцов,
+    та же схема один-раунд-на-строку (22 раунда) + helper-столбцы `sq`/`sbox` (степень ≤3), что у t=8;
+    обобщённые 16-ячеечные `mat_external16_expr`/`mat_internal16_expr` кросс-чекнуты против
+    референс-слоёв отдельным тестом; C2-пиннинг preproc. Валидация: expr-слои ≡ референс,
+    round-schedule ≡ permute_t16, trace node ≡ compress_t16, roundtrip, wrong-node/-input,
+    corrupted-trace, forged-preproc. 7 тестов. **134 рекурсивных (489 всего), 0 предупреждений.**
+  - Дальше: t=16 Merkle-path AIR + композиция (тот же swap, что R3.14/R3.15) → полный 128-битный
+    inner-hash стек; затем on-chain интеграция (root vs committed FRI-layer root,
+    `QLSAVerifierRecursive.sol`).
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

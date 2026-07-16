@@ -154,6 +154,20 @@
 //! 2 tests (3-query roundtrip + per-query wrong-final/wrong-root rejection;
 //! hostile-input validation). Next: t=16 for full 128-bit; root vs committed
 //! FRI-layer root (on-chain integration); `QLSAVerifierRecursive.sol`.
+//!
+//! **R3.17 (2026-07-16) — the 128-bit inner hash: t=16 permutation + compression
+//! AIR:** `crate::poseidon2_t16` implements the Poseidon2 t=16 permutation
+//! (R_F=8, R_P=14, α=5; M_E = circ(2·M4, M4, M4, M4); M_I = J + diag(1..16),
+//! invertibility asserted; RC by the documented SHA-256 domain rule) with a
+//! rate-8/capacity-8 sponge and a 2-to-1 compression over **8-word (248-bit)
+//! nodes → ~2^124 ≈ 128-bit node collision** — the FINAL rung of the ladder,
+//! matching the width of Stwo's native Poseidon2-16. `poseidon2_t16_air`
+//! arithmetizes `compress_t16` (80 main + 19 preproc cols, same
+//! one-round-per-row + `sq`/`sbox` helper pattern as t=8; generic 16-cell
+//! `mat_external16_expr`/`mat_internal16_expr` cross-checked against the
+//! reference layers), C2-pinned. 6 + 7 tests. Next: t=16 Merkle-path AIR +
+//! composition (the same R3.14/R3.15 swap), completing the 128-bit inner-hash
+//! stack; then on-chain integration.
 
 pub mod channel_air;
 pub mod composition;
@@ -164,6 +178,7 @@ pub mod integration;
 pub mod merkle_path_air;
 pub mod merkle_path_t8_air;
 pub mod oods_air;
+pub mod poseidon2_t16_air;
 pub mod poseidon2_t8_air;
 pub mod qm31_mul_air;
 pub mod query_step_air;
