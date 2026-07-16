@@ -59,6 +59,19 @@ pub fn qm31_leaf_hash_t8(value: u128) -> [u64; 4] {
     [s[0], s[1], s[2], s[3]]
 }
 
+/// 128-bit (t=16) analogue: hash a QM31 value's four limbs into an **8-word
+/// (248-bit)** M31 leaf node via the Poseidon2 t=16 rate-8 sponge — the leaf a
+/// t=16 FRI-layer Merkle path authenticates (node collision ~2^124 ≈ 128-bit).
+///
+/// `leaf = sponge_t16([v≫96, v≫64, v≫32, v])[0..8]` (4 limbs < rate 8 → one
+/// padded block with the capacity-cell domain flag; limbs MSB-first, matching
+/// `qm31_words` and the gadgets' [`limbs`]).
+pub fn qm31_leaf_hash_t16(value: u128) -> [u64; 8] {
+    let l = limbs(value);
+    let s = crate::poseidon2_t16::sponge_t16(&[l[0], l[1], l[2], l[3]]);
+    [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

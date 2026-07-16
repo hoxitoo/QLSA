@@ -1,5 +1,31 @@
 # QLSA — Project Context
 
+## Рекурсия R3.18 (2026-07-16) — 128-битный inner-hash стек ЗАВЕРШЁН (t=16 path + композиция)
+
+Завершение лестницы inner-hash: t=16 Merkle-path AIR + композиция — тот же механический swap, что
+R3.14/R3.15 (t=8), на **8-словных (248-битных) узлах → коллизия ~2^124 ≈ 128 бит** (целевой уровень).
+
+- **`recursive/merkle_path_t16_air.rs`** (11 тестов): путь аутентификации через `compress_t16`,
+  дуал `poseidon2_t16_air`. 89 main + 38 preproc столбцов; раунд-ядро переиспользует
+  `round_schedule`/`mat_external16_expr`/`mat_internal16_expr` из R3.17; кросс-компрессионная
+  цепочка `cur` — трюк смежности `out[-1]` (22 раунда/компрессия); C1-привязка index/leaf/root
+  in-circuit + C2-пиннинг preproc; multi-path builders включены сразу (для N-query).
+- **`recursive/composition_t16.rs`** (5 тестов): `recursive_verifier` + `merkle_path_t16` в ОДНОМ
+  STARK, single- И N-query (форма VFRI11). Связка `leaf8 = qm31_leaf_hash_t16(finalFold)` (rate-8
+  губка t=16 над 4 лимбами QM31, добавлена в `integration.rs`) пиннится в 8-словные leaf-столбцы.
+  Value-bound end-to-end полностью in-circuit: finalFold (pinned) → hashLeaf_t16 → leaf8 (pinned) →
+  t=16 путь → root (pinned). Капы входов с самого начала (урок R3.12).
+- **Метод:** файлы сгенерированы систематическим t8→t16 преобразованием (структурная параллельность
+  доказана паттерном) + ручная правка литеральных массивов; страховка — reference-driven тесты
+  (trace против `compress_t16`/`merkle_path_root_t16`), поймавшие бы любую ошибку преобразования.
+  Все 16 новых тестов прошли с первого прогона после исправления трёх size-аннотаций.
+- **Итог лестницы:** t=2 (2^15.5) → t=8 (2^62) → **t=16 (~2^124 ≈ 128 бит)** — все три ступени
+  in-circuit, каждая — чистый swap hash-backend'а при неизменном паттерне композиции.
+  **150 рекурсивных тестов (505 всего), 0 предупреждений.**
+- **Дальше (финальная фаза рекурсии):** on-chain интеграция — root vs committed FRI-layer root,
+  channel-replay (challenges как public inputs), `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
+  `docs/roadmap/recursion.md` § R3.18.
+
 ## Рекурсия R3.17 (2026-07-16) — 128-битный inner hash: t=16 перестановка + compression AIR
 
 ФИНАЛЬНАЯ ступень лестницы inner-hash (t=2 → t=4 → t=8 → **t=16**): 8-словные (248-битные) узлы

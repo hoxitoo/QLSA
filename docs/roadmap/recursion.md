@@ -112,9 +112,8 @@ ML-DSA подпись
 - **t=16 inner hash — перестановка + compression AIR** (`poseidon2_t16.rs` + `recursive/poseidon2_t16_air.rs`)
   — ✅ **готов (2026-07-16, R3.17)**: 8-словные (248-битные) узлы → коллизия ~2^124 ≈ **128 бит**
   (ширина нативного Stwo Poseidon2-16). Детали — § R3.17 ниже.
-- **t=16 Merkle path + композиция** (остаток R2): t=16 path AIR (дуал `poseidon2_t16_air`, тот же
-  swap, что R3.14) + composition_t16 (как R3.15/R3.16). **Здесь t=16 «возвращается»** — но как
-  inner circuit, on-chain газ не растёт
+- **t=16 Merkle path + композиция** (`merkle_path_t16_air.rs` + `composition_t16.rs`) — ✅ **готов
+  (2026-07-16, R3.18)**: R2 ЗАВЕРШЁН — полный 128-битный inner-hash стек in-circuit. Детали — § R3.18
 
 ### Этап R3 — recursive verifier composition
 
@@ -319,6 +318,25 @@ ML-DSA подпись
   - Дальше: t=16 Merkle-path AIR + композиция (тот же swap, что R3.14/R3.15) → полный 128-битный
     inner-hash стек; затем on-chain интеграция (root vs committed FRI-layer root,
     `QLSAVerifierRecursive.sol`).
+- **R3.18 — 128-битный inner-hash стек ЗАВЕРШЁН: t=16 path AIR + composition_t16 (2026-07-16)** — ✅ **готов**
+  - `recursive/merkle_path_t16_air.rs`: путь аутентификации по **8-словным (248-битным) узлам** через
+    `compress_t16` — дуал `poseidon2_t16_air`, тот же механический swap, что R3.14 (t=8). 89 main + 38
+    preproc столбцов; переиспользует раунд-арифметизацию t=16 (`round_schedule`/`mat_external16_expr`/
+    `mat_internal16_expr`); кросс-компрессионная цепочка `cur` — тот же трюк смежности `out[-1]`;
+    C1-привязка index/leaf/root in-circuit + C2-пиннинг; multi-path builders (`build_trace_multi`/
+    `build_preproc_multi`) включены сразу. 11 тестов (reference-driven + roundtrip depth 1/3/5 +
+    rejection + forged-root/-preproc).
+  - `recursive/composition_t16.rs`: `recursive_verifier` + `merkle_path_t16` в ОДНОМ STARK — single- И
+    N-query (форма VFRI11), t=16-аналог composition_t8. Связка `leaf8 = qm31_leaf_hash_t16(finalFold)`
+    (rate-8 губка над 4 лимбами, `integration.rs`) пиннится в 8-словные leaf-столбцы. Value-bound
+    end-to-end полностью in-circuit на **~2^124 ≈ 128-битной коллизии узла**: finalFold (pinned) →
+    hashLeaf_t16 → leaf8 (pinned) → t=16 путь → root (pinned). Капы входов с самого начала. 5 тестов
+    (roundtrip + wrong-final/-root + N-query roundtrip с пер-query rejection + validation-errors).
+  - **Лестница inner-hash (t=2 → t=8 → t=16) ЗАВЕРШЕНА in-circuit** — каждая ступень была чистым
+    swap'ом hash-backend'а при неизменном паттерне композиции (сработало с первого прогона все три
+    раза — R3.15, R3.16, R3.18). **150 рекурсивных тестов (505 всего), 0 предупреждений.**
+  - Дальше: on-chain интеграция — root vs committed FRI-layer root, channel-replay,
+    `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
