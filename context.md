@@ -1,5 +1,37 @@
 # QLSA — Project Context
 
+## Аудит (2026-07-16) — C1 input/output binding закрыт в compression-AIR (R3.13–R4.1)
+
+Двухчастный аудит (крипто + код) свежей поверхности R3.13–R4.1 (t=8/t=16 inner-hash стек ~5500 строк
++ VFRI11-мост рекурсии). Два эксперта-агента + инлайн-верификация. **Одна HIGH-находка исправлена**,
+остальное — LOW/MEDIUM-гигиена, всё закрыто.
+
+- **[HIGH, крипто — ИСПРАВЛЕНО] Пиннинг входа/выхода в standalone compression-гаджетах.**
+  `poseidon2_t8_air`/`poseidon2_t16_air`: `prove_compress`/`verify_compress` привязывали заявленный
+  триплет `(left,right,node)` к трейсу только через Fiat-Shamir `mix_public` — злонамеренный prover
+  мог доказать ЛОЖНОЕ `compress(FAKE_left, FAKE_right) = node` (тот же класс, что закрытый в R3.12
+  root-binding). **Не достижимо в production** (эти функции вызываются только из своих
+  `#[cfg(test)]`-модулей; композиция использует merkle-path AIR, где пиннинг уже был), но это была
+  латентная ловушка в публичном API, нарушавшая инвариант репо «ни один verify_* не принимает
+  непиннутую привязку». Фикс по паттерну R3.12: preproc-столбцы `raw_pin[0..T]` (is_first-gated) +
+  `node_pin[0..T/2]` (is_node-gated) + in-circuit равенства; `canonical_preproc_root`/`verify_compress`
+  строят их из переданных верификатором `(left,right,node)`. Регрессии `test_forged_input_cannot_prove`
+  в обоих файлах.
+- **[MEDIUM, код — ИСПРАВЛЕНО] Пробел в тестах t16 vs t8-шаблон.** Добавлены
+  `test_external_matrix_invertible` + naive-cross-check линейных слоёв (16×16 эталон с нуля) +
+  `test_rc_count_and_range` в `poseidon2_t16.rs` — независимо подтверждают, что M_E = circ(2·M4,…) и
+  M_I = J+diag(1..16) суть именно те матрицы.
+- **[LOW, код — ИСПРАВЛЕНО]** stale Vec-capacity `leaves.len()*9 → *17` в composition_t16; устаревшие
+  "t=8" doc-комментарии, intra-doc-ссылки и runtime `format!`-строки ошибок внутри t16-файлов →
+  t16/8-word/M31⁸; stale "32 main columns" в poseidon2_t8_air → 40.
+- **Чистые зоны (подтверждено обоими агентами + инлайн):** C1/C2 в merkle-path t8/t16 (index/leaf/root
+  пиннятся, canonical-root сверяется в обоих verify-путях); связка композиции finalFold→leaf→root
+  пиннутая end-to-end; ориентационный трюк R4.1 корректен (тождество проверено, жёсткий инвариант
+  ловит ошибки); рефакторинг vfri11_fri_chain — byte-for-byte behavior-preserving (фикстура
+  идентична); ширина узла (t8 124-бит / t16 248-бит) течёт без усечения; M_I обратима (det≠0);
+  секретов нет; входные капы в публичных entry-points на месте.
+- **Итог: 513 тестов (+6), 152 рекурсивных, 0 предупреждений. Находок soundness в production-пути нет.**
+
 ## Рекурсия R4.1 (2026-07-16) — рекурсия верифицирует РЕАЛЬНЫЙ VFRI11-конвейер
 
 Старт финальной фазы (R4, on-chain интеграция) с её первого пункта: **«root vs committed FRI-layer
