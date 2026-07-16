@@ -497,6 +497,220 @@ pub fn build_trace(
     (main_cols, root)
 }
 
+// ── Multi-path builders (N independent paths in one component) ───────────────────
+//
+// The AIR is unchanged — `is_first_path` gates each path's `cur = leaf` reset and
+// leaf pinning, `is_root` gates each path's root pinning, so N paths of uniform
+// `depth` lay out in consecutive blocks of `depth` compressions (22 rows each).
+
+/// Smallest `log_size` fitting `num_paths` paths of `depth` compressions.
+pub fn compute_log_size_multi(num_paths: usize, depth: usize) -> u32 {
+    let comps = num_paths.max(1) * depth.max(1);
+    let n_real = comps * N_ROUNDS;
+    let mut log = MIN_LOG_SIZE;
+    while (1usize << log) < n_real {
+        log += 1;
+    }
+    log
+}
+
+/// Canonical preprocessed columns for `num_paths` paths of uniform `depth`:
+/// per-round rc/is_ext/is_int, per-compression `is_first_comp`, per-path
+/// `is_first_path`/`idx_bit`/`leaf_pin`/`is_root`/`root_pin`. Single source of
+/// truth for the preprocessed tree (C1/C2).
+pub fn build_preproc_multi(
+    leaves: &[[u64; 4]],
+    indices: &[u32],
+    roots: &[[u64; 4]],
+    depth: usize,
+    log_size: u32,
+) -> TraceColumns {
+    assert_eq!(leaves.len(), indices.len(), "leaves/indices length mismatch");
+    assert_eq!(leaves.len(), roots.len(), "leaves/roots length mismatch");
+    assert!(depth >= 1, "depth must be ≥ 1");
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let one = BaseField::from_u32_unchecked(1);
+    let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut rc_cols: Vec<Vec<BaseField>> = (0..T).map(|_| vec![bf0; n]).collect();
+    let mut is_ext_c = vec![bf0; n];
+    let mut is_int_c = vec![bf0; n];
+    let mut first_comp_c = vec![bf0; n];
+    let mut first_path_c = vec![bf0; n];
+    let mut idx_bit_c = vec![bf0; n];
+    let mut leaf_cols: Vec<Vec<BaseField>> = (0..4).map(|_| vec![bf0; n]).collect();
+    let mut is_root_c = vec![bf0; n];
+    let mut root_cols: Vec<Vec<BaseField>> = (0..4).map(|_| vec![bf0; n]).collect();
+
+    let n_comp = n / N_ROUNDS;
+    for comp in 0..n_comp {
+        let path = comp / depth;
+        let j = comp % depth; // compression within the path
+        if path >= leaves.len() {
+            break; // padding rows: all selectors stay zero
+        }
+        for r in 0..N_ROUNDS {
+            let row = comp * N_ROUNDS + r;
+            let (is_ext, rc) = round_schedule(r);
+            for i in 0..T {
+                rc_cols[i][row] = m31(rc[i]);
+            }
+            if is_ext {
+                is_ext_c[row] = one;
+            } else {
+                is_int_c[row] = one;
+            }
+        }
+        let first = comp * N_ROUNDS;
+        first_comp_c[first] = one;
+        let bit = if j < 32 { (indices[path] >> j) & 1 } else { 0 };
+        idx_bit_c[first] = m31(bit as u64);
+        if j == 0 {
+            first_path_c[first] = one; // path start: cur = leaf reset + leaf pin
+            for k in 0..4 {
+                leaf_cols[k][first] = m31(leaves[path][k]);
+            }
+        }
+        if j == depth - 1 {
+            // Path root pinned on its last compression's last round row (C1).
+            let root_row = comp * N_ROUNDS + (N_ROUNDS - 1);
+            is_root_c[root_row] = one;
+            for k in 0..4 {
+                root_cols[k][root_row] = m31(roots[path][k]);
+            }
+        }
+    }
+
+    let mut all = rc_cols;
+    all.push(is_ext_c);
+    all.push(is_int_c);
+    all.push(first_comp_c);
+    all.push(first_path_c);
+    all.push(idx_bit_c);
+    all.extend(leaf_cols);
+    all.push(is_root_c);
+    all.extend(root_cols);
+    for col in all.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    all.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect()
+}
+
+/// Build the multi-path main trace. `leaves[p]`, `sibs[p]`, `bits[p]` describe
+/// path `p` (all of uniform `depth`). Returns `(main_columns, roots)`.
+pub fn build_trace_multi(
+    leaves: &[[u64; 4]],
+    sibs: &[Vec<[u64; 4]>],
+    bits: &[Vec<bool>],
+    log_size: u32,
+) -> (TraceColumns, Vec<[u64; 4]>) {
+    let num_paths = leaves.len();
+    assert!(num_paths >= 1, "need ≥ 1 path");
+    assert_eq!(sibs.len(), num_paths);
+    assert_eq!(bits.len(), num_paths);
+    let depth = sibs[0].len();
+    assert!(depth >= 1, "depth must be ≥ 1");
+    assert!(sibs.iter().all(|s| s.len() == depth), "paths must share depth");
+    assert!(bits.iter().all(|b| b.len() == depth), "paths must share depth");
+
+    let n = 1usize << log_size;
+    debug_assert!(num_paths * depth * N_ROUNDS <= n, "paths exceed trace capacity");
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
+    let mut roots = Vec::with_capacity(num_paths);
+    let mut carry_state = [0u64; T]; // previous row's out (for chains)
+
+    let n_comp_real = num_paths * depth;
+    let mut cur = [0u64; 4];
+    for comp in 0..n_comp_real {
+        let path = comp / depth;
+        let j = comp % depth;
+        if j == 0 {
+            cur = norm4(leaves[path]); // path start: cur = its leaf
+        }
+        let sib = norm4(sibs[path][j]);
+        let bit = bits[path][j];
+        let (left, right) = if bit { (sib, cur) } else { (cur, sib) };
+        let raw8 = [left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3]];
+
+        let mut state = raw8;
+        mat_external_ref(&mut state);
+
+        for r in 0..N_ROUNDS {
+            let row = comp * N_ROUNDS + r;
+            let (is_ext, rc) = round_schedule(r);
+            let inp = state;
+            let mut sq = [0u64; T];
+            let mut sbx = [0u64; T];
+            for i in 0..T {
+                let yi = m31_add(inp[i], rc[i]);
+                sq[i] = m31_mul(yi, yi);
+                sbx[i] = sbox_ref(yi);
+            }
+            let mut lin = inp;
+            if is_ext {
+                for i in 0..T {
+                    lin[i] = sbx[i];
+                }
+                mat_external_ref(&mut lin);
+            } else {
+                lin[0] = sbx[0];
+                mat_internal_ref(&mut lin);
+            }
+            let out = lin;
+
+            for i in 0..T {
+                cols[C_IN + i][row] = m31(inp[i]);
+                cols[C_SQ + i][row] = m31(sq[i]);
+                cols[C_SBOX + i][row] = m31(sbx[i]);
+                cols[C_OUT + i][row] = m31(out[i]);
+            }
+            if r == 0 {
+                for k in 0..4 {
+                    cols[C_CUR + k][row] = m31(cur[k]);
+                    cols[C_SIB + k][row] = m31(sib[k]);
+                }
+                cols[C_BIT][row] = if bit { m31(1) } else { bf0 };
+                if j == 0 {
+                    for k in 0..4 {
+                        cols[C_LEAF + k][row] = m31(leaves[path][k]);
+                    }
+                }
+            }
+            state = out;
+            carry_state = out;
+        }
+        cur = [state[0], state[1], state[2], state[3]];
+        if j == depth - 1 {
+            roots.push(cur); // path `path`'s root
+        }
+    }
+
+    // Padding rows: continue the round chain (in = out_prev); selectors are 0 so
+    // C_out forces out = 0; sq/sbox derived so the ungated constraints hold.
+    for row in (n_comp_real * N_ROUNDS)..n {
+        for i in 0..T {
+            let inp_i = carry_state[i];
+            cols[C_IN + i][row] = m31(inp_i);
+            cols[C_SQ + i][row] = m31(m31_mul(inp_i, inp_i));
+            cols[C_SBOX + i][row] = m31(sbox_ref(inp_i));
+        }
+        carry_state = [0u64; T];
+    }
+
+    let mut main = cols;
+    for col in main.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    let main_cols: TraceColumns = main.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect();
+    (main_cols, roots)
+}
+
 // ── Prove / verify roundtrip ────────────────────────────────────────────────────
 
 fn mix_public(channel: &mut Blake2sM31Channel, leaf: [u64; 4], index: u32, root: [u64; 4]) {

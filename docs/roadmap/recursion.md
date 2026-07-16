@@ -288,6 +288,19 @@ ML-DSA подпись
     finalFold И пересчитанный leaf4) + wrong-root. **3 теста, 125 рекурсивных (474 всего), 0 предупреждений.**
     Поднимает коллизию узла inner-hash рекурсии с 2^15.5 до **2^62**. Дальше: N-query t=8 композиция
     (форма VFRI11, как R3.9 после R3.8), затем t=16 (полные 128 бит — тот же swap с t=16 path AIR).
+- **R3.16 — N-query широкая композиция: форма VFRI11 на t=8 (2026-07-16)** — ✅ **готов**
+  - `prove_queries_membership_t8`/`verify_queries_membership_t8` доказывают N fold-цепочек + N широких
+    (4-словные узлы) Merkle-путей в ОДНОМ STARK — t=8-аналог N-query композиции R3.9. Построен на новых
+    multi-path t=8 builders (`merkle_path_t8_air::build_trace_multi`/`build_preproc_multi`/
+    `compute_log_size_multi`): N путей однородной глубины в последовательных блоках по `depth` компрессий
+    (22 строки каждая); **AIR не меняется** — пер-строчные селекторы `is_first_path`/`is_root` гейтят
+    сброс cur=leaf и пиннинг root каждого пути в своём блоке. Пер-query листья пересчитываются
+    верификатором как `qm31_leaf_hash_t8(final)` и пиннятся; root каждого пути пиннится in-circuit.
+    Капы входов включены сразу (урок R3.12): MAX_QUERIES/MAX_NUM_FOLDS/MAX_DEPTH/диапазон log_size/
+    ёмкость трейса — враждебные входы дают Err, не панику. Тесты: 3-query roundtrip + пер-query
+    rejection (wrong-final меняет пиннутый fin И leaf4; wrong-root меняет пиннутый root) +
+    validation-errors. **2 теста, 127 рекурсивных (476 всего), 0 предупреждений.**
+    Дальше: t=16 (полные 128 бит), root vs committed FRI-layer root (on-chain), `QLSAVerifierRecursive.sol`.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

@@ -139,8 +139,21 @@
 //! fully in-circuit: finalFold (pinned) → hashLeaf_t8 → leaf4 (pinned) → t=8 path →
 //! root (pinned). `prove_query_membership_t8` / `verify_query_membership_t8`,
 //! 3 tests. This lifts the recursion's inner-hash node collision to ~2^62; t=16
-//! (128-bit) is the same swap once a t=16 path AIR exists. Next: N-query t=8
-//! composition (VFRI11 shape), then t=16.
+//! (128-bit) is the same swap once a t=16 path AIR exists.
+//!
+//! **R3.16 (2026-07-16) — N-query wide composition (VFRI11 shape on t=8):**
+//! `prove_queries_membership_t8` / `verify_queries_membership_t8` prove N fold
+//! chains + N wide (4-word-node) Merkle paths in ONE STARK — the t=8 analogue of
+//! R3.9's N-query composition, built on new multi-path t=8 builders
+//! (`merkle_path_t8_air::build_trace_multi` / `build_preproc_multi` /
+//! `compute_log_size_multi`; AIR unchanged — `is_first_path`/`is_root` gate each
+//! path's leaf reset and root pin per block). Per-query leaves are recomputed by
+//! the verifier as `qm31_leaf_hash_t8(final)` and pinned; every path's root is
+//! pinned in-circuit. Input caps included from the start (R3.12 lesson):
+//! MAX_QUERIES / MAX_NUM_FOLDS / MAX_DEPTH / log_size range / trace capacity.
+//! 2 tests (3-query roundtrip + per-query wrong-final/wrong-root rejection;
+//! hostile-input validation). Next: t=16 for full 128-bit; root vs committed
+//! FRI-layer root (on-chain integration); `QLSAVerifierRecursive.sol`.
 
 pub mod channel_air;
 pub mod composition;

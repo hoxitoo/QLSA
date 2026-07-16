@@ -1,5 +1,30 @@
 # QLSA — Project Context
 
+## Рекурсия R3.16 (2026-07-16) — N-query широкая композиция (форма VFRI11 на t=8)
+
+Масштабирование R3.15 до формы реального VFRI11-верификатора: N запросов + N широких путей в ОДНОМ
+STARK — t=8-аналог N-query композиции R3.9. `prove_queries_membership_t8`/`verify_queries_membership_t8`
+в `composition_t8.rs` + multi-path builders в `merkle_path_t8_air.rs`.
+
+- **Multi-path t=8 builders** (`build_trace_multi`/`build_preproc_multi`/`compute_log_size_multi`):
+  N путей однородной глубины в последовательных блоках по `depth` компрессий (22 строки каждая).
+  **AIR не меняется** — пер-строчные селекторы `is_first_path` (сброс cur=leaf + пиннинг листа) и
+  `is_root` (пиннинг корня) гейтят каждый путь в своём блоке; padding-строки продолжают round-chain
+  с нулевыми селекторами (out форсится в 0).
+- **Связка по каждому запросу q:** finalFold_q (pinned в rv) → leaf4_q = qm31_leaf_hash_t8(finalFold_q)
+  (пересчитывается верификатором) → пиннится в leaf-столбцы пути q → root_q (pinned in-circuit).
+- **Капы входов с самого начала (урок аудита R3.12):** MAX_QUERIES/MAX_NUM_FOLDS/MAX_DEPTH/диапазон
+  log_size/ёмкость трейса в обоих prove/verify — враждебные входы дают Err, не панику/OOM.
+- **Валидация:** 3-query roundtrip (finals/leaves/roots сверены с референсами) + пер-query rejection
+  (wrong-final меняет пиннутый fin И пересчитанный leaf4; wrong-root меняет пиннутый root_q) +
+  validation-errors (depth=0, mismatch, log_size=40). **2 теста, 127 рекурсивных (476 всего),
+  0 предупреждений.**
+- **Статус стека t=8:** compression AIR (R3.13) → path AIR (R3.14) → 1-query композиция (R3.15) →
+  **N-query композиция (R3.16)** — широкий inner-hash стек рекурсии полностью повторяет форму
+  верификации VFRI11 (N запросов, пути к FRI-layer корням) на коллизии узла 2^62.
+- **Дальше:** t=16 (полные 128 бит — тот же swap), root vs committed FRI-layer root (on-chain
+  интеграция), `QLSAVerifierRecursive.sol`. `docs/roadmap/recursion.md` § R3.16.
+
 ## Рекурсия R3.15 (2026-07-13) — широкая (t=8) композиция: recursive_verifier + merkle_path_t8
 
 Интеграционный шаг: подключает t=8 path AIR (R3.14) как inner hash композиции рекурсии.
