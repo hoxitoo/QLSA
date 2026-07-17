@@ -369,6 +369,20 @@ ML-DSA подпись
     сдвиг z_x и query-индексов (нельзя cherry-pick запросы подменой корня on-chain). **514 тестов.**
   - Дальше: `QLSAVerifierRecursive.sol` (Poseidon2ChannelT8 replay → challenges как public inputs →
     verify рекурсивного STARK) + `BatchRegistryV7` + PyO3/SDK + E2E.
+- **R4.3 — on-chain channel-replay в Solidity (2026-07-16)** — ✅ **готов**
+  - `contracts/src/verifier/RecursiveChannelReplay.sol` — Solidity-зеркало `vfri11_replay_channel`
+    (R4.2) на уже кросс-чекнутом `Poseidon2ChannelT8`. Из публичных корней (traceRoot, oods-combos,
+    compRoot, friLayerRoots, batchRoot) без witness выдаёт `Challenges{zX, compAlpha, friAlpha,
+    friAlphas[], queryIndices[]}` — public inputs будущего рекурсивного verify. Op-order байт-в-байт ==
+    Rust. `qm31Words` (MSB-first) + mixRootFull/mixRootW/mixU32s/drawSecureFelt/drawQueries в том же
+    порядке; guard'ы treeDepth∈[2,30]/nQueries∈[1,64]/≥1 root.
+  - Кросс-чек: Rust-фикстура `contracts/test/fixtures/vfri11_channel_replay.json`
+    (ignored-тест `write_vfri11_channel_replay_fixture`) + `RecursiveChannelReplay.test.js` (harness
+    `RecursiveChannelReplayHarness.sol`): replay on-chain == Rust draws (zX/compAlpha/friAlpha/
+    friAlphas/indices); tamper traceRoot → сдвиг challenges; revert на out-of-range. Контракт
+    компилируется чисто (solc viaIR, 0 предупреждений); EVM-кросс-чек гоняется в CI (Solidity-джоб).
+  - Дальше: `QLSAVerifierRecursive.sol` (этот replay → challenges как public inputs → verify
+    рекурсивного STARK через VFRI-машинерию для его фикс-размера) + `BatchRegistryV7` + E2E.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

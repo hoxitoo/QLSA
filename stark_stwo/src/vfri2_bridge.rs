@@ -7864,6 +7864,74 @@ mod tests_vfri8 {
         assert_ne!(replay_bad.z_x, replay.z_x, "tampered trace_root must change z_x");
     }
 
+    /// Writes the channel-replay fixture consumed by the Solidity cross-check
+    /// (RecursiveChannelReplay.test.js). Inputs = public roots + OODS combos;
+    /// expected = the challenges/indices vfri11_replay_channel draws. Run with:
+    /// cargo test write_vfri11_channel_replay_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore = "regenerates contracts/test/fixtures/vfri11_channel_replay.json"]
+    fn write_vfri11_channel_replay_fixture() {
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x5Cu8; 32];
+        let (tree_depth, n_queries, num_folds) = (4u32, 3usize, 2usize);
+        let ch = vfri11_fri_chain(&cols, tree_depth, &batch_root, n_queries, Some(num_folds)).unwrap();
+        let inp = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root,
+            tree_depth,
+            n_queries,
+        };
+        let out = vfri11_replay_channel(&inp).unwrap();
+
+        let hx = |b: &[u8; 32]| format!("0x{}", hex::encode(b));
+        let roots_json: Vec<String> = inp.fri_layer_roots.iter().map(|r| hx(r)).collect();
+        let alphas_json: Vec<String> = out.fri_alphas.iter().map(|a| a.to_string()).collect();
+        let idx_json: Vec<String> = out.query_indices.iter().map(|i| i.to_string()).collect();
+        let json = format!(
+            concat!(
+                "{{\n",
+                "  \"traceRoot\": \"{}\",\n",
+                "  \"oodsComboPos\": \"{}\",\n",
+                "  \"oodsComboNeg\": \"{}\",\n",
+                "  \"compRoot\": \"{}\",\n",
+                "  \"friLayerRoots\": [{}],\n",
+                "  \"batchRoot\": \"{}\",\n",
+                "  \"treeDepth\": {},\n",
+                "  \"nQueries\": {},\n",
+                "  \"expected\": {{\n",
+                "    \"zX\": \"{}\",\n",
+                "    \"compAlpha\": \"{}\",\n",
+                "    \"friAlpha\": \"{}\",\n",
+                "    \"friAlphas\": [{}],\n",
+                "    \"queryIndices\": [{}]\n",
+                "  }}\n}}\n"
+            ),
+            hx(&inp.trace_root),
+            inp.oods_combo_pos,
+            inp.oods_combo_neg,
+            hx(&inp.comp_root),
+            roots_json.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(", "),
+            hx(&inp.batch_root),
+            inp.tree_depth,
+            inp.n_queries,
+            out.z_x,
+            out.comp_alpha,
+            out.fri_alpha,
+            alphas_json.join(", "),
+            idx_json.join(", "),
+        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/vfri11_channel_replay.json");
+        std::fs::write(path, json).expect("write fixture");
+        println!("wrote {path}");
+    }
+
     // The bridge must work at the odd-orientation edge too: many queries so some
     // fold rounds hit the high half (cur_idx ≥ layer_sz → negated twiddle inverse).
     #[test]

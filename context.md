@@ -1,5 +1,22 @@
 # QLSA — Project Context
 
+## Рекурсия R4.3 (2026-07-16) — on-chain channel-replay в Solidity
+
+Первый Solidity-кирпич `QLSAVerifierRecursive.sol`. `contracts/src/verifier/RecursiveChannelReplay.sol`
+— зеркало Rust `vfri11_replay_channel` (R4.2) на уже бит-в-бит кросс-чекнутом `Poseidon2ChannelT8`:
+из публичных committed-корней (traceRoot, oods_combo_pos/neg, compRoot, friLayerRoots[0..=K], batchRoot,
+treeDepth, nQueries) без трейса/witness выдаёт `Challenges{zX, compAlpha, friAlpha, friAlphas[],
+queryIndices[]}` — те public inputs, к которым привязан рекурсивный proof (решение R3.10: challenges
+как public inputs, канал on-chain). Op-order (mixRootFull(traceRoot)→drawSecureFelt×2→mixU32s(8 combo
+слов)→mixRootW(compRoot)→drawSecureFelt→mixRootW(layer0)→loop[drawSecureFelt+mixRootW]→mixRootFull(batch)
+→drawQueries) байт-в-байт == Rust. `qm31Words` MSB-first, guard'ы treeDepth∈[2,30]/nQueries∈[1,64]/≥1 root.
+Кросс-чек: Rust-фикстура `vfri11_channel_replay.json` + `RecursiveChannelReplay.test.js` (harness):
+on-chain replay == Rust draws, tamper traceRoot сдвигает challenges, revert на out-of-range.
+Контракт компилируется чисто (solc-js viaIR, 0 предупреждений; solc 0.8.35 в CI — egress-политика
+блокирует локальную загрузку компилятора, EVM-тест гоняется в Solidity-джобе CI). **515 Rust-тестов
+(+1 fixture-writer), 0 предупреждений.** Дальше: `QLSAVerifierRecursive.sol` + `BatchRegistryV7` + E2E.
+`docs/roadmap/recursion.md` § R4.3.
+
 ## Рекурсия R4.2 (2026-07-16) — on-chain channel-replay эталон
 
 Начало Solidity-фазы с Rust-эталона (крит.-замечание №5: сперва валидация на Rust).
