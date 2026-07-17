@@ -7892,8 +7892,10 @@ mod tests_vfri8 {
 
         let hx = |b: &[u8; 32]| format!("0x{}", hex::encode(b));
         let roots_json: Vec<String> = inp.fri_layer_roots.iter().map(|r| hx(r)).collect();
-        let alphas_json: Vec<String> = out.fri_alphas.iter().map(|a| a.to_string()).collect();
-        let idx_json: Vec<String> = out.query_indices.iter().map(|i| i.to_string()).collect();
+        // uint128 challenges + query indices are emitted as QUOTED strings so
+        // JSON.parse keeps them exact (bare numbers > 2^53 lose precision as JS floats).
+        let alphas_json: Vec<String> = out.fri_alphas.iter().map(|a| format!("\"{a}\"")).collect();
+        let idx_json: Vec<String> = out.query_indices.iter().map(|i| format!("\"{i}\"")).collect();
         let json = format!(
             concat!(
                 "{{\n",
