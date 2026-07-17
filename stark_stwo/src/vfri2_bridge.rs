@@ -7934,6 +7934,53 @@ mod tests_vfri8 {
         println!("wrote {path}");
     }
 
+    // R4.3 tie-together: the query indices the on-chain channel replay derives are
+    // EXACTLY the positions the recursion proof commits to (each query's px =
+    // coset_at(idx).x). This is the composition invariant QLSAVerifierRecursive.sol
+    // relies on: replay → indices, then verify the recursion bound to those px —
+    // a prover can't prove membership at cherry-picked positions.
+    #[test]
+    fn test_channel_indices_match_recursion_query_points() {
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x5Cu8; 32];
+        let (tree_depth, n_queries, num_folds) = (4u32, 3usize, 2usize);
+
+        let ch = vfri11_fri_chain(&cols, tree_depth, &batch_root, n_queries, Some(num_folds)).unwrap();
+        let inp = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root,
+            tree_depth,
+            n_queries,
+        };
+        let replay = vfri11_replay_channel(&inp).unwrap();
+        let rec = gen_vfri11_recursion_inputs(&cols, tree_depth, &batch_root, n_queries, Some(num_folds)).unwrap();
+
+        assert_eq!(replay.query_indices.len(), rec.queries.len());
+        for q in 0..replay.query_indices.len() {
+            let idx = replay.query_indices[q];
+            let px_from_index = coset_at(tree_depth, idx as u64).0;
+            // queries[q].step.2 is the px the recursion proof pins for this query.
+            assert_eq!(
+                px_from_index, rec.queries[q].0 .2,
+                "channel-derived index {idx} must equal the recursion query point px at slot {q}",
+            );
+            // And the replay's FRI challenges are the ones the recursion consumes:
+            // query q's circle-fold alpha (step.6) == the single fri_alpha; the
+            // per-fold alphas (rounds[k].1) == replay.fri_alphas[k].
+            assert_eq!(rec.queries[q].0 .6, replay.fri_alpha, "circle-fold alpha");
+            for (k, round) in rec.queries[q].1.iter().enumerate() {
+                assert_eq!(round.1, replay.fri_alphas[k], "fold-round {k} alpha");
+            }
+        }
+    }
+
     // The bridge must work at the odd-orientation edge too: many queries so some
     // fold rounds hit the high half (cur_idx ≥ layer_sz → negated twiddle inverse).
     #[test]
