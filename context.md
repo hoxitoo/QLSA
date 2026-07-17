@@ -1,5 +1,19 @@
 # QLSA — Project Context
 
+## Рекурсия R4.2 (2026-07-16) — on-chain channel-replay эталон
+
+Начало Solidity-фазы с Rust-эталона (крит.-замечание №5: сперва валидация на Rust).
+`vfri11_replay_channel(Vfri11ChannelInputs) -> Vfri11ChannelChallenges` в vfri2_bridge.rs: из ОДНИХ
+публичных committed-корней (trace_root, oods_combo_pos/neg, comp_root, friLayerRoots[0..=K], batch_root,
+tree_depth, n_queries) — без трейса/witness — реплеит Poseidon2 t=8 канал и выдаёт ровно те
+challenges/indices (`z_x`, `comp_alpha`, `fri_alpha`, per-fold `fri_alphas`, query-индексы), к которым
+привязан рекурсивный proof (по решению R3.10 challenges — public inputs, канал остаётся on-chain).
+Порядок операций байт-в-байт == `vfri11_fri_chain`. Тест `test_vfri11_channel_replay_matches_chain`:
+replay из корней реальной цепочки совпадает с её draws; tamper trace_root сдвигает z_x + индексы
+(нельзя cherry-pick запросы подменой корня). Это точная спецификация для `QLSAVerifierRecursive.sol`
+(Poseidon2ChannelT8 уже кросс-чекнут). **514 тестов, 0 предупреждений.** Дальше: контракт + BatchRegistryV7
++ PyO3/SDK + E2E. `docs/roadmap/recursion.md` § R4.2.
+
 ## Аудит (2026-07-16) — C1 input/output binding закрыт в compression-AIR (R3.13–R4.1)
 
 Двухчастный аудит (крипто + код) свежей поверхности R3.13–R4.1 (t=8/t=16 inner-hash стек ~5500 строк

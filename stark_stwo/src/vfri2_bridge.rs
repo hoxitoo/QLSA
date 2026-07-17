@@ -5465,6 +5465,83 @@ pub fn gen_vfri11_recursion_inputs(
     })
 }
 
+/// PUBLIC absorbed values of the VFRI11 Fiat-Shamir channel (R4.2 — the on-chain
+/// channel-replay spec). These are the ONLY inputs the on-chain verifier needs to
+/// re-derive the recursion's challenge/query public inputs — no trace/witness.
+/// Every field is a committed root or an OODS combo that already appears in the
+/// VFRI11 proof/hints, so an on-chain contract holding the proof can reconstruct
+/// them and replay the (cheap Poseidon2 t=8) channel to draw the same challenges.
+#[derive(Clone)]
+pub struct Vfri11ChannelInputs {
+    pub trace_root: [u8; 32],
+    pub oods_combo_pos: u128,
+    pub oods_combo_neg: u128,
+    pub comp_root: [u8; 32],
+    /// `friLayerRoots[0..=num_folds]` — layer-1 root first, then one per fold.
+    pub fri_layer_roots: Vec<[u8; 32]>,
+    pub batch_root: [u8; 32],
+    pub tree_depth: u32,
+    pub n_queries: usize,
+}
+
+/// The challenges + query indices the channel replay draws — exactly the
+/// verifier-fixed public inputs the recursive proof pins (`z_x`, `comp_alpha`,
+/// `fri_alpha`, per-fold `fri_alphas`, and the FRI query indices).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Vfri11ChannelChallenges {
+    pub z_x: u128,
+    pub comp_alpha: u128,
+    pub fri_alpha: u128,
+    pub fri_alphas: Vec<u128>,
+    pub query_indices: Vec<usize>,
+}
+
+/// Replay the VFRI11 Fiat-Shamir channel from PUBLIC roots + OODS combos alone
+/// (no trace/witness) and return the drawn challenges + query indices — the Rust
+/// reference for `QLSAVerifierRecursive.sol`'s on-chain channel replay. The op
+/// order is byte-identical to [`vfri11_fri_chain`] (same `P2T8Channel`), so the
+/// replay reproduces exactly the challenges the recursion was bound to.
+pub fn vfri11_replay_channel(
+    inp: &Vfri11ChannelInputs,
+) -> Result<Vfri11ChannelChallenges, String> {
+    if !(2..=30).contains(&inp.tree_depth) {
+        return Err(format!("tree_depth={} must be in 2..=30", inp.tree_depth));
+    }
+    if inp.n_queries == 0 || inp.n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {}", inp.n_queries));
+    }
+    if inp.fri_layer_roots.is_empty() {
+        return Err("fri_layer_roots must contain at least the layer-1 root".into());
+    }
+    let num_folds = inp.fri_layer_roots.len() - 1;
+
+    let mut chan = P2T8Channel::init();
+    chan.mix_root_full(&inp.trace_root);
+    let z_x = chan.draw_secure_felt();
+    let comp_alpha = chan.draw_secure_felt();
+
+    let p = qm31_words(inp.oods_combo_pos);
+    let nw = qm31_words(inp.oods_combo_neg);
+    let combo_words = [p[0], p[1], p[2], p[3], nw[0], nw[1], nw[2], nw[3]];
+    chan.mix_u32s(&combo_words);
+
+    chan.mix_root_w(&inp.comp_root);
+    let fri_alpha = chan.draw_secure_felt();
+
+    chan.mix_root_w(&inp.fri_layer_roots[0]);
+    let mut fri_alphas = Vec::with_capacity(num_folds);
+    for k in 0..num_folds {
+        let alpha_k = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+        chan.mix_root_w(&inp.fri_layer_roots[k + 1]);
+    }
+
+    chan.mix_root_full(&inp.batch_root);
+    let query_indices = chan.draw_queries(inp.tree_depth, inp.n_queries);
+
+    Ok(Vfri11ChannelChallenges { z_x, comp_alpha, fri_alpha, fri_alphas, query_indices })
+}
+
 pub fn gen_vfri11_hints_from_cols_nfolds(
     cols:              &[Vec<u32>],
     tree_depth:        u32,
@@ -7742,6 +7819,49 @@ mod tests_vfri8 {
             .unwrap_or(false),
             "a root ≠ the committed FRI-layer root must not verify",
         );
+    }
+
+    // R4.2: replaying the channel from PUBLIC roots + OODS combos alone (no
+    // trace/witness) reproduces exactly the challenges + query indices the real
+    // VFRI11 chain drew — the on-chain channel-replay spec for
+    // QLSAVerifierRecursive.sol. A tampered root must change the drawn challenges.
+    #[test]
+    fn test_vfri11_channel_replay_matches_chain() {
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x5Cu8; 32];
+        let ch = vfri11_fri_chain(&cols, 4, &batch_root, 3, Some(2)).unwrap();
+
+        let inp = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root,
+            tree_depth: 4,
+            n_queries: 3,
+        };
+        let replay = vfri11_replay_channel(&inp).unwrap();
+
+        // Byte-identical to the real chain's Fiat-Shamir draws.
+        assert_eq!(replay.z_x, ch.z_x, "z_x");
+        assert_eq!(replay.comp_alpha, ch.comp_alpha, "comp_alpha");
+        assert_eq!(replay.fri_alpha, ch.fri_alpha, "fri_alpha");
+        assert_eq!(replay.fri_alphas, ch.fri_alphas, "per-fold fri_alphas");
+        assert_eq!(replay.query_indices, ch.derived_indices, "query indices");
+
+        // Public-input soundness: a tampered committed root changes the challenges
+        // (so an adversary can't cherry-pick queries by swapping a root on-chain).
+        // trace_root is absorbed via mix_root_full (all 32 bytes), so any bit flip
+        // reshuffles the whole downstream transcript incl. the query indices.
+        let mut bad = inp.clone();
+        bad.trace_root[0] ^= 1;
+        let replay_bad = vfri11_replay_channel(&bad).unwrap();
+        assert_ne!(replay_bad.query_indices, replay.query_indices, "tampered trace_root must move the queries");
+        assert_ne!(replay_bad.z_x, replay.z_x, "tampered trace_root must change z_x");
     }
 
     // The bridge must work at the odd-orientation edge too: many queries so some

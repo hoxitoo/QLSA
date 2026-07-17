@@ -357,6 +357,18 @@ ML-DSA подпись
     0 предупреждений.**
   - Дальше: on-chain channel-replay (absorb roots → draw challenges/indices, сверка с public inputs
     рекурсивного proof) + `QLSAVerifierRecursive.sol` + `BatchRegistryV7`.
+- **R4.2 — on-chain channel-replay эталон (2026-07-16)** — ✅ **готов**
+  - `vfri11_replay_channel(Vfri11ChannelInputs) -> Vfri11ChannelChallenges` (vfri2_bridge.rs): из ОДНИХ
+    публичных корней (trace_root, oods-combos, comp_root, friLayerRoots[0..=K], batch_root) без
+    трейса/witness воспроизводит ровно те challenges/indices (`z_x`, `comp_alpha`, `fri_alpha`,
+    per-fold `fri_alphas`, query-индексы), к которым привязан рекурсивный proof. Порядок операций
+    байт-в-байт совпадает с `vfri11_fri_chain` (тот же `P2T8Channel`). Это Rust-эталон для
+    `QLSAVerifierRecursive.sol` (по дисциплине крит.-замечания №5: валидация на Rust до Solidity).
+  - Тест `test_vfri11_channel_replay_matches_chain`: replay из корней реальной цепочки == её draws
+    (z_x/comp_alpha/fri_alpha/fri_alphas/indices); tamper trace_root (mix_root_full, все 32 байта) →
+    сдвиг z_x и query-индексов (нельзя cherry-pick запросы подменой корня on-chain). **514 тестов.**
+  - Дальше: `QLSAVerifierRecursive.sol` (Poseidon2ChannelT8 replay → challenges как public inputs →
+    verify рекурсивного STARK) + `BatchRegistryV7` + PyO3/SDK + E2E.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
