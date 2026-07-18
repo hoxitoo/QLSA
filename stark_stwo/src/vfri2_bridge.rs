@@ -7981,6 +7981,62 @@ mod tests_vfri8 {
         }
     }
 
+    // R4.4: the OUTER recursive trace exports as plain columns and feeds the
+    // EXISTING VFRI11 hint generator — the path to on-chain verification of the
+    // recursion by the deployed VFRI11 machinery at small constant gas. The outer
+    // proof is cross-bound to the INNER proof's public roots via batch_root =
+    // keccak(inner trace_root ‖ inner last-layer root) (BatchRegistryV4 pattern).
+    #[test]
+    fn test_recursive_outer_trace_vfri11_hints() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        use sha3::{Digest as Sha3Digest, Keccak256};
+
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let inner_batch_root = [0x5Cu8; 32];
+        let rec = gen_vfri11_recursion_inputs(&cols, 4, &inner_batch_root, 2, Some(2)).unwrap();
+
+        // Outer trace: 87 columns at the composition's shared log_size.
+        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths).unwrap();
+        assert_eq!(outer_cols.len(), 87, "rv 42 + merkle_t8 45 main columns");
+        assert!(outer_cols.iter().all(|c| c.len() == 1usize << outer_log));
+
+        // Cross-bind the outer proof to the inner proof's public roots.
+        let mut h = Keccak256::new();
+        h.update(rec.trace_root);
+        for w in rec.last_layer_root {
+            h.update((w as u32).to_be_bytes());
+        }
+        let outer_batch_root: [u8; 32] = h.finalize().into();
+
+        // The outer trace feeds the EXISTING VFRI11 hint generator unchanged.
+        let (proof1, commit1, hints1) = gen_vfri11_hints_from_cols_nfolds(
+            &outer_cols, outer_log, &outer_batch_root, 2, Some(3),
+        )
+        .unwrap();
+        assert_eq!(proof1[0..8], 5u64.to_le_bytes(), "VFRI11 version marker");
+        assert!(!hints1.is_empty());
+
+        // Deterministic…
+        let (proof2, commit2, hints2) = gen_vfri11_hints_from_cols_nfolds(
+            &outer_cols, outer_log, &outer_batch_root, 2, Some(3),
+        )
+        .unwrap();
+        assert_eq!((&proof1, &commit1, &hints1), (&proof2, &commit2, &hints2));
+
+        // …and genuinely bound: a different inner binding root changes the outer
+        // hints (query indices shift), so outer proofs can't be replayed across
+        // different inner proofs.
+        let mut other_root = outer_batch_root;
+        other_root[0] ^= 1;
+        let (_, _, hints3) =
+            gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &other_root, 2, Some(3))
+                .unwrap();
+        assert_ne!(hints1, hints3, "outer hints must be bound to the inner roots");
+    }
+
     // The bridge must work at the odd-orientation edge too: many queries so some
     // fold rounds hit the high half (cur_idx ≥ layer_sz → negated twiddle inverse).
     #[test]

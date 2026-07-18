@@ -1,5 +1,28 @@
 # QLSA — Project Context
 
+## Рекурсия R4.4 (2026-07-18) — внешний трейс рекурсии → существующая VFRI11-машинерия
+
+Ключевой архитектурный шаг к `QLSAVerifierRecursive.sol`: внешний рекурсивный трейс мал (87 столбцов,
+сотни строк) → его можно верифицировать on-chain УЖЕ ЗАДЕПЛОЕННОЙ VFRI11-машинерией за малый
+константный газ, не пиша новый полный Stwo-верификатор в Solidity.
+
+- **Сплит билдеров (code motion):** `rv::build_trace_multi_raw` + `merkle_path_t8_air::build_trace_multi_raw`
+  выдают натуральный порядок (до bit-reverse), обёртки зовут raw + финализацию — единая реализация.
+  `composition_t8::outer_trace_columns_t8(queries, paths) → (87 колонок u32, log_size)` с той же
+  валидацией, что prove_queries_membership_t8.
+- **Кросс-привязка:** `outer batch_root = keccak(inner trace_root ‖ inner last_layer_root)`
+  (паттерн BatchRegistryV4). VFRI11-канал миксует batch_root перед drawQueries → внешние хинты
+  специфичны внутренним корням; тест подтверждает (другой root → другие хинты).
+- **Тест** `test_recursive_outer_trace_vfri11_hints`: реальные R4.1 recursion-inputs → внешний трейс →
+  `gen_vfri11_hints_from_cols_nfolds` без изменений → VFRI11-proof (маркер версии 5), детерминизм,
+  binding. **516 тестов, 0 предупреждений.**
+- **Семантика (честно):** VFRI-частичная верификация внешнего трейса — та же модель доверия, что у
+  production BatchRegistryV6 сегодня; полный on-chain AIR-check остаётся документированным
+  ограничением VFRI-линейки (снимается в будущем полной заменой или SNARK-обёрткой).
+- **Дальше:** `QLSAVerifierRecursive.sol` = RecursiveChannelReplay (R4.3, CI green) +
+  VFRI11.verify(outer) + сверка replay-challenges с пиннутыми public inputs; `BatchRegistryV7`; E2E.
+  `docs/roadmap/recursion.md` § R4.4.
+
 ## Рекурсия R4.3 (2026-07-16) — on-chain channel-replay в Solidity
 
 Первый Solidity-кирпич `QLSAVerifierRecursive.sol`. `contracts/src/verifier/RecursiveChannelReplay.sol`

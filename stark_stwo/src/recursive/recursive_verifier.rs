@@ -661,23 +661,35 @@ pub fn build_trace_multi(
     queries: &[(StepOp, Vec<FoldRound>)],
     log_n_rows: u32,
 ) -> (TraceColumns, Vec<TraceCol>) {
+    let cols = build_trace_multi_raw(queries, log_n_rows);
+    let num_folds = queries[0].1.len();
+    let domain = CanonicCoset::new(log_n_rows).circle_domain();
+    let main_trace = finalize_main(cols, domain);
+    let chs: Vec<QueryChallenges> = queries.iter().map(|(s, r)| query_challenges(s, r)).collect();
+    let preproc = build_preproc(&recursive_queries_final(queries), &chs, num_folds, log_n_rows);
+    (main_trace, preproc)
+}
+
+/// The natural-order (pre-bit-reverse) main columns of [`build_trace_multi`] —
+/// the single fill implementation both consume. Exposed so the OUTER recursive
+/// trace can be exported as plain row-major columns (R4.4: VFRI hint generation
+/// over the outer trace for on-chain verification).
+pub fn build_trace_multi_raw(
+    queries: &[(StepOp, Vec<FoldRound>)],
+    log_n_rows: u32,
+) -> Vec<Vec<BaseField>> {
     assert!(!queries.is_empty(), "build_trace_multi requires ≥ 1 query");
     let n = 1usize << log_n_rows;
     let num_folds = queries[0].1.len();
     let block = 1 + num_folds;
     debug_assert!(queries.len() * block <= n, "rows exceed trace capacity");
 
-    let domain = CanonicCoset::new(log_n_rows).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
     let mut cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-
     for (q, (step, rounds)) in queries.iter().enumerate() {
         fill_query_block(&mut cols, q * block, step, rounds);
     }
-    let main_trace = finalize_main(cols, domain);
-    let chs: Vec<QueryChallenges> = queries.iter().map(|(s, r)| query_challenges(s, r)).collect();
-    let preproc = build_preproc(&recursive_queries_final(queries), &chs, num_folds, log_n_rows);
-    (main_trace, preproc)
+    cols
 }
 
 /// Recompute the canonical preprocessed-tree commitment root for the given

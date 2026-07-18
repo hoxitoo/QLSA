@@ -383,6 +383,27 @@ ML-DSA подпись
     компилируется чисто (solc viaIR, 0 предупреждений); EVM-кросс-чек гоняется в CI (Solidity-джоб).
   - Дальше: `QLSAVerifierRecursive.sol` (этот replay → challenges как public inputs → verify
     рекурсивного STARK через VFRI-машинерию для его фикс-размера) + `BatchRegistryV7` + E2E.
+- **R4.4 — внешний (outer) трейс рекурсии → существующая VFRI11-машинерия (2026-07-18)** — ✅ **готов**
+  - Архитектурный шаг к `QLSAVerifierRecursive.sol`: внешний рекурсивный трейс МАЛ (87 main-столбцов,
+    сотни строк), поэтому его можно верифицировать on-chain УЖЕ ЗАДЕПЛОЕННОЙ VFRI11-машинерией за
+    малый константный газ — вместо написания нового полного Stwo-верификатора в Solidity.
+  - Сплит билдеров (чистый code motion, единая реализация): `rv::build_trace_multi_raw` +
+    `merkle_path_t8_air::build_trace_multi_raw` выдают колонки в натуральном порядке (до bit-reverse);
+    обёртки `build_trace_multi` вызывают raw + финализацию. `composition_t8::outer_trace_columns_t8`
+    экспортирует объединённый внешний трейс (rv 42 + merkle_t8 45 = 87 колонок u32) с той же
+    валидацией, что prove.
+  - **Кросс-привязка к внутреннему proof:** `batch_root = keccak(inner trace_root ‖ inner
+    last_layer_root)` — по паттерну BatchRegistryV4; VFRI11-канал миксует batch_root перед
+    drawQueries, значит внешние хинты криптографически специфичны внутренним публичным корням
+    (тест: другой binding root → другие хинты, replay внешнего proof между внутренними невозможен).
+  - Тест `test_recursive_outer_trace_vfri11_hints`: реальные recursion-inputs (R4.1) → 87 колонок →
+    `gen_vfri11_hints_from_cols_nfolds` (без изменений) → proof с маркером VFRI11, детерминизм,
+    binding. **516 тестов (610 всего с ignored), 0 предупреждений.**
+  - Семантика честно: это VFRI-частичная верификация внешнего трейса (FRI low-degree + binding) —
+    ТА ЖЕ модель доверия, что у задеплоенного production-пути BatchRegistryV6; полная on-chain
+    проверка AIR-ограничений остаётся документированным ограничением всей VFRI-линейки.
+  - Дальше: `QLSAVerifierRecursive.sol` = RecursiveChannelReplay (R4.3) + VFRI11.verify(outer proof)
+    + сверка replay-challenges с пиннутыми public inputs; `BatchRegistryV7`; JS E2E.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
