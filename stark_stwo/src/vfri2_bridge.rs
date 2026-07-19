@@ -8037,6 +8037,102 @@ mod tests_vfri8 {
         assert_ne!(hints1, hints3, "outer hints must be bound to the inner roots");
     }
 
+    /// Writes the full R4.5 recursive-verifier E2E fixture consumed by
+    /// QLSAVerifierRecursive.test.js: the inner proof's public roots, the outer
+    /// (recursive-trace) VFRI11 proof/commitment/hints cross-bound to them, and
+    /// the expected replayed challenges. Run with:
+    /// cargo test write_recursive_e2e_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore = "regenerates contracts/test/fixtures/recursive_e2e.json"]
+    fn write_recursive_e2e_fixture() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        use sha3::{Digest as Sha3Digest, Keccak256};
+
+        // ── Inner VFRI11 statement (same params as the channel-replay fixture).
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let inner_batch_root = [0x5Cu8; 32];
+        let (tree_depth, n_queries, num_folds) = (4u32, 2usize, 2usize);
+        let ch = vfri11_fri_chain(&cols, tree_depth, &inner_batch_root, n_queries, Some(num_folds)).unwrap();
+        let rec = gen_vfri11_recursion_inputs(&cols, tree_depth, &inner_batch_root, n_queries, Some(num_folds)).unwrap();
+
+        // ── Outer recursive trace → VFRI11 hints, cross-bound to the inner publics.
+        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths).unwrap();
+        let mut h = Keccak256::new();
+        h.update(rec.trace_root);
+        for w in rec.last_layer_root {
+            h.update((w as u32).to_be_bytes());
+        }
+        let outer_bound: [u8; 32] = h.finalize().into();
+        let outer_folds = (outer_log as usize - 1).min(6);
+        let (outer_proof, outer_commit_hex, outer_hints) =
+            gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &outer_bound, 1, Some(outer_folds))
+                .unwrap();
+
+        // ── Expected replayed challenges (the contract returns these).
+        let replay = vfri11_replay_channel(&Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root: inner_batch_root,
+            tree_depth,
+            n_queries,
+        })
+        .unwrap();
+
+        let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
+        let roots_json: Vec<String> =
+            ch.layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
+        let idx_json: Vec<String> =
+            replay.query_indices.iter().map(|i| format!("\"{i}\"")).collect();
+        let json = format!(
+            concat!(
+                "{{\n",
+                "  \"inner\": {{\n",
+                "    \"traceRoot\": \"{}\",\n",
+                "    \"oodsComboPos\": \"{}\",\n",
+                "    \"oodsComboNeg\": \"{}\",\n",
+                "    \"compRoot\": \"{}\",\n",
+                "    \"friLayerRoots\": [{}],\n",
+                "    \"batchRoot\": \"{}\",\n",
+                "    \"treeDepth\": {},\n",
+                "    \"nQueries\": {}\n",
+                "  }},\n",
+                "  \"outer\": {{\n",
+                "    \"bindingRoot\": \"{}\",\n",
+                "    \"proof\": \"{}\",\n",
+                "    \"commitment\": \"0x{}\",\n",
+                "    \"hints\": \"{}\"\n",
+                "  }},\n",
+                "  \"expected\": {{\n",
+                "    \"zX\": \"{}\",\n",
+                "    \"queryIndices\": [{}]\n",
+                "  }}\n}}\n"
+            ),
+            hx(&ch.trace_root),
+            ch.oods_combo_pos,
+            ch.oods_combo_neg,
+            hx(&ch.comp_root),
+            roots_json.join(", "),
+            hx(&inner_batch_root),
+            tree_depth,
+            n_queries,
+            hx(&outer_bound),
+            hx(&outer_proof),
+            outer_commit_hex,
+            hx(&outer_hints),
+            replay.z_x,
+            idx_json.join(", "),
+        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/recursive_e2e.json");
+        std::fs::write(path, json).expect("write fixture");
+        println!("wrote {path} (outer_log={outer_log}, outer_folds={outer_folds})");
+    }
+
     // The bridge must work at the odd-orientation edge too: many queries so some
     // fold rounds hit the high half (cur_idx ≥ layer_sz → negated twiddle inverse).
     #[test]

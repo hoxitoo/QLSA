@@ -1,5 +1,28 @@
 # QLSA — Project Context
 
+## Рекурсия R4.5 (2026-07-18) — QLSAVerifierRecursive.sol: on-chain вход рекурсии (MVP)
+
+Сборка обеих on-chain половин рекурсии в один контракт. `verifyRecursive(inner, outerProof,
+outerCommitment, outerHints) → (ok, challenges)`:
+1. **Replay внутреннего канала** (R4.3) из публичных корней inner-proof → challenges/query-indices
+   возвращаются вызывающему — верхние слои потребляют channel-derived, а не prover-chosen значения.
+2. **Binding-root** = `keccak(innerTraceRoot ‖ низкие 16 байт lastLayerRoot)` — побайтово == Rust
+   R4.4 (4 BE-слова wide-узла t=8).
+3. **Верификация внешнего proof** задеплоенным `QLSAVerifierVFRI11` под этим binding-root: внешний
+   канал миксовал его перед drawQueries → внешний proof криптографически специфичен внутренним
+   публичным корням.
+
+- **Модель доверия (честно):** внешняя верификация — VFRI-частичная (FRI low-degree + FS + Merkle
+  binding), как у production BatchRegistryV6; AIR-ограничения рекурсии + C1/C2-пиннинг — Rust-сторона.
+- **E2E-бандл:** `write_recursive_e2e_fixture` → `recursive_e2e.json` (inner publics, outer
+  proof 700 B / commitment / hints 4.6 KB на outer_log=7 folds=6, ожидаемые challenges) +
+  `QLSAVerifierRecursive.test.js` — 5 тестов (binding == Rust; honest → ok=true и challenges ==
+  Rust-replay; tamper inner → false + сдвиг zX; tamper hints → false; wrong commitment → false).
+- Контракт компилируется чисто (solc-js viaIR, 0 предупреждений; EVM-прогон — CI Solidity-джоб,
+  solc-бинарь локально блокирован egress-политикой). **517 Rust-тестов (611 с ignored), 0
+  предупреждений.**
+- **Дальше:** `BatchRegistryV7` + gas-замер + PyO3/SDK-обвязка. `docs/roadmap/recursion.md` § R4.5.
+
 ## Рекурсия R4.4 (2026-07-18) — внешний трейс рекурсии → существующая VFRI11-машинерия
 
 Ключевой архитектурный шаг к `QLSAVerifierRecursive.sol`: внешний рекурсивный трейс мал (87 столбцов,

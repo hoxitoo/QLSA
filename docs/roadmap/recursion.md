@@ -404,6 +404,26 @@ ML-DSA подпись
     проверка AIR-ограничений остаётся документированным ограничением всей VFRI-линейки.
   - Дальше: `QLSAVerifierRecursive.sol` = RecursiveChannelReplay (R4.3) + VFRI11.verify(outer proof)
     + сверка replay-challenges с пиннутыми public inputs; `BatchRegistryV7`; JS E2E.
+- **R4.5 — `QLSAVerifierRecursive.sol`: on-chain вход рекурсии (2026-07-18)** — ✅ **готов (MVP)**
+  - `contracts/src/QLSAVerifierRecursive.sol` собирает обе on-chain половины: (1) **replay внутреннего
+    канала** (`RecursiveChannelReplay`, R4.3) из публичных корней → challenges/indices возвращаются
+    вызывающему (channel-derived public inputs рекурсии); (2) **верификация внешнего proof** —
+    внешний рекурсивный трейс (87 колонок) FRI-коммитится тем же VFRI11-конвейером и проверяется
+    задеплоенным `QLSAVerifierVFRI11` (immutable-адрес в конструкторе) под binding-root
+    `keccak(innerTraceRoot ‖ innerLastLayerRoot words)` — внешний proof не реплеится между разными
+    внутренними публичными корнями. `outerBindingRoot()` побайтово == Rust-биндинг R4.4
+    (низкие 16 байт wide-узла = 4 BE-слова `p2t8_node_words`).
+  - **Модель доверия задокументирована честно:** внешняя верификация VFRI-частичная (FRI low-degree +
+    FS + Merkle binding) — та же семантика, что у production `BatchRegistryV6`; проверка
+    AIR-ограничений рекурсии и пиннинг preproc (C1/C2) — на Rust-стороне
+    (`verify_queries_membership_t8` + canonical roots).
+  - Полный E2E-бандл: fixture-writer `write_recursive_e2e_fixture` (inner publics + outer
+    proof/commitment/hints + ожидаемые challenges; outer_log=7, folds=6, хинты 4.6 KB) +
+    `QLSAVerifierRecursive.test.js` (5 тестов: binding-root == Rust, honest verify==true + challenges
+    == replay, tamper inner publics → false + сдвиг zX, tamper hints → false, wrong commitment →
+    false). Контракт компилируется чисто (viaIR); EVM-прогон в CI Solidity-джобе.
+  - Дальше: `BatchRegistryV7` (хранение финализированных батчей поверх verifyRecursive) + gas-замер
+    в CI + PyO3/SDK-обвязка полного конвейера inner→outer.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 
