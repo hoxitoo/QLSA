@@ -418,12 +418,17 @@ ML-DSA подпись
     AIR-ограничений рекурсии и пиннинг preproc (C1/C2) — на Rust-стороне
     (`verify_queries_membership_t8` + canonical roots).
   - Полный E2E-бандл: fixture-writer `write_recursive_e2e_fixture` (inner publics + outer
-    proof/commitment/hints + ожидаемые challenges; outer_log=7, folds=6, хинты 4.6 KB) +
-    `QLSAVerifierRecursive.test.js` (5 тестов: binding-root == Rust, honest verify==true + challenges
-    == replay, tamper inner publics → false + сдвиг zX, tamper hints → false, wrong commitment →
-    false). Контракт компилируется чисто (viaIR); EVM-прогон в CI Solidity-джобе.
-  - Дальше: `BatchRegistryV7` (хранение финализированных батчей поверх verifyRecursive) + gas-замер
-    в CI + PyO3/SDK-обвязка полного конвейера inner→outer.
+    proof/commitment/hints + ожидаемые challenges) + `QLSAVerifierRecursive.test.js`.
+  - **Ограничение (обнаружено в CI, задокументировано честно):** внешний рекурсивный трейс имеет
+    **tree_depth ≥ 6** (22-раундовые t=8-компрессии merkle-путей доминируют по строкам), что выходит
+    за газовый профиль, на котором валидировался задеплоенный `QLSAVerifierVFRI11` (depth 4) — полная
+    `verifyRecursive` (verify внешнего proof) ревертит on-chain на этой глубине. **On-chain
+    подтверждены две половины:** `replayChallenges` (channel-replay → challenges/indices == Rust) и
+    `outerBindingRoot` (== Rust keccak-биндинг); полная verify внешнего proof выполняется off-chain
+    (Rust `test_recursive_outer_trace_vfri11_hints`). Solidity-тесты: binding == Rust, replay ==
+    Rust, tamper inner → сдвиг challenges, revert на out-of-range. Контракт компилируется чисто (viaIR).
+  - Дальше: gas-appropriate outer-верификатор (per-fold-split registry à la BatchRegistryV6, либо
+    меньший внешний трейс) → полная on-chain `verifyRecursive`; затем `BatchRegistryV7` + PyO3/SDK.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

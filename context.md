@@ -8,20 +8,22 @@ outerCommitment, outerHints) → (ok, challenges)`:
    возвращаются вызывающему — верхние слои потребляют channel-derived, а не prover-chosen значения.
 2. **Binding-root** = `keccak(innerTraceRoot ‖ низкие 16 байт lastLayerRoot)` — побайтово == Rust
    R4.4 (4 BE-слова wide-узла t=8).
-3. **Верификация внешнего proof** задеплоенным `QLSAVerifierVFRI11` под этим binding-root: внешний
-   канал миксовал его перед drawQueries → внешний proof криптографически специфичен внутренним
-   публичным корням.
+3. **Верификация внешнего proof** задеплоенным `QLSAVerifierVFRI11` под этим binding-root — по
+   дизайну; НО (обнаружено в CI) внешний трейс имеет tree_depth ≥ 6 (t=8-компрессии merkle-путей
+   доминируют), что выходит за газовый профиль VFRI11 (валидирован на depth 4) → полная on-chain
+   verifyRecursive ревертит на этой глубине.
 
 - **Модель доверия (честно):** внешняя верификация — VFRI-частичная (FRI low-degree + FS + Merkle
   binding), как у production BatchRegistryV6; AIR-ограничения рекурсии + C1/C2-пиннинг — Rust-сторона.
-- **E2E-бандл:** `write_recursive_e2e_fixture` → `recursive_e2e.json` (inner publics, outer
-  proof 700 B / commitment / hints 4.6 KB на outer_log=7 folds=6, ожидаемые challenges) +
-  `QLSAVerifierRecursive.test.js` — 5 тестов (binding == Rust; honest → ok=true и challenges ==
-  Rust-replay; tamper inner → false + сдвиг zX; tamper hints → false; wrong commitment → false).
-- Контракт компилируется чисто (solc-js viaIR, 0 предупреждений; EVM-прогон — CI Solidity-джоб,
-  solc-бинарь локально блокирован egress-политикой). **517 Rust-тестов (611 с ignored), 0
-  предупреждений.**
-- **Дальше:** `BatchRegistryV7` + gas-замер + PyO3/SDK-обвязка. `docs/roadmap/recursion.md` § R4.5.
+- **On-chain подтверждено (Solidity-тесты):** `replayChallenges(inner)` → challenges/indices ==
+  Rust-replay (byte-identical), сдвиг при tamper inner publics, revert на out-of-range;
+  `outerBindingRoot` == Rust keccak-биндинг. Полная verify внешнего proof — off-chain (Rust
+  `test_recursive_outer_trace_vfri11_hints`), помечена pending в контракте (VFRI11 gas/tree-depth).
+- Контракт компилируется чисто (solc-js viaIR, 0 предупреждений; EVM-прогон — CI Solidity-джоб).
+  **517 Rust-тестов, 0 предупреждений.**
+- **Дальше:** gas-appropriate outer-верификатор (per-fold split, как BatchRegistryV6, либо меньший
+  внешний трейс) → полная on-chain verifyRecursive; `BatchRegistryV7`; PyO3/SDK.
+  `docs/roadmap/recursion.md` § R4.5.
 
 ## Рекурсия R4.4 (2026-07-18) — внешний трейс рекурсии → существующая VFRI11-машинерия
 

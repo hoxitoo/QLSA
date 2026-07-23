@@ -70,7 +70,42 @@ contract QLSAVerifierRecursive {
         return keccak256(abi.encodePacked(innerTraceRoot, nodeWords));
     }
 
+    /// @notice Replay ONLY the inner VFRI11 channel from its public roots and
+    ///         return the derived challenges + query indices — the recursion's
+    ///         channel-derived public inputs, with no outer-proof verification.
+    ///         This half is fully on-chain today (R4.3); it is the sound source of
+    ///         the query positions/challenges upper layers must pin.
+    function replayChallenges(InnerPublics calldata inner)
+        external
+        pure
+        returns (RecursiveChannelReplay.Challenges memory ch)
+    {
+        bytes32[] memory roots = new bytes32[](inner.friLayerRoots.length);
+        for (uint256 i = 0; i < inner.friLayerRoots.length; i++) {
+            roots[i] = inner.friLayerRoots[i];
+        }
+        ch = RecursiveChannelReplay.replay(
+            inner.traceRoot,
+            inner.oodsComboPos,
+            inner.oodsComboNeg,
+            inner.compRoot,
+            roots,
+            inner.batchRoot,
+            inner.treeDepth,
+            inner.nQueries
+        );
+    }
+
     /// @notice Verify the recursive proof for one inner VFRI11 statement.
+    ///
+    /// NOTE (R4.5 status): the outer recursive trace has tree_depth ≥ 6 (the t=8
+    /// Merkle-path compressions dominate its row count), which exceeds the gas
+    /// profile the deployed `QLSAVerifierVFRI11` was validated against (depth 4).
+    /// The channel-replay + binding-root halves are verified on-chain
+    /// (`replayChallenges`, `outerBindingRoot`); driving the OUTER proof through
+    /// the deployed VFRI11 at this depth is pending a gas-appropriate outer
+    /// verifier (a per-fold-split registry, à la BatchRegistryV6, or a smaller
+    /// outer trace).  Kept for wiring completeness and off-chain (Rust) E2E.
     /// @param inner           the inner proof's public committed roots/combos
     /// @param outerProof      VFRI11-pipeline proof bytes over the OUTER trace
     /// @param outerCommitment Blake2s(outerProof[0:32] ‖ bindingRoot)[0:16]
