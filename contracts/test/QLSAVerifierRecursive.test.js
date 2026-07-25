@@ -87,7 +87,7 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
       fx.outer.proof,
       fx.outer.commitment,
       fx.outer.hints,
-      { gasLimit: 16_000_000n }
+      { gasLimit: 29_000_000n }
     );
     expect(ok).to.equal(true, "outer proof must verify against the inner-bound root");
     expect(ch.zX.toString()).to.equal(fx.expected.zX, "replayed zX");
