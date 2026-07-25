@@ -98,14 +98,17 @@ contract QLSAVerifierRecursive {
 
     /// @notice Verify the recursive proof for one inner VFRI11 statement.
     ///
-    /// NOTE (R4.5 status): the outer recursive trace has tree_depth ≥ 6 (the t=8
-    /// Merkle-path compressions dominate its row count), which exceeds the gas
-    /// profile the deployed `QLSAVerifierVFRI11` was validated against (depth 4).
-    /// The channel-replay + binding-root halves are verified on-chain
-    /// (`replayChallenges`, `outerBindingRoot`); driving the OUTER proof through
-    /// the deployed VFRI11 at this depth is pending a gas-appropriate outer
-    /// verifier (a per-fold-split registry, à la BatchRegistryV6, or a smaller
-    /// outer trace).  Kept for wiring completeness and off-chain (Rust) E2E.
+    /// GAS ENVELOPE (R4.6): the outer verification cost scales roughly as
+    /// `nQueries · (3 + 2·folds) · treeDepth` Poseidon2-t8 path units; the
+    /// generic on-chain VFRI11 E2E (depth 4, 2 queries, 2 folds ≈ 13.1M gas) is
+    /// 56 such units.  A recursion bundle therefore must be produced with a
+    /// COMPACT outer trace: choose the inner `num_folds` so the last FRI layer
+    /// is 2 elements (membership path depth 1 → the outer Merkle block is a
+    /// single 22-row compression, outer trace log_size 5) and outer FRI params
+    /// of 1 query / 2 folds — 35 units, inside the envelope.  Larger outer
+    /// traces (e.g. depth-2 last-layer paths → outer log_size 7, 6 folds ≈ 105
+    /// units) exceed it and revert; those need a per-fold-split registry
+    /// (à la BatchRegistryV6) or a smaller outer trace.
     /// @param inner           the inner proof's public committed roots/combos
     /// @param outerProof      VFRI11-pipeline proof bytes over the OUTER trace
     /// @param outerCommitment Blake2s(outerProof[0:32] ‖ bindingRoot)[0:16]

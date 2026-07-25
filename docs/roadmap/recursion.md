@@ -429,6 +429,22 @@ ML-DSA подпись
     Rust, tamper inner → сдвиг challenges, revert на out-of-range. Контракт компилируется чисто (viaIR).
   - Дальше: gas-appropriate outer-верификатор (per-fold-split registry à la BatchRegistryV6, либо
     меньший внешний трейс) → полная on-chain `verifyRecursive`; затем `BatchRegistryV7` + PyO3/SDK.
+- **R4.6 — компактный внешний трейс: полная on-chain `verifyRecursive` (2026-07-23)** — ⏳ **в CI**
+  - Диагноз реверта R4.5 уточнён по коду VFRI11: все его структурные проверки возвращают `false`,
+    а не ревертят → падение было **по газу**. Стоимость ≈ `nQueries·(3+2·folds)·treeDepth` t8-path-единиц;
+    generic on-chain E2E (depth 4, 2 запроса, 2 фолда ≈ 13.1M газа) = 56 единиц, прежняя внешняя
+    конфигурация (1×15×7) = **105 единиц ≈ 25M** — за лимитом.
+  - **Решение — сжать внешний трейс через выбор inner-параметров:** взять inner `num_folds` так, чтобы
+    последний FRI-слой был из 2 элементов → путь membership глубины 1 → внешний merkle-блок = одна
+    22-строчная компрессия → **внешний трейс log_size 5** (было 7). Inner (depth 4, folds 3, 1 запрос);
+    внешние FRI-параметры 1 запрос / 2 фолда → **35 единиц ≈ 8M газа**, внутри профиля. Хинты
+    сжались 4.6 KB → **2.6 KB**.
+  - Тест `QLSAVerifierRecursive.test.js` возвращает полное утверждение `verifyRecursive → ok==true`
+    (+ отклонение при tamper inner publics и при неверном commitment), с `gasLimit 16M` как в generic
+    E2E. Байтовый tamper хинтов намеренно НЕ тестируется — битый ABI-блоб роняет декодер задеплоенного
+    VFRI11 в panic 0x41 (свойство его декодера, не логики этого контракта); отмечено в тесте.
+  - Gas envelope задокументирован в самом контракте (какие конфигурации влезают, какие требуют
+    per-fold-split реестра). Статус подтверждается CI Solidity-джобом.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

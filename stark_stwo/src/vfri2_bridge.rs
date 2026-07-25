@@ -8054,7 +8054,11 @@ mod tests_vfri8 {
             .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
             .collect();
         let inner_batch_root = [0x5Cu8; 32];
-        let (tree_depth, n_queries, num_folds) = (4u32, 2usize, 2usize);
+        // Inner config chosen so the OUTER trace stays inside the deployed
+        // VFRI11's validated gas profile: num_folds=3 leaves a 2-element last
+        // layer → membership path depth 1 → outer merkle block = 22 rows, so the
+        // outer trace fits log_size 5 (vs 7 for the earlier depth-2 paths).
+        let (tree_depth, n_queries, num_folds) = (4u32, 1usize, 3usize);
         let ch = vfri11_fri_chain(&cols, tree_depth, &inner_batch_root, n_queries, Some(num_folds)).unwrap();
         let rec = gen_vfri11_recursion_inputs(&cols, tree_depth, &inner_batch_root, n_queries, Some(num_folds)).unwrap();
 
@@ -8066,7 +8070,10 @@ mod tests_vfri8 {
             h.update((w as u32).to_be_bytes());
         }
         let outer_bound: [u8; 32] = h.finalize().into();
-        let outer_folds = (outer_log as usize - 1).min(6);
+        // Outer FRI params sized to the deployed VFRI11's gas envelope: cost
+        // scales ~ n_queries·(3+2·folds)·tree_depth; the generic on-chain E2E
+        // (depth 4, 2 queries, 2 folds ≈ 13.1M gas) is 56 such units, this is 35.
+        let outer_folds = 2usize;
         let (outer_proof, outer_commit_hex, outer_hints) =
             gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &outer_bound, 1, Some(outer_folds))
                 .unwrap();

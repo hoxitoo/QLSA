@@ -76,10 +76,54 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
     ).to.be.revertedWith("RCR: nQueries out of range");
   });
 
-  // NOTE: the FULL verifyRecursive (outer-proof verification via the deployed
-  // VFRI11) is not asserted on-chain here — the outer recursive trace has
-  // tree_depth ≥ 6, beyond the gas profile the deployed VFRI11 was validated
-  // against (depth 4). That half is exercised off-chain (Rust
-  // test_recursive_outer_trace_vfri11_hints) and is documented as pending a
-  // gas-appropriate outer verifier in QLSAVerifierRecursive.sol / recursion.md.
+  // Full path: replay + outer-proof verification in one call. The fixture's
+  // inner config (depth 4, 3 folds → 2-element last layer → path depth 1) keeps
+  // the OUTER trace at log_size 5, and the outer FRI params (1 query, 2 folds)
+  // sit inside the deployed VFRI11's validated gas envelope.
+  it("verifies the honest recursive bundle end-to-end", async function () {
+    this.timeout(120_000);
+    const [ok, ch] = await recursive.verifyRecursive.staticCall(
+      innerTuple,
+      fx.outer.proof,
+      fx.outer.commitment,
+      fx.outer.hints,
+      { gasLimit: 16_000_000n }
+    );
+    expect(ok).to.equal(true, "outer proof must verify against the inner-bound root");
+    expect(ch.zX.toString()).to.equal(fx.expected.zX, "replayed zX");
+  });
+
+  it("rejects the bundle when the inner publics are tampered", async function () {
+    this.timeout(120_000);
+    const tampered = {
+      ...innerTuple,
+      traceRoot: "0x" + (BigInt(fx.inner.traceRoot) ^ 1n).toString(16).padStart(64, "0"),
+    };
+    const [ok] = await recursive.verifyRecursive.staticCall(
+      tampered,
+      fx.outer.proof,
+      fx.outer.commitment,
+      fx.outer.hints,
+      { gasLimit: 16_000_000n }
+    );
+    expect(ok).to.equal(false, "outer proof must not verify for different inner publics");
+  });
+
+  it("rejects a wrong outer commitment", async function () {
+    this.timeout(120_000);
+    const bad = "0x" + (BigInt(fx.outer.commitment) ^ 1n).toString(16).padStart(32, "0");
+    const [ok] = await recursive.verifyRecursive.staticCall(
+      innerTuple,
+      fx.outer.proof,
+      bad,
+      fx.outer.hints,
+      { gasLimit: 16_000_000n }
+    );
+    expect(ok).to.equal(false, "wrong outer commitment must not verify");
+  });
+
+  // NOTE: byte-level tampering of `outerHints` is deliberately NOT tested — a
+  // corrupted ABI blob can make the deployed VFRI11's decoder allocate wildly
+  // (panic 0x41) instead of returning false. That is a property of the deployed
+  // verifier's decoder robustness, unrelated to this contract's logic.
 });
