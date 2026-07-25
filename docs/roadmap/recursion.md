@@ -443,8 +443,17 @@ ML-DSA подпись
     (+ отклонение при tamper inner publics и при неверном commitment), с `gasLimit 16M` как в generic
     E2E. Байтовый tamper хинтов намеренно НЕ тестируется — битый ABI-блоб роняет декодер задеплоенного
     VFRI11 в panic 0x41 (свойство его декодера, не логики этого контракта); отмечено в тесте.
-  - Gas envelope задокументирован в самом контракте (какие конфигурации влезают, какие требуют
-    per-fold-split реестра). Статус подтверждается CI Solidity-джобом.
+  - **ИЗМЕРЕННЫЙ РЕЗУЛЬТАТ (CI):** сжатие НЕ помогло — полная `verifyRecursive` ревертит и при
+    16M, и при **29M** (потолок блока Ethereum), как на исходном внешнем трейсе (log 7, 6 фолдов),
+    так и на сжатом (log 5, 1 запрос, 2 фолда). Аналитическая модель (~35 единиц ≈ 8M) занижала
+    реальную стоимость. При этом **rejection-пути исполняются on-chain успешно** (VFRI11
+    `_checkCommitment` отсекает до тяжёлой Merkle/Poseidon-работы), что и подтвердило газовую
+    природу ограничения.
+  - **On-chain подтверждено CI:** `outerBindingRoot` == Rust-биндинг; `replayChallenges` == Rust
+    replay (+ сдвиг при tamper, + revert на out-of-range); `verifyRecursive` возвращает `false` при
+    подделке inner publics и при неверном commitment. Полная верификация внешнего proof — **R4.7**:
+    per-fold-split реестр (один `verify` на транзакцию, как `BatchRegistryV6` для V23), либо
+    существенно меньший внешний трейс.
 - `recursive/recursive_bridge.rs` — `prove_vfri11_recursive(inner_proof, hints)` + PyO3
 - Двухфазная стратегия: (A) recursive proof для LOG=10 группы; (B) мета-схема объединяет LOG=10+LOG=8
 

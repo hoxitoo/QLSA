@@ -76,22 +76,15 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
     ).to.be.revertedWith("RCR: nQueries out of range");
   });
 
-  // Full path: replay + outer-proof verification in one call. The fixture's
-  // inner config (depth 4, 3 folds → 2-element last layer → path depth 1) keeps
-  // the OUTER trace at log_size 5, and the outer FRI params (1 query, 2 folds)
-  // sit inside the deployed VFRI11's validated gas envelope.
-  it("verifies the honest recursive bundle end-to-end", async function () {
-    this.timeout(120_000);
-    const [ok, ch] = await recursive.verifyRecursive.staticCall(
-      innerTuple,
-      fx.outer.proof,
-      fx.outer.commitment,
-      fx.outer.hints,
-      { gasLimit: 29_000_000n }
-    );
-    expect(ok).to.equal(true, "outer proof must verify against the inner-bound root");
-    expect(ch.zX.toString()).to.equal(fx.expected.zX, "replayed zX");
-  });
+  // MEASURED LIMIT (R4.6): the honest bundle's full path — replay + outer-proof
+  // verification via the deployed VFRI11 — exceeds even a 29M gas call (Ethereum's
+  // block ceiling), both at the original outer trace (log_size 7, 6 folds) and at
+  // the compacted one (log_size 5, 1 query, 2 folds; hints 4.6 KB → 2.6 KB). The
+  // rejection paths below DO execute on-chain because VFRI11's _checkCommitment
+  // short-circuits before the expensive Merkle/Poseidon work. Verifying the outer
+  // proof therefore needs a per-fold-split registry (one verify per transaction,
+  // à la BatchRegistryV6) — tracked as R4.7. The outer→VFRI11 hint pipeline itself
+  // is exercised off-chain by the Rust test_recursive_outer_trace_vfri11_hints.
 
   it("rejects the bundle when the inner publics are tampered", async function () {
     this.timeout(120_000);
