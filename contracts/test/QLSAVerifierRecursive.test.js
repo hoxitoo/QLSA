@@ -86,6 +86,32 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
   // à la BatchRegistryV6) — tracked as R4.7. The outer→VFRI11 hint pipeline itself
   // is exercised off-chain by the Rust test_recursive_outer_trace_vfri11_hints.
 
+  // R4.7 measurement: split the cost between the two halves so we know which one
+  // to attack. Both run as eth_call, so we can estimate each independently.
+  it("measures the gas of each half (diagnostic)", async function () {
+    this.timeout(180_000);
+    let replayGas = null, verifyGas = null;
+    try {
+      replayGas = await recursive.replayChallenges.estimateGas(innerTuple);
+    } catch (e) {
+      replayGas = `revert: ${(e.message || "").slice(0, 90)}`;
+    }
+    // Call the deployed VFRI11 DIRECTLY on the outer proof — isolates whether the
+    // cost is in the outer verification or in this contract's wrapper/replay.
+    const VFRI11 = await ethers.getContractFactory("QLSAVerifierVFRI11");
+    const vfri11 = VFRI11.attach(await recursive.outerVerifier());
+    try {
+      verifyGas = await vfri11.verify.estimateGas(
+        fx.outer.proof, fx.outer.commitment, fx.outer.bindingRoot, fx.outer.hints
+      );
+    } catch (e) {
+      verifyGas = `revert: ${(e.message || "").slice(0, 90)}`;
+    }
+    console.log(`        [gas] replayChallenges = ${replayGas}`);
+    console.log(`        [gas] VFRI11.verify(outer, direct) = ${verifyGas}`);
+    expect(true).to.equal(true);
+  });
+
   it("rejects the bundle when the inner publics are tampered", async function () {
     this.timeout(120_000);
     const tampered = {
