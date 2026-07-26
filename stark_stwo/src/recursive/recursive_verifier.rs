@@ -674,7 +674,7 @@ pub fn build_trace_multi(
 /// the single fill implementation both consume. Exposed so the OUTER recursive
 /// trace can be exported as plain row-major columns (R4.4: VFRI hint generation
 /// over the outer trace for on-chain verification).
-pub fn build_trace_multi_raw(
+pub(crate) fn build_trace_multi_raw(
     queries: &[(StepOp, Vec<FoldRound>)],
     log_n_rows: u32,
 ) -> Vec<Vec<BaseField>> {

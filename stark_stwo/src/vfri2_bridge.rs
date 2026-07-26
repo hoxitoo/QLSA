@@ -5496,6 +5496,33 @@ pub struct Vfri11ChannelChallenges {
     pub query_indices: Vec<usize>,
 }
 
+/// Cross-binding root for the OUTER recursive proof (R4.7 — audit fix).
+///
+/// Hashes EVERY public field of the inner VFRI11 statement, not just the trace
+/// root and the last FRI-layer root: an audit found that binding only those two
+/// let an attacker swap `oods_combo_*`, `comp_root`, the interior fold roots,
+/// `batch_root`, `tree_depth` or `n_queries` while keeping a valid outer proof.
+/// Layout (all big-endian, length-prefixed where variable):
+///   trace_root(32) ‖ oods_pos(16) ‖ oods_neg(16) ‖ comp_root(32)
+///   ‖ n_roots(4) ‖ root_i(32)* ‖ batch_root(32) ‖ tree_depth(4) ‖ n_queries(4)
+/// Mirrored byte-for-byte by `QLSAVerifierRecursive.outerBindingRoot`.
+pub fn outer_binding_root(inp: &Vfri11ChannelInputs) -> [u8; 32] {
+    use sha3::{Digest as Sha3Digest, Keccak256};
+    let mut h = Keccak256::new();
+    h.update(inp.trace_root);
+    h.update(inp.oods_combo_pos.to_be_bytes());
+    h.update(inp.oods_combo_neg.to_be_bytes());
+    h.update(inp.comp_root);
+    h.update((inp.fri_layer_roots.len() as u32).to_be_bytes());
+    for r in &inp.fri_layer_roots {
+        h.update(r);
+    }
+    h.update(inp.batch_root);
+    h.update(inp.tree_depth.to_be_bytes());
+    h.update((inp.n_queries as u32).to_be_bytes());
+    h.finalize().into()
+}
+
 /// Replay the VFRI11 Fiat-Shamir channel from PUBLIC roots + OODS combos alone
 /// (no trace/witness) and return the drawn challenges + query indices — the Rust
 /// reference for `QLSAVerifierRecursive.sol`'s on-chain channel replay. The op
@@ -5512,6 +5539,13 @@ pub fn vfri11_replay_channel(
     }
     if inp.fri_layer_roots.is_empty() {
         return Err("fri_layer_roots must contain at least the layer-1 root".into());
+    }
+    // Mirror QLSAVerifierVFRI11's MAX_FOLD_ROUNDS cap (defense in depth).
+    if inp.fri_layer_roots.len() > 29 {
+        return Err(format!(
+            "fri_layer_roots length {} exceeds MAX_FOLD_ROUNDS + 1 (29)",
+            inp.fri_layer_roots.len()
+        ));
     }
     let num_folds = inp.fri_layer_roots.len() - 1;
 
@@ -8004,12 +8038,17 @@ mod tests_vfri8 {
         assert!(outer_cols.iter().all(|c| c.len() == 1usize << outer_log));
 
         // Cross-bind the outer proof to the inner proof's public roots.
-        let mut h = Keccak256::new();
-        h.update(rec.trace_root);
-        for w in rec.last_layer_root {
-            h.update((w as u32).to_be_bytes());
-        }
-        let outer_batch_root: [u8; 32] = h.finalize().into();
+        let ch_full = vfri11_fri_chain(&cols, 4, &inner_batch_root, 2, Some(2)).unwrap();
+        let outer_batch_root: [u8; 32] = outer_binding_root(&Vfri11ChannelInputs {
+            trace_root: ch_full.trace_root,
+            oods_combo_pos: ch_full.oods_combo_pos,
+            oods_combo_neg: ch_full.oods_combo_neg,
+            comp_root: ch_full.comp_root,
+            fri_layer_roots: ch_full.layer_roots.clone(),
+            batch_root: inner_batch_root,
+            tree_depth: 4,
+            n_queries: 2,
+        });
 
         // The outer trace feeds the EXISTING VFRI11 hint generator unchanged.
         let (proof1, commit1, hints1) = gen_vfri11_hints_from_cols_nfolds(
@@ -8064,12 +8103,18 @@ mod tests_vfri8 {
 
         // ── Outer recursive trace → VFRI11 hints, cross-bound to the inner publics.
         let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths).unwrap();
-        let mut h = Keccak256::new();
-        h.update(rec.trace_root);
-        for w in rec.last_layer_root {
-            h.update((w as u32).to_be_bytes());
-        }
-        let outer_bound: [u8; 32] = h.finalize().into();
+        let chan_inputs = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root: inner_batch_root,
+            tree_depth,
+            n_queries,
+        };
+        // R4.7: bind EVERY public inner field, not just trace+last-layer roots.
+        let outer_bound: [u8; 32] = outer_binding_root(&chan_inputs);
         // Outer FRI params sized to the deployed VFRI11's gas envelope: cost
         // scales ~ n_queries·(3+2·folds)·tree_depth; the generic on-chain E2E
         // (depth 4, 2 queries, 2 folds ≈ 13.1M gas) is 56 such units, this is 35.
@@ -8079,17 +8124,7 @@ mod tests_vfri8 {
                 .unwrap();
 
         // ── Expected replayed challenges (the contract returns these).
-        let replay = vfri11_replay_channel(&Vfri11ChannelInputs {
-            trace_root: ch.trace_root,
-            oods_combo_pos: ch.oods_combo_pos,
-            oods_combo_neg: ch.oods_combo_neg,
-            comp_root: ch.comp_root,
-            fri_layer_roots: ch.layer_roots.clone(),
-            batch_root: inner_batch_root,
-            tree_depth,
-            n_queries,
-        })
-        .unwrap();
+        let replay = vfri11_replay_channel(&chan_inputs).unwrap();
 
         let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
         let roots_json: Vec<String> =
@@ -8117,6 +8152,9 @@ mod tests_vfri8 {
                 "  }},\n",
                 "  \"expected\": {{\n",
                 "    \"zX\": \"{}\",\n",
+                "    \"compAlpha\": \"{}\",\n",
+                "    \"friAlpha\": \"{}\",\n",
+                "    \"friAlphas\": [{}],\n",
                 "    \"queryIndices\": [{}]\n",
                 "  }}\n}}\n"
             ),
@@ -8133,6 +8171,14 @@ mod tests_vfri8 {
             outer_commit_hex,
             hx(&outer_hints),
             replay.z_x,
+            replay.comp_alpha,
+            replay.fri_alpha,
+            replay
+                .fri_alphas
+                .iter()
+                .map(|a| format!("\"{a}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
             idx_json.join(", "),
         );
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/recursive_e2e.json");

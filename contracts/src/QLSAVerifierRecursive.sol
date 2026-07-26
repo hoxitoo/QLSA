@@ -56,18 +56,29 @@ contract QLSAVerifierRecursive {
         uint256 nQueries;
     }
 
-    /// @notice The outer proof's cross-binding root: keccak256 of the inner
-    ///         trace root and the inner LAST FRI-layer root's four wide-node
-    ///         words (bytes[16..32] of the packed node) — exactly the R4.4
-    ///         Rust binding `keccak(trace_root ‖ last_layer_root words BE)`.
-    function outerBindingRoot(bytes32 innerTraceRoot, bytes32 innerLastLayerRoot)
-        public
-        pure
-        returns (bytes32)
-    {
-        // The wide t=8 node occupies bytes[16..32] = the low 128 bits.
-        bytes16 nodeWords = bytes16(uint128(uint256(innerLastLayerRoot)));
-        return keccak256(abi.encodePacked(innerTraceRoot, nodeWords));
+    /// @notice Cross-binding root for the outer proof — hashes EVERY public
+    ///         field of the inner statement (R4.7 audit fix). Binding only the
+    ///         trace root and last FRI-layer root let an attacker swap the OODS
+    ///         combos, comp root, interior fold roots, batch root, tree depth or
+    ///         query count while keeping a valid outer proof; now any change
+    ///         moves `bound` and the outer proof no longer verifies.
+    ///         Layout mirrors Rust `outer_binding_root` byte-for-byte:
+    ///         traceRoot(32) ‖ oodsPos(16) ‖ oodsNeg(16) ‖ compRoot(32)
+    ///         ‖ nRoots(4) ‖ root_i(32)* ‖ batchRoot(32) ‖ treeDepth(4) ‖ nQueries(4)
+    function outerBindingRoot(InnerPublics calldata inner) public pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                inner.traceRoot,
+                bytes16(inner.oodsComboPos),
+                bytes16(inner.oodsComboNeg),
+                inner.compRoot,
+                uint32(inner.friLayerRoots.length),
+                inner.friLayerRoots,
+                inner.batchRoot,
+                uint32(inner.treeDepth),
+                uint32(inner.nQueries)
+            )
+        );
     }
 
     /// @notice Replay ONLY the inner VFRI11 channel from its public roots and
@@ -80,16 +91,12 @@ contract QLSAVerifierRecursive {
         pure
         returns (RecursiveChannelReplay.Challenges memory ch)
     {
-        bytes32[] memory roots = new bytes32[](inner.friLayerRoots.length);
-        for (uint256 i = 0; i < inner.friLayerRoots.length; i++) {
-            roots[i] = inner.friLayerRoots[i];
-        }
         ch = RecursiveChannelReplay.replay(
             inner.traceRoot,
             inner.oodsComboPos,
             inner.oodsComboNeg,
             inner.compRoot,
-            roots,
+            inner.friLayerRoots,
             inner.batchRoot,
             inner.treeDepth,
             inner.nQueries
@@ -98,17 +105,26 @@ contract QLSAVerifierRecursive {
 
     /// @notice Verify the recursive proof for one inner VFRI11 statement.
     ///
-    /// GAS ENVELOPE (R4.6): the outer verification cost scales roughly as
-    /// `nQueries · (3 + 2·folds) · treeDepth` Poseidon2-t8 path units; the
-    /// generic on-chain VFRI11 E2E (depth 4, 2 queries, 2 folds ≈ 13.1M gas) is
-    /// 56 such units.  A recursion bundle therefore must be produced with a
-    /// COMPACT outer trace: choose the inner `num_folds` so the last FRI layer
-    /// is 2 elements (membership path depth 1 → the outer Merkle block is a
-    /// single 22-row compression, outer trace log_size 5) and outer FRI params
-    /// of 1 query / 2 folds — 35 units, inside the envelope.  Larger outer
-    /// traces (e.g. depth-2 last-layer paths → outer log_size 7, 6 folds ≈ 105
-    /// units) exceed it and revert; those need a per-fold-split registry
-    /// (à la BatchRegistryV6) or a smaller outer trace.
+    /// GAS (MEASURED, R4.6): this full path does NOT fit on-chain today. The
+    /// outer verification cost is dominated by Poseidon2-t8 Merkle/channel work
+    /// and was measured to exceed a **29M-gas call** (Ethereum's block ceiling)
+    /// BOTH with the original outer trace (log_size 7, 6 folds) AND with the
+    /// compacted one (log_size 5, 1 query, 2 folds; hints 4.6 KB -> 2.6 KB).
+    /// An earlier analytic estimate suggested the compact bundle would fit; the
+    /// CI measurement refuted it, so do NOT build a submission pipeline on this
+    /// entry point yet.
+    ///
+    /// What IS verified on-chain today: `replayChallenges` (the channel replay,
+    /// byte-identical to the Rust reference) and `outerBindingRoot`; and this
+    /// function correctly returns `false` for tampered inner publics or a wrong
+    /// outer commitment, because VFRI11 short-circuits those before the
+    /// expensive work.
+    ///
+    /// To make the honest path fit, the outer proof needs either a per-fold /
+    /// per-transaction split registry (à la `BatchRegistryV6`, which solved the
+    /// same wall for V23) or a cheaper outer backend (e.g. committing the outer
+    /// trace with the t=4 `QLSAVerifierVFRI10` — the outer commitment's hash
+    /// width is independent of the inner proof's t=8 backend).
     /// @param inner           the inner proof's public committed roots/combos
     /// @param outerProof      VFRI11-pipeline proof bytes over the OUTER trace
     /// @param outerCommitment Blake2s(outerProof[0:32] ‖ bindingRoot)[0:16]
@@ -125,26 +141,19 @@ contract QLSAVerifierRecursive {
         // 1. Replay the inner Fiat-Shamir channel from public roots alone —
         //    validates the inner publics' shape and derives the challenges the
         //    recursion is bound to (R4.2/R4.3).
-        bytes32[] memory roots = new bytes32[](inner.friLayerRoots.length);
-        for (uint256 i = 0; i < inner.friLayerRoots.length; i++) {
-            roots[i] = inner.friLayerRoots[i];
-        }
         ch = RecursiveChannelReplay.replay(
             inner.traceRoot,
             inner.oodsComboPos,
             inner.oodsComboNeg,
             inner.compRoot,
-            roots,
+            inner.friLayerRoots,
             inner.batchRoot,
             inner.treeDepth,
             inner.nQueries
         );
 
         // 2. Cross-binding root from the inner publics (R4.4).
-        bytes32 bound = outerBindingRoot(
-            inner.traceRoot,
-            inner.friLayerRoots[inner.friLayerRoots.length - 1]
-        );
+        bytes32 bound = outerBindingRoot(inner);
 
         // 3. Verify the outer FRI-committed recursive trace, bound to `bound`
         //    (the outer channel mixed it before drawing ITS queries, so these

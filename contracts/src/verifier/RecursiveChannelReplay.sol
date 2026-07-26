@@ -52,7 +52,7 @@ library RecursiveChannelReplay {
         uint128 oodsComboPos,
         uint128 oodsComboNeg,
         bytes32 compRoot,
-        bytes32[] memory friLayerRoots,
+        bytes32[] calldata friLayerRoots,
         bytes32 batchRoot,
         uint256 treeDepth,
         uint256 nQueries
@@ -60,6 +60,8 @@ library RecursiveChannelReplay {
         require(treeDepth >= 2 && treeDepth <= 30, "RCR: treeDepth out of range");
         require(nQueries >= 1 && nQueries <= 64, "RCR: nQueries out of range");
         require(friLayerRoots.length >= 1, "RCR: need >= 1 fri layer root");
+        // Mirror QLSAVerifierVFRI11's MAX_FOLD_ROUNDS cap (defense in depth).
+        require(friLayerRoots.length <= 29, "RCR: too many fri layer roots");
         uint256 numFolds = friLayerRoots.length - 1;
 
         Poseidon2ChannelT8.State memory s = Poseidon2ChannelT8.init();

@@ -38,11 +38,34 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
   });
 
   it("outerBindingRoot matches the Rust keccak binding", async function () {
-    const bound = await recursive.outerBindingRoot(
-      fx.inner.traceRoot,
-      fx.inner.friLayerRoots[fx.inner.friLayerRoots.length - 1]
-    );
+    const bound = await recursive.outerBindingRoot(innerTuple);
     expect(bound).to.equal(fx.outer.bindingRoot);
+  });
+
+  // R4.7 regression: the binding root must move when ANY public inner field
+  // changes — previously only traceRoot and the last fold root were bound, so
+  // the OODS combos / compRoot / interior roots / batchRoot / depth / query
+  // count could be swapped freely while an outer proof still verified.
+  it("binding root is sensitive to every public inner field", async function () {
+    const base = await recursive.outerBindingRoot(innerTuple);
+    const variants = {
+      oodsComboPos: { ...innerTuple, oodsComboPos: (BigInt(fx.inner.oodsComboPos) ^ 1n).toString() },
+      oodsComboNeg: { ...innerTuple, oodsComboNeg: (BigInt(fx.inner.oodsComboNeg) ^ 1n).toString() },
+      compRoot: { ...innerTuple, compRoot: "0x" + (BigInt(fx.inner.compRoot) ^ 1n).toString(16).padStart(64, "0") },
+      interiorRoot: {
+        ...innerTuple,
+        friLayerRoots: fx.inner.friLayerRoots.map((r, i) =>
+          i === 0 ? "0x" + (BigInt(r) ^ 1n).toString(16).padStart(64, "0") : r
+        ),
+      },
+      batchRoot: { ...innerTuple, batchRoot: "0x" + (BigInt(fx.inner.batchRoot) ^ 1n).toString(16).padStart(64, "0") },
+      treeDepth: { ...innerTuple, treeDepth: fx.inner.treeDepth + 1 },
+      nQueries: { ...innerTuple, nQueries: fx.inner.nQueries + 1 },
+    };
+    for (const [name, v] of Object.entries(variants)) {
+      const got = await recursive.outerBindingRoot(v);
+      expect(got).to.not.equal(base, `binding must change when ${name} changes`);
+    }
   });
 
   // The channel-replay half is fully on-chain today: replayChallenges derives the
@@ -51,6 +74,12 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
   it("replayChallenges reproduces the Rust replay from the inner publics", async function () {
     const ch = await recursive.replayChallenges(innerTuple);
     expect(ch.zX.toString()).to.equal(fx.expected.zX, "replayed zX");
+    expect(ch.compAlpha.toString()).to.equal(fx.expected.compAlpha, "compAlpha");
+    expect(ch.friAlpha.toString()).to.equal(fx.expected.friAlpha, "friAlpha");
+    expect(ch.friAlphas.length).to.equal(fx.expected.friAlphas.length, "friAlphas length");
+    for (let i = 0; i < ch.friAlphas.length; i++) {
+      expect(ch.friAlphas[i].toString()).to.equal(fx.expected.friAlphas[i], `friAlphas[${i}]`);
+    }
     expect(ch.queryIndices.length).to.equal(fx.expected.queryIndices.length);
     for (let i = 0; i < ch.queryIndices.length; i++) {
       expect(ch.queryIndices[i].toString()).to.equal(fx.expected.queryIndices[i]);
@@ -109,7 +138,11 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
     }
     console.log(`        [gas] replayChallenges = ${replayGas}`);
     console.log(`        [gas] VFRI11.verify(outer, direct) = ${verifyGas}`);
-    expect(true).to.equal(true);
+    // Diagnostic only — the numbers are the deliverable, so assert just that we
+    // obtained something for each half rather than a tautology.
+    for (const g of [replayGas, verifyGas]) {
+      expect(["bigint", "string"]).to.include(typeof g);
+    }
   });
 
   it("rejects the bundle when the inner publics are tampered", async function () {

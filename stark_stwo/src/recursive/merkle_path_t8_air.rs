@@ -618,7 +618,7 @@ pub fn build_trace_multi(
 
 /// The natural-order (pre-bit-reverse) main columns of [`build_trace_multi`] —
 /// the single fill implementation both consume (R4.4: outer-trace export).
-pub fn build_trace_multi_raw(
+pub(crate) fn build_trace_multi_raw(
     leaves: &[[u64; 4]],
     sibs: &[Vec<[u64; 4]>],
     bits: &[Vec<bool>],

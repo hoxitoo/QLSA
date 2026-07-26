@@ -27,10 +27,8 @@ contract RecursiveChannelReplayHarness {
             uint256[] memory queryIndices
         )
     {
-        bytes32[] memory roots = new bytes32[](friLayerRoots.length);
-        for (uint256 i = 0; i < friLayerRoots.length; i++) roots[i] = friLayerRoots[i];
         RecursiveChannelReplay.Challenges memory ch = RecursiveChannelReplay.replay(
-            traceRoot, oodsComboPos, oodsComboNeg, compRoot, roots, batchRoot, treeDepth, nQueries
+            traceRoot, oodsComboPos, oodsComboNeg, compRoot, friLayerRoots, batchRoot, treeDepth, nQueries
         );
         return (ch.zX, ch.compAlpha, ch.friAlpha, ch.friAlphas, ch.queryIndices);
     }
