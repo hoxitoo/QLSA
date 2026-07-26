@@ -1,5 +1,38 @@
 # QLSA — Project Context
 
+## Аудит R4.2–R4.7 (2026-07-26) — привязаны ВСЕ публичные поля inner-statement
+
+Двухэкспертный аудит (крипто + код) on-chain слоя рекурсии. Одна HIGH-находка каждого типа,
+обе исправлены.
+
+- **[КРИПТО HIGH — ИСПРАВЛЕНО] `verifyRecursive` связывал лишь 2 из 8 полей `InnerPublics`.**
+  `bound = keccak(traceRoot ‖ lastLayerRoot)` оставлял вне привязки `oodsComboPos/Neg`, `compRoot`,
+  внутренние `friLayerRoots`, `batchRoot`, `treeDepth`, `nQueries`: злоумышленник мог переиспользовать
+  валидный внешний proof, подменив эти поля, и всё равно получить `ok=true` — а возвращаемые
+  challenges (посчитанные уже по подменённым значениям) нигде не сверялись. Исправлено: в binding-root
+  хешируются ВСЕ публичные поля, одна раскладка зеркально на обеих сторонах:
+  `traceRoot(32) ‖ oodsPos(16) ‖ oodsNeg(16) ‖ compRoot(32) ‖ nRoots(4) ‖ root_i(32)* ‖ batchRoot(32)
+  ‖ treeDepth(4) ‖ nQueries(4)`. Rust: общий `outer_binding_root(&Vfri11ChannelInputs)` (одна
+  реализация для теста R4.4 и генератора фикстуры). Solidity: `outerBindingRoot(InnerPublics)`.
+  Регрессия: binding обязан меняться при изменении ЛЮБОГО из семи ранее непривязанных полей.
+- **[КРИПТО MEDIUM — ИСПРАВЛЕНО]** в channel-replay не было капа `MAX_FOLD_ROUNDS`, который есть в
+  VFRI11 → добавлен `≤29` корней в Solidity-библиотеке и в `vfri11_replay_channel`.
+- **[КРИПТО LOW — ИСПРАВЛЕНО]** `build_trace_multi_raw` паниковали на превышении ёмкости при прямом
+  вызове → сужены до `pub(crate)`, единственный вызывающий — валидирующий `outer_trace_columns_t8`.
+- **[КОД HIGH — ИСПРАВЛЕНО]** NatSpec `QLSAVerifierRecursive` всё ещё утверждал, что сжатая
+  конфигурация «внутри газового профиля», хотя следующий же замер показал превышение 29M: тест и
+  roadmap я тогда обновил, а доккомментарий контракта — нет. Переписан на измеренный факт + что
+  реально верифицируется on-chain + два пути решения.
+- **[КОД LOW ×2, INFO ×1 — ИСПРАВЛЕНО]** убраны три избыточных copy-loop для `friLayerRoots`
+  (параметр библиотеки теперь `calldata`); тавтологический `expect(true)` заменён реальной проверкой;
+  фикстура E2E дополнена `compAlpha`/`friAlpha`/`friAlphas` + утверждения в тесте.
+- **Чистые зоны (подтверждено обоими):** порядок операций Fiat-Shamir Rust↔Solidity бит-в-бит
+  (включая MSB-first `qm31Words`, диапазоны байт `mixRootW`=[16..32] / `mixRootFull`=все 32);
+  сплит `build_trace_multi_raw` — чистое code-motion; кавычки uint128 в фикстурах не регрессировали;
+  секретов и утечек в сообщениях об ошибках нет; `outer_trace_columns_t8` валидирует входы наравне с
+  prove-путём.
+- **Итог: 516 Rust-тестов, 0 предупреждений; контракты компилируются чисто (viaIR); CI зелёный.**
+
 ## Рекурсия R4.5 (2026-07-18) — QLSAVerifierRecursive.sol: on-chain вход рекурсии (MVP)
 
 Сборка обеих on-chain половин рекурсии в один контракт. `verifyRecursive(inner, outerProof,
