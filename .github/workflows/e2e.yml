@@ -33,7 +33,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/liboqs-install
-          key: liboqs-0.14.0-${{ runner.os }}
+          key: liboqs-0.16.0-${{ runner.os }}
 
       - name: Build liboqs from source
         if: steps.cache-liboqs.outputs.cache-hit != 'true'
@@ -41,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y cmake ninja-build libssl-dev
-          git clone --branch 0.14.0 --depth 1 \
+          git clone --branch 0.16.0 --depth 1 \
             https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs
           cmake -S /tmp/liboqs -B /tmp/liboqs/build \
             -DCMAKE_INSTALL_PREFIX="${HOME}/liboqs-install" \
