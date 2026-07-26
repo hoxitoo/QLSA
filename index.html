@@ -207,6 +207,44 @@
       .metric-table th,.metric-table td{padding:12px}
       .section{padding:28px 0}
     }
+
+    /* ── Mobile adaptation ─────────────────────────────────────────────── */
+    html{-webkit-text-size-adjust:100%}
+    body{overflow-x:hidden}
+    img,svg,video{max-width:100%;height:auto}
+    /* Wide content scrolls inside its own box — never widens the page */
+    .table-wrap,.pre-wrap{
+      overflow-x:auto;-webkit-overflow-scrolling:touch;
+      max-width:100%;
+      scrollbar-width:thin;
+    }
+    .table-wrap .metric-table{min-width:520px}
+    .pre-wrap pre{white-space:pre;min-width:0}
+    /* Long tokens (hashes, identifiers) wrap instead of overflowing */
+    p,li,td,th,h1,h2,h3,.card p,.faq-item p{overflow-wrap:anywhere}
+    code{overflow-wrap:anywhere;word-break:break-word}
+    /* Anchor targets clear the sticky nav */
+    section[id],div[id]{scroll-margin-top:84px}
+
+    @media (max-width: 740px){
+      .table-wrap .metric-table{min-width:0;font-size:.9rem}
+      .metric-table th,.metric-table td{padding:10px 8px}
+      .pre-wrap pre{font-size:.8rem;line-height:1.6}
+      h1{font-size:clamp(1.7rem,7vw,2.4rem)}
+      h2{font-size:clamp(1.35rem,5.6vw,1.8rem)}
+      h3{font-size:1.05rem}
+      .card,.stack-block,.repo,.faq-item,.phase{padding:16px}
+      .container{padding-left:14px;padding-right:14px}
+      .progress-item span,.card p,.faq-item p{font-size:.94rem;line-height:1.65}
+    }
+    @media (max-width: 420px){
+      .pre-wrap pre{font-size:.72rem}
+      .metric-table th,.metric-table td{padding:8px 6px;font-size:.86rem}
+    }
+    .milestones{margin:0;padding-left:20px;color:#dbe5fa}
+    .milestones li{margin:0 0 12px;line-height:1.7}
+    .milestones li:last-child{margin-bottom:0}
+    @media (max-width:740px){.milestones{padding-left:16px}.milestones li{font-size:.94rem;line-height:1.65}}
   </style>
 </head>
 <body>
@@ -233,7 +271,7 @@
     <section class="hero">
       <div class="container hero-grid">
         <div>
-          <div class="eyebrow">Testnet live · 128-bit inner-hash stack complete (t=2→t=8→t=16) + verifies real VFRI11 · 152 recursive tests · 2026-07-16</div>
+          <div class="eyebrow">Testnet live · recursion: 128-bit inner-hash stack complete, on-chain channel replay verified · 2026-07-26</div>
           <h1>Build the post-quantum migration layer before it becomes urgent</h1>
           <p class="sub">
             QLSA aggregates thousands of post-quantum signatures into a single constant-size proof,
@@ -250,8 +288,8 @@
 
           <div class="signal">
             <div class="signal-card"><small>Focus</small><strong>Infrastructure, not just cryptography</strong></div>
-            <div class="signal-card"><small>CI</small><strong>950 Solidity + ~560 Python + 453 Rust (104 recursive) + 71 TS — all green</strong></div>
-            <div class="signal-card"><small>Status</small><strong>recursion R0.1–R4.1 ✓ · 128-bit inner hash + real-VFRI11 bridge · audit clean · 2026-07-16</strong></div>
+            <div class="signal-card"><small>CI</small><strong>1,011 Solidity + ~560 Python + 516 Rust (152 recursive) + 71 TS — all green</strong></div>
+            <div class="signal-card"><small>Status</small><strong>recursion R0.1–R4.6 ✓ · on-chain replay + binding verified · outer-proof gas: next step</strong></div>
           </div>
         </div>
 
@@ -286,7 +324,17 @@
         <div class="section-head">
           <div>
             <h2>What's been built</h2>
-            <p>Phase 6 complete — live on Ethereum Sepolia (2026-05-05). <strong>V23 production pipeline</strong>: 8 ML-DSA circuits in 1 STARK proof (3,505 trace columns). <strong>VFRI11 (2026-06-16)</strong>: Poseidon2 t=8 backend (4-word/124-bit nodes → ~2^62 collision), but full-V23 t=8 <code>verify()</code> exceeds 100M gas at depth-10. <strong>Path decision (2026-06-17)</strong>: skip the standalone t=16 verifier — go straight to <strong>proof recursion</strong> (a STARK proving "I verified a VFRI11 STARK"; outer proof ~5M gas constant, inner hash any width for free). <strong>Recursion gadget set complete R0.1–R3.6 (2026-06-17)</strong>: the full AIR gadget set for the recursive VFRI11 verifier — QM31 arithmetic, FRI fold/OODS, Poseidon2 inner-hash Merkle path, Fiat-Shamir absorb + draw, per-query composition (single + N-query aggregation), and the leaf-hash → Merkle integration. 88 recursive Rust tests, all green. <strong>⚠ Audit (2026-06-17)</strong>: a two-expert review (crypto + code) confirmed the gadgets are correct arithmetic <em>relation</em> provers but the composition is <strong>not yet sound against a malicious prover</strong> — two confirmed blockers for R3.7 (before any production wiring): <strong>[C1]</strong> public outputs bound only via Fiat-Shamir, not an in-circuit constraint; <strong>[C2, reproduced]</strong> preprocessed selectors/round-constants are prover-supplied and unpinned (a forged <code>is_step≡0</code> with a corrupted <code>compPos</code> verifies true). The same unpinned-preprocessed pattern exists in the mature V23/VFRI verifiers — a per-circuit follow-up. Robustness fixes (input caps, guards, asserts) applied in-audit. <strong>R3.7–R3.11 (2026-06-17): both blockers CLOSED.</strong> [C1] outputs pinned via <code>fin</code> preprocessed columns + <code>is_output</code>-gated in-circuit equality; [C2] every preprocessed-column verifier in the codebase (recursion gadgets + all five production V23 <code>is_init_uh</code> verifiers + the Poseidon2 hash-chain) now pins Tree 0 via a canonical recomputed root. <strong>1a (FRI cherry-pick) fully closed</strong>: all verifier-fixed challenge inputs (<code>alpha</code>, <code>z_x</code>, <code>px</code>, <code>inv</code>) pinned in-circuit — the on-chain channel makes them public inputs, no logup needed. Multi-gadget composition proven at single- and N-query (VFRI11) scale. <strong>Audit R3.12 (2026-07-10): C1 root-binding closed</strong> — the claimed Merkle <code>root</code> is pinned in-circuit (<code>is_root</code>-gated <code>s0 − root_pinned = 0</code>); previously only Fiat-Shamir-mixed, so a fresh dishonest proof for a false root claim verified. <code>depth</code> is now an explicit public input. The composition is value-bound end-to-end fully in-circuit: fin → hashLeaf → leaf → path → root. + input caps close hostile-input panic/OOM paths. 104 recursive tests (453 total). <strong>R3.13–R3.18 (2026-07-13/16): the 128-bit inner-hash ladder is COMPLETE in-circuit</strong> — t=8 (4-word/124-bit nodes → ~2^62) and t=16 (8-word/248-bit nodes → ~2^124 ≈ 128-bit, Stwo's native Poseidon2-16 width) compression AIRs, Merkle-path AIRs, and single-/N-query compositions (<code>composition_t8</code>/<code>composition_t16</code>), each rung a pure hash-backend swap binding <code>leaf = hash(finalFold)</code> end-to-end (finalFold → hashLeaf → leaf → path → root, all pinned). <strong>R4.1 (2026-07-16): the recursion verifies the REAL VFRI11 pipeline</strong> — a shared <code>vfri11_fri_chain</code> (byte-identical to the ABI hint generator) feeds <code>gen_vfri11_recursion_inputs</code>, and the t=8 composition proves the inner proof's per-query decommitments against the genuine committed last-FRI-layer root ("root vs committed FRI-layer root" closed at the Rust level). <strong>Audit R3.13–R4.1 (2026-07-16, crypto + code): one HIGH finding fixed</strong> — the standalone compression gadgets' <code>verify_compress</code> bound <code>(left,right,node)</code> only via Fiat-Shamir (a false <code>compress(FAKE)=node</code> claim could verify; latent — test-only, not production); now pinned in-circuit (<code>raw_pin</code>/<code>node_pin</code>). All other new code verified clean. 152 recursive tests (513 total, 0 warnings). Remaining: on-chain channel-replay + <code>QLSAVerifierRecursive.sol</code> + <code>BatchRegistryV7</code>.</p>
+            <p style="margin:0 0 14px">Phase&nbsp;6 complete — <strong>live on Ethereum Sepolia</strong> (2026-05-05). The <strong>V23 production pipeline</strong> proves 8 ML-DSA circuits in a single STARK (3,505 trace columns), and <code>BatchRegistryV6</code> + <code>QLSAVerifierVFRI10</code> finalize a batch on-chain within the per-transaction gas cap.</p>
+          <p style="margin:0 0 10px;color:#9fb2d4;font-size:.94rem">Milestones since then:</p>
+          <ul class="milestones">
+            <li><strong>VFRI11 — Poseidon2 t=8 backend</strong> (2026-06-16): 4-word/124-bit nodes → ~2<sup>62</sup> node collision. Full-V23 <code>verify()</code> at depth-10 exceeds 100M gas — which is what motivated recursion.</li>
+            <li><strong>Path decision</strong> (2026-06-17): skip a standalone t=16 verifier (~4× worse gas) and go straight to <strong>proof recursion</strong> — a STARK proving “I verified a VFRI11 STARK”, where the inner hash can be any width for free.</li>
+            <li><strong>Recursion gadget set + soundness closure</strong> (R0.1–R3.12): QM31 arithmetic, FRI fold/OODS, inner-hash Merkle path, Fiat-Shamir absorb/draw, per-query composition. Two-expert audits closed every composition-level gap — <strong>C1</strong> (outputs pinned in-circuit), <strong>C2</strong> (every preprocessed-column verifier pins Tree&nbsp;0 via a canonical recomputed root), <strong>1a</strong> (all verifier-fixed FRI challenges pinned), and <strong>Merkle root binding</strong>.</li>
+            <li><strong>128-bit inner-hash ladder complete</strong> (R3.13–R3.18): t=2 → t=8 → <strong>t=16</strong> (8-word/248-bit nodes, ~2<sup>124</sup> ≈ 128-bit), each rung a pure hash-backend swap with compression AIR, Merkle-path AIR and single-/N-query composition.</li>
+            <li><strong>The recursion verifies the real pipeline</strong> (R4.1): per-query inputs are extracted from a genuine VFRI11 FRI chain and proven against the <em>committed</em> last-FRI-layer root.</li>
+            <li><strong>On-chain half assembled</strong> (R4.2–R4.5): the cheap Poseidon2 channel replay runs on-chain — <code>RecursiveChannelReplay.sol</code> reproduces the Rust reference byte-for-byte, and <code>QLSAVerifierRecursive.sol</code> binds an outer proof to the inner publics via <code>keccak(traceRoot‖lastLayerRoot)</code>.</li>
+            <li><strong>Measured limit</strong> (R4.6): the channel replay and the binding root verify on-chain today; driving the <em>outer</em> proof through the deployed VFRI11 exceeds a 29M-gas call even with a compacted outer trace. Next: a cheaper outer backend (t=4) or a per-transaction split, exactly as <code>BatchRegistryV6</code> already does for V23.</li>
+          </ul>
           </div>
         </div>
         <div class="progress-grid">
@@ -341,7 +389,7 @@
           </div>
         </div>
 
-        <table class="metric-table" aria-label="Signature size comparison">
+        <div class="table-wrap"><table class="metric-table" aria-label="Signature size comparison">
           <thead>
             <tr>
               <th>Signature</th>
@@ -354,7 +402,7 @@
             <tr><td>ECDSA (current)</td><td>~70 bytes</td><td>~220 KB</td><td class="good">Fits today's assumptions</td></tr>
             <tr><td>ML-DSA-65 (FIPS 204)</td><td>~2,420 bytes</td><td>~7.2 MB</td><td class="bad">Severe throughput penalty</td></tr>
           </tbody>
-        </table>
+        </table></div>
 
         <div class="stat-band">
           <div class="stat-tile"><strong>~30–40×</strong><span>Payload overhead from direct migration</span></div>
@@ -464,7 +512,7 @@
           <p style="margin:0;color:var(--muted);">
             The project intentionally separates realistic implementation milestones from the hardest research component.
           </p>
-          <table class="metric-table" style="margin-top:14px;">
+          <div class="table-wrap"><table class="metric-table" style="margin-top:14px;">
             <thead>
               <tr><th>Stage</th><th>What STARK proves</th><th>ML-DSA in STARK</th><th>Status</th></tr>
             </thead>
@@ -490,7 +538,7 @@
               <tr><td>Recursion R3–R4</td><td>Full recursive verifier composition → <code>QLSAVerifierRecursive</code> (~5M gas constant)</td><td class="good">Yes</td><td class="warn">⏳ In Progress</td></tr>
               <tr><td>MVP-6</td><td>VFRI8: Poseidon2 Merkle + channel; 20-query ≤15M gas; BatchRegistryV5; security &amp; code audit</td><td class="good">Yes</td><td class="good">✓ Done (2026-06-10)</td></tr>
             </tbody>
-          </table>
+          </table></div>
         </div>
 
         <div class="card">
@@ -557,7 +605,7 @@
         <div class="grid grid-2" style="margin-top:18px;">
           <div class="card">
             <h3>Performance targets</h3>
-            <table class="metric-table" style="margin-top:10px;">
+            <div class="table-wrap"><table class="metric-table" style="margin-top:10px;">
               <tbody>
                 <tr><td>Batch size</td><td>3,000 tx</td></tr>
                 <tr><td>Proof size</td><td>90–200 KB</td></tr>
@@ -567,19 +615,19 @@
                 <tr><td>Full pipeline N=3000</td><td class="good">354 ms</td></tr>
                 <tr><td>V23 STARK columns</td><td class="good">3,505 (649+1523+295+649+24+15+61+288+1 preproc)</td></tr>
                 <tr><td>20-query VFRI9 gas</td><td class="good">≤15M gas (wide Poseidon2 Merkle, last-layer check)</td></tr>
-                <tr><td>Solidity tests</td><td class="good">917 passing</td></tr>
-                <tr><td>Python tests</td><td class="good">~552 passing (with PyO3) / ~350 without</td></tr>
-                <tr><td>Rust tests</td><td class="good">315 passing (+12 poseidon2_t4)</td></tr>
+                <tr><td>Solidity tests</td><td class="good">1,011 passing</td></tr>
+                <tr><td>Python tests</td><td class="good">~560 passing (with PyO3) / ~350 without</td></tr>
+                <tr><td>Rust tests</td><td class="good">516 passing (152 recursive)</td></tr>
                 <tr><td>TS tests</td><td class="good">71 passing</td></tr>
-                <tr><td>CI pipeline</td><td class="good">5 / 5 jobs green</td></tr>
+                <tr><td>CI pipeline</td><td class="good">6 / 6 jobs green</td></tr>
               </tbody>
-            </table>
+            </table></div>
           </div>
 
           <div class="card">
             <h3>Repository snapshot</h3>
             <div class="repo">
-<pre>QLSA/
+<div class="pre-wrap"><pre>QLSA/
 ├── core/          # ML-DSA, Merkle, batch
 ├── aggregator/    # Mempool, batcher, FastAPI
 ├── stark/         # Python prover/verifier wrappers
@@ -599,7 +647,7 @@
 ├── sdk/python/    # Wallet, LocalClient
 ├── sdk/js/        # TypeScript AggregatorClient
 ├── testnet/       # E2E demo, deploy, submit
-└── tests/         # 950 Sol + ~560 Py + 323 Rust + 71 TS</pre>
+└── tests/         # 1011 Sol + ~560 Py + 516 Rust + 71 TS</pre></div>
             </div>
           </div>
         </div>
