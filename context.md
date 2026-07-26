@@ -1,5 +1,117 @@
 # QLSA — Project Context
 
+## Аудит R4.2–R4.7 (2026-07-26) — привязаны ВСЕ публичные поля inner-statement
+
+Двухэкспертный аудит (крипто + код) on-chain слоя рекурсии. Одна HIGH-находка каждого типа,
+обе исправлены.
+
+- **[КРИПТО HIGH — ИСПРАВЛЕНО] `verifyRecursive` связывал лишь 2 из 8 полей `InnerPublics`.**
+  `bound = keccak(traceRoot ‖ lastLayerRoot)` оставлял вне привязки `oodsComboPos/Neg`, `compRoot`,
+  внутренние `friLayerRoots`, `batchRoot`, `treeDepth`, `nQueries`: злоумышленник мог переиспользовать
+  валидный внешний proof, подменив эти поля, и всё равно получить `ok=true` — а возвращаемые
+  challenges (посчитанные уже по подменённым значениям) нигде не сверялись. Исправлено: в binding-root
+  хешируются ВСЕ публичные поля, одна раскладка зеркально на обеих сторонах:
+  `traceRoot(32) ‖ oodsPos(16) ‖ oodsNeg(16) ‖ compRoot(32) ‖ nRoots(4) ‖ root_i(32)* ‖ batchRoot(32)
+  ‖ treeDepth(4) ‖ nQueries(4)`. Rust: общий `outer_binding_root(&Vfri11ChannelInputs)` (одна
+  реализация для теста R4.4 и генератора фикстуры). Solidity: `outerBindingRoot(InnerPublics)`.
+  Регрессия: binding обязан меняться при изменении ЛЮБОГО из семи ранее непривязанных полей.
+- **[КРИПТО MEDIUM — ИСПРАВЛЕНО]** в channel-replay не было капа `MAX_FOLD_ROUNDS`, который есть в
+  VFRI11 → добавлен `≤29` корней в Solidity-библиотеке и в `vfri11_replay_channel`.
+- **[КРИПТО LOW — ИСПРАВЛЕНО]** `build_trace_multi_raw` паниковали на превышении ёмкости при прямом
+  вызове → сужены до `pub(crate)`, единственный вызывающий — валидирующий `outer_trace_columns_t8`.
+- **[КОД HIGH — ИСПРАВЛЕНО]** NatSpec `QLSAVerifierRecursive` всё ещё утверждал, что сжатая
+  конфигурация «внутри газового профиля», хотя следующий же замер показал превышение 29M: тест и
+  roadmap я тогда обновил, а доккомментарий контракта — нет. Переписан на измеренный факт + что
+  реально верифицируется on-chain + два пути решения.
+- **[КОД LOW ×2, INFO ×1 — ИСПРАВЛЕНО]** убраны три избыточных copy-loop для `friLayerRoots`
+  (параметр библиотеки теперь `calldata`); тавтологический `expect(true)` заменён реальной проверкой;
+  фикстура E2E дополнена `compAlpha`/`friAlpha`/`friAlphas` + утверждения в тесте.
+- **Чистые зоны (подтверждено обоими):** порядок операций Fiat-Shamir Rust↔Solidity бит-в-бит
+  (включая MSB-first `qm31Words`, диапазоны байт `mixRootW`=[16..32] / `mixRootFull`=все 32);
+  сплит `build_trace_multi_raw` — чистое code-motion; кавычки uint128 в фикстурах не регрессировали;
+  секретов и утечек в сообщениях об ошибках нет; `outer_trace_columns_t8` валидирует входы наравне с
+  prove-путём.
+- **Итог: 516 Rust-тестов, 0 предупреждений; контракты компилируются чисто (viaIR); CI зелёный.**
+
+## Рекурсия R4.5 (2026-07-18) — QLSAVerifierRecursive.sol: on-chain вход рекурсии (MVP)
+
+Сборка обеих on-chain половин рекурсии в один контракт. `verifyRecursive(inner, outerProof,
+outerCommitment, outerHints) → (ok, challenges)`:
+1. **Replay внутреннего канала** (R4.3) из публичных корней inner-proof → challenges/query-indices
+   возвращаются вызывающему — верхние слои потребляют channel-derived, а не prover-chosen значения.
+2. **Binding-root** = `keccak(innerTraceRoot ‖ низкие 16 байт lastLayerRoot)` — побайтово == Rust
+   R4.4 (4 BE-слова wide-узла t=8).
+3. **Верификация внешнего proof** задеплоенным `QLSAVerifierVFRI11` под этим binding-root — по
+   дизайну; НО (обнаружено в CI) внешний трейс имеет tree_depth ≥ 6 (t=8-компрессии merkle-путей
+   доминируют), что выходит за газовый профиль VFRI11 (валидирован на depth 4) → полная on-chain
+   verifyRecursive ревертит на этой глубине.
+
+- **Модель доверия (честно):** внешняя верификация — VFRI-частичная (FRI low-degree + FS + Merkle
+  binding), как у production BatchRegistryV6; AIR-ограничения рекурсии + C1/C2-пиннинг — Rust-сторона.
+- **On-chain подтверждено (Solidity-тесты):** `replayChallenges(inner)` → challenges/indices ==
+  Rust-replay (byte-identical), сдвиг при tamper inner publics, revert на out-of-range;
+  `outerBindingRoot` == Rust keccak-биндинг. Полная verify внешнего proof — off-chain (Rust
+  `test_recursive_outer_trace_vfri11_hints`), помечена pending в контракте (VFRI11 gas/tree-depth).
+- Контракт компилируется чисто (solc-js viaIR, 0 предупреждений; EVM-прогон — CI Solidity-джоб).
+  **517 Rust-тестов, 0 предупреждений.**
+- **Дальше:** gas-appropriate outer-верификатор (per-fold split, как BatchRegistryV6, либо меньший
+  внешний трейс) → полная on-chain verifyRecursive; `BatchRegistryV7`; PyO3/SDK.
+  `docs/roadmap/recursion.md` § R4.5.
+
+## Рекурсия R4.4 (2026-07-18) — внешний трейс рекурсии → существующая VFRI11-машинерия
+
+Ключевой архитектурный шаг к `QLSAVerifierRecursive.sol`: внешний рекурсивный трейс мал (87 столбцов,
+сотни строк) → его можно верифицировать on-chain УЖЕ ЗАДЕПЛОЕННОЙ VFRI11-машинерией за малый
+константный газ, не пиша новый полный Stwo-верификатор в Solidity.
+
+- **Сплит билдеров (code motion):** `rv::build_trace_multi_raw` + `merkle_path_t8_air::build_trace_multi_raw`
+  выдают натуральный порядок (до bit-reverse), обёртки зовут raw + финализацию — единая реализация.
+  `composition_t8::outer_trace_columns_t8(queries, paths) → (87 колонок u32, log_size)` с той же
+  валидацией, что prove_queries_membership_t8.
+- **Кросс-привязка:** `outer batch_root = keccak(inner trace_root ‖ inner last_layer_root)`
+  (паттерн BatchRegistryV4). VFRI11-канал миксует batch_root перед drawQueries → внешние хинты
+  специфичны внутренним корням; тест подтверждает (другой root → другие хинты).
+- **Тест** `test_recursive_outer_trace_vfri11_hints`: реальные R4.1 recursion-inputs → внешний трейс →
+  `gen_vfri11_hints_from_cols_nfolds` без изменений → VFRI11-proof (маркер версии 5), детерминизм,
+  binding. **516 тестов, 0 предупреждений.**
+- **Семантика (честно):** VFRI-частичная верификация внешнего трейса — та же модель доверия, что у
+  production BatchRegistryV6 сегодня; полный on-chain AIR-check остаётся документированным
+  ограничением VFRI-линейки (снимается в будущем полной заменой или SNARK-обёрткой).
+- **Дальше:** `QLSAVerifierRecursive.sol` = RecursiveChannelReplay (R4.3, CI green) +
+  VFRI11.verify(outer) + сверка replay-challenges с пиннутыми public inputs; `BatchRegistryV7`; E2E.
+  `docs/roadmap/recursion.md` § R4.4.
+
+## Рекурсия R4.3 (2026-07-16) — on-chain channel-replay в Solidity
+
+Первый Solidity-кирпич `QLSAVerifierRecursive.sol`. `contracts/src/verifier/RecursiveChannelReplay.sol`
+— зеркало Rust `vfri11_replay_channel` (R4.2) на уже бит-в-бит кросс-чекнутом `Poseidon2ChannelT8`:
+из публичных committed-корней (traceRoot, oods_combo_pos/neg, compRoot, friLayerRoots[0..=K], batchRoot,
+treeDepth, nQueries) без трейса/witness выдаёт `Challenges{zX, compAlpha, friAlpha, friAlphas[],
+queryIndices[]}` — те public inputs, к которым привязан рекурсивный proof (решение R3.10: challenges
+как public inputs, канал on-chain). Op-order (mixRootFull(traceRoot)→drawSecureFelt×2→mixU32s(8 combo
+слов)→mixRootW(compRoot)→drawSecureFelt→mixRootW(layer0)→loop[drawSecureFelt+mixRootW]→mixRootFull(batch)
+→drawQueries) байт-в-байт == Rust. `qm31Words` MSB-first, guard'ы treeDepth∈[2,30]/nQueries∈[1,64]/≥1 root.
+Кросс-чек: Rust-фикстура `vfri11_channel_replay.json` + `RecursiveChannelReplay.test.js` (harness):
+on-chain replay == Rust draws, tamper traceRoot сдвигает challenges, revert на out-of-range.
+Контракт компилируется чисто (solc-js viaIR, 0 предупреждений; solc 0.8.35 в CI — egress-политика
+блокирует локальную загрузку компилятора, EVM-тест гоняется в Solidity-джобе CI). **515 Rust-тестов
+(+1 fixture-writer), 0 предупреждений.** Дальше: `QLSAVerifierRecursive.sol` + `BatchRegistryV7` + E2E.
+`docs/roadmap/recursion.md` § R4.3.
+
+## Рекурсия R4.2 (2026-07-16) — on-chain channel-replay эталон
+
+Начало Solidity-фазы с Rust-эталона (крит.-замечание №5: сперва валидация на Rust).
+`vfri11_replay_channel(Vfri11ChannelInputs) -> Vfri11ChannelChallenges` в vfri2_bridge.rs: из ОДНИХ
+публичных committed-корней (trace_root, oods_combo_pos/neg, comp_root, friLayerRoots[0..=K], batch_root,
+tree_depth, n_queries) — без трейса/witness — реплеит Poseidon2 t=8 канал и выдаёт ровно те
+challenges/indices (`z_x`, `comp_alpha`, `fri_alpha`, per-fold `fri_alphas`, query-индексы), к которым
+привязан рекурсивный proof (по решению R3.10 challenges — public inputs, канал остаётся on-chain).
+Порядок операций байт-в-байт == `vfri11_fri_chain`. Тест `test_vfri11_channel_replay_matches_chain`:
+replay из корней реальной цепочки совпадает с её draws; tamper trace_root сдвигает z_x + индексы
+(нельзя cherry-pick запросы подменой корня). Это точная спецификация для `QLSAVerifierRecursive.sol`
+(Poseidon2ChannelT8 уже кросс-чекнут). **514 тестов, 0 предупреждений.** Дальше: контракт + BatchRegistryV7
++ PyO3/SDK + E2E. `docs/roadmap/recursion.md` § R4.2.
+
 ## Аудит (2026-07-16) — C1 input/output binding закрыт в compression-AIR (R3.13–R4.1)
 
 Двухчастный аудит (крипто + код) свежей поверхности R3.13–R4.1 (t=8/t=16 inner-hash стек ~5500 строк

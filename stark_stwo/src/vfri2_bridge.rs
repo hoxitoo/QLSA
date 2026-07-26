@@ -5465,6 +5465,117 @@ pub fn gen_vfri11_recursion_inputs(
     })
 }
 
+/// PUBLIC absorbed values of the VFRI11 Fiat-Shamir channel (R4.2 — the on-chain
+/// channel-replay spec). These are the ONLY inputs the on-chain verifier needs to
+/// re-derive the recursion's challenge/query public inputs — no trace/witness.
+/// Every field is a committed root or an OODS combo that already appears in the
+/// VFRI11 proof/hints, so an on-chain contract holding the proof can reconstruct
+/// them and replay the (cheap Poseidon2 t=8) channel to draw the same challenges.
+#[derive(Clone)]
+pub struct Vfri11ChannelInputs {
+    pub trace_root: [u8; 32],
+    pub oods_combo_pos: u128,
+    pub oods_combo_neg: u128,
+    pub comp_root: [u8; 32],
+    /// `friLayerRoots[0..=num_folds]` — layer-1 root first, then one per fold.
+    pub fri_layer_roots: Vec<[u8; 32]>,
+    pub batch_root: [u8; 32],
+    pub tree_depth: u32,
+    pub n_queries: usize,
+}
+
+/// The challenges + query indices the channel replay draws — exactly the
+/// verifier-fixed public inputs the recursive proof pins (`z_x`, `comp_alpha`,
+/// `fri_alpha`, per-fold `fri_alphas`, and the FRI query indices).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Vfri11ChannelChallenges {
+    pub z_x: u128,
+    pub comp_alpha: u128,
+    pub fri_alpha: u128,
+    pub fri_alphas: Vec<u128>,
+    pub query_indices: Vec<usize>,
+}
+
+/// Cross-binding root for the OUTER recursive proof (R4.7 — audit fix).
+///
+/// Hashes EVERY public field of the inner VFRI11 statement, not just the trace
+/// root and the last FRI-layer root: an audit found that binding only those two
+/// let an attacker swap `oods_combo_*`, `comp_root`, the interior fold roots,
+/// `batch_root`, `tree_depth` or `n_queries` while keeping a valid outer proof.
+/// Layout (all big-endian, length-prefixed where variable):
+///   trace_root(32) ‖ oods_pos(16) ‖ oods_neg(16) ‖ comp_root(32)
+///   ‖ n_roots(4) ‖ root_i(32)* ‖ batch_root(32) ‖ tree_depth(4) ‖ n_queries(4)
+/// Mirrored byte-for-byte by `QLSAVerifierRecursive.outerBindingRoot`.
+pub fn outer_binding_root(inp: &Vfri11ChannelInputs) -> [u8; 32] {
+    use sha3::{Digest as Sha3Digest, Keccak256};
+    let mut h = Keccak256::new();
+    h.update(inp.trace_root);
+    h.update(inp.oods_combo_pos.to_be_bytes());
+    h.update(inp.oods_combo_neg.to_be_bytes());
+    h.update(inp.comp_root);
+    h.update((inp.fri_layer_roots.len() as u32).to_be_bytes());
+    for r in &inp.fri_layer_roots {
+        h.update(r);
+    }
+    h.update(inp.batch_root);
+    h.update(inp.tree_depth.to_be_bytes());
+    h.update((inp.n_queries as u32).to_be_bytes());
+    h.finalize().into()
+}
+
+/// Replay the VFRI11 Fiat-Shamir channel from PUBLIC roots + OODS combos alone
+/// (no trace/witness) and return the drawn challenges + query indices — the Rust
+/// reference for `QLSAVerifierRecursive.sol`'s on-chain channel replay. The op
+/// order is byte-identical to [`vfri11_fri_chain`] (same `P2T8Channel`), so the
+/// replay reproduces exactly the challenges the recursion was bound to.
+pub fn vfri11_replay_channel(
+    inp: &Vfri11ChannelInputs,
+) -> Result<Vfri11ChannelChallenges, String> {
+    if !(2..=30).contains(&inp.tree_depth) {
+        return Err(format!("tree_depth={} must be in 2..=30", inp.tree_depth));
+    }
+    if inp.n_queries == 0 || inp.n_queries > 64 {
+        return Err(format!("n_queries must be 1..64, got {}", inp.n_queries));
+    }
+    if inp.fri_layer_roots.is_empty() {
+        return Err("fri_layer_roots must contain at least the layer-1 root".into());
+    }
+    // Mirror QLSAVerifierVFRI11's MAX_FOLD_ROUNDS cap (defense in depth).
+    if inp.fri_layer_roots.len() > 29 {
+        return Err(format!(
+            "fri_layer_roots length {} exceeds MAX_FOLD_ROUNDS + 1 (29)",
+            inp.fri_layer_roots.len()
+        ));
+    }
+    let num_folds = inp.fri_layer_roots.len() - 1;
+
+    let mut chan = P2T8Channel::init();
+    chan.mix_root_full(&inp.trace_root);
+    let z_x = chan.draw_secure_felt();
+    let comp_alpha = chan.draw_secure_felt();
+
+    let p = qm31_words(inp.oods_combo_pos);
+    let nw = qm31_words(inp.oods_combo_neg);
+    let combo_words = [p[0], p[1], p[2], p[3], nw[0], nw[1], nw[2], nw[3]];
+    chan.mix_u32s(&combo_words);
+
+    chan.mix_root_w(&inp.comp_root);
+    let fri_alpha = chan.draw_secure_felt();
+
+    chan.mix_root_w(&inp.fri_layer_roots[0]);
+    let mut fri_alphas = Vec::with_capacity(num_folds);
+    for k in 0..num_folds {
+        let alpha_k = chan.draw_secure_felt();
+        fri_alphas.push(alpha_k);
+        chan.mix_root_w(&inp.fri_layer_roots[k + 1]);
+    }
+
+    chan.mix_root_full(&inp.batch_root);
+    let query_indices = chan.draw_queries(inp.tree_depth, inp.n_queries);
+
+    Ok(Vfri11ChannelChallenges { z_x, comp_alpha, fri_alpha, fri_alphas, query_indices })
+}
+
 pub fn gen_vfri11_hints_from_cols_nfolds(
     cols:              &[Vec<u32>],
     tree_depth:        u32,
@@ -7742,6 +7853,337 @@ mod tests_vfri8 {
             .unwrap_or(false),
             "a root ≠ the committed FRI-layer root must not verify",
         );
+    }
+
+    // R4.2: replaying the channel from PUBLIC roots + OODS combos alone (no
+    // trace/witness) reproduces exactly the challenges + query indices the real
+    // VFRI11 chain drew — the on-chain channel-replay spec for
+    // QLSAVerifierRecursive.sol. A tampered root must change the drawn challenges.
+    #[test]
+    fn test_vfri11_channel_replay_matches_chain() {
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x5Cu8; 32];
+        let ch = vfri11_fri_chain(&cols, 4, &batch_root, 3, Some(2)).unwrap();
+
+        let inp = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root,
+            tree_depth: 4,
+            n_queries: 3,
+        };
+        let replay = vfri11_replay_channel(&inp).unwrap();
+
+        // Byte-identical to the real chain's Fiat-Shamir draws.
+        assert_eq!(replay.z_x, ch.z_x, "z_x");
+        assert_eq!(replay.comp_alpha, ch.comp_alpha, "comp_alpha");
+        assert_eq!(replay.fri_alpha, ch.fri_alpha, "fri_alpha");
+        assert_eq!(replay.fri_alphas, ch.fri_alphas, "per-fold fri_alphas");
+        assert_eq!(replay.query_indices, ch.derived_indices, "query indices");
+
+        // Public-input soundness: a tampered committed root changes the challenges
+        // (so an adversary can't cherry-pick queries by swapping a root on-chain).
+        // trace_root is absorbed via mix_root_full (all 32 bytes), so any bit flip
+        // reshuffles the whole downstream transcript incl. the query indices.
+        let mut bad = inp.clone();
+        bad.trace_root[0] ^= 1;
+        let replay_bad = vfri11_replay_channel(&bad).unwrap();
+        assert_ne!(replay_bad.query_indices, replay.query_indices, "tampered trace_root must move the queries");
+        assert_ne!(replay_bad.z_x, replay.z_x, "tampered trace_root must change z_x");
+    }
+
+    /// Writes the channel-replay fixture consumed by the Solidity cross-check
+    /// (RecursiveChannelReplay.test.js). Inputs = public roots + OODS combos;
+    /// expected = the challenges/indices vfri11_replay_channel draws. Run with:
+    /// cargo test write_vfri11_channel_replay_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore = "regenerates contracts/test/fixtures/vfri11_channel_replay.json"]
+    fn write_vfri11_channel_replay_fixture() {
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x5Cu8; 32];
+        let (tree_depth, n_queries, num_folds) = (4u32, 3usize, 2usize);
+        let ch = vfri11_fri_chain(&cols, tree_depth, &batch_root, n_queries, Some(num_folds)).unwrap();
+        let inp = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root,
+            tree_depth,
+            n_queries,
+        };
+        let out = vfri11_replay_channel(&inp).unwrap();
+
+        let hx = |b: &[u8; 32]| format!("0x{}", hex::encode(b));
+        let roots_json: Vec<String> = inp.fri_layer_roots.iter().map(|r| hx(r)).collect();
+        // uint128 challenges + query indices are emitted as QUOTED strings so
+        // JSON.parse keeps them exact (bare numbers > 2^53 lose precision as JS floats).
+        let alphas_json: Vec<String> = out.fri_alphas.iter().map(|a| format!("\"{a}\"")).collect();
+        let idx_json: Vec<String> = out.query_indices.iter().map(|i| format!("\"{i}\"")).collect();
+        let json = format!(
+            concat!(
+                "{{\n",
+                "  \"traceRoot\": \"{}\",\n",
+                "  \"oodsComboPos\": \"{}\",\n",
+                "  \"oodsComboNeg\": \"{}\",\n",
+                "  \"compRoot\": \"{}\",\n",
+                "  \"friLayerRoots\": [{}],\n",
+                "  \"batchRoot\": \"{}\",\n",
+                "  \"treeDepth\": {},\n",
+                "  \"nQueries\": {},\n",
+                "  \"expected\": {{\n",
+                "    \"zX\": \"{}\",\n",
+                "    \"compAlpha\": \"{}\",\n",
+                "    \"friAlpha\": \"{}\",\n",
+                "    \"friAlphas\": [{}],\n",
+                "    \"queryIndices\": [{}]\n",
+                "  }}\n}}\n"
+            ),
+            hx(&inp.trace_root),
+            inp.oods_combo_pos,
+            inp.oods_combo_neg,
+            hx(&inp.comp_root),
+            roots_json.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(", "),
+            hx(&inp.batch_root),
+            inp.tree_depth,
+            inp.n_queries,
+            out.z_x,
+            out.comp_alpha,
+            out.fri_alpha,
+            alphas_json.join(", "),
+            idx_json.join(", "),
+        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/vfri11_channel_replay.json");
+        std::fs::write(path, json).expect("write fixture");
+        println!("wrote {path}");
+    }
+
+    // R4.3 tie-together: the query indices the on-chain channel replay derives are
+    // EXACTLY the positions the recursion proof commits to (each query's px =
+    // coset_at(idx).x). This is the composition invariant QLSAVerifierRecursive.sol
+    // relies on: replay → indices, then verify the recursion bound to those px —
+    // a prover can't prove membership at cherry-picked positions.
+    #[test]
+    fn test_channel_indices_match_recursion_query_points() {
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let batch_root = [0x5Cu8; 32];
+        let (tree_depth, n_queries, num_folds) = (4u32, 3usize, 2usize);
+
+        let ch = vfri11_fri_chain(&cols, tree_depth, &batch_root, n_queries, Some(num_folds)).unwrap();
+        let inp = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root,
+            tree_depth,
+            n_queries,
+        };
+        let replay = vfri11_replay_channel(&inp).unwrap();
+        let rec = gen_vfri11_recursion_inputs(&cols, tree_depth, &batch_root, n_queries, Some(num_folds)).unwrap();
+
+        assert_eq!(replay.query_indices.len(), rec.queries.len());
+        for q in 0..replay.query_indices.len() {
+            let idx = replay.query_indices[q];
+            let px_from_index = coset_at(tree_depth, idx as u64).0;
+            // queries[q].step.2 is the px the recursion proof pins for this query.
+            assert_eq!(
+                px_from_index, rec.queries[q].0 .2,
+                "channel-derived index {idx} must equal the recursion query point px at slot {q}",
+            );
+            // And the replay's FRI challenges are the ones the recursion consumes:
+            // query q's circle-fold alpha (step.6) == the single fri_alpha; the
+            // per-fold alphas (rounds[k].1) == replay.fri_alphas[k].
+            assert_eq!(rec.queries[q].0 .6, replay.fri_alpha, "circle-fold alpha");
+            for (k, round) in rec.queries[q].1.iter().enumerate() {
+                assert_eq!(round.1, replay.fri_alphas[k], "fold-round {k} alpha");
+            }
+        }
+    }
+
+    // R4.4: the OUTER recursive trace exports as plain columns and feeds the
+    // EXISTING VFRI11 hint generator — the path to on-chain verification of the
+    // recursion by the deployed VFRI11 machinery at small constant gas. The outer
+    // proof is cross-bound to the INNER proof's public roots via batch_root =
+    // keccak(inner trace_root ‖ inner last-layer root) (BatchRegistryV4 pattern).
+    #[test]
+    fn test_recursive_outer_trace_vfri11_hints() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        use sha3::{Digest as Sha3Digest, Keccak256};
+
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let inner_batch_root = [0x5Cu8; 32];
+        let rec = gen_vfri11_recursion_inputs(&cols, 4, &inner_batch_root, 2, Some(2)).unwrap();
+
+        // Outer trace: 87 columns at the composition's shared log_size.
+        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths).unwrap();
+        assert_eq!(outer_cols.len(), 87, "rv 42 + merkle_t8 45 main columns");
+        assert!(outer_cols.iter().all(|c| c.len() == 1usize << outer_log));
+
+        // Cross-bind the outer proof to the inner proof's public roots.
+        let ch_full = vfri11_fri_chain(&cols, 4, &inner_batch_root, 2, Some(2)).unwrap();
+        let outer_batch_root: [u8; 32] = outer_binding_root(&Vfri11ChannelInputs {
+            trace_root: ch_full.trace_root,
+            oods_combo_pos: ch_full.oods_combo_pos,
+            oods_combo_neg: ch_full.oods_combo_neg,
+            comp_root: ch_full.comp_root,
+            fri_layer_roots: ch_full.layer_roots.clone(),
+            batch_root: inner_batch_root,
+            tree_depth: 4,
+            n_queries: 2,
+        });
+
+        // The outer trace feeds the EXISTING VFRI11 hint generator unchanged.
+        let (proof1, commit1, hints1) = gen_vfri11_hints_from_cols_nfolds(
+            &outer_cols, outer_log, &outer_batch_root, 2, Some(3),
+        )
+        .unwrap();
+        assert_eq!(proof1[0..8], 5u64.to_le_bytes(), "VFRI11 version marker");
+        assert!(!hints1.is_empty());
+
+        // Deterministic…
+        let (proof2, commit2, hints2) = gen_vfri11_hints_from_cols_nfolds(
+            &outer_cols, outer_log, &outer_batch_root, 2, Some(3),
+        )
+        .unwrap();
+        assert_eq!((&proof1, &commit1, &hints1), (&proof2, &commit2, &hints2));
+
+        // …and genuinely bound: a different inner binding root changes the outer
+        // hints (query indices shift), so outer proofs can't be replayed across
+        // different inner proofs.
+        let mut other_root = outer_batch_root;
+        other_root[0] ^= 1;
+        let (_, _, hints3) =
+            gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &other_root, 2, Some(3))
+                .unwrap();
+        assert_ne!(hints1, hints3, "outer hints must be bound to the inner roots");
+    }
+
+    /// Writes the full R4.5 recursive-verifier E2E fixture consumed by
+    /// QLSAVerifierRecursive.test.js: the inner proof's public roots, the outer
+    /// (recursive-trace) VFRI11 proof/commitment/hints cross-bound to them, and
+    /// the expected replayed challenges. Run with:
+    /// cargo test write_recursive_e2e_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore = "regenerates contracts/test/fixtures/recursive_e2e.json"]
+    fn write_recursive_e2e_fixture() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        use sha3::{Digest as Sha3Digest, Keccak256};
+
+        // ── Inner VFRI11 statement (same params as the channel-replay fixture).
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let inner_batch_root = [0x5Cu8; 32];
+        // Inner config chosen so the OUTER trace stays inside the deployed
+        // VFRI11's validated gas profile: num_folds=3 leaves a 2-element last
+        // layer → membership path depth 1 → outer merkle block = 22 rows, so the
+        // outer trace fits log_size 5 (vs 7 for the earlier depth-2 paths).
+        let (tree_depth, n_queries, num_folds) = (4u32, 1usize, 3usize);
+        let ch = vfri11_fri_chain(&cols, tree_depth, &inner_batch_root, n_queries, Some(num_folds)).unwrap();
+        let rec = gen_vfri11_recursion_inputs(&cols, tree_depth, &inner_batch_root, n_queries, Some(num_folds)).unwrap();
+
+        // ── Outer recursive trace → VFRI11 hints, cross-bound to the inner publics.
+        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths).unwrap();
+        let chan_inputs = Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root: inner_batch_root,
+            tree_depth,
+            n_queries,
+        };
+        // R4.7: bind EVERY public inner field, not just trace+last-layer roots.
+        let outer_bound: [u8; 32] = outer_binding_root(&chan_inputs);
+        // Outer FRI params sized to the deployed VFRI11's gas envelope: cost
+        // scales ~ n_queries·(3+2·folds)·tree_depth; the generic on-chain E2E
+        // (depth 4, 2 queries, 2 folds ≈ 13.1M gas) is 56 such units, this is 35.
+        let outer_folds = 2usize;
+        let (outer_proof, outer_commit_hex, outer_hints) =
+            gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &outer_bound, 1, Some(outer_folds))
+                .unwrap();
+
+        // ── Expected replayed challenges (the contract returns these).
+        let replay = vfri11_replay_channel(&chan_inputs).unwrap();
+
+        let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
+        let roots_json: Vec<String> =
+            ch.layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
+        let idx_json: Vec<String> =
+            replay.query_indices.iter().map(|i| format!("\"{i}\"")).collect();
+        let json = format!(
+            concat!(
+                "{{\n",
+                "  \"inner\": {{\n",
+                "    \"traceRoot\": \"{}\",\n",
+                "    \"oodsComboPos\": \"{}\",\n",
+                "    \"oodsComboNeg\": \"{}\",\n",
+                "    \"compRoot\": \"{}\",\n",
+                "    \"friLayerRoots\": [{}],\n",
+                "    \"batchRoot\": \"{}\",\n",
+                "    \"treeDepth\": {},\n",
+                "    \"nQueries\": {}\n",
+                "  }},\n",
+                "  \"outer\": {{\n",
+                "    \"bindingRoot\": \"{}\",\n",
+                "    \"proof\": \"{}\",\n",
+                "    \"commitment\": \"0x{}\",\n",
+                "    \"hints\": \"{}\"\n",
+                "  }},\n",
+                "  \"expected\": {{\n",
+                "    \"zX\": \"{}\",\n",
+                "    \"compAlpha\": \"{}\",\n",
+                "    \"friAlpha\": \"{}\",\n",
+                "    \"friAlphas\": [{}],\n",
+                "    \"queryIndices\": [{}]\n",
+                "  }}\n}}\n"
+            ),
+            hx(&ch.trace_root),
+            ch.oods_combo_pos,
+            ch.oods_combo_neg,
+            hx(&ch.comp_root),
+            roots_json.join(", "),
+            hx(&inner_batch_root),
+            tree_depth,
+            n_queries,
+            hx(&outer_bound),
+            hx(&outer_proof),
+            outer_commit_hex,
+            hx(&outer_hints),
+            replay.z_x,
+            replay.comp_alpha,
+            replay.fri_alpha,
+            replay
+                .fri_alphas
+                .iter()
+                .map(|a| format!("\"{a}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            idx_json.join(", "),
+        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/recursive_e2e.json");
+        std::fs::write(path, json).expect("write fixture");
+        println!("wrote {path} (outer_log={outer_log}, outer_folds={outer_folds})");
     }
 
     // The bridge must work at the odd-orientation edge too: many queries so some

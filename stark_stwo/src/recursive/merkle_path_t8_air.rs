@@ -606,6 +606,24 @@ pub fn build_trace_multi(
     bits: &[Vec<bool>],
     log_size: u32,
 ) -> (TraceColumns, Vec<[u64; 4]>) {
+    let (mut cols, roots) = build_trace_multi_raw(leaves, sibs, bits, log_size);
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    for col in cols.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    let main_cols: TraceColumns =
+        cols.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect();
+    (main_cols, roots)
+}
+
+/// The natural-order (pre-bit-reverse) main columns of [`build_trace_multi`] —
+/// the single fill implementation both consume (R4.4: outer-trace export).
+pub(crate) fn build_trace_multi_raw(
+    leaves: &[[u64; 4]],
+    sibs: &[Vec<[u64; 4]>],
+    bits: &[Vec<bool>],
+    log_size: u32,
+) -> (Vec<Vec<BaseField>>, Vec<[u64; 4]>) {
     let num_paths = leaves.len();
     assert!(num_paths >= 1, "need ≥ 1 path");
     assert_eq!(sibs.len(), num_paths);
@@ -617,7 +635,6 @@ pub fn build_trace_multi(
 
     let n = 1usize << log_size;
     debug_assert!(num_paths * depth * N_ROUNDS <= n, "paths exceed trace capacity");
-    let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
     let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
 
@@ -703,12 +720,7 @@ pub fn build_trace_multi(
         carry_state = [0u64; T];
     }
 
-    let mut main = cols;
-    for col in main.iter_mut() {
-        bit_reverse_coset_to_circle_domain_order(col);
-    }
-    let main_cols: TraceColumns = main.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect();
-    (main_cols, roots)
+    (cols, roots)
 }
 
 // ── Prove / verify roundtrip ────────────────────────────────────────────────────

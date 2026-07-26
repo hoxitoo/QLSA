@@ -585,6 +585,65 @@ pub fn verify_queries_membership_t8(
     Ok(verify::<Blake2sM31MerkleChannel>(&[&rv_comp, &merkle_comp], verifier_channel, commitment_scheme, proof).is_ok())
 }
 
+// ── Outer-trace export (R4.4) ────────────────────────────────────────────────────
+
+/// Export the OUTER recursive trace (rv fold chains ++ t=8 Merkle paths) as plain
+/// natural-order row-major `u32` columns, for VFRI hint generation over the outer
+/// trace — the path to on-chain verification of the recursion by the EXISTING
+/// deployed VFRI11 machinery at small constant gas (the outer trace is tiny).
+/// Returns `(columns, log_size)`; each column has `1 << log_size` entries.
+/// Validation mirrors [`prove_queries_membership_t8`].
+pub fn outer_trace_columns_t8(
+    queries: &[(QueryStep, Vec<FoldRound>)],
+    paths: &[(Vec<[u64; 4]>, Vec<bool>)],
+) -> Result<(Vec<Vec<u32>>, u32), String> {
+    if queries.is_empty() {
+        return Err("need ≥ 1 query".into());
+    }
+    if queries.len() != paths.len() {
+        return Err("queries/paths length mismatch".into());
+    }
+    if queries.len() > rv::MAX_QUERIES {
+        return Err(format!("query count {} exceeds MAX_QUERIES {}", queries.len(), rv::MAX_QUERIES));
+    }
+    let num_folds = queries[0].1.len();
+    if num_folds > rv::MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
+    }
+    if queries.iter().any(|(_, r)| r.len() != num_folds) {
+        return Err("all queries must share num_folds".into());
+    }
+    let depth = paths[0].0.len();
+    if depth == 0 {
+        return Err("path depth must be ≥ 1".into());
+    }
+    if depth > merkle::MAX_DEPTH {
+        return Err(format!("path depth {depth} exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
+    }
+    if paths.iter().any(|(s, b)| s.len() != depth || b.len() != depth) {
+        return Err("all paths must share depth".into());
+    }
+    let log_size = queries_log_size(queries.len(), num_folds, depth);
+    if log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE) {
+        return Err(format!("outer trace log_size {log_size} too large"));
+    }
+
+    let finals = rv::recursive_queries_final(queries);
+    let leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+    let sibs: Vec<Vec<[u64; 4]>> = paths.iter().map(|(s, _)| s.clone()).collect();
+    let bits: Vec<Vec<bool>> = paths.iter().map(|(_, b)| b.clone()).collect();
+
+    let rv_cols = rv::build_trace_multi_raw(queries, log_size);
+    let (merkle_cols, _roots) = merkle::build_trace_multi_raw(&leaves, &sibs, &bits, log_size);
+
+    let mut cols: Vec<Vec<u32>> = Vec::with_capacity(rv_cols.len() + merkle_cols.len());
+    for c in rv_cols.into_iter().chain(merkle_cols.into_iter()) {
+        cols.push(c.into_iter().map(|v| v.0).collect());
+    }
+    debug_assert_eq!(cols.len(), TOTAL_MAIN_COLS);
+    Ok((cols, log_size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
