@@ -52,10 +52,10 @@ pub type FoldRound = rv::FoldRound;
 
 const RV_MAIN_COLS: usize = rv::N_MAIN_COLS; // 42
 const MERKLE_MAIN_COLS: usize = merkle::N_MAIN_COLS; // 89
-const RV_PREPROC_COLS: usize = 17;
+const RV_PREPROC_COLS: usize = 25; // 17 selectors/challenges + 8 pinned comp limbs
 const MERKLE_PREPROC_COLS: usize = 38; // rc x16 + 4 selectors + idx_bit + leaf x8 + is_root + root x8
 const TOTAL_MAIN_COLS: usize = RV_MAIN_COLS + MERKLE_MAIN_COLS; // 131
-const TOTAL_PREPROC_COLS: usize = RV_PREPROC_COLS + MERKLE_PREPROC_COLS; // 55
+const TOTAL_PREPROC_COLS: usize = RV_PREPROC_COLS + MERKLE_PREPROC_COLS; // 63
 
 /// Shared `log_size` fitting a 1-query fold chain (`1 + num_folds` rows) and a
 /// `depth`-compression t=8 Merkle path (`depth · 22` rows).
