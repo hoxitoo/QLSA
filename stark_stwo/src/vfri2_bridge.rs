@@ -8284,7 +8284,11 @@ mod tests_vfri8 {
         let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
 
         let mut entries: Vec<String> = Vec::new();
-        for &q in &[1usize, 2, 4, 8] {
+        // q=20 is the production security point: log_blowup(6)*20 + pow_bits(10)
+        // = 130 bits. The whole production plan rests on what happens there, and
+        // extrapolation has been wrong every time this series (see
+        // docs/conclusions.md §1.4), so it is measured rather than projected.
+        for &q in &[1usize, 2, 4, 8, 16, 20] {
             // ── DIRECT: what BatchRegistryV5 verifies today, per group.
             let (d_proof, d_commit, d_hints) =
                 gen_vfri11_hints_from_cols_nfolds(&cols, tree_depth, &batch_root, q, Some(num_folds))
