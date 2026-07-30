@@ -126,6 +126,7 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
       fx.outer.proof,
       fx.outer.commitment,
       fx.outer.hints,
+      fx.inner.lastLayerEvals,
       { gasLimit: 16_777_215n }
     );
     expect(ok, "the honest recursive bundle must verify on-chain").to.equal(true);
@@ -145,7 +146,8 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
       fx.outer.proof, fx.outer.commitment, fx.outer.bindingRoot, fx.outer.hints
     );
     const wholeGas = await recursive.verifyRecursive.estimateGas(
-      innerTuple, fx.outer.proof, fx.outer.commitment, fx.outer.hints
+      innerTuple, fx.outer.proof, fx.outer.commitment, fx.outer.hints,
+      fx.inner.lastLayerEvals
     );
     console.log(`        [gas] replayChallenges            = ${replayGas}`);
     console.log(`        [gas] VFRI11.verify(outer, direct) = ${verifyGas}`);
@@ -167,9 +169,60 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
       fx.outer.proof,
       fx.outer.commitment,
       fx.outer.hints,
+      fx.inner.lastLayerEvals,
       { gasLimit: 16_000_000n }
     );
     expect(ok).to.equal(false, "outer proof must not verify for different inner publics");
+  });
+
+  // R4.13: the last FRI layer must be a COMMITTED bounded-degree layer. The
+  // recursion proves every query's fold chain terminates in friLayerRoots[K];
+  // this check proves that root commits a small low-degree layer rather than
+  // arbitrary data. It stays on-chain because it is cheap and CONSTANT (16 evals
+  // for LOG=10, 4 for LOG=8 in production) while the per-query work is what
+  // scales — the same split that keeps the channel replay on-chain.
+  it("rejects tampered last-layer evaluations", async function () {
+    this.timeout(300_000);
+    const bad = [...fx.inner.lastLayerEvals];
+    bad[0] = (BigInt(bad[0]) ^ 1n).toString();
+    const [ok] = await recursive.verifyRecursive.staticCall(
+      innerTuple,
+      fx.outer.proof,
+      fx.outer.commitment,
+      fx.outer.hints,
+      bad,
+      { gasLimit: 16_777_215n }
+    );
+    expect(ok, "a last layer that does not hash to friLayerRoots[K] must not verify")
+      .to.equal(false);
+  });
+
+  it("rejects a last layer of the wrong size", async function () {
+    this.timeout(300_000);
+    const [ok] = await recursive.verifyRecursive.staticCall(
+      innerTuple,
+      fx.outer.proof,
+      fx.outer.commitment,
+      fx.outer.hints,
+      [...fx.inner.lastLayerEvals, fx.inner.lastLayerEvals[0]],
+      { gasLimit: 16_777_215n }
+    );
+    expect(ok, "size must be exactly 2^(treeDepth − numFolds)").to.equal(false);
+  });
+
+  it("checkLastLayer accepts the committed layer and rejects any change", async function () {
+    const numFolds = fx.inner.friLayerRoots.length - 1;
+    const lastDepth = fx.inner.treeDepth - numFolds;
+    const root = fx.inner.friLayerRoots[numFolds];
+    expect(await recursive.checkLastLayer(fx.inner.lastLayerEvals, root, lastDepth))
+      .to.equal(true, "the committed evaluations must rebuild friLayerRoots[K]");
+
+    const bad = [...fx.inner.lastLayerEvals];
+    bad[bad.length - 1] = (BigInt(bad[bad.length - 1]) ^ 1n).toString();
+    expect(await recursive.checkLastLayer(bad, root, lastDepth)).to.equal(false);
+    // A wrong depth must not be silently accepted either.
+    expect(await recursive.checkLastLayer(fx.inner.lastLayerEvals, root, lastDepth + 1))
+      .to.equal(false);
   });
 
   it("rejects a wrong outer commitment", async function () {
@@ -180,6 +233,7 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
       fx.outer.proof,
       bad,
       fx.outer.hints,
+      fx.inner.lastLayerEvals,
       { gasLimit: 16_000_000n }
     );
     expect(ok).to.equal(false, "wrong outer commitment must not verify");

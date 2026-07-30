@@ -24,8 +24,23 @@ preprocessed-селекторы. Значит переменная глубин�
 `compRoot →(Merkle) compValue →(пин) fₚ → fold chain → finalFold →(пин) hashLeaf → путь →
 friLayerRoots[K]`. Prover больше не может выбрать `fₚ`.
 
-**524 теста Rust, 0 падений, 0 warnings.** Остаётся до замены `verify()` целиком: проверка
-ограниченной степени последнего слоя. После неё `BatchRegistryV7` становится осмысленным.
+**R4.13 — проверка последнего слоя, ON-CHAIN.** Последний недостающий элемент. Первым побуждением
+было доказывать его в цепи, но замер показал обратное: в production последний слой — 16 evals
+(LOG=10) и 4 (LOG=8), то есть 15 и 3 компрессии (~225k и ~45k газа), тогда как per-query работа
+рекурсии — `3 пути × depth × nQueries`. Тот же принцип, что и для channel replay (R3.10): дешёвое и
+константное остаётся on-chain, дорогое и растущее уходит в рекурсию. Перенос в цепь стоил бы времени
+prover'а ради экономии пары сотен тысяч газа.
+
+`QLSAVerifierRecursive.checkLastLayer` зеркалит `QLSAVerifierVFRI11._checkLastLayer` (согласованы по
+построению); `verifyRecursive` принимает `lastLayerEvals` и отвергает bundle, если они не хешируются
+в `friLayerRoots[K]`. Полный honest bundle: **4 197 671 газа** (было 2 289 889 — рост от R4.12,
+comp-пути увеличили внешний трейс; рекурсия доказывает строго больше). Запас под cap ~4×.
+
+**Контур проверки замкнут:** on-chain (channel replay + last-layer) плюс in-circuit
+(`compRoot → compValue → fₚ → fold chain → finalFold → hashLeaf → путь → friLayerRoots[K]`)
+покрывают то же, что проверяет `verify()`. **`BatchRegistryV7` теперь осмыслен** — это следующий шаг.
+
+**1022 Solidity, 524 Rust, 0 падений, 0 warnings.**
 
 
 ## R4.10 (2026-07-30) — закрыта входная сторона привязки C1 в рекурсии

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "./IQLSAVerifierV4.sol";
 import "./verifier/RecursiveChannelReplay.sol";
+import "./verifier/Poseidon2MerkleVerifierT8.sol";
 
 /// @title QLSAVerifierRecursive — on-chain entry point for the recursive proof (R4.5, MVP)
 ///
@@ -103,6 +104,59 @@ contract QLSAVerifierRecursive {
         );
     }
 
+    /// @notice Largest last FRI layer accepted (mirrors QLSAVerifierVFRI11).
+    uint256 public constant MAX_LAST_LAYER_SIZE = 1 << 16;
+
+    /// @dev Split a QM31 into its four M31 words, MSB-first (matches qm31Words).
+    function _qm31ToWords(uint128 v) private pure returns (uint32[] memory w) {
+        w = new uint32[](4);
+        w[0] = uint32(v >> 96);
+        w[1] = uint32(v >> 64);
+        w[2] = uint32(v >> 32);
+        w[3] = uint32(v);
+    }
+
+    /// @notice Bounded-degree check on the final FRI layer.
+    ///
+    /// Rebuilds the last layer's Merkle tree from the supplied evaluations and
+    /// compares it with the committed `friLayerRoots[K]`.  Combined with the
+    /// recursion — which proves every query's fold chain terminates in that same
+    /// committed root — this pins each query's final fold to a layer that is
+    /// demonstrably a committed, bounded-degree polynomial.
+    ///
+    /// This stays ON-CHAIN rather than going in-circuit for the same reason the
+    /// channel replay does (R3.10): it is cheap and CONSTANT, while the per-query
+    /// work is what scales.  Production last layers are 16 evaluations (LOG=10)
+    /// and 4 (LOG=8) — 15 and 3 compressions — against the recursion's
+    /// 3 paths x depth x nQueries.  Moving it into the circuit would cost prover
+    /// time to save a few hundred thousand gas.
+    ///
+    /// Mirrors `QLSAVerifierVFRI11._checkLastLayer` exactly, so the two agree by
+    /// construction.
+    function checkLastLayer(
+        uint128[] memory evals,
+        bytes32 expectedRoot,
+        uint256 lastDepth
+    ) public pure returns (bool) {
+        if (lastDepth > 30) return false;
+        uint256 lastLayerSize = uint256(1) << lastDepth;
+        if (evals.length != lastLayerSize)       return false;
+        if (lastLayerSize > MAX_LAST_LAYER_SIZE) return false;
+
+        bytes32[] memory nodes = new bytes32[](lastLayerSize);
+        for (uint256 i = 0; i < lastLayerSize; i++) {
+            nodes[i] = Poseidon2MerkleVerifierT8.hashLeaf(_qm31ToWords(evals[i]));
+        }
+        uint256 sz = lastLayerSize;
+        while (sz > 1) {
+            sz >>= 1;
+            for (uint256 i = 0; i < sz; i++) {
+                nodes[i] = Poseidon2MerkleVerifierT8.hashPair(nodes[2 * i], nodes[2 * i + 1]);
+            }
+        }
+        return nodes[0] == expectedRoot;
+    }
+
     /// @notice Verify the recursive proof for one inner VFRI11 statement.
     ///
     /// GAS (MEASURED, R4.6): this full path does NOT fit on-chain today. The
@@ -129,6 +183,8 @@ contract QLSAVerifierRecursive {
     /// @param outerProof      VFRI11-pipeline proof bytes over the OUTER trace
     /// @param outerCommitment Blake2s(outerProof[0:32] ‖ bindingRoot)[0:16]
     /// @param outerHints      VFRI11 ABI query hints for the outer proof
+    /// @param lastLayerEvals  all 2^(treeDepth − numFolds) evaluations of the final
+    ///        FRI layer, checked against the committed friLayerRoots[K]
     /// @return ok  true iff the outer proof verifies against the binding root
     /// @return ch  the replayed challenges + query indices (channel-derived
     ///             public inputs of the recursion) for upper-layer consumption
@@ -136,7 +192,8 @@ contract QLSAVerifierRecursive {
         InnerPublics calldata inner,
         bytes calldata outerProof,
         bytes16 outerCommitment,
-        bytes calldata outerHints
+        bytes calldata outerHints,
+        uint128[] calldata lastLayerEvals
     ) external view returns (bool ok, RecursiveChannelReplay.Challenges memory ch) {
         // 1. Replay the inner Fiat-Shamir channel from public roots alone —
         //    validates the inner publics' shape and derives the challenges the
@@ -155,7 +212,22 @@ contract QLSAVerifierRecursive {
         // 2. Cross-binding root from the inner publics (R4.4).
         bytes32 bound = outerBindingRoot(inner);
 
-        // 3. Verify the outer FRI-committed recursive trace, bound to `bound`
+        // 3. Bounded-degree check on the final FRI layer.  The recursion proves
+        //    each query's fold chain lands on friLayerRoots[K]; this proves that
+        //    root commits a small, low-degree layer rather than arbitrary data.
+        //    numFolds = friLayerRoots.length - 1, so the last layer has
+        //    2^(treeDepth - numFolds) evaluations.
+        uint256 numFolds = inner.friLayerRoots.length - 1;
+        if (inner.treeDepth < numFolds) return (false, ch);
+        if (!checkLastLayer(
+                lastLayerEvals,
+                inner.friLayerRoots[numFolds],
+                inner.treeDepth - numFolds
+            )) {
+            return (false, ch);
+        }
+
+        // 4. Verify the outer FRI-committed recursive trace, bound to `bound`
         //    (the outer channel mixed it before drawing ITS queries, so these
         //    hints only verify for exactly these inner publics).
         ok = outerVerifier.verify(outerProof, outerCommitment, bound, outerHints);

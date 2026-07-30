@@ -8169,6 +8169,12 @@ mod tests_vfri8 {
             ch.layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
         let idx_json: Vec<String> =
             replay.query_indices.iter().map(|i| format!("\"{i}\"")).collect();
+        // The final FRI layer's evaluations — the on-chain bounded-degree check
+        // rebuilds their tree and compares it with friLayerRoots[K] (R4.13).
+        let last_evals_json: Vec<String> = ch.layer_values[ch.num_folds]
+            .iter()
+            .map(|v| format!("\"{v}\""))
+            .collect();
         let json = format!(
             concat!(
                 "{{\n",
@@ -8180,7 +8186,8 @@ mod tests_vfri8 {
                 "    \"friLayerRoots\": [{}],\n",
                 "    \"batchRoot\": \"{}\",\n",
                 "    \"treeDepth\": {},\n",
-                "    \"nQueries\": {}\n",
+                "    \"nQueries\": {},\n",
+                "    \"lastLayerEvals\": [{}]\n",
                 "  }},\n",
                 "  \"outer\": {{\n",
                 "    \"bindingRoot\": \"{}\",\n",
@@ -8204,6 +8211,7 @@ mod tests_vfri8 {
             hx(&inner_batch_root),
             tree_depth,
             n_queries,
+            last_evals_json.join(", "),
             hx(&outer_bound),
             hx(&outer_proof),
             outer_commit_hex,
