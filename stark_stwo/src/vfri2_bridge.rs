@@ -5371,6 +5371,13 @@ pub struct Vfri11RecursionInputs {
     pub paths: Vec<(Vec<[u64; 4]>, Vec<bool>)>,
     /// The committed last FRI-layer root (`friLayerRoots[num_folds]`) as 4 M31 words.
     pub last_layer_root: [u64; 4],
+    /// Per query: membership paths for the two composition values in the committed
+    /// composition tree (`comp_root`) — `(pos_sibs, pos_bits, neg_sibs, neg_bits)`.
+    /// Depth is `tree_depth` (compRoot spans the whole domain), i.e. DEEPER than
+    /// `paths`, which is why the composition needs per-path depth (R4.11).
+    pub comp_paths: Vec<crate::recursive::composition_t8::CompMembership>,
+    /// The committed composition-polynomial root as 4 M31 words.
+    pub comp_root: [u64; 4],
     /// Expected final fold value per query (== the last FoldHint's folded_value).
     pub finals: Vec<u128>,
     /// The embedded Stwo-style trace root (proof[8..40] of the ABI generator).
@@ -5393,6 +5400,7 @@ pub fn gen_vfri11_recursion_inputs(
 
     let mut queries = Vec::with_capacity(ch.derived_indices.len());
     let mut paths = Vec::with_capacity(ch.derived_indices.len());
+    let mut comp_paths = Vec::with_capacity(ch.derived_indices.len());
     let mut finals = Vec::with_capacity(ch.derived_indices.len());
 
     for &idx in &ch.derived_indices {
@@ -5451,14 +5459,27 @@ pub fn gen_vfri11_recursion_inputs(
         let sibs: Vec<[u64; 4]> = sibs_packed.iter().map(p2t8_node_words).collect();
         let bits: Vec<bool> = (0..sibs.len()).map(|i| (cur_idx >> i) & 1 == 1).collect();
 
+        // Composition-value membership paths in the committed comp tree.  These use
+        // the ORIGINAL query index (and its antipode), not the folded `cur_idx`,
+        // because compValue is committed over the full trace domain.
+        let cp_sibs: Vec<[u64; 4]> =
+            proof_path(&ch.comp_levels, idx).iter().map(p2t8_node_words).collect();
+        let cp_bits: Vec<bool> = (0..cp_sibs.len()).map(|i| (idx >> i) & 1 == 1).collect();
+        let cn_sibs: Vec<[u64; 4]> =
+            proof_path(&ch.comp_levels, anti).iter().map(p2t8_node_words).collect();
+        let cn_bits: Vec<bool> = (0..cn_sibs.len()).map(|i| (anti >> i) & 1 == 1).collect();
+
         queries.push((step, rounds));
         paths.push((sibs, bits));
+        comp_paths.push((cp_sibs, cp_bits, cn_sibs, cn_bits));
         finals.push(final_val);
     }
 
     Ok(Vfri11RecursionInputs {
         queries,
         paths,
+        comp_paths,
+        comp_root: p2t8_node_words(&ch.comp_root),
         last_layer_root: p2t8_node_words(&ch.layer_roots[ch.num_folds]),
         finals,
         trace_root: ch.trace_root,
@@ -7827,16 +7848,35 @@ mod tests_vfri8 {
         assert_eq!(&proof_bytes[8..40], &inputs.trace_root, "bridge and ABI generator must share the chain");
 
         // The recursion proves the REAL decommitments in ONE STARK…
-        let r = prove_queries_membership_t8(&inputs.queries, &inputs.paths).unwrap();
+        let r =
+            prove_queries_membership_t8(&inputs.queries, &inputs.paths, &inputs.comp_paths).unwrap();
         assert_eq!(r.finals, inputs.finals, "recursion finals must equal the real fold-chain outputs");
-        // …and every query's path lands on the GENUINE committed last-layer root.
-        for root in &r.roots {
+
+        // The comp paths are DEEPER than the fold paths on real data — compRoot
+        // spans the whole trace domain, the last FRI layer does not. This is the
+        // shape that made the uniform-depth attempt fail before R4.11.
+        let n = inputs.queries.len();
+        assert!(
+            r.comp_depth > r.depth,
+            "real data must exercise mixed depths (comp {} vs fold {})",
+            r.comp_depth, r.depth,
+        );
+
+        // Every final-fold path lands on the GENUINE committed last-layer root…
+        for root in &r.roots[..n] {
             assert_eq!(*root, inputs.last_layer_root, "path must authenticate into friLayerRoots[K]");
+        }
+        // …and every composition path lands on the GENUINE committed compRoot.
+        // THIS is the binding: compValue is pinned in-circuit (R4.10) and that
+        // pinned value is now proven to be a member of the inner proof's committed
+        // composition tree, so `fₚ` can no longer be chosen freely.
+        for root in &r.roots[n..] {
+            assert_eq!(*root, inputs.comp_root, "comp path must authenticate into compRoot");
         }
         let pxs: Vec<u32> = inputs.queries.iter().map(|(s, _)| s.2).collect();
         assert!(
             verify_queries_membership_t8(
-                &r.proof, r.log_size, r.num_folds, r.depth, &r.challenges,
+                &r.proof, r.log_size, r.num_folds, r.depth, r.comp_depth, &r.challenges,
                 &pxs, &r.finals, &r.indices, &r.roots,
             )
             .unwrap(),
@@ -7847,7 +7887,7 @@ mod tests_vfri8 {
         bad[0][0] ^= 1;
         assert!(
             !verify_queries_membership_t8(
-                &r.proof, r.log_size, r.num_folds, r.depth, &r.challenges,
+                &r.proof, r.log_size, r.num_folds, r.depth, r.comp_depth, &r.challenges,
                 &pxs, &r.finals, &r.indices, &bad,
             )
             .unwrap_or(false),
@@ -8032,7 +8072,7 @@ mod tests_vfri8 {
         let rec = gen_vfri11_recursion_inputs(&cols, 4, &inner_batch_root, 2, Some(2)).unwrap();
 
         // Outer trace: 87 columns at the composition's shared log_size.
-        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths).unwrap();
+        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths).unwrap();
         assert_eq!(outer_cols.len(), 87, "rv 42 + merkle_t8 45 main columns");
         assert!(outer_cols.iter().all(|c| c.len() == 1usize << outer_log));
 
@@ -8100,7 +8140,7 @@ mod tests_vfri8 {
         let rec = gen_vfri11_recursion_inputs(&cols, tree_depth, &inner_batch_root, n_queries, Some(num_folds)).unwrap();
 
         // ── Outer recursive trace → VFRI11 hints, cross-bound to the inner publics.
-        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths).unwrap();
+        let (outer_cols, outer_log) = outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths).unwrap();
         let chan_inputs = Vfri11ChannelInputs {
             trace_root: ch.trace_root,
             oods_combo_pos: ch.oods_combo_pos,
@@ -8198,10 +8238,15 @@ mod tests_vfri8 {
         let inputs = gen_vfri11_recursion_inputs(&cols, 5, &batch_root, 6, Some(3)).unwrap();
         // The hard invariant inside the bridge already rejects any orientation
         // error; proving must then succeed over the real data.
-        let r = prove_queries_membership_t8(&inputs.queries, &inputs.paths).unwrap();
+        let r = prove_queries_membership_t8(&inputs.queries, &inputs.paths, &inputs.comp_paths).unwrap();
         assert_eq!(r.finals, inputs.finals);
-        for root in &r.roots {
+        // Roots are laid out as N final-fold, then 2N composition paths.
+        let n = inputs.queries.len();
+        for root in &r.roots[..n] {
             assert_eq!(*root, inputs.last_layer_root);
+        }
+        for root in &r.roots[n..] {
+            assert_eq!(*root, inputs.comp_root);
         }
     }
 

@@ -50,6 +50,19 @@ use crate::{make_config, LOG_BLOWUP, MAX_PROOF_BYTES, N_FRI_QUERIES, POW_BITS};
 pub type QueryStep = rv::StepOp;
 pub type FoldRound = rv::FoldRound;
 
+/// Membership paths for one query's two composition values in the committed
+/// composition tree (`compRoot`): `(pos_siblings, pos_bits, neg_siblings, neg_bits)`.
+///
+/// `compValue` is pinned in `recursive_verifier` (R4.10) so the prover cannot pick
+/// `fₚ`; these paths attach that pinned value to the inner proof's committed
+/// composition tree, closing the remaining half of the input-side binding.
+///
+/// Their depth is `tree_depth` — compRoot spans the WHOLE trace domain — whereas
+/// the final-fold paths are `tree_depth − num_folds` deep.  The two families
+/// therefore coexist in one Merkle component only because `merkle_path_t8_air`
+/// supports per-path depth (R4.11).
+pub type CompMembership = (Vec<[u64; 4]>, Vec<bool>, Vec<[u64; 4]>, Vec<bool>);
+
 const RV_MAIN_COLS: usize = rv::N_MAIN_COLS; // 42
 const MERKLE_MAIN_COLS: usize = merkle::N_MAIN_COLS; // 45
 const RV_PREPROC_COLS: usize = 25; // 17 selectors/challenges + 8 pinned comp limbs
@@ -320,9 +333,22 @@ pub fn verify_query_membership_t8(
 
 /// Shared log_size fitting N query blocks of `1 + num_folds` rows AND `n_paths`
 /// t=8 Merkle paths of `depth` compressions (22 rows each).
-fn queries_log_size(n_queries: usize, num_folds: usize, depth: usize) -> u32 {
+/// Path depths for the 3N paths: N final-fold paths, then N compValue and N
+/// compValueNeg paths (which are deeper — see [`CompMembership`]).
+fn path_depths(n_queries: usize, depth: usize, comp_depth: usize) -> Vec<usize> {
+    let mut d = vec![depth; n_queries];
+    d.extend(std::iter::repeat(comp_depth).take(2 * n_queries));
+    d
+}
+
+fn queries_log_size(
+    n_queries: usize,
+    num_folds: usize,
+    depth: usize,
+    comp_depth: usize,
+) -> u32 {
     rv::compute_log_size(n_queries * (1 + num_folds))
-        .max(merkle::compute_log_size_multi(n_queries, depth))
+        .max(merkle::compute_log_size_multi_var(&path_depths(n_queries, depth, comp_depth)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,7 +359,7 @@ fn canonical_queries_preproc_root(
     leaves: &[[u64; 4]],
     indices: &[u32],
     roots: &[[u64; 4]],
-    depth: usize,
+    depths: &[usize],
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
     let config = make_config(log_size);
@@ -345,7 +371,7 @@ fn canonical_queries_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut cols = rv::build_preproc(finals, challenges, num_folds, log_size);
-    cols.extend(merkle::build_preproc_multi(leaves, indices, roots, depth, log_size));
+    cols.extend(merkle::build_preproc_multi_var(leaves, indices, roots, depths, log_size));
     let mut tree = scheme.tree_builder();
     tree.extend_evals(cols);
     tree.commit(&mut throwaway);
@@ -383,7 +409,10 @@ pub struct QueriesMembershipT8Result {
     pub proof: Vec<u8>,
     pub log_size: u32,
     pub num_folds: usize,
+    /// Depth of the final-fold paths (into the last FRI layer).
     pub depth: usize,
+    /// Depth of the composition paths (into `compRoot`, over the whole domain).
+    pub comp_depth: usize,
     pub challenges: Vec<rv::QueryChallenges>,
     pub finals: Vec<u128>,
     pub leaves: Vec<[u64; 4]>,
@@ -398,6 +427,7 @@ pub struct QueriesMembershipT8Result {
 pub fn prove_queries_membership_t8(
     queries: &[(QueryStep, Vec<FoldRound>)],
     paths: &[(Vec<[u64; 4]>, Vec<bool>)],
+    comp_paths: &[CompMembership],
 ) -> Result<QueriesMembershipT8Result, String> {
     if queries.is_empty() {
         return Err("need ≥ 1 query".into());
@@ -425,22 +455,58 @@ pub fn prove_queries_membership_t8(
     if paths.iter().any(|(s, b)| s.len() != depth || b.len() != depth) {
         return Err("all paths must share depth".into());
     }
+    if comp_paths.len() != queries.len() {
+        return Err("queries/comp_paths length mismatch".into());
+    }
+    // The composition paths have their OWN depth (compRoot spans the whole trace
+    // domain), so they must be internally uniform but need NOT match `depth`.
+    let comp_depth = comp_paths[0].0.len();
+    if comp_depth == 0 {
+        return Err("comp path depth must be ≥ 1".into());
+    }
+    if comp_depth > merkle::MAX_DEPTH {
+        return Err(format!("comp path depth {comp_depth} exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
+    }
+    if comp_paths.iter().any(|(ps, pb, ns, nb)| {
+        ps.len() != comp_depth || pb.len() != comp_depth
+            || ns.len() != comp_depth || nb.len() != comp_depth
+    }) {
+        return Err("all comp paths must share one depth".into());
+    }
     let n = queries.len();
-    let log_size = queries_log_size(n, num_folds, depth);
+    let log_size = queries_log_size(n, num_folds, depth, comp_depth);
+    let depths = path_depths(n, depth, comp_depth);
     if log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE) {
         return Err(format!("N-query t8 composition log_size {log_size} too large"));
     }
 
     let finals = rv::recursive_queries_final(queries);
-    let leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
-    let sibs: Vec<Vec<[u64; 4]>> = paths.iter().map(|(s, _)| s.clone()).collect();
-    let bits: Vec<Vec<bool>> = paths.iter().map(|(_, b)| b.clone()).collect();
+    let challenges: Vec<rv::QueryChallenges> =
+        queries.iter().map(|(s, r)| rv::query_challenges(s, r)).collect();
+
+    // Path order: N final-fold, then N compValue, then N compValueNeg.  The comp
+    // leaves are a deterministic function of the values PINNED in
+    // `recursive_verifier`, so authenticating them binds the pinned input to the
+    // inner proof's committed composition tree.
+    let mut leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_pos)));
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_neg)));
+
+    let mut sibs: Vec<Vec<[u64; 4]>> = paths.iter().map(|(s, _)| s.clone()).collect();
+    sibs.extend(comp_paths.iter().map(|(ps, _, _, _)| ps.clone()));
+    sibs.extend(comp_paths.iter().map(|(_, _, ns, _)| ns.clone()));
+
+    let mut bits: Vec<Vec<bool>> = paths.iter().map(|(_, b)| b.clone()).collect();
+    bits.extend(comp_paths.iter().map(|(_, pb, _, _)| pb.clone()));
+    bits.extend(comp_paths.iter().map(|(_, _, _, nb)| nb.clone()));
+
     let indices: Vec<u32> = bits.iter().map(|b| merkle::bits_to_index(b)).collect();
     let pxs: Vec<u32> = queries.iter().map(|(s, _)| s.2).collect();
 
     let (rv_main, rv_preproc) = rv::build_trace_multi(queries, log_size);
     let (merkle_main, roots) = merkle::build_trace_multi(&leaves, &sibs, &bits, log_size);
-    let merkle_preproc = merkle::build_preproc_multi(&leaves, &indices, &roots, depth, log_size);
+    let merkle_preproc =
+        merkle::build_preproc_multi_var(&leaves, &indices, &roots, &depths, log_size);
 
     let config = make_config(log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -482,13 +548,12 @@ pub fn prove_queries_membership_t8(
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("N-query t8 composition serialize error: {e:?}"))?;
 
-    let challenges: Vec<rv::QueryChallenges> =
-        queries.iter().map(|(s, r)| rv::query_challenges(s, r)).collect();
     Ok(QueriesMembershipT8Result {
         proof: bytes,
         log_size,
         num_folds,
         depth,
+        comp_depth,
         challenges,
         finals,
         leaves,
@@ -505,16 +570,18 @@ pub fn verify_queries_membership_t8(
     log_size: u32,
     num_folds: usize,
     depth: usize,
+    comp_depth: usize,
     challenges: &[rv::QueryChallenges],
     pxs: &[u32],
     finals: &[u128],
     indices: &[u32],
     roots: &[[u64; 4]],
 ) -> Result<bool, String> {
+    // 3 paths per query: final fold, compValue, compValueNeg.
     if finals.is_empty()
         || pxs.len() != finals.len()
-        || indices.len() != finals.len()
-        || roots.len() != finals.len()
+        || indices.len() != 3 * finals.len()
+        || roots.len() != 3 * finals.len()
         || challenges.len() != finals.len()
     {
         return Err("public-input length mismatch".into());
@@ -538,7 +605,13 @@ pub fn verify_queries_membership_t8(
     {
         return Err(format!("blocks exceed trace capacity at log_size {log_size}"));
     }
-    let leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+    // Rebuild the SAME 3N leaf list the prover pinned.  The composition leaves come
+    // from `challenges`, which carry the compValues the verifier authenticated
+    // against compRoot — a prover cannot substitute a different pinned value.
+    let mut leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_pos)));
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_neg)));
+    let depths = path_depths(finals.len(), depth, comp_depth);
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
@@ -571,7 +644,7 @@ pub fn verify_queries_membership_t8(
         return Err(format!("N-query t8: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
     let canonical_root = canonical_queries_preproc_root(
-        finals, challenges, num_folds, &leaves, indices, roots, depth, log_size,
+        finals, challenges, num_folds, &leaves, indices, roots, &depths, log_size,
     );
     if proof.commitments[0] != canonical_root {
         return Ok(false);
@@ -596,6 +669,7 @@ pub fn verify_queries_membership_t8(
 pub fn outer_trace_columns_t8(
     queries: &[(QueryStep, Vec<FoldRound>)],
     paths: &[(Vec<[u64; 4]>, Vec<bool>)],
+    comp_paths: &[CompMembership],
 ) -> Result<(Vec<Vec<u32>>, u32), String> {
     if queries.is_empty() {
         return Err("need ≥ 1 query".into());
@@ -623,15 +697,40 @@ pub fn outer_trace_columns_t8(
     if paths.iter().any(|(s, b)| s.len() != depth || b.len() != depth) {
         return Err("all paths must share depth".into());
     }
-    let log_size = queries_log_size(queries.len(), num_folds, depth);
+    if comp_paths.len() != queries.len() {
+        return Err("queries/comp_paths length mismatch".into());
+    }
+    let comp_depth = comp_paths[0].0.len();
+    if comp_depth == 0 || comp_depth > merkle::MAX_DEPTH {
+        return Err(format!("comp path depth {comp_depth} out of range"));
+    }
+    if comp_paths.iter().any(|(ps, pb, ns, nb)| {
+        ps.len() != comp_depth || pb.len() != comp_depth
+            || ns.len() != comp_depth || nb.len() != comp_depth
+    }) {
+        return Err("all comp paths must share one depth".into());
+    }
+    let log_size = queries_log_size(queries.len(), num_folds, depth, comp_depth);
     if log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE) {
         return Err(format!("outer trace log_size {log_size} too large"));
     }
 
     let finals = rv::recursive_queries_final(queries);
-    let leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
-    let sibs: Vec<Vec<[u64; 4]>> = paths.iter().map(|(s, _)| s.clone()).collect();
-    let bits: Vec<Vec<bool>> = paths.iter().map(|(_, b)| b.clone()).collect();
+    let challenges: Vec<rv::QueryChallenges> =
+        queries.iter().map(|(s, r)| rv::query_challenges(s, r)).collect();
+
+    // Same 3N path layout the prover builds, so the exported columns match.
+    let mut leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_pos)));
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_neg)));
+
+    let mut sibs: Vec<Vec<[u64; 4]>> = paths.iter().map(|(s, _)| s.clone()).collect();
+    sibs.extend(comp_paths.iter().map(|(ps, _, _, _)| ps.clone()));
+    sibs.extend(comp_paths.iter().map(|(_, _, ns, _)| ns.clone()));
+
+    let mut bits: Vec<Vec<bool>> = paths.iter().map(|(_, b)| b.clone()).collect();
+    bits.extend(comp_paths.iter().map(|(_, pb, _, _)| pb.clone()));
+    bits.extend(comp_paths.iter().map(|(_, _, _, nb)| nb.clone()));
 
     let rv_cols = rv::build_trace_multi_raw(queries, log_size);
     let (merkle_cols, _roots) = merkle::build_trace_multi_raw(&leaves, &sibs, &bits, log_size);
@@ -733,16 +832,46 @@ mod tests {
             })
             .collect();
 
-        let r = prove_queries_membership_t8(&queries, &paths).unwrap();
+        // Composition paths are DEEPER than the fold paths — the real shape:
+        // compRoot spans the whole trace domain, the last FRI layer does not.
+        let comp_depth = depth + 2;
+        let comp_paths: Vec<CompMembership> = (0..n)
+            .map(|_| {
+                (
+                    (0..comp_depth).map(|_| rand_node(&mut s)).collect(),
+                    (0..comp_depth).map(|_| rand_m31(&mut s) & 1 == 1).collect(),
+                    (0..comp_depth).map(|_| rand_node(&mut s)).collect(),
+                    (0..comp_depth).map(|_| rand_m31(&mut s) & 1 == 1).collect(),
+                )
+            })
+            .collect();
+
+        let r = prove_queries_membership_t8(&queries, &paths, &comp_paths).unwrap();
+        assert_eq!(r.comp_depth, comp_depth);
+        assert_eq!(r.leaves.len(), 3 * n, "3 paths per query");
         let pxs: Vec<u32> = queries.iter().map(|(st, _)| st.2).collect();
         // finals + roots match each query's/path's reference.
         for (i, (st, rd)) in queries.iter().enumerate() {
             assert_eq!(r.finals[i], rv::recursive_query_final(st, rd));
             assert_eq!(r.leaves[i], qm31_leaf_hash_t8(r.finals[i]));
             assert_eq!(r.roots[i], merkle::merkle_path_root_t8(r.leaves[i], &paths[i].0, &paths[i].1));
+
+            // The compValues PINNED in recursive_verifier are the comp leaves —
+            // this is what attaches the pinned input to compRoot.
+            let ch = rv::query_challenges(st, rd);
+            assert_eq!(r.leaves[n + i], qm31_leaf_hash_t8(ch.comp_pos));
+            assert_eq!(r.leaves[2 * n + i], qm31_leaf_hash_t8(ch.comp_neg));
+            assert_eq!(
+                r.roots[n + i],
+                merkle::merkle_path_root_t8(r.leaves[n + i], &comp_paths[i].0, &comp_paths[i].1)
+            );
+            assert_eq!(
+                r.roots[2 * n + i],
+                merkle::merkle_path_root_t8(r.leaves[2 * n + i], &comp_paths[i].2, &comp_paths[i].3)
+            );
         }
         assert!(
-            verify_queries_membership_t8(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, &pxs, &r.finals, &r.indices, &r.roots)
+            verify_queries_membership_t8(&r.proof, r.log_size, r.num_folds, r.depth, r.comp_depth, &r.challenges, &pxs, &r.finals, &r.indices, &r.roots)
                 .unwrap(),
             "an honest N-query t=8 composition must verify",
         );
@@ -750,7 +879,7 @@ mod tests {
         let mut bad = r.finals.clone();
         bad[1] ^= 1;
         assert!(
-            !verify_queries_membership_t8(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, &pxs, &bad, &r.indices, &r.roots)
+            !verify_queries_membership_t8(&r.proof, r.log_size, r.num_folds, r.depth, r.comp_depth, &r.challenges, &pxs, &bad, &r.indices, &r.roots)
                 .unwrap_or(false),
             "a wrong final fold must not verify",
         );
@@ -758,7 +887,7 @@ mod tests {
         let mut bad_roots = r.roots.clone();
         bad_roots[2][0] ^= 1;
         assert!(
-            !verify_queries_membership_t8(&r.proof, r.log_size, r.num_folds, r.depth, &r.challenges, &pxs, &r.finals, &r.indices, &bad_roots)
+            !verify_queries_membership_t8(&r.proof, r.log_size, r.num_folds, r.depth, r.comp_depth, &r.challenges, &pxs, &r.finals, &r.indices, &bad_roots)
                 .unwrap_or(false),
             "a wrong path root must not verify",
         );
@@ -771,15 +900,28 @@ mod tests {
         let step = sample_step(&mut s);
         let rounds = sample_rounds(&mut s, 2);
         // depth = 0 path
+        let cp1: Vec<CompMembership> =
+            vec![(vec![rand_node(&mut s)], vec![true], vec![rand_node(&mut s)], vec![false])];
         let bad_paths: Vec<(Vec<[u64; 4]>, Vec<bool>)> = vec![(vec![], vec![])];
-        assert!(prove_queries_membership_t8(&[(step, rounds.clone())], &bad_paths).is_err());
+        assert!(prove_queries_membership_t8(&[(step, rounds.clone())], &bad_paths, &cp1).is_err());
         // queries/paths length mismatch
         let ok_path: Vec<(Vec<[u64; 4]>, Vec<bool>)> =
             vec![(vec![rand_node(&mut s)], vec![true]), (vec![rand_node(&mut s)], vec![false])];
-        assert!(prove_queries_membership_t8(&[(step, rounds)], &ok_path).is_err());
+        assert!(prove_queries_membership_t8(&[(step, rounds.clone())], &ok_path, &cp1).is_err());
+        // comp_paths length mismatch
+        let one_path: Vec<(Vec<[u64; 4]>, Vec<bool>)> = vec![(vec![rand_node(&mut s)], vec![true])];
+        assert!(prove_queries_membership_t8(&[(step, rounds.clone())], &one_path, &[]).is_err());
+        // comp paths of differing depths among themselves
+        let ragged: Vec<CompMembership> = vec![(
+            vec![rand_node(&mut s), rand_node(&mut s)],
+            vec![true],
+            vec![rand_node(&mut s)],
+            vec![false],
+        )];
+        assert!(prove_queries_membership_t8(&[(step, rounds)], &one_path, &ragged).is_err());
         // verify: log_size out of range
         assert!(
-            verify_queries_membership_t8(&[], 40, 2, 1, &[], &[], &[1u128], &[0], &[[0u64; 4]]).is_err()
+            verify_queries_membership_t8(&[], 40, 2, 1, 1, &[], &[], &[1u128], &[0], &[[0u64; 4]]).is_err()
         );
     }
 
