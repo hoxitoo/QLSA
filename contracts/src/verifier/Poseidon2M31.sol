@@ -59,14 +59,20 @@ library Poseidon2M31 {
     uint256 private constant RC7_1 =   723_279_574;   // 0xab1c5ed5 mod P
 
     // ── M31 field helpers (inlined for gas efficiency) ─────────────────────────
+    //
+    // Lazy reduction (same scheme as Poseidon2M31T4 / Poseidon2M31T8 — keep all
+    // three consistent).  AddRC and the MDS layer add WITHOUT reducing mod P.
+    // This is exact, not an approximation: addition and multiplication mod P are
+    // ring homomorphisms, and the S-box goes through `mulmod(…, P)`, which reduces
+    // its output whatever the input size.  Reduction is therefore only owed where
+    // a value LEAVES the permutation (the `% P` on permute's return).
+    //
+    // Magnitude bound (why uint256 never overflows): every round S-boxes before
+    // its MDS layer, so MDS only ever sees inputs < P and — with the 3·s terms
+    // taken through mulmod — emits < 2P < 2^32.  The next round's AddRC lifts that
+    // to < 2^33 before the S-box collapses it back under P.  Peak ≈ 2^33 ≪ 2^256.
 
-    /// @dev a + b mod P.  Requires a, b < P.
-    function _add(uint256 a, uint256 b) private pure returns (uint256 r) {
-        unchecked { r = a + b; }
-        if (r >= P) r -= P;
-    }
-
-    /// @dev x^5 mod P — the Poseidon2 S-box.  3 mulmod operations.
+    /// @dev x^5 mod P — the Poseidon2 S-box.  3 mulmods; accepts unreduced x.
     function _sbox(uint256 x) private pure returns (uint256) {
         uint256 x2 = mulmod(x, x, P);
         uint256 x4 = mulmod(x2, x2, P);
@@ -75,33 +81,27 @@ library Poseidon2M31 {
 
     // ── One full Poseidon2 round ───────────────────────────────────────────────
 
-    /// @dev AddRC → SBox (both elements) → MDS [[3,1],[1,3]].
+    /// @dev AddRC → SBox (both elements) → MDS [[3,1],[1,3]], unreduced.
     function _round(
         uint256 s0, uint256 s1,
         uint256 rc0, uint256 rc1
     ) private pure returns (uint256, uint256) {
-        // 1. Add round constants
-        s0 = _add(s0, rc0);
-        s1 = _add(s1, rc1);
+        unchecked {
+            // 1. Add round constants, 2. S-box (full round: both elements).
+            s0 = _sbox(s0 + rc0);
+            s1 = _sbox(s1 + rc1);
 
-        // 2. S-box (full round: applied to both elements)
-        s0 = _sbox(s0);
-        s1 = _sbox(s1);
-
-        // 3. MDS [[3,1],[1,3]]:  s0' = 3·s0 + s1,  s1' = s0 + 3·s1
-        uint256 n0 = _add(mulmod(3, s0, P), s1);
-        uint256 n1 = _add(s0, mulmod(3, s1, P));
-        return (n0, n1);
+            // 3. MDS [[3,1],[1,3]]:  s0' = 3·s0 + s1,  s1' = s0 + 3·s1
+            return (mulmod(3, s0, P) + s1, s0 + mulmod(3, s1, P));
+        }
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// @notice Apply the Poseidon2 permutation (8 full rounds) to state (s0, s1).
     ///
-    /// Gas: ~1000 gas (8 rounds × ~125 gas/round: 6 mulmod + 4 add + 2 cond-sub).
-    ///
-    /// @param s0 First state element (must be < P).
-    /// @param s1 Second state element (must be < P).
+    /// @param s0 First state element (may exceed P; reduced through the S-box).
+    /// @param s1 Second state element (may exceed P).
     /// @return out0 First output (< P).
     /// @return out1 Second output (< P).
     function permute(uint256 s0, uint256 s1)
@@ -116,7 +116,8 @@ library Poseidon2M31 {
         (s0, s1) = _round(s0, s1, RC5_0, RC5_1);
         (s0, s1) = _round(s0, s1, RC6_0, RC6_1);
         (s0, s1) = _round(s0, s1, RC7_0, RC7_1);
-        return (s0, s1);
+        // The only place reduction is owed: on the way out.
+        return (s0 % P, s1 % P);
     }
 
     /// @notice Poseidon2 Merkle compression: hash of a pair.
@@ -139,18 +140,24 @@ library Poseidon2M31 {
     ///     s0 ← (s0 + v) mod P
     ///     (s0, s1) ← permute(s0, s1)
     ///
-    /// @param values  Array of M31 field elements (each < P).
+    /// @param values  Array of M31 field elements. Inputs are reduced mod P on
+    ///        absorption so the on-chain hash matches the Rust `poseidon2_chain`
+    ///        reference (which reduces every word) bit-for-bit even for
+    ///        non-canonical words ≥ P.
     /// @return s0 First output state element (< P).
     /// @return s1 Second output state element (< P).
     function sponge(uint256[] memory values)
         internal pure
         returns (uint256 s0, uint256 s1)
     {
-        s0 = 0;
-        s1 = 0;
-        for (uint256 i = 0; i < values.length; i++) {
-            s0 = _add(s0, values[i]);
-            (s0, s1) = permute(s0, s1);
+        unchecked {
+            s0 = 0;
+            s1 = 0;
+            for (uint256 i = 0; i < values.length; i++) {
+                // Absorbed sums stay < 2^32; permute tolerates unreduced inputs.
+                s0 += values[i] % P;
+                (s0, s1) = permute(s0, s1);
+            }
         }
     }
 }

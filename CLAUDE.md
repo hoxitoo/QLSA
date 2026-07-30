@@ -601,7 +601,7 @@ Per-group (split) V23 registry — verifies each trace group in its OWN transact
 ### `testnet/` — deployment & E2E tooling
 
 Three contract stacks, selected by the `--stack` flag / deploy script:
-- **MVP-7: `QLSAVerifierVFRI11` + `BatchRegistryV5`** — Poseidon2 **t=8**, ONE atomic transaction
+- **MVP-7 (default): `QLSAVerifierVFRI11` + `BatchRegistryV5`** — Poseidon2 **t=8**, ONE atomic transaction
   - Strongest on-chain soundness available: 4-word (124-bit) Merkle nodes → node collision ~2^62,
     versus t=4's 2-word nodes at ~2^31. Enabled by the R4.8 Poseidon2 rewrite (2026-07-30) — before
     it, a dual t=8 verify needed >18M gas; measured after: **6.06M in one tx**
@@ -609,9 +609,15 @@ Three contract stacks, selected by the `--stack` flag / deploy script:
   - `testnet/deploy_v7.sh [--network sepolia]` — builds STARK binary, deploys, writes `.env.deployed`
   - `testnet.submit.OnchainSubmitterV5` — subclass of `OnchainSubmitterV4` (BatchRegistryV4 and V5
     have byte-identical ABIs; only the wired verifier differs); single `submit_batch_with_nonces()`
-  - `python -m testnet.e2e --stack v7 [--txs N] [--dry-run]` — uses `prove_mldsa_sig_vfri11_stark`
-    with `num_folds=6`; submits via a single atomic `submitBatchWithNonces`
-- **MVP-6 (default): `QLSAVerifierVFRI10` + `BatchRegistryV6`** — Poseidon2 t=4, per-group split
+  - `python -m testnet.e2e [--stack v7] [--txs N] [--dry-run]` — the DEFAULT stack; uses
+    `prove_mldsa_sig_vfri11_stark` with `num_folds=6`; submits via a single atomic
+    `submitBatchWithNonces`
+  - Registry-shape guard: `testnet.submit.detect_registry_kind` / `require_registry_kind` probe
+    `pendingGroups(bytes32)` (present ONLY on V6) before submitting, so a `REGISTRY_ADDRESS`
+    pointing at the wrong registry shape fails immediately with a clear message instead of an
+    opaque in-transaction error. V4 vs V5 are indistinguishable on-chain (identical ABIs) but
+    surface legibly as `Log10ProofInvalid`
+- **MVP-6: `QLSAVerifierVFRI10` + `BatchRegistryV6`** — Poseidon2 t=4, per-group split
   - `contracts/scripts/deploy_v6.js` — deploys VFRI10 + BatchRegistryV6 (prints both addresses)
   - `testnet/deploy_v6.sh [--network sepolia]` — builds STARK binary, deploys, writes `.env.deployed`
   - `testnet.submit.OnchainSubmitterV6` — per-group split flow: `submit_group10()` then

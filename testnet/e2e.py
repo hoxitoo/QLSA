@@ -12,14 +12,19 @@ Flow:
   6. Verify on-chain finalization
 
 Three contract stacks are supported via --stack:
-  v7:           QLSAVerifierVFRI11 + BatchRegistryV5 — Poseidon2 t=8 backend
+  v7 (default): QLSAVerifierVFRI11 + BatchRegistryV5 — Poseidon2 t=8 backend
                 (4-word/124-bit Merkle nodes → node collision ~2^62 vs t=4's
                 ~2^31), BOTH V23 groups verified in ONE atomic transaction
-                (~6.06M gas measured).  Strongest available on-chain soundness.
-  v6 (default): QLSAVerifierVFRI10 + BatchRegistryV6 — Poseidon2 t=4 backend,
-                per-group split (submitGroup10 then submitGroup8WithNonces, now
-                ~2.15M + ~1.70M gas).  Lower peak gas per tx, weaker node bound.
+                (~6.06M gas measured).  Strongest available on-chain soundness,
+                which is why it is the default.
+  v6:           QLSAVerifierVFRI10 + BatchRegistryV6 — Poseidon2 t=4 backend,
+                per-group split (submitGroup10 then submitGroup8WithNonces,
+                ~2.15M + ~1.70M gas).  Choose it when a lower peak gas per
+                transaction matters more than the stronger node bound.
   v4:           QLSAVerifierVFRI7 + BatchRegistryV4 — single submitBatch (MVP-5).
+
+REGISTRY_ADDRESS must match the chosen stack's registry shape (v4/v7 -> V4/V5,
+v6 -> V6).  A mismatch is detected and reported before anything is submitted.
 
 Prerequisites:
   pip install -r requirements.txt -r requirements-api.txt -r requirements-testnet.txt
@@ -28,11 +33,12 @@ Prerequisites:
 Environment (.env):
   RPC_URL              — L2 RPC endpoint (e.g. Polygon zkEVM Cardona)
   DEPLOYER_PRIVATE_KEY — 0x-prefixed deployer private key
-  REGISTRY_ADDRESS     — deployed registry address (V5 for --stack v7, V6 for v6,
-                         V4 for v4)
+  REGISTRY_ADDRESS     — deployed registry address (V5 for --stack v7 (default),
+                         V6 for v6, V4 for v4)
 
 Usage:
   python -m testnet.e2e [--stack v7|v6|v4] [--txs N] [--dry-run]
+  bash testnet/deploy_v7.sh --network sepolia   # deploy the default stack
 """
 
 from __future__ import annotations
@@ -123,7 +129,7 @@ def build_sender_nonces(txs: list[Transaction]) -> dict[bytes, int]:
     return sender_nonces
 
 
-def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = "v6") -> int:
+def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = "v7") -> int:
     """Run the full E2E flow. Returns exit code (0 = success)."""
     if stack not in ("v4", "v6", "v7"):
         logger.error("unknown --stack %r (expected 'v7', 'v6' or 'v4')", stack)
@@ -371,13 +377,13 @@ def _submit_v4(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="QLSA E2E testnet demo")
     p.add_argument(
-        "--stack", choices=["v7", "v6", "v4"], default="v6",
+        "--stack", choices=["v7", "v6", "v4"], default="v7",
         help=(
-            "Contract stack: v7 = QLSAVerifierVFRI11 + BatchRegistryV5 (Poseidon2 "
-            "t=8, atomic dual verify in one tx, node collision ~2^62 — strongest "
-            "on-chain soundness); v6 = QLSAVerifierVFRI10 + BatchRegistryV6 "
-            "(default, Poseidon2 t=4, per-group split, node ~2^31); v4 = "
-            "QLSAVerifierVFRI7 + BatchRegistryV4 (MVP-5, single submitBatch)."
+            "Contract stack: v7 = QLSAVerifierVFRI11 + BatchRegistryV5 (default; "
+            "Poseidon2 t=8, atomic dual verify in one tx, node collision ~2^62 — "
+            "strongest on-chain soundness); v6 = QLSAVerifierVFRI10 + "
+            "BatchRegistryV6 (Poseidon2 t=4, per-group split, node ~2^31, lower "
+            "peak gas per tx); v4 = QLSAVerifierVFRI7 + BatchRegistryV4 (MVP-5)."
         ),
     )
     p.add_argument("--txs", type=int, default=8, help="Number of transactions (default: 8)")
