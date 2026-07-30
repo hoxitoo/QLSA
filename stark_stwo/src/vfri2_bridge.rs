@@ -6111,16 +6111,19 @@ pub fn gen_mldsa_v23_vfri10_cross_bound_hints(
 // Identical trace construction to the VFRI10 V23 wrappers; only the generic
 // generator differs (gen_vfri11_hints_from_cols_nfolds → t=8 backend).
 
-/// VFRI11 wrapper for V23 LOG=10 group (NttBatch + InttBatch, 1298 cols, depth=10).
-pub fn gen_mldsa_v23_vfri11_hints(
+/// The V23 LOG=10 group's trace columns (NttBatch + InttBatch, 1298 cols, depth=10).
+///
+/// Factored out of `gen_mldsa_v23_vfri11_hints` so the ABI hint generator and the
+/// recursion-input extractor consume ONE implementation and cannot drift — the
+/// same reasoning as the `vfri11_fri_chain` split in R4.1.
+fn v23_vfri11_cols_log10(
     z:                 &[[i64; 256]; 5],
     c:                 &[i64; 256],
     t1:                &[[i64; 256]; 6],
     a_hat:             &[[i64; 256]],
     batch_merkle_root: &[u8],
     n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+) -> Result<(Vec<Vec<u32>>, u32), String> {
     use crate::mldsa_ntt_batch_air;
     use crate::mldsa_intt_batch_air;
     use crate::mldsa_az_full_air;
@@ -6172,7 +6175,36 @@ pub fn gen_mldsa_v23_vfri11_hints(
         debug_assert_eq!(cols.last().unwrap().len(), n_rows);
     }
 
+    Ok((cols, tree_depth))
+}
+
+/// VFRI11 wrapper for V23 LOG=10 group (NttBatch + InttBatch, 1298 cols, depth=10).
+pub fn gen_mldsa_v23_vfri11_hints(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    let (cols, tree_depth) = v23_vfri11_cols_log10(z, c, t1, a_hat, batch_merkle_root, n_queries)?;
     gen_vfri11_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// Recursion inputs for the V23 LOG=10 group, built from the SAME columns the ABI
+/// hint generator uses, so the two cannot drift (the R4.1 pattern).
+pub fn gen_mldsa_v23_recursion_inputs_log10(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<Vfri11RecursionInputs, String> {
+    let (cols, tree_depth) = v23_vfri11_cols_log10(z, c, t1, a_hat, batch_merkle_root, n_queries)?;
+    gen_vfri11_recursion_inputs(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
 }
 
 /// VFRI11 wrapper for V23 LOG=8 group (2206 cols).
@@ -8256,6 +8288,83 @@ mod tests_vfri8 {
         for root in &r.roots[n..] {
             assert_eq!(*root, inputs.comp_root);
         }
+    }
+
+    /// The recursion over REAL V23 data at PRODUCTION security (n_queries = 20).
+    ///
+    /// Everything measured so far used synthetic inner statements. Those give the
+    /// right OUTER cost — the outer trace depends only on
+    /// (n_queries, num_folds, tree_depth) — but they do not prove the extraction
+    /// works on the actual 1298-column V23 LOG=10 group. This does.
+    ///
+    /// Slow (a 20-query V23 chain), hence #[ignore]:
+    ///   cargo test test_v23_recursion_inputs_production -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn test_v23_recursion_inputs_production() {
+        use crate::recursive::composition_t8::{
+            outer_trace_columns_t8, prove_queries_membership_t8, verify_queries_membership_t8,
+        };
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(4242);
+        let batch_root = [0x31u8; 32];
+        let n_queries = 20usize;
+        let num_folds = 6usize;
+
+        // Same columns the ABI hint generator uses (shared builder, so no drift).
+        let rec = gen_mldsa_v23_recursion_inputs_log10(
+            &z, &c, &t1, &a_hat, &batch_root, n_queries, Some(num_folds),
+        )
+        .unwrap();
+        assert_eq!(rec.queries.len(), n_queries);
+        assert_eq!(rec.paths.len(), n_queries);
+        assert_eq!(rec.comp_paths.len(), n_queries);
+
+        // The bridge and the ABI generator must share the chain: same trace root.
+        let (proof_bytes, _, _) = gen_mldsa_v23_vfri11_hints(
+            &z, &c, &t1, &a_hat, &batch_root, n_queries, Some(num_folds),
+        )
+        .unwrap();
+        assert_eq!(
+            &proof_bytes[8..40],
+            &rec.trace_root,
+            "recursion bridge and ABI generator must share the V23 chain",
+        );
+
+        // Comp paths span the whole trace domain; fold paths are shallower.
+        assert!(
+            rec.comp_paths[0].0.len() > rec.paths[0].0.len(),
+            "real V23 data must exercise MIXED path depths (comp {} vs fold {})",
+            rec.comp_paths[0].0.len(),
+            rec.paths[0].0.len(),
+        );
+
+        let (outer_cols, outer_log) =
+            outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths).unwrap();
+        println!(
+            "V23 LOG=10 @ q={n_queries}: outer_log={outer_log} outer_cols={}",
+            outer_cols.len()
+        );
+
+        // Prove + verify the recursion over the REAL V23 decommitments.
+        let r =
+            prove_queries_membership_t8(&rec.queries, &rec.paths, &rec.comp_paths).unwrap();
+        assert_eq!(r.finals, rec.finals, "finals must equal the real fold-chain outputs");
+        for root in &r.roots[..n_queries] {
+            assert_eq!(*root, rec.last_layer_root, "fold path must land on friLayerRoots[K]");
+        }
+        for root in &r.roots[n_queries..] {
+            assert_eq!(*root, rec.comp_root, "comp path must land on the committed compRoot");
+        }
+        let pxs: Vec<u32> = rec.queries.iter().map(|(s, _)| s.2).collect();
+        assert!(
+            verify_queries_membership_t8(
+                &r.proof, r.log_size, r.num_folds, r.depth, r.comp_depth, &r.challenges,
+                &pxs, &r.finals, &r.indices, &r.roots,
+            )
+            .unwrap(),
+            "the recursion over REAL V23 data at production security must verify",
+        );
     }
 
     /// Scaling study: DIRECT VFRI11 verification vs the RECURSION, as a function of
