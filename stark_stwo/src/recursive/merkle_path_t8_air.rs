@@ -503,9 +503,36 @@ pub fn build_trace(
 // leaf pinning, `is_root` gates each path's root pinning, so N paths of uniform
 // `depth` lay out in consecutive blocks of `depth` compressions (22 rows each).
 
+/// Compression-slot layout for paths of possibly DIFFERENT depths.
+///
+/// Returns `layout[comp] = (path, j)` — which path a compression slot belongs to
+/// and its position within that path.  With uniform depth this is just
+/// `(comp / depth, comp % depth)`; the explicit walk is what allows paths of
+/// different depths to share one component, which real VFRI11 data requires:
+/// `compRoot` commits over the WHOLE trace domain (depth = tree_depth) while the
+/// last FRI layer has `2^(tree_depth − num_folds)` leaves (a shallower path).
+///
+/// The AIR is unaffected — it reads only preprocessed selectors, never `depth` —
+/// so variable depth is purely a matter of how the builders lay slots out.
+fn comp_layout(depths: &[usize]) -> Vec<(usize, usize)> {
+    let total: usize = depths.iter().sum();
+    let mut layout = Vec::with_capacity(total);
+    for (path, &d) in depths.iter().enumerate() {
+        for j in 0..d {
+            layout.push((path, j));
+        }
+    }
+    layout
+}
+
 /// Smallest `log_size` fitting `num_paths` paths of `depth` compressions.
 pub fn compute_log_size_multi(num_paths: usize, depth: usize) -> u32 {
-    let comps = num_paths.max(1) * depth.max(1);
+    compute_log_size_multi_var(&vec![depth.max(1); num_paths.max(1)])
+}
+
+/// Smallest `log_size` fitting paths of the given (possibly differing) depths.
+pub fn compute_log_size_multi_var(depths: &[usize]) -> u32 {
+    let comps: usize = depths.iter().map(|d| (*d).max(1)).sum::<usize>().max(1);
     let n_real = comps * N_ROUNDS;
     let mut log = MIN_LOG_SIZE;
     while (1usize << log) < n_real {
@@ -525,9 +552,22 @@ pub fn build_preproc_multi(
     depth: usize,
     log_size: u32,
 ) -> TraceColumns {
+    build_preproc_multi_var(leaves, indices, roots, &vec![depth; leaves.len()], log_size)
+}
+
+/// As [`build_preproc_multi`], but each path carries its OWN depth.
+pub fn build_preproc_multi_var(
+    leaves: &[[u64; 4]],
+    indices: &[u32],
+    roots: &[[u64; 4]],
+    depths: &[usize],
+    log_size: u32,
+) -> TraceColumns {
     assert_eq!(leaves.len(), indices.len(), "leaves/indices length mismatch");
     assert_eq!(leaves.len(), roots.len(), "leaves/roots length mismatch");
-    assert!(depth >= 1, "depth must be ≥ 1");
+    assert_eq!(leaves.len(), depths.len(), "leaves/depths length mismatch");
+    assert!(depths.iter().all(|&d| d >= 1), "every depth must be ≥ 1");
+    let layout = comp_layout(depths);
     let n = 1usize << log_size;
     let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
@@ -546,11 +586,10 @@ pub fn build_preproc_multi(
 
     let n_comp = n / N_ROUNDS;
     for comp in 0..n_comp {
-        let path = comp / depth;
-        let j = comp % depth; // compression within the path
-        if path >= leaves.len() {
+        if comp >= layout.len() {
             break; // padding rows: all selectors stay zero
         }
+        let (path, j) = layout[comp];
         for r in 0..N_ROUNDS {
             let row = comp * N_ROUNDS + r;
             let (is_ext, rc) = round_schedule(r);
@@ -573,7 +612,7 @@ pub fn build_preproc_multi(
                 leaf_cols[k][first] = m31(leaves[path][k]);
             }
         }
-        if j == depth - 1 {
+        if j == depths[path] - 1 {
             // Path root pinned on its last compression's last round row (C1).
             let root_row = comp * N_ROUNDS + (N_ROUNDS - 1);
             is_root_c[root_row] = one;
@@ -628,13 +667,19 @@ pub(crate) fn build_trace_multi_raw(
     assert!(num_paths >= 1, "need ≥ 1 path");
     assert_eq!(sibs.len(), num_paths);
     assert_eq!(bits.len(), num_paths);
-    let depth = sibs[0].len();
-    assert!(depth >= 1, "depth must be ≥ 1");
-    assert!(sibs.iter().all(|s| s.len() == depth), "paths must share depth");
-    assert!(bits.iter().all(|b| b.len() == depth), "paths must share depth");
+    // Paths may have DIFFERENT depths (real VFRI11 data needs this: compRoot spans
+    // the whole trace domain while the last FRI layer is shallower).  Each path's
+    // depth is simply its own sibling count.
+    let depths: Vec<usize> = sibs.iter().map(|s| s.len()).collect();
+    assert!(depths.iter().all(|&d| d >= 1), "every depth must be ≥ 1");
+    assert!(
+        bits.iter().zip(&depths).all(|(b, &d)| b.len() == d),
+        "each path's bits must match its sibling count",
+    );
+    let layout = comp_layout(&depths);
 
     let n = 1usize << log_size;
-    debug_assert!(num_paths * depth * N_ROUNDS <= n, "paths exceed trace capacity");
+    debug_assert!(layout.len() * N_ROUNDS <= n, "paths exceed trace capacity");
     let bf0 = BaseField::from_u32_unchecked(0);
     let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
 
@@ -642,11 +687,10 @@ pub(crate) fn build_trace_multi_raw(
     let mut roots = Vec::with_capacity(num_paths);
     let mut carry_state = [0u64; T]; // previous row's out (for chains)
 
-    let n_comp_real = num_paths * depth;
+    let n_comp_real = layout.len();
     let mut cur = [0u64; 4];
     for comp in 0..n_comp_real {
-        let path = comp / depth;
-        let j = comp % depth;
+        let (path, j) = layout[comp];
         if j == 0 {
             cur = norm4(leaves[path]); // path start: cur = its leaf
         }
@@ -703,7 +747,7 @@ pub(crate) fn build_trace_multi_raw(
             carry_state = out;
         }
         cur = [state[0], state[1], state[2], state[3]];
-        if j == depth - 1 {
+        if j == depths[path] - 1 {
             roots.push(cur); // path `path`'s root
         }
     }
@@ -981,6 +1025,73 @@ mod tests {
         let component = new_component(log);
         let res = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, scheme);
         assert!(res.is_err(), "trace root ≠ pinned root must violate the root-binding constraint (C1)");
+    }
+
+    // Variable-depth multi-path support (R4.11).
+    //
+    // Real VFRI11 data needs it: compRoot commits the composition values over the
+    // WHOLE trace domain (depth = tree_depth) while the last FRI layer has
+    // 2^(tree_depth − num_folds) leaves, so its paths are shallower. Folding both
+    // families into one component previously failed on "paths must share depth".
+    //
+    // The AIR is untouched — it reads only preprocessed selectors — so this is
+    // purely a question of how the builders lay compression slots out.
+    #[test]
+    fn test_multi_paths_of_differing_depths() {
+        let mut s = 0xd3_47_u64;
+        // Three paths with depths 4, 2 and 3 — the shape real data produces.
+        let depths = [4usize, 2, 3];
+        let leaves: Vec<[u64; 4]> = (0..3).map(|_| rand_node(&mut s)).collect();
+        let sibs: Vec<Vec<[u64; 4]>> =
+            depths.iter().map(|&d| (0..d).map(|_| rand_node(&mut s)).collect()).collect();
+        let bits: Vec<Vec<bool>> =
+            depths.iter().map(|&d| (0..d).map(|_| rand_m31(&mut s) & 1 == 1).collect()).collect();
+
+        let log_size = compute_log_size_multi_var(&depths);
+        let (_cols, roots) = build_trace_multi_raw(&leaves, &sibs, &bits, log_size);
+
+        // Every path's computed root must equal its own independent reference —
+        // i.e. the slots really are attributed to the right path despite the
+        // differing depths.
+        assert_eq!(roots.len(), 3);
+        for i in 0..3 {
+            assert_eq!(
+                roots[i],
+                merkle_path_root_t8(leaves[i], &sibs[i], &bits[i]),
+                "path {i} (depth {}) must authenticate independently",
+                depths[i],
+            );
+        }
+
+        // The preprocessed builder must agree on the same layout: it is built from
+        // PUBLIC data only, so a layout disagreement would desynchronise the pins.
+        let indices: Vec<u32> = bits.iter().map(|b| bits_to_index(b)).collect();
+        let preproc = build_preproc_multi_var(&leaves, &indices, &roots, &depths, log_size);
+        assert_eq!(preproc.len(), preprocessed_column_ids().len());
+    }
+
+    // The uniform-depth entry point must stay a special case of the general one,
+    // so the pre-existing callers keep their exact behaviour.
+    #[test]
+    fn test_uniform_depth_matches_the_variable_path() {
+        let mut s = 0x5a_5a_u64;
+        let depth = 3usize;
+        let leaves: Vec<[u64; 4]> = (0..2).map(|_| rand_node(&mut s)).collect();
+        let sibs: Vec<Vec<[u64; 4]>> =
+            (0..2).map(|_| (0..depth).map(|_| rand_node(&mut s)).collect()).collect();
+        let bits: Vec<Vec<bool>> =
+            (0..2).map(|_| (0..depth).map(|_| rand_m31(&mut s) & 1 == 1).collect()).collect();
+        assert_eq!(compute_log_size_multi(2, depth), compute_log_size_multi_var(&[depth; 2]));
+
+        let log_size = compute_log_size_multi(2, depth);
+        let (_c, roots) = build_trace_multi_raw(&leaves, &sibs, &bits, log_size);
+        let indices: Vec<u32> = bits.iter().map(|b| bits_to_index(b)).collect();
+        let uniform = build_preproc_multi(&leaves, &indices, &roots, depth, log_size);
+        let variable = build_preproc_multi_var(&leaves, &indices, &roots, &[depth; 2], log_size);
+        assert_eq!(uniform.len(), variable.len());
+        for (a, b) in uniform.iter().zip(variable.iter()) {
+            assert_eq!(a.values, b.values, "uniform must equal variable-depth");
+        }
     }
 
     // C2 regression: a forged preprocessed selector (is_first_comp → 0) must not
