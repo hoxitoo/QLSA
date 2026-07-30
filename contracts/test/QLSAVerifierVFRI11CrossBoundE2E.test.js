@@ -10,15 +10,21 @@
  *   (V23 inputs seed=16600, n_queries=1, num_folds=6).  Both LOG groups carry
  *   version marker 5.
  *
- * GAS FINDING (2026-06-16): on-chain verify() of a FULL V23 t=8 group exceeds
- * 100M gas at depth-10 (estimateGas runs out at the 100M block limit) — the t=8
- * permutation is ~3–4× t=4 per call, and the depth-10 Merkle paths + 6 fold
- * rounds compound it.  The t=8 backend's on-chain *correctness* is proven at
- * small scale by QLSAVerifierVFRI11E2E (generic depth-4 fixture, ~13.1M gas,
- * verify()==true).  Production full-V23 t=8 verification needs proof recursion
- * (constant on-chain cost) — wider permutations raise security but not the gas
- * budget.  This suite therefore asserts the structural + cross-binding
- * invariants (which are gas-cheap) and documents the wall.
+ * GAS (2026-07-30, R4.8): both full-V23 t=8 groups verify ON-CHAIN inside the
+ * 16,777,216 (2^24, EIP-7825) per-tx cap — LOG=10 ~3.34M, LOG=8 ~2.63M — and
+ * BatchRegistryV5 finalizes BOTH in ONE transaction at ~6.06M gas.
+ *
+ * The earlier "exceeds 100M gas" finding (2026-06-16) was Poseidon2 IMPLEMENTATION
+ * overhead, not the permutation width: ~106k gas per t=8 permute of which the field
+ * arithmetic was ~3k, the rest being uint256[8] memory plumbing and a branchy
+ * conditional subtract on every linear-layer addition.  The stack-state + lazy-
+ * reduction rewrite cut it ~7x (127k -> 36k gross per permute).  Two measurement
+ * errors had also inflated the picture: a gasLimit above 2^24 is rejected BEFORE
+ * execution, and estimateGas over-provisions nested calls by ~3x — always measure
+ * gasUsed of a sent transaction.
+ *
+ * t=8 is therefore a deployable SECURITY upgrade over the t=4 stack (Merkle node
+ * collision ~2^62 vs ~2^31), not merely a faster path.
  * If the fixture is absent, fixture-dependent tests skip.
  */
 "use strict";
@@ -165,6 +171,40 @@ describe("QLSAVerifierVFRI11 — full V23 cross-bound structural E2E", function 
       { gasLimit: 16_777_215n }
     );
     expect(ok, "full-V23 t=8 LOG=8 group must verify on-chain").to.equal(true);
+  });
+
+  // AUDIT (2026-07-30): MAX_SENDERS = 3000 is a backstop, not a reachable
+  // capability — the O(n²) duplicate-sender scan in submitBatchWithNonces is what
+  // actually bounds a call. Measured on this fixture: n=1 -> 6.08M, n=100 -> 9.73M,
+  // n=200 -> 15.77M, n=400 -> out of gas (~201 gas/n²; n=3000 would need ~1821M).
+  // This pins a comfortably-reachable count so a regression in the loop's cost, or
+  // an accidental extra per-sender SLOAD/SSTORE, shows up here.
+  it("submitBatchWithNonces stays well inside the cap at 100 senders", async function () {
+    if (!FIXTURE_EXISTS) { this.skip(); return; }
+    this.timeout(600_000);
+    const [owner] = await ethers.getSigners();
+    const reg = await (await ethers.getContractFactory("BatchRegistryV5"))
+      .deploy(owner.address, await verifier.getAddress());
+    await reg.waitForDeployment();
+
+    const senders = [];
+    const nonces = [];
+    for (let i = 0; i < 100; i++) {
+      senders.push("0x" + (BigInt(i) + 1n).toString(16).padStart(64, "0"));
+      nonces.push(i + 1);
+    }
+    const tx = await reg.submitBatchWithNonces(
+      fixture.merkleRoot,
+      fixture.log10_commitment, fixture.log10_proof, fixture.log10_queryHints,
+      fixture.log8_commitment, fixture.log8_proof, fixture.log8_queryHints,
+      senders, nonces,
+      { gasLimit: 16_777_215n }
+    );
+    const rc = await tx.wait();
+    console.log(`        [gas] submitBatchWithNonces(100 senders) = ${rc.gasUsed}`);
+    expect(rc.gasUsed).to.be.lessThan(12_000_000n, "100 senders must stay well under the cap");
+    expect(await reg.isBatchFinalized(fixture.merkleRoot)).to.equal(true);
+    expect(await reg.senderNonces(senders[99])).to.equal(100n);
   });
 
   // Both t=8 groups in ONE transaction — the single-pass 2^62 production path.

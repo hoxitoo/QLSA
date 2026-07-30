@@ -16,7 +16,9 @@ import os
 import time
 from pathlib import Path
 
+from eth_abi.exceptions import DecodingError
 from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 from web3.middleware import ExtraDataToPOAMiddleware
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,18 @@ _REGISTRY_ABI = json.loads("""
 _PER_GROUP = "per-group"        # BatchRegistryV6
 _SINGLE_SUBMIT = "single-submit"  # BatchRegistryV4 / V5
 
+# Only CONTRACT-level failures mean "this selector is not implemented".  A
+# transport failure (dead RPC, timeout, rate limit) must NOT be read as an answer:
+# swallowing it would silently classify a BatchRegistryV6 as V4/V5 and let a
+# mismatched submission proceed.  Verified against a live node — a missing selector
+# raises ContractLogicError, a dead endpoint raises requests.ConnectionError — so
+# anything outside this tuple propagates to the caller.
+_NO_SUCH_FUNCTION = (
+    ContractLogicError,      # reverted / no such function
+    BadFunctionCallOutput,   # empty or undecodable return data
+    DecodingError,           # return data did not match the probe ABI
+)
+
 _PENDING_GROUPS_ABI = json.loads("""
 [
   {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"pendingGroups","outputs":[{"internalType":"bool","name":"","type":"bool"},{"internalType":"bool","name":"","type":"bool"},{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"}
@@ -125,7 +139,9 @@ def detect_registry_kind(w3: Web3, registry_address: str) -> str:
     probe = w3.eth.contract(address=addr, abi=_PENDING_GROUPS_ABI)
     try:
         probe.functions.pendingGroups(b"\x00" * 32).call()
-    except Exception:
+    except _NO_SUCH_FUNCTION as exc:
+        # Contract-level failure: the selector is not implemented (V4/V5).
+        logger.debug("pendingGroups probe rejected by %s: %s", addr, exc)
         return _SINGLE_SUBMIT
     return _PER_GROUP
 

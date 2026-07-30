@@ -9580,7 +9580,7 @@ mod tests {
 
     #[test]
     fn test_two_channel_init_mix_root() {
-        use stwo::core::channel::{Blake2sM31Channel, Channel, MerkleChannel};
+        use stwo::core::channel::{Blake2sM31Channel, MerkleChannel};
         use stwo::core::vcs::blake2_hash::Blake2sHash;
         use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
 
@@ -9632,7 +9632,7 @@ mod tests {
 
     #[test]
     fn test_two_channel_draw_queries() {
-        use stwo::core::channel::{Blake2sM31Channel, Channel};
+        use stwo::core::channel::Blake2sM31Channel;
         use stwo::core::queries::draw_queries;
 
         let mut ch = Blake2sM31Channel::default();
@@ -9679,8 +9679,7 @@ mod tests {
 
     #[test]
     fn test_circle_point_generator() {
-        use stwo::core::circle::{CirclePoint, M31_CIRCLE_GEN, M31_CIRCLE_LOG_ORDER};
-        use stwo::core::fields::m31::M31;
+        use stwo::core::circle::{M31_CIRCLE_GEN, M31_CIRCLE_LOG_ORDER};
 
         println!("GEN_X = {}", M31_CIRCLE_GEN.x.0);
         println!("GEN_Y = {}", M31_CIRCLE_GEN.y.0);
@@ -9751,12 +9750,8 @@ mod tests {
 
     #[test]
     fn test_circle_fold_formula() {
-        use stwo::core::circle::M31_CIRCLE_GEN;
-        use stwo::core::fields::m31::M31;
         use stwo::core::fields::qm31::QM31;
         use stwo::core::poly::circle::CanonicCoset;
-        use stwo::core::fri::fold_circle_into_line;
-        use stwo::core::fields::{Field, FieldExpOps};
 
         // Use cosetAt(3, 0) as the query point
         let p = CanonicCoset::new(3).at(0);

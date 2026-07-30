@@ -58,7 +58,30 @@ contract BatchRegistryV5 is ReentrancyGuard, Ownable {
     /// @notice The VFRI8 verifier used for BOTH the LOG=10 and LOG=8 proof checks.
     IQLSAVerifierV4 public verifier;
 
-    /// @notice Maximum senders per submitBatchWithNonces call (caps O(n²) dedup loop).
+    /// @notice Hard backstop on senders per `submitBatchWithNonces` — NOT a
+    ///         reachable capability.
+    ///
+    /// The duplicate-sender scan below is O(n²), and it, not this constant, is what
+    /// actually bounds a call.  Measured against a real V23 t=8 batch (per-tx cap
+    /// 16,777,216 — EIP-7825):
+    ///
+    ///     n =   1  ->  6,083,956 gas
+    ///     n =  50  ->  7,599,183
+    ///     n = 100  ->  9,731,908
+    ///     n = 200  -> 15,774,846   (only ~1M under the cap)
+    ///     n = 400  -> out of gas
+    ///
+    /// The quadratic term is ~201 gas/n², so n = 3000 would need ~1,821M gas — 108x
+    /// over the cap.  The gas-reachable maximum is n ~ 212, and exceeding it fails
+    /// with OUT OF GAS rather than the clean SenderCountExceedsLimit revert.
+    ///
+    /// Plan accordingly: keep `submitBatchWithNonces` batches well under ~150
+    /// distinct senders, or use `submitBatch` (no sender loop at all, so batch size
+    /// is unbounded) when on-chain per-sender replay protection is not required.
+    /// To raise the ceiling, require `senders` to be strictly ascending — duplicates
+    /// then cannot exist, the inner loop disappears, and the limit becomes the
+    /// ~22k/sender storage write (n ~ 480).  That is an interface change (callers
+    /// must sort) and is deliberately NOT done here.
     uint256 public constant MAX_SENDERS = 3000;
 
     /// @notice Returns true if the given Merkle root has been finalized.

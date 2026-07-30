@@ -96,5 +96,39 @@ describe("Poseidon2M31T8", function () {
       expect(a).to.not.deep.equal(b);
       expect(a).to.not.deep.equal(c);
     });
+
+    // Frozen Rust vectors for EVERY tail-length residue (n mod 4 = 0,1,2,3),
+    // mirroring stark_stwo poseidon2_t8.rs::sponge_length_vectors.  The other
+    // cross-checks only cover n = 8 — an exact multiple of the rate, i.e. no
+    // padded tail — so without these the odd-tail branch (absorb rem[k] into
+    // state[k], then s7 += 1) was pinned on neither side.
+    const SPONGE_1_TO_12 = [
+      [1602001037n, 1159405765n, 1921860026n, 2002639276n],
+      [1555987374n, 1688093151n, 2127323245n, 361838150n],
+      [112403478n, 521399817n, 1196614111n, 2120628259n],
+      [1073120416n, 1930841549n, 67141568n, 840805313n],
+      [1211130541n, 319063584n, 2140513727n, 749177741n],
+      [467986364n, 1089613104n, 1110911080n, 1548533126n],
+      [244352717n, 1116616254n, 1533576768n, 1130591728n],
+      [1440998077n, 1368105497n, 587877558n, 669993876n],
+      [1146550239n, 1854944943n, 689231702n, 1773328536n],
+      [1823865393n, 1869725030n, 515593527n, 2051133110n],
+      [1512006615n, 2120640284n, 1191961299n, 1220524832n],
+      [665623931n, 104507602n, 1166029400n, 1568827346n],
+    ];
+
+    it("sponge matches Rust for every tail length (n = 1..12)", async () => {
+      for (let n = 1; n <= 12; n++) {
+        const vals = Array.from({ length: n }, (_, i) => i + 1);
+        const out = (await h.sponge(vals)).map(BigInt);
+        expect(out, `length ${n}`).to.deep.equal(SPONGE_1_TO_12[n - 1]);
+      }
+    });
+
+    it("reduces non-canonical words (v and v+P absorb identically)", async () => {
+      const canonical = (await h.sponge([1, 2, 3])).map(BigInt);
+      const shifted = (await h.sponge([1 + Number(P), 2, 3 + Number(P)])).map(BigInt);
+      expect(shifted).to.deep.equal(canonical);
+    });
   });
 });

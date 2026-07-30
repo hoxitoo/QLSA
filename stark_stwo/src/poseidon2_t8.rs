@@ -398,3 +398,61 @@ mod tests {
         println!("compress([1..4],[5..8]) = {:?}", compress_t8([1, 2, 3, 4], [5, 6, 7, 8]));
     }
 }
+
+#[cfg(test)]
+mod sponge_length_vectors {
+    use super::*;
+
+    /// Frozen reference vectors for EVERY tail length residue (n mod 4 = 0,1,2,3).
+    ///
+    /// The pre-existing cross-checks only covered n = 8 (an exact multiple of the
+    /// rate, i.e. no padded tail), so the odd-tail branch — absorb rem[k] into
+    /// state[k], then state[7] += 1 — was not pinned on either side.  These vectors
+    /// are mirrored by the Solidity test `Poseidon2M31T8.test.js` ("sponge matches
+    /// Rust for every tail length"), which is what makes the two implementations
+    /// provably identical across the padding boundary rather than only on it.
+    const SPONGE_1_TO_12: [[u64; 4]; 12] = [
+        [1602001037, 1159405765, 1921860026, 2002639276],
+        [1555987374, 1688093151, 2127323245, 361838150],
+        [112403478, 521399817, 1196614111, 2120628259],
+        [1073120416, 1930841549, 67141568, 840805313],
+        [1211130541, 319063584, 2140513727, 749177741],
+        [467986364, 1089613104, 1110911080, 1548533126],
+        [244352717, 1116616254, 1533576768, 1130591728],
+        [1440998077, 1368105497, 587877558, 669993876],
+        [1146550239, 1854944943, 689231702, 1773328536],
+        [1823865393, 1869725030, 515593527, 2051133110],
+        [1512006615, 2120640284, 1191961299, 1220524832],
+        [665623931, 104507602, 1166029400, 1568827346],
+    ];
+
+    #[test]
+    fn sponge_t8_matches_frozen_vectors_for_every_tail_length() {
+        for (idx, expected) in SPONGE_1_TO_12.iter().enumerate() {
+            let n = idx + 1;
+            let vals: Vec<u64> = (1..=n as u64).collect();
+            let got = sponge_t8(&vals);
+            assert_eq!(&got[..4], &expected[..], "sponge_t8 length {n}");
+        }
+    }
+
+    #[test]
+    fn sponge_t8_padding_separates_adjacent_lengths() {
+        // A padded tail must never collide with the unpadded block that precedes
+        // it, otherwise leaves of different arity could share a hash.
+        for n in 1..12usize {
+            let a: Vec<u64> = (1..=n as u64).collect();
+            let b: Vec<u64> = (1..=(n + 1) as u64).collect();
+            assert_ne!(sponge_t8(&a), sponge_t8(&b), "lengths {n} vs {}", n + 1);
+        }
+    }
+
+    #[test]
+    fn sponge_t8_reduces_non_canonical_words() {
+        // v and v + P are the same field element and must absorb identically —
+        // the Solidity side relies on this (`values[i] % P`).
+        let canonical = sponge_t8(&[1, 2, 3]);
+        let shifted = sponge_t8(&[1 + M31_P, 2, 3 + M31_P]);
+        assert_eq!(canonical, shifted);
+    }
+}

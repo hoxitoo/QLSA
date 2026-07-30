@@ -52,7 +52,10 @@ contract BatchRegistryV4 is ReentrancyGuard, Ownable {
     /// @notice The VFRI7 verifier used for BOTH the LOG=10 and LOG=8 proof checks.
     IQLSAVerifierV4 public verifier;
 
-    /// @notice Maximum senders per submitBatchWithNonces call (caps O(n²) dedup loop).
+    /// @notice Hard backstop on senders per call — NOT a reachable capability: the
+    ///         O(n²) duplicate scan bounds a call at n ~ 212 (measured; see
+    ///         BatchRegistryV5 for the full gas table). Exceeding that is OUT OF
+    ///         GAS, not a clean revert. Keep batches under ~150 senders.
     uint256 public constant MAX_SENDERS = 3000;
 
     /// @notice Returns true if the given Merkle root has been finalized.

@@ -6,3 +6,6 @@ pip-audit==2.10.0
 maturin==1.13.3
 # API testing (FastAPI TestClient) — actual versions pinned in requirements-api.txt
 -r requirements-api.txt
+# testnet tooling — tests/test_testnet_*.py import testnet.submit, which needs
+# web3. Included (not re-pinned) so the version has ONE source of truth.
+-r requirements-testnet.txt

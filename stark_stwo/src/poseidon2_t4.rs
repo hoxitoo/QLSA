@@ -373,3 +373,43 @@ mod tests {
         assert_eq!(cp, [1_706_601_437, 1_471_208_702]);
     }
 }
+
+#[cfg(test)]
+mod sponge_length_vectors {
+    use super::*;
+
+    /// Frozen reference vectors for both tail parities (n even = no tail, n odd =
+    /// padded tail).  The pre-existing cross-check only covered n = 8, an exact
+    /// multiple of the rate, leaving the odd-tail branch (absorb rem[0] into
+    /// state[0], then state[3] += 1) unpinned.  Mirrored by
+    /// contracts/test/Poseidon2M31T4.test.js.
+    const SPONGE_1_TO_8: [[u64; 2]; 8] = [
+        [1820522999, 34679397],
+        [524555141, 137084408],
+        [1862243750, 449482630],
+        [188265029, 348838750],
+        [1491877616, 716646245],
+        [1527875717, 302206499],
+        [1714831849, 1861755525],
+        [1315656215, 594434174],
+    ];
+
+    #[test]
+    fn sponge_t4_matches_frozen_vectors_for_both_tail_parities() {
+        for (idx, expected) in SPONGE_1_TO_8.iter().enumerate() {
+            let n = idx + 1;
+            let vals: Vec<u64> = (1..=n as u64).collect();
+            let got = sponge_t4(&vals);
+            assert_eq!(&got[..2], &expected[..], "sponge_t4 length {n}");
+        }
+    }
+
+    #[test]
+    fn sponge_t4_padding_separates_adjacent_lengths() {
+        for n in 1..8usize {
+            let a: Vec<u64> = (1..=n as u64).collect();
+            let b: Vec<u64> = (1..=(n + 1) as u64).collect();
+            assert_ne!(sponge_t4(&a), sponge_t4(&b), "lengths {n} vs {}", n + 1);
+        }
+    }
+}

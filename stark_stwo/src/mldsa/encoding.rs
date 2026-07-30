@@ -183,9 +183,6 @@ pub fn w1_encode(w1: &PolyVec) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    fn filled_poly(val: i64) -> [i64; N] {
-        [val; N]
-    }
 
     #[test]
     fn test_simple_bit_pack_unpack_roundtrip_t1() {
