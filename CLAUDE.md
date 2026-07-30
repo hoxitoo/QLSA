@@ -17,7 +17,7 @@ aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
 contracts/      Solidity: BatchRegistryV2/V3/V4/V5/V6, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9/VFRI10, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2MerkleVerifierT4.sol, Poseidon2Channel.sol, Poseidon2ChannelT4.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
-testnet/        e2e.py (--stack v6/v4), deploy.sh, deploy_v6.sh, submit.py (V4/V6 submitters), monitor.py
+testnet/        e2e.py (--stack v7/v6/v4), deploy.sh, deploy_v6.sh, deploy_v7.sh, submit.py (V4/V5/V6 submitters), monitor.py
 tests/          Python test suite (pytest)
 benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_witnesses.py
 ```
@@ -600,7 +600,17 @@ Per-group (split) V23 registry — verifies each trace group in its OWN transact
 
 ### `testnet/` — deployment & E2E tooling
 
-Two contract stacks, selected by the `--stack` flag / deploy script:
+Three contract stacks, selected by the `--stack` flag / deploy script:
+- **MVP-7: `QLSAVerifierVFRI11` + `BatchRegistryV5`** — Poseidon2 **t=8**, ONE atomic transaction
+  - Strongest on-chain soundness available: 4-word (124-bit) Merkle nodes → node collision ~2^62,
+    versus t=4's 2-word nodes at ~2^31. Enabled by the R4.8 Poseidon2 rewrite (2026-07-30) — before
+    it, a dual t=8 verify needed >18M gas; measured after: **6.06M in one tx**
+  - `contracts/scripts/deploy_v7.js` — deploys VFRI11 + BatchRegistryV5 (prints both addresses)
+  - `testnet/deploy_v7.sh [--network sepolia]` — builds STARK binary, deploys, writes `.env.deployed`
+  - `testnet.submit.OnchainSubmitterV5` — subclass of `OnchainSubmitterV4` (BatchRegistryV4 and V5
+    have byte-identical ABIs; only the wired verifier differs); single `submit_batch_with_nonces()`
+  - `python -m testnet.e2e --stack v7 [--txs N] [--dry-run]` — uses `prove_mldsa_sig_vfri11_stark`
+    with `num_folds=6`; submits via a single atomic `submitBatchWithNonces`
 - **MVP-6 (default): `QLSAVerifierVFRI10` + `BatchRegistryV6`** — Poseidon2 t=4, per-group split
   - `contracts/scripts/deploy_v6.js` — deploys VFRI10 + BatchRegistryV6 (prints both addresses)
   - `testnet/deploy_v6.sh [--network sepolia]` — builds STARK binary, deploys, writes `.env.deployed`
@@ -609,10 +619,11 @@ Two contract stacks, selected by the `--stack` flag / deploy script:
     runs both txs (extracts each group's cross trace root from the OTHER proof's `[8:40]`),
     `pending_groups()` / `wait_and_verify()` views
   - `python -m testnet.e2e --stack v6 [--txs N] [--dry-run]` — uses `prove_mldsa_sig_vfri10_stark`
-    with `num_folds=6` (gas budget); submits via the two-tx split
+    with `num_folds=6`; submits via the two-tx split (now ~2.15M + ~1.70M gas). Since R4.8 the split
+    is a choice (lower peak gas per tx), not a gas requirement — see `--stack v7` for the t=8 path
 - **MVP-5: `QLSAVerifierVFRI7` + `BatchRegistryV4`** — single `submitBatch`
   - `contracts/scripts/deploy.js`, `testnet/deploy.sh`, `OnchainSubmitterV4`, `--stack v4`
-- `testnet/monitor.py` — polls `BatchFinalized` (identical event signature for V4 and V6)
+- `testnet/monitor.py` — polls `BatchFinalized` (identical event signature for V4, V5 and V6)
 
 ### `contracts/src/verifier/Poseidon2MerkleVerifierW.sol` (VFRI9)
 WIDE Poseidon2 Merkle verification — nodes carry BOTH sponge words (62-bit content).
@@ -890,6 +901,15 @@ width alone never delivers. See `docs/roadmap/recursion.md` § R4.8.
 - **`/stats` overflow observability** (2026-06-14 audit): `mempool_dropped` (txs lost to `prepend_batch` overflow during prover-crash recovery) is now surfaced so operators can detect silent loss
 - **Production-build hygiene** (2026-06-14 audit): `vfri2_bridge.rs` test module gained the missing `#[cfg(test)]` gate (test fixtures `make_v23_inputs`/`make_vfri5_polys`/`make_log8_hints` no longer compiled into the shipped library); `poseidon2_t4.rs` `m31_mul` import moved to its test module — release build is now warning-free
 - **FRI generator depth guard** (2026-06-14 audit): the VFRI9/VFRI10 generic generators validate `tree_depth ∈ 2..=30` (mirrors the on-chain `logDomainSize > 30` guard), preventing the `coset_at` shift underflow for oversized depths (defense-in-depth; V23 wrappers always use fixed depth 8/10)
+- **Testnet nonce mapping fixed** (2026-07-30): the on-chain registries store 0 for an unseen sender
+  and enforce `newNonce > stored`, so the smallest submittable nonce is 1 — but `testnet/e2e.py`
+  passed the 0-based `tx.nonce` straight through, making EVERY non-dry-run submission revert with
+  `SenderNonceTooLow(provided=0, expected=1)` for the sender of tx[0] (all three stacks: v4, v6, v7).
+  Only ever reachable on a real submit, which is why `--dry-run` never surfaced it. Fixed at the one
+  boundary where the conventions meet: `testnet.e2e.build_sender_nonces()` maps `tx.nonce → nonce+1`,
+  preserving strict monotonicity; 7 regression tests in `tests/test_testnet_nonces.py`. Found by
+  verifying a FRESHLY generated v7 proof against a deployed `BatchRegistryV5` (full loop: ML-DSA-65
+  signature → V23 → VFRI11 → `submitBatchWithNonces` finalized at 6,150,487 gas)
 - **t=8 (2^62) node binding becomes deployable** (2026-07-30, R4.8): the Poseidon2 Solidity rewrite
   (stack state + lazy reduction, bit-exact against the frozen Rust vectors) brought a full-V23 t=8
   dual `submitBatch` from ">100M gas / unverifiable" to **6,058,052 gas in one transaction**. The

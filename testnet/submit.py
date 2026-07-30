@@ -451,6 +451,48 @@ _REGISTRY_V6_ABI = json.loads("""
 """)
 
 
+class OnchainSubmitterV5(OnchainSubmitterV4):
+    """Wraps web3 interaction with BatchRegistryV5 (atomic dual VFRI11 / t=8).
+
+    BatchRegistryV5's ABI is byte-identical to BatchRegistryV4's (same
+    ``submitBatch`` / ``submitBatchWithNonces`` / ``isBatchFinalized`` /
+    ``senderNonces`` signatures) — only the wired verifier differs, so the whole
+    of ``OnchainSubmitterV4`` applies unchanged. This subclass exists to name the
+    MVP-7 stack explicitly and to carry the correct gas/soundness notes.
+
+    Stack: ``QLSAVerifierVFRI11`` (Poseidon2 t=8 → 4-word/124-bit Merkle nodes,
+    node collision ~2^62, versus t=4's ~2^31) behind ``BatchRegistryV5``, which
+    verifies BOTH V23 trace groups in ONE transaction with cross-proof binding
+    computed on-chain:
+
+      boundRoot10 = keccak256(merkleRoot | traceRoot8)
+      boundRoot8  = keccak256(merkleRoot | traceRoot10)
+
+    Measured cost of the atomic dual verify: ~6.06M gas (LOG=10 ~3.34M + LOG=8
+    ~2.63M + overhead), inside the 16,777,216 (2^24, EIP-7825) per-tx cap. Before
+    the R4.8 Poseidon2 rewrite the same call needed >18M, which is why
+    :class:`OnchainSubmitterV6` splits the work across two transactions; that
+    split is now an option (lower peak gas per tx) rather than a requirement.
+    """
+
+    def __init__(
+        self,
+        rpc_url: str,
+        private_key: str,
+        registry_address: str,
+        gas_limit: int = 16_700_000,
+        confirm_timeout_s: int = 180,
+    ) -> None:
+        super().__init__(
+            rpc_url=rpc_url,
+            private_key=private_key,
+            registry_address=registry_address,
+            gas_limit=gas_limit,
+            confirm_timeout_s=confirm_timeout_s,
+        )
+        logger.info("submitterV5 ready (VFRI11 t=8, atomic dual verify)")
+
+
 class OnchainSubmitterV6:
     """Wraps web3 interaction with BatchRegistryV6 (per-group split, dual VFRI10).
 

@@ -62,6 +62,30 @@ Merkle-корни и Fiat-Shamir-транскрипты идентичны. По
 `verify()==true`, + dual submit в одной tx), `QLSAVerifierRecursive` (honest bundle обязан
 `ok==true`). Подробности: `docs/roadmap/recursion.md` § R4.8.
 
+### MVP-7 — стек t=8 в одной транзакции (2026-07-30)
+
+Апгрейд, который стал возможен после R4.8: `--stack v7` = `QLSAVerifierVFRI11` (Poseidon2 t=8,
+4-словные/124-бит узлы → стойкость узла ~2^62) + `BatchRegistryV5` (атомарная двойная проверка в
+ОДНОЙ транзакции). Против текущего production `--stack v6` (t=4, ~2^31, split на 2 tx).
+
+- `contracts/scripts/deploy_v7.js` + `testnet/deploy_v7.sh` — деплой VFRI11 + BatchRegistryV5
+- `testnet.submit.OnchainSubmitterV5` — подкласс `OnchainSubmitterV4` (ABI BatchRegistryV4 и V5
+  побитово идентичны, различается только подключённый верификатор); один `submit_batch_with_nonces()`
+- `python -m testnet.e2e --stack v7` — `prove_mldsa_sig_vfri11_stark`, `num_folds=6`
+- **Полный цикл проверен на свежем доказательстве**: подпись ML-DSA-65 → V23 → VFRI11 cross-bound →
+  `submitBatchWithNonces` на развёрнутом `BatchRegistryV5` → finalized, **6 150 487 газа в одной
+  транзакции**, с проверкой nonce'ов
+
+**[БАГ НАЙДЕН И ИСПРАВЛЕН] Отображение nonce'ов в testnet-обвязке.** Проверка полного цикла на
+свежем доказательстве вскрыла давний дефект: on-chain реестры (`BatchRegistryV4`/`V5`/`V6`) хранят 0
+для ни разу не виденного отправителя и требуют `newNonce > stored`, то есть минимальный отправляемый
+nonce равен 1. А `testnet/e2e.py` передавал 0-based `tx.nonce` без сдвига — поэтому ЛЮБАЯ реальная
+(не `--dry-run`) отправка падала с `SenderNonceTooLow(provided=0, expected=1)` на отправителе tx[0],
+во всех трёх стеках (v4, v6, v7). Баг был достижим только при настоящей отправке, поэтому
+`--dry-run` его никогда не показывал. Исправлено в единственной точке стыка соглашений:
+`testnet.e2e.build_sender_nonces()` отображает `tx.nonce → nonce+1`, сохраняя строгую монотонность;
+7 регрессионных тестов в `tests/test_testnet_nonces.py`.
+
 Инфраструктура: `contracts/hardhat.config.js` получил опциональный обход загрузки компилятора для
 песочниц с закрытым egress — `QLSA_LOCAL_SOLCJS=1` использует `soljson.js` из npm-пакета `solc`
 (тот же компилятор, медленнее). Без переменной поведение не меняется, CI не затронут.
