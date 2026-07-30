@@ -8258,6 +8258,131 @@ mod tests_vfri8 {
         }
     }
 
+    /// Writes the CROSS-BOUND PAIR fixture consumed by BatchRegistryV7E2E.test.js.
+    ///
+    /// A V23 batch is two trace groups, so BatchRegistryV7 takes two recursive
+    /// bundles and requires each to have been produced against the OTHER group's
+    /// trace root — the same cross-proof binding BatchRegistryV5 enforces:
+    ///
+    ///     bundleA.inner.batchRoot == keccak(merkleRoot ‖ traceRootB)
+    ///     bundleB.inner.batchRoot == keccak(merkleRoot ‖ traceRootA)
+    ///
+    /// Generated in two passes, which is sound only because the trace root is
+    /// committed BEFORE `batchRoot` enters the channel (it is mixed just before
+    /// drawQueries). The generator asserts that invariant instead of assuming it.
+    ///
+    /// Run with: cargo test write_recursive_pair_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn write_recursive_pair_fixture() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        use sha3::{Digest as Sha3Digest, Keccak256};
+
+        let merkle_root = [0xA7u8; 32];
+        let (tree_depth, n_queries, num_folds) = (4u32, 1usize, 3usize);
+        let n = 16usize;
+        // Two DISTINCT statements standing in for the LOG=10 / LOG=8 groups.
+        let cols_a: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let cols_b: Vec<Vec<u32>> = (0..4)
+            .map(|j| (0..n).map(|i| ((i * 13 + j * 7 + 11) as u32) % 2_147_483_647).collect())
+            .collect();
+
+        let chain = |cols: &Vec<Vec<u32>>, br: &[u8; 32]| {
+            vfri11_fri_chain(cols, tree_depth, br, n_queries, Some(num_folds)).unwrap()
+        };
+        let keccak2 = |a: &[u8; 32], b: &[u8; 32]| -> [u8; 32] {
+            let mut h = Keccak256::new();
+            h.update(a);
+            h.update(b);
+            h.finalize().into()
+        };
+
+        // Pass 1: provisional roots, only to learn each group's trace root.
+        let t_a = chain(&cols_a, &merkle_root).trace_root;
+        let t_b = chain(&cols_b, &merkle_root).trace_root;
+
+        // Pass 2: each group bound to the OTHER's trace root.
+        let bound_a = keccak2(&merkle_root, &t_b);
+        let bound_b = keccak2(&merkle_root, &t_a);
+        let ch_a = chain(&cols_a, &bound_a);
+        let ch_b = chain(&cols_b, &bound_b);
+        assert_eq!(ch_a.trace_root, t_a, "trace root must not depend on batchRoot");
+        assert_eq!(ch_b.trace_root, t_b, "trace root must not depend on batchRoot");
+
+        let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
+
+        // Build one bundle's JSON from its chain + the batch root it was bound to.
+        let bundle_json = |cols: &Vec<Vec<u32>>, ch: &Vfri11Chain, br: &[u8; 32]| -> String {
+            let rec =
+                gen_vfri11_recursion_inputs(cols, tree_depth, br, n_queries, Some(num_folds)).unwrap();
+            let (outer_cols, outer_log) =
+                outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths).unwrap();
+            let chan_inputs = Vfri11ChannelInputs {
+                trace_root: ch.trace_root,
+                oods_combo_pos: ch.oods_combo_pos,
+                oods_combo_neg: ch.oods_combo_neg,
+                comp_root: ch.comp_root,
+                fri_layer_roots: ch.layer_roots.clone(),
+                batch_root: *br,
+                tree_depth,
+                n_queries,
+            };
+            let outer_bound: [u8; 32] = outer_binding_root(&chan_inputs);
+            let (outer_proof, outer_commit_hex, outer_hints) =
+                gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &outer_bound, 1, Some(2))
+                    .unwrap();
+            let roots_json: Vec<String> =
+                ch.layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
+            let evals_json: Vec<String> =
+                ch.layer_values[ch.num_folds].iter().map(|v| format!("\"{v}\"")).collect();
+            format!(
+                concat!(
+                    "{{\n",
+                    "      \"inner\": {{\n",
+                    "        \"traceRoot\": \"{}\",\n",
+                    "        \"oodsComboPos\": \"{}\",\n",
+                    "        \"oodsComboNeg\": \"{}\",\n",
+                    "        \"compRoot\": \"{}\",\n",
+                    "        \"friLayerRoots\": [{}],\n",
+                    "        \"batchRoot\": \"{}\",\n",
+                    "        \"treeDepth\": {},\n",
+                    "        \"nQueries\": {}\n",
+                    "      }},\n",
+                    "      \"outerProof\": \"{}\",\n",
+                    "      \"outerCommitment\": \"0x{}\",\n",
+                    "      \"outerHints\": \"{}\",\n",
+                    "      \"lastLayerEvals\": [{}]\n",
+                    "    }}"
+                ),
+                hx(&ch.trace_root),
+                ch.oods_combo_pos,
+                ch.oods_combo_neg,
+                hx(&ch.comp_root),
+                roots_json.join(", "),
+                hx(br),
+                tree_depth,
+                n_queries,
+                hx(&outer_proof),
+                outer_commit_hex,
+                hx(&outer_hints),
+                evals_json.join(", "),
+            )
+        };
+
+        let json = format!(
+            "{{\n  \"merkleRoot\": \"{}\",\n  \"bundle10\": {},\n  \"bundle8\": {}\n}}\n",
+            hx(&merkle_root),
+            bundle_json(&cols_a, &ch_a, &bound_a),
+            bundle_json(&cols_b, &ch_b, &bound_b),
+        );
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/recursive_pair_e2e.json");
+        std::fs::write(path, json).unwrap();
+        println!("wrote {path}");
+    }
+
     /// Writes the VFRI11 E2E fixture consumed by QLSAVerifierVFRI11E2E.test.js.
     /// Run with: cargo test write_vfri11_e2e_fixture -- --ignored --nocapture
     #[test]
