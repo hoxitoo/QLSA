@@ -132,22 +132,59 @@ describe("QLSAVerifierVFRI11 — full V23 cross-bound structural E2E", function 
       .to.not.equal(boundRoot(fixture.merkleRoot, fixture.log10_proof));
   });
 
-  // ── Gas wall documentation ──────────────────────────────────────────────────
+  // ── On-chain acceptance ─────────────────────────────────────────────────────
+  //
+  // History: until 2026-07-30 a full-V23 t=8 group verify() exceeded 100M gas
+  // (estimateGas ran out at the block limit), so t=8 correctness was only ever
+  // demonstrated at the depth-4 toy scale.  The lazy-reduction + stack-state
+  // rewrite of Poseidon2M31T8 cut the per-permutation cost ~7x (127k -> 36k gas
+  // per permute measured through the harness), and both full-V23 groups now
+  // verify on-chain well inside the 16,777,216 (2^24, EIP-7825) per-tx cap.
+  //
+  // This is a SECURITY upgrade over the t=4 production stack, not just a speedup:
+  // t=8 carries 4-word (124-bit) Merkle nodes -> node collision ~2^62, versus
+  // t=4's 2-word nodes at ~2^31.
 
-  it("documents that full-V23 t=8 verify() exceeds the 100M gas budget", async function () {
+  it("full-V23 t=8 LOG=10 verify() accepts inside the per-tx gas cap", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
-    this.timeout(120_000);
+    this.timeout(300_000);
     const boundRoot10 = boundRoot(fixture.merkleRoot, fixture.log8_proof);
-    let outOfGas = false;
-    try {
-      // estimateGas binary-searches up to the 100M block limit; for the depth-10
-      // LOG=10 t=8 group it runs out, confirming the documented wall.
-      await verifier.verify.estimateGas(
-        fixture.log10_proof, fixture.log10_commitment, boundRoot10, fixture.log10_queryHints
-      );
-    } catch (e) {
-      outOfGas = /gas/i.test(e.message);
-    }
-    expect(outOfGas, "full-V23 t=8 LOG=10 verify is expected to exceed 100M gas").to.equal(true);
+    const ok = await verifier.verify.staticCall(
+      fixture.log10_proof, fixture.log10_commitment, boundRoot10, fixture.log10_queryHints,
+      { gasLimit: 16_777_215n }
+    );
+    expect(ok, "full-V23 t=8 LOG=10 group must verify on-chain").to.equal(true);
+  });
+
+  it("full-V23 t=8 LOG=8 verify() accepts inside the per-tx gas cap", async function () {
+    if (!FIXTURE_EXISTS) { this.skip(); return; }
+    this.timeout(300_000);
+    const boundRoot8 = boundRoot(fixture.merkleRoot, fixture.log10_proof);
+    const ok = await verifier.verify.staticCall(
+      fixture.log8_proof, fixture.log8_commitment, boundRoot8, fixture.log8_queryHints,
+      { gasLimit: 16_777_215n }
+    );
+    expect(ok, "full-V23 t=8 LOG=8 group must verify on-chain").to.equal(true);
+  });
+
+  // Both t=8 groups in ONE transaction — the single-pass 2^62 production path.
+  it("BatchRegistryV5 finalizes both t=8 groups in ONE transaction", async function () {
+    if (!FIXTURE_EXISTS) { this.skip(); return; }
+    this.timeout(300_000);
+    const [owner] = await ethers.getSigners();
+    const R5 = await ethers.getContractFactory("BatchRegistryV5");
+    const reg = await R5.deploy(owner.address, await verifier.getAddress());
+    await reg.waitForDeployment();
+
+    const tx = await reg.submitBatch(
+      fixture.merkleRoot,
+      fixture.log10_commitment, fixture.log10_proof, fixture.log10_queryHints,
+      fixture.log8_commitment, fixture.log8_proof, fixture.log8_queryHints,
+      { gasLimit: 16_777_215n }
+    );
+    const rc = await tx.wait();
+    console.log(`        [gas] dual-VFRI11 (t=8) submitBatch used = ${rc.gasUsed}`);
+    expect(rc.gasUsed).to.be.lessThan(16_777_216n, "dual t=8 verify must fit one transaction");
+    expect(await reg.isBatchFinalized(fixture.merkleRoot)).to.equal(true);
   });
 });

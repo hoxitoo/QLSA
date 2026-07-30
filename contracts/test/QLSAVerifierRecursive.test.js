@@ -68,7 +68,7 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
     }
   });
 
-  // The channel-replay half is fully on-chain today: replayChallenges derives the
+  // The channel-replay half derives the
   // recursion's public inputs from the inner proof's public roots, byte-identical
   // to the Rust reference vfri11_replay_channel (R4.2/R4.3).
   it("replayChallenges reproduces the Rust replay from the inner publics", async function () {
@@ -105,44 +105,55 @@ describe("QLSAVerifierRecursive — recursive proof on-chain entry point (R4.5)"
     ).to.be.revertedWith("RCR: nQueries out of range");
   });
 
-  // MEASURED LIMIT (R4.6): the honest bundle's full path — replay + outer-proof
-  // verification via the deployed VFRI11 — exceeds even a 29M gas call (Ethereum's
-  // block ceiling), both at the original outer trace (log_size 7, 6 folds) and at
-  // the compacted one (log_size 5, 1 query, 2 folds; hints 4.6 KB → 2.6 KB). The
-  // rejection paths below DO execute on-chain because VFRI11's _checkCommitment
-  // short-circuits before the expensive Merkle/Poseidon work. Verifying the outer
-  // proof therefore needs a per-fold-split registry (one verify per transaction,
-  // à la BatchRegistryV6) — tracked as R4.7. The outer→VFRI11 hint pipeline itself
-  // is exercised off-chain by the Rust test_recursive_outer_trace_vfri11_hints.
+  // R4.8 — THE HONEST BUNDLE VERIFIES ON-CHAIN IN ONE TRANSACTION.
+  //
+  // History: R4.6 recorded the full path (channel replay + outer-proof verification
+  // via the deployed VFRI11) as exceeding the gas budget. Two things were wrong with
+  // that conclusion. First, hardhat rejects a gasLimit above 16,777,216 (2^24,
+  // EIP-7825) outright — the "29M call" was never executed, so the honest path had
+  // never actually been run to completion. Second, the real cost was dominated by
+  // Poseidon2 t=8 implementation overhead: ~106k gas per permutation, of which the
+  // field arithmetic was only ~3k. The lazy-reduction + stack-state rewrite of
+  // Poseidon2M31T8 cut that ~7x, taking the replay from 6.06M to ~0.8M and the outer
+  // verify from 11.30M to ~1.55M.
+  //
+  // The recursion's on-chain contour is therefore CLOSED at t=8 (node collision
+  // ~2^62), with ~7x headroom under the per-transaction cap.
+  it("verifies the honest bundle in one transaction under the EIP-7825 cap", async function () {
+    this.timeout(300_000);
+    const [ok, ch] = await recursive.verifyRecursive.staticCall(
+      innerTuple,
+      fx.outer.proof,
+      fx.outer.commitment,
+      fx.outer.hints,
+      { gasLimit: 16_777_215n }
+    );
+    expect(ok, "the honest recursive bundle must verify on-chain").to.equal(true);
+    // The challenges returned alongside the proof are the replayed public inputs.
+    expect(ch.zX.toString()).to.equal(fx.expected.zX);
+    expect(ch.queryIndices.length).to.equal(fx.expected.queryIndices.length);
+  });
 
-  // R4.7 measurement: split the cost between the two halves so we know which one
-  // to attack. Both run as eth_call, so we can estimate each independently.
-  it("measures the gas of each half (diagnostic)", async function () {
-    this.timeout(180_000);
-    let replayGas = null, verifyGas = null;
-    try {
-      replayGas = await recursive.replayChallenges.estimateGas(innerTuple);
-    } catch (e) {
-      replayGas = `revert: ${(e.message || "").slice(0, 90)}`;
-    }
-    // Call the deployed VFRI11 DIRECTLY on the outer proof — isolates whether the
-    // cost is in the outer verification or in this contract's wrapper/replay.
+  it("measures the gas of each half and of the whole call", async function () {
+    this.timeout(300_000);
+    const replayGas = await recursive.replayChallenges.estimateGas(innerTuple);
+    // Call the deployed VFRI11 DIRECTLY on the outer proof — isolates the outer
+    // verification from this contract's wrapper/replay.
     const VFRI11 = await ethers.getContractFactory("QLSAVerifierVFRI11");
     const vfri11 = VFRI11.attach(await recursive.outerVerifier());
-    try {
-      verifyGas = await vfri11.verify.estimateGas(
-        fx.outer.proof, fx.outer.commitment, fx.outer.bindingRoot, fx.outer.hints
-      );
-    } catch (e) {
-      verifyGas = `revert: ${(e.message || "").slice(0, 90)}`;
-    }
-    console.log(`        [gas] replayChallenges = ${replayGas}`);
+    const verifyGas = await vfri11.verify.estimateGas(
+      fx.outer.proof, fx.outer.commitment, fx.outer.bindingRoot, fx.outer.hints
+    );
+    const wholeGas = await recursive.verifyRecursive.estimateGas(
+      innerTuple, fx.outer.proof, fx.outer.commitment, fx.outer.hints
+    );
+    console.log(`        [gas] replayChallenges            = ${replayGas}`);
     console.log(`        [gas] VFRI11.verify(outer, direct) = ${verifyGas}`);
-    // Diagnostic only — the numbers are the deliverable, so assert just that we
-    // obtained something for each half rather than a tautology.
-    for (const g of [replayGas, verifyGas]) {
-      expect(["bigint", "string"]).to.include(typeof g);
-    }
+    console.log(`        [gas] verifyRecursive (whole)      = ${wholeGas}`);
+    // The whole call must fit a single transaction; each half must be a real cost.
+    expect(wholeGas).to.be.lessThan(16_777_216n, "full recursive verify must fit one tx");
+    expect(replayGas).to.be.greaterThan(0n);
+    expect(verifyGas).to.be.greaterThan(0n);
   });
 
   it("rejects the bundle when the inner publics are tampered", async function () {

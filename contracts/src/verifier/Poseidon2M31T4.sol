@@ -36,13 +36,23 @@ library Poseidon2M31T4 {
 
     uint256 internal constant P = M31.P;  // 2^31 - 1
 
-    /// @dev a + b mod P.  Requires a, b < P.
-    function _add(uint256 a, uint256 b) private pure returns (uint256 r) {
-        unchecked { r = a + b; }
-        if (r >= P) r -= P;
-    }
+    // ── Lazy reduction ────────────────────────────────────────────────────────
+    //
+    // The linear layers add WITHOUT reducing mod P.  This is exact, not an
+    // approximation: addition and multiplication mod P are ring homomorphisms, so
+    // an unreduced accumulator ≡ the reduced one (mod P), and every S-box passes
+    // through `mulmod(…, P)`, which reduces its output whatever the input size.
+    // Reduction is therefore only owed where a value LEAVES the permutation (the
+    // `% P` on permute's return).
+    //
+    // Magnitude bound (why uint256 never overflows).  M4's largest row-coefficient
+    // sum is 16 and every external round S-boxes before its linear layer, so M_E
+    // only sees inputs < 2^32 and emits < 16·2^32 < 2^36.  An internal round emits
+    // sum + μ_i·s_i ≤ 8·B, so 21 of them starting from B < 2^36 stay under
+    // 8^21·2^36 = 2^99.  The next external round S-boxes first, collapsing back
+    // under P.  Peak ≈ 2^99 ≪ 2^256.
 
-    /// @dev x^5 mod P — the Poseidon2 S-box.  3 mulmod operations.
+    /// @dev x^5 mod P — the Poseidon2 S-box.  3 mulmods; accepts unreduced x.
     function _sbox(uint256 x) private pure returns (uint256) {
         uint256 x2 = mulmod(x, x, P);
         uint256 x4 = mulmod(x2, x2, P);
@@ -50,7 +60,7 @@ library Poseidon2M31T4 {
     }
 
     /// @dev External linear layer: state ← M4·state via the 8-addition fast path
-    ///      (matches mat_external in poseidon2_t4.rs):
+    ///      (matches mat_external in poseidon2_t4.rs), unreduced:
     ///        t0 = s0+s1;  t1 = s2+s3
     ///        t2 = 2·s1 + t1;  t3 = 2·s3 + t0
     ///        t4 = 4·t1 + t3;  t5 = 4·t0 + t2
@@ -59,27 +69,33 @@ library Poseidon2M31T4 {
         private pure
         returns (uint256, uint256, uint256, uint256)
     {
-        uint256 t0 = _add(s0, s1);
-        uint256 t1 = _add(s2, s3);
-        uint256 t2 = _add(_add(s1, s1), t1);
-        uint256 t3 = _add(_add(s3, s3), t0);
-        uint256 t4 = _add(_add(_add(t1, t1), _add(t1, t1)), t3);
-        uint256 t5 = _add(_add(_add(t0, t0), _add(t0, t0)), t2);
-        return (_add(t3, t5), t5, _add(t2, t4), t4);
+        unchecked {
+            uint256 t0 = s0 + s1;
+            uint256 t1 = s2 + s3;
+            uint256 t2 = s1 + s1 + t1;
+            uint256 t3 = s3 + s3 + t0;
+            uint256 t4 = (t1 << 2) + t3;
+            uint256 t5 = (t0 << 2) + t2;
+            return (t3 + t5, t5, t2 + t4, t4);
+        }
     }
 
-    /// @dev Internal linear layer: out_i = (Σ_j s_j) + μ_i·s_i with μ = (1,2,3,4).
+    /// @dev Internal linear layer: out_i = (Σ_j s_j) + μ_i·s_i with μ = (1,2,3,4),
+    ///      unreduced (μ_i·s_i by shift/add, exactly as the Rust reference's
+    ///      repeated additions).
     function _matI(uint256 s0, uint256 s1, uint256 s2, uint256 s3)
         private pure
         returns (uint256, uint256, uint256, uint256)
     {
-        uint256 sum = _add(_add(s0, s1), _add(s2, s3));
-        return (
-            _add(sum, s0),
-            _add(sum, _add(s1, s1)),
-            _add(sum, _add(_add(s2, s2), s2)),
-            _add(sum, _add(_add(s3, s3), _add(s3, s3)))
-        );
+        unchecked {
+            uint256 sum = s0 + s1 + s2 + s3;
+            return (
+                sum + s0,
+                sum + (s1 << 1),
+                sum + (s2 << 1) + s2,
+                sum + (s3 << 2)
+            );
+        }
     }
 
     /// @dev One external round: AddRC → SBox(all 4) → M_E.
@@ -87,11 +103,11 @@ library Poseidon2M31T4 {
         uint256 s0, uint256 s1, uint256 s2, uint256 s3,
         uint256 rc0, uint256 rc1, uint256 rc2, uint256 rc3
     ) private pure returns (uint256, uint256, uint256, uint256) {
-        s0 = _sbox(_add(s0, rc0));
-        s1 = _sbox(_add(s1, rc1));
-        s2 = _sbox(_add(s2, rc2));
-        s3 = _sbox(_add(s3, rc3));
-        return _matE(s0, s1, s2, s3);
+        unchecked {
+            return _matE(
+                _sbox(s0 + rc0), _sbox(s1 + rc1), _sbox(s2 + rc2), _sbox(s3 + rc3)
+            );
+        }
     }
 
     /// @dev One internal round: AddRC to cell 0 → SBox(cell 0) → M_I.
@@ -99,12 +115,14 @@ library Poseidon2M31T4 {
         uint256 s0, uint256 s1, uint256 s2, uint256 s3,
         uint256 rc0
     ) private pure returns (uint256, uint256, uint256, uint256) {
-        s0 = _sbox(_add(s0, rc0));
-        return _matI(s0, s1, s2, s3);
+        unchecked {
+            return _matI(_sbox(s0 + rc0), s1, s2, s3);
+        }
     }
 
     /// @notice Apply the Poseidon2 t=4 permutation to state (s0, s1, s2, s3).
-    /// @dev All inputs must be < P; outputs are < P.
+    /// @dev Inputs may exceed P (they are reduced through the first S-box layer);
+    ///      every returned cell is < P.
     function permute(uint256 s0, uint256 s1, uint256 s2, uint256 s3)
         internal pure
         returns (uint256, uint256, uint256, uint256)
@@ -146,7 +164,8 @@ library Poseidon2M31T4 {
         (s0, s1, s2, s3) = _ext(s0, s1, s2, s3, 406737235, 674350702, 805513161, 1062830024);
         (s0, s1, s2, s3) = _ext(s0, s1, s2, s3, 1189088244, 1437045064, 113926993, 338241895);
 
-        return (s0, s1, s2, s3);
+        // The only place reduction is owed: on the way out.
+        return (s0 % P, s1 % P, s2 % P, s3 % P);
     }
 
     /// @notice Two-to-one compression for 124-bit wide Merkle nodes.
@@ -168,26 +187,33 @@ library Poseidon2M31T4 {
     /// The odd-length flag lives in capacity cell 3 — outside the rate — so no
     /// choice of data words can imitate a padded final block.
     ///
-    /// @param values  Array of M31 field elements (each < P).
+    /// @param values  Array of M31 field elements. Inputs are reduced mod P on
+    ///        absorption so the on-chain hash matches the Rust `sponge_t4`
+    ///        reference (which reduces every word) bit-for-bit even for
+    ///        non-canonical words ≥ P — a defense-in-depth parity guard; in the
+    ///        VFRI pipeline every word is already a QM31 limb < P.
     /// @return s0 First state element after absorption (< P).
     /// @return s1 Second state element after absorption (< P).
     function sponge(uint256[] memory values)
         internal pure
         returns (uint256 s0, uint256 s1)
     {
-        uint256 s2 = 0;
-        uint256 s3 = 0;
-        uint256 n = values.length;
-        uint256 i = 0;
-        for (; i + 1 < n; i += 2) {
-            s0 = _add(s0, values[i]);
-            s1 = _add(s1, values[i + 1]);
-            (s0, s1, s2, s3) = permute(s0, s1, s2, s3);
-        }
-        if (i < n) {
-            s0 = _add(s0, values[i]);
-            s3 = _add(s3, 1);
-            (s0, s1, s2, s3) = permute(s0, s1, s2, s3);
+        unchecked {
+            uint256 s2 = 0;
+            uint256 s3 = 0;
+            uint256 n = values.length;
+            uint256 i = 0;
+            for (; i + 1 < n; i += 2) {
+                // Absorbed sums stay < 2^32; permute tolerates unreduced inputs.
+                s0 += values[i] % P;
+                s1 += values[i + 1] % P;
+                (s0, s1, s2, s3) = permute(s0, s1, s2, s3);
+            }
+            if (i < n) {
+                s0 += values[i] % P;
+                s3 += 1;
+                (s0, s1, s2, s3) = permute(s0, s1, s2, s3);
+            }
         }
     }
 }

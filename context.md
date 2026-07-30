@@ -1,5 +1,71 @@
 # QLSA — Project Context
 
+## R4.8 (2026-07-30) — газовый барьер снят: полная on-chain верификация в ОДНОЙ транзакции
+
+**Все зафиксированные ранее «газовые стены» оказались накладными расходами реализации Poseidon2
+в Solidity, а не свойством протокола.** Rust не менялся; каждый хеш побитово тот же.
+
+**Две ошибки измерения, из-за которых стены выглядели непреодолимыми:**
+1. `gasLimit` > 2^24 **не исполняется** — hardhat (и mainnet после EIP-7825) отклоняет транзакцию
+   ДО исполнения с `transaction gas limit (X) is greater than the cap (16777216)`. Вывод R4.6
+   «полный путь превышает даже 29M» опирался на такой вызов: honest path ни разу не был доведён
+   до конца, а сообщение об отказе было принято за out-of-gas.
+2. `estimateGas` **завышает** транзакции с вложенными вызовами (правило 63/64 на каждый кадр):
+   для `submitBatch` с VFRI11 оценка = 18 174 156 при фактическом `gasUsed` = 6 058 052.
+   **Мерить надо `gasUsed` реально отправленной транзакции.**
+
+**Настоящая причина стоимости:** одна t=8 перестановка стоила ~106k газа, тогда как её арифметика
+(~350 `mulmod` + ~700 сложений) ≈ 3k. Остальные ~97% — `uint256[8] memory` (аллокация +
+MLOAD/MSTORE на каждую ячейку каждого раунда) и условное вычитание `if (r >= P) r -= P` на КАЖДОМ
+сложении линейного слоя.
+
+**Исправление** (`Poseidon2M31T8.sol`, `Poseidon2M31T4.sol`, + `Poseidon2ChannelT8`/
+`Poseidon2MerkleVerifierT8` на новые точки входа):
+- **состояние на стеке**: `permute8(s0..s7)`, `compress4`, `sponge4`, `_permuteInto` — без
+  `uint256[8] memory`;
+- **ленивая редукция**: линейные слои складывают БЕЗ `mod P`. Это точно, а не приближённо:
+  сложение/умножение mod P — гомоморфизмы кольца, а каждый S-box идёт через `mulmod(…, P)`, который
+  редуцирует свой выход при любом размере входа. Редукция нужна только на выходе перестановки.
+  Оценка величин: пик ≈2^80 (t=8) и ≈2^99 (t=4) — далеко до 2^256.
+
+Корректность: **47 существующих кросс-чек-тестов против ЗАМОРОЖЕННЫХ Rust-референс-векторов
+проходят без изменений** (`poseidon2_t4.rs`/`poseidon2_t8.rs`/`vfri2_bridge.rs`) — все хеши,
+Merkle-корни и Fiat-Shamir-транскрипты идентичны. Полный набор контрактов: **1015 passing, 0 failing**
+(и весь прогон ускорился с ~11 мин до ~1 мин).
+
+**Измерено (фактический `gasUsed` / исполненный `staticCall`):**
+
+| Путь | До | После |
+|------|-----|-------|
+| `t8.permute` / `t4.permute` (harness) | 127 228 / 61 331 | **36 251 / ~16 000** |
+| `replayChallenges` (t=8 канал) | 6 059 429 | **733 849** |
+| `VFRI11.verify` (внешний recursive proof) | 11 296 675 | **1 545 728** |
+| **`verifyRecursive` (весь honest path)** | не исполнялся | **2 289 889, `ok = true`** |
+| VFRI10 (t=4) V23 LOG=10 / LOG=8 | ~10.6M / ~7.9M | **2 065 966 / 1 588 923** |
+| **VFRI10 dual `submitBatch`** | ~18.5M (> cap → 2 tx) | **3 736 943 — одна tx** |
+| VFRI11 (t=8) V23 LOG=10 / LOG=8 | **>100M** | **3 342 623 / 2 633 375** |
+| **VFRI11 (t=8) dual `submitBatch`** | не верифицировался | **6 058 052 — одна tx** |
+| BatchRegistryV6 per-group (t=4) | ~10.6M / ~7.9M | **2 147 099 / 1 701 231** |
+
+**Следствия:**
+1. **t=8 (стойкость узла ~2^62) теперь развёртываем в одной транзакции** — апгрейд относительно
+   текущего production t=4 (~2^31), а не только ускорение.
+2. **Двухтранзакционный split `BatchRegistryV6` больше не обязателен**: `BatchRegistryV5` с единым
+   `submitBatch` укладывается в cap и для t=4 (3.7M), и для t=8 (6.1M). V6 остаётся валидным при
+   желании снизить пик газа на транзакцию.
+3. **On-chain контур рекурсии закрыт** при t=8 с ~7× запасом под cap. Рекурсия остаётся целью для
+   (а) 128-бит через t=16 как inner hash и (б) КОНСТАНТНОЙ стоимости независимо от размера батча —
+   ширина перестановки этого не даёт.
+
+Обновлены тесты, кодировавшие устаревшие стены: `QLSAVerifierVFRI10CrossBoundE2E` (dual submit теперь
+обязан ФИНАЛИЗИРОВАТЬСЯ в одной tx), `QLSAVerifierVFRI11CrossBoundE2E` (обе t=8 группы обязаны
+`verify()==true`, + dual submit в одной tx), `QLSAVerifierRecursive` (honest bundle обязан
+`ok==true`). Подробности: `docs/roadmap/recursion.md` § R4.8.
+
+Инфраструктура: `contracts/hardhat.config.js` получил опциональный обход загрузки компилятора для
+песочниц с закрытым egress — `QLSA_LOCAL_SOLCJS=1` использует `soljson.js` из npm-пакета `solc`
+(тот же компилятор, медленнее). Без переменной поведение не меняется, CI не затронут.
+
 ## Аудит R4.2–R4.7 (2026-07-26) — привязаны ВСЕ публичные поля inner-statement
 
 Двухэкспертный аудит (крипто + код) on-chain слоя рекурсии. Одна HIGH-находка каждого типа,
@@ -786,8 +852,8 @@ RangeQBatch LOG=8   288  cols  — az_hat[j][p] ∈ [0, Q) для K=6 полин
 | **VFRI10 hash backend** | **✅ Done** | **t=4 wide Merkle (`Poseidon2MerkleVerifierT4`) + Fiat-Shamir channel (`Poseidon2ChannelT4`) + Rust refs, cross-checked; 321 Rust + 929 Solidity (2026-06-13)** |
 | **VFRI10 верификатор** | **✅ Done** | **`QLSAVerifierVFRI10.sol` — VFRI9-протокол на t=4 backend; `gen_vfri10_hints_from_cols_nfolds`; on-chain verify()==true; 323 Rust + 940 Solidity (2026-06-13)** |
 | **VFRI10 production pipeline** | **✅ Done** | **V23 cross-bound обёртки + PyO3 + Python + on-chain dual E2E; per-group verify ≤16.7M; 210 Python + 950 Solidity (2026-06-14)** |
-| **BatchRegistryV6** | **✅ Done** | **Per-group split: 1 verify()/tx (LOG=10 ~10.6M, LOG=8 ~7.9M gas, оба ≤16.7M); полный V23 t=4 deployable через 2 tx (2026-06-14)** |
-| **VFRI11 (t=8)** | **✅ Done** | **VFRI10-протокол на Poseidon2 t=8 backend (4-словные/124-бит узлы → 2^62); generic verify()~13.1M; full-V23 t=8 >100M газа on-chain (2026-06-16)** |
+| **BatchRegistryV6** | **✅ Done** | **Per-group split: 1 verify()/tx (теперь 2.15M / 1.70M gas). После R4.8 split опционален — единый `BatchRegistryV5.submitBatch` укладывается в cap (3.74M для t=4) (2026-06-14; газ 2026-07-30)** |
+| **VFRI11 (t=8)** | **✅ Done** | **VFRI10-протокол на Poseidon2 t=8 backend (4-словные/124-бит узлы → 2^62); full-V23 t=8 on-chain: LOG=10 3.34M / LOG=8 2.63M, dual submitBatch 6.06M в одной tx (2026-06-16; газ пересчитан 2026-07-30, R4.8)** |
 | **t=16 standalone** | **⏭️ SKIPPED** | **Решение 2026-06-17: газовая стена ~×4 хуже t=8; t=16 переезжает внутрь рекурсии как inner hash AIR** |
 | **Рекурсия** | **⏳ IN PROGRESS** | **STARK, доказывающий VFRI11-верификацию → константный ~5M газа on-chain + inner hash любой ширины (t=16/RPO256) бесплатно. `docs/roadmap/recursion.md`, `stark_stwo/src/recursive/`** |
 

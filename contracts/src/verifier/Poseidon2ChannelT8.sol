@@ -124,17 +124,7 @@ library Poseidon2ChannelT8 {
         uint256 s0;
         unchecked { s0 = uint256(st.s0) + w; }
         if (s0 >= P) s0 -= P;
-        uint256[8] memory s;
-        s[0] = s0;
-        s[1] = uint256(st.s1);
-        s[2] = uint256(st.s2);
-        s[3] = uint256(st.s3);
-        s[4] = uint256(st.s4);
-        s[5] = uint256(st.s5);
-        s[6] = uint256(st.s6);
-        s[7] = uint256(st.s7);
-        s = Poseidon2M31T8.permute(s);
-        _store(st, s);
+        _permuteInto(st, s0);
     }
 
     /// @dev Squeeze one pair of M31 words (s0, s1): save (s0,s1), mix nDraws into
@@ -145,28 +135,28 @@ library Poseidon2ChannelT8 {
         uint256 s0;
         unchecked { s0 = uint256(st.s0) + uint256(st.nDraws); }
         if (s0 >= P) s0 -= P;
-        uint256[8] memory s;
-        s[0] = s0;
-        s[1] = uint256(st.s1);
-        s[2] = uint256(st.s2);
-        s[3] = uint256(st.s3);
-        s[4] = uint256(st.s4);
-        s[5] = uint256(st.s5);
-        s[6] = uint256(st.s6);
-        s[7] = uint256(st.s7);
-        s = Poseidon2M31T8.permute(s);
-        _store(st, s);
+        _permuteInto(st, s0);
         st.nDraws++;
     }
 
-    function _store(State memory st, uint256[8] memory s) private pure {
-        st.s0 = uint32(s[0]);
-        st.s1 = uint32(s[1]);
-        st.s2 = uint32(s[2]);
-        st.s3 = uint32(s[3]);
-        st.s4 = uint32(s[4]);
-        st.s5 = uint32(s[5]);
-        st.s6 = uint32(s[6]);
-        st.s7 = uint32(s[7]);
+    /// @dev Permute (newS0, st.s1..st.s7) and write the result back into `st`.
+    ///      Goes straight to the stack-based `permute8` — no uint256[8] round trip.
+    function _permuteInto(State memory st, uint256 newS0) private pure {
+        (
+            uint256 o0, uint256 o1, uint256 o2, uint256 o3,
+            uint256 o4, uint256 o5, uint256 o6, uint256 o7
+        ) = Poseidon2M31T8.permute8(
+            newS0,
+            uint256(st.s1), uint256(st.s2), uint256(st.s3),
+            uint256(st.s4), uint256(st.s5), uint256(st.s6), uint256(st.s7)
+        );
+        st.s0 = uint32(o0);
+        st.s1 = uint32(o1);
+        st.s2 = uint32(o2);
+        st.s3 = uint32(o3);
+        st.s4 = uint32(o4);
+        st.s5 = uint32(o5);
+        st.s6 = uint32(o6);
+        st.s7 = uint32(o7);
     }
 }
