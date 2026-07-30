@@ -16,7 +16,9 @@ import os
 import time
 from pathlib import Path
 
+from eth_abi.exceptions import DecodingError
 from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 from web3.middleware import ExtraDataToPOAMiddleware
 
 logger = logging.getLogger(__name__)
@@ -80,6 +82,82 @@ _REGISTRY_ABI = json.loads("""
   {"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"senderNonces","outputs":[{"internalType":"uint64","name":"","type":"uint64"}],"stateMutability":"view","type":"function"}
 ]
 """)
+
+
+# ── Registry-kind detection ───────────────────────────────────────────────────
+#
+# The three stacks pair a prover protocol with a registry SHAPE:
+#
+#   --stack v4 / v7 -> BatchRegistryV4 / V5: submitBatch[WithNonces] (one tx)
+#   --stack v6      -> BatchRegistryV6:      submitGroup10 + submitGroup8 (two txs)
+#
+# Pointing REGISTRY_ADDRESS at the wrong shape otherwise fails deep inside a
+# transaction with an opaque error (calling a selector the contract does not
+# implement), so probe it up front and say plainly what is mismatched.
+#
+# `pendingGroups(bytes32)` exists ONLY on BatchRegistryV6, which makes it an exact
+# discriminator between the two shapes. V4 vs V5 cannot be told apart on-chain —
+# their ABIs are byte-identical, only the wired verifier differs — but that
+# mismatch surfaces legibly as Log10ProofInvalid from verify(), not as a decode
+# failure, so it needs no probe.
+
+_PER_GROUP = "per-group"        # BatchRegistryV6
+_SINGLE_SUBMIT = "single-submit"  # BatchRegistryV4 / V5
+
+# Only CONTRACT-level failures mean "this selector is not implemented".  A
+# transport failure (dead RPC, timeout, rate limit) must NOT be read as an answer:
+# swallowing it would silently classify a BatchRegistryV6 as V4/V5 and let a
+# mismatched submission proceed.  Verified against a live node — a missing selector
+# raises ContractLogicError, a dead endpoint raises requests.ConnectionError — so
+# anything outside this tuple propagates to the caller.
+_NO_SUCH_FUNCTION = (
+    ContractLogicError,      # reverted / no such function
+    BadFunctionCallOutput,   # empty or undecodable return data
+    DecodingError,           # return data did not match the probe ABI
+)
+
+_PENDING_GROUPS_ABI = json.loads("""
+[
+  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"pendingGroups","outputs":[{"internalType":"bool","name":"","type":"bool"},{"internalType":"bool","name":"","type":"bool"},{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"}
+]
+""")
+
+
+def detect_registry_kind(w3: Web3, registry_address: str) -> str:
+    """Return ``_PER_GROUP`` or ``_SINGLE_SUBMIT`` for a deployed registry.
+
+    Probes ``pendingGroups(bytes32)``, which only BatchRegistryV6 implements.
+    Raises RuntimeError if there is no contract at the address at all — a far more
+    common misconfiguration than a wrong registry version.
+    """
+    addr = Web3.to_checksum_address(registry_address)
+    if w3.eth.get_code(addr) in (b"", b"0x"):
+        raise RuntimeError(
+            f"no contract deployed at REGISTRY_ADDRESS={addr} "
+            "(wrong network, or the address was never deployed)"
+        )
+    probe = w3.eth.contract(address=addr, abi=_PENDING_GROUPS_ABI)
+    try:
+        probe.functions.pendingGroups(b"\x00" * 32).call()
+    except _NO_SUCH_FUNCTION as exc:
+        # Contract-level failure: the selector is not implemented (V4/V5).
+        logger.debug("pendingGroups probe rejected by %s: %s", addr, exc)
+        return _SINGLE_SUBMIT
+    return _PER_GROUP
+
+
+def require_registry_kind(
+    w3: Web3, registry_address: str, expected_kind: str, expected_registry: str
+) -> None:
+    """Raise RuntimeError unless the deployed registry has the expected shape."""
+    kind = detect_registry_kind(w3, registry_address)
+    if kind != expected_kind:
+        raise RuntimeError(
+            f"REGISTRY_ADDRESS={registry_address} is a {kind} registry, but this "
+            f"submitter expects {expected_kind} ({expected_registry}). Check --stack "
+            "against the deployed contract: v4/v7 need BatchRegistryV4/V5, "
+            "v6 needs BatchRegistryV6."
+        )
 
 
 class OnchainSubmitter:
@@ -277,6 +355,12 @@ _REGISTRY_V4_ABI = json.loads("""
 class OnchainSubmitterV4:
     """Wraps web3 interaction with BatchRegistryV4 (dual VFRI7 proofs)."""
 
+    #: Registry shape this submitter speaks; checked against the deployed contract.
+    _EXPECTED_KIND = _SINGLE_SUBMIT
+    _EXPECTED_REGISTRY = "BatchRegistryV4/V5"
+    #: Log prefix — subclasses override it so a v7 run does not log "V4".
+    _LOG_TAG = "V4"
+
     def __init__(
         self,
         rpc_url: str,
@@ -294,9 +378,17 @@ class OnchainSubmitterV4:
             address=Web3.to_checksum_address(registry_address),
             abi=_REGISTRY_V4_ABI,
         )
+        require_registry_kind(
+            self.w3, registry_address, self._EXPECTED_KIND, self._EXPECTED_REGISTRY
+        )
         self.gas_limit = gas_limit
         self.confirm_timeout_s = confirm_timeout_s
-        logger.info("submitterV4 ready: account=%s chain=%d", self.account.address, self.w3.eth.chain_id)
+        logger.info(
+            "submitter%s ready: account=%s chain=%d",
+            self._LOG_TAG, self.account.address, self.w3.eth.chain_id,
+        )
+
+
 
     @classmethod
     def from_env(cls) -> "OnchainSubmitterV4":
@@ -348,7 +440,7 @@ class OnchainSubmitterV4:
         signed = self.account.sign_transaction(tx)
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         tx_hex = tx_hash.hex()
-        logger.info("V4 tx submitted: %s", tx_hex)
+        logger.info("%s tx submitted: %s", self._LOG_TAG, tx_hex)
         return tx_hex
 
     def submit_batch_with_nonces(
@@ -385,7 +477,7 @@ class OnchainSubmitterV4:
         signed = self.account.sign_transaction(tx)
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         tx_hex = tx_hash.hex()
-        logger.info("V4 tx submitted (with nonces): %s", tx_hex)
+        logger.info("%s tx submitted (with nonces): %s", self._LOG_TAG, tx_hex)
         return tx_hex
 
     def wait_and_verify(self, tx_hash: str, merkle_root: bytes) -> bool:
@@ -412,7 +504,8 @@ class OnchainSubmitterV4:
         if finalized:
             c10 = self.registry.functions.batchCommitmentsLog10(root_b32).call()
             logger.info(
-                "V4 batch finalized: root=%s commitmentLog10=%s",
+                "%s batch finalized: root=%s commitmentLog10=%s",
+                self._LOG_TAG,
                 root_b32.hex()[:16],
                 c10.hex(),
             )
@@ -451,6 +544,51 @@ _REGISTRY_V6_ABI = json.loads("""
 """)
 
 
+class OnchainSubmitterV5(OnchainSubmitterV4):
+    """Wraps web3 interaction with BatchRegistryV5 (atomic dual VFRI11 / t=8).
+
+    BatchRegistryV5's ABI is byte-identical to BatchRegistryV4's (same
+    ``submitBatch`` / ``submitBatchWithNonces`` / ``isBatchFinalized`` /
+    ``senderNonces`` signatures) — only the wired verifier differs, so the whole
+    of ``OnchainSubmitterV4`` applies unchanged. This subclass exists to name the
+    MVP-7 stack explicitly and to carry the correct gas/soundness notes.
+
+    Stack: ``QLSAVerifierVFRI11`` (Poseidon2 t=8 → 4-word/124-bit Merkle nodes,
+    node collision ~2^62, versus t=4's ~2^31) behind ``BatchRegistryV5``, which
+    verifies BOTH V23 trace groups in ONE transaction with cross-proof binding
+    computed on-chain:
+
+      boundRoot10 = keccak256(merkleRoot | traceRoot8)
+      boundRoot8  = keccak256(merkleRoot | traceRoot10)
+
+    Measured cost of the atomic dual verify: ~6.06M gas (LOG=10 ~3.34M + LOG=8
+    ~2.63M + overhead), inside the 16,777,216 (2^24, EIP-7825) per-tx cap. Before
+    the R4.8 Poseidon2 rewrite the same call needed >18M, which is why
+    :class:`OnchainSubmitterV6` splits the work across two transactions; that
+    split is now an option (lower peak gas per tx) rather than a requirement.
+    """
+
+    _EXPECTED_REGISTRY = "BatchRegistryV5"
+    _LOG_TAG = "V5"
+
+    def __init__(
+        self,
+        rpc_url: str,
+        private_key: str,
+        registry_address: str,
+        gas_limit: int = 16_700_000,
+        confirm_timeout_s: int = 180,
+    ) -> None:
+        super().__init__(
+            rpc_url=rpc_url,
+            private_key=private_key,
+            registry_address=registry_address,
+            gas_limit=gas_limit,
+            confirm_timeout_s=confirm_timeout_s,
+        )
+        logger.info("stack: VFRI11 (Poseidon2 t=8, node ~2^62), atomic dual verify in one tx")
+
+
 class OnchainSubmitterV6:
     """Wraps web3 interaction with BatchRegistryV6 (per-group split, dual VFRI10).
 
@@ -465,6 +603,10 @@ class OnchainSubmitterV6:
     root (``proof[8:40]``), reproducing BatchRegistryV5's atomic cross-binding
     lazily across two transactions.
     """
+
+    #: Registry shape this submitter speaks; checked against the deployed contract.
+    _EXPECTED_KIND = _PER_GROUP
+    _EXPECTED_REGISTRY = "BatchRegistryV6"
 
     def __init__(
         self,
@@ -482,6 +624,9 @@ class OnchainSubmitterV6:
         self.registry = self.w3.eth.contract(
             address=Web3.to_checksum_address(registry_address),
             abi=_REGISTRY_V6_ABI,
+        )
+        require_registry_kind(
+            self.w3, registry_address, self._EXPECTED_KIND, self._EXPECTED_REGISTRY
         )
         self.gas_limit = gas_limit
         self.confirm_timeout_s = confirm_timeout_s

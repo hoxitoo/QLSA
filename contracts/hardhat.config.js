@@ -1,6 +1,36 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("dotenv").config({ path: "../.env" });
 
+// Optional escape hatch for sandboxes whose egress policy blocks
+// binaries.soliditylang.org (hardhat's compiler download host).  With
+// QLSA_LOCAL_SOLCJS=1 the compile task uses the `solc` npm package's
+// soljson.js instead of a downloaded native binary — same compiler version,
+// just slower.  Inert without the env var, so CI is unaffected.
+//
+//   npm install --no-save solc@0.8.35
+//   QLSA_LOCAL_SOLCJS=1 npx hardhat test
+if (process.env.QLSA_LOCAL_SOLCJS === "1") {
+  const { subtask } = require("hardhat/config");
+  const {
+    TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD,
+  } = require("hardhat/builtin-tasks/task-names");
+
+  subtask(TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD, async (args, _hre, runSuper) => {
+    try {
+      const local = require("solc/package.json").version;
+      if (local.split("+")[0] !== args.solcVersion) return runSuper();
+      return {
+        compilerPath: require.resolve("solc/soljson.js"),
+        isSolcJs: true,
+        version: args.solcVersion,
+        longVersion: local,
+      };
+    } catch {
+      return runSuper();
+    }
+  });
+}
+
 const RPC_URL         = process.env.RPC_URL         || "";
 const POLYGON_ZKEVM   = process.env.POLYGON_ZKEVM_RPC || "";
 const PRIVATE_KEY     = process.env.PRIVATE_KEY      || "";

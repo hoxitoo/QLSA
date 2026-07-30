@@ -89,4 +89,30 @@ describe("Poseidon2M31T4", function () {
       expect(a).to.not.deep.equal(b);
     });
   });
+
+  // Frozen Rust vectors for both tail parities (mirrors
+  // stark_stwo poseidon2_t4.rs::sponge_length_vectors).  The other cross-check
+  // covers only n = 8, an exact multiple of the rate, so without these the
+  // odd-tail branch (absorb rem[0] into s0, then s3 += 1) is pinned on neither side.
+  describe("sponge — every tail parity (Rust cross-check)", () => {
+    const SPONGE_1_TO_8 = [
+      [1820522999n, 34679397n],
+      [524555141n, 137084408n],
+      [1862243750n, 449482630n],
+      [188265029n, 348838750n],
+      [1491877616n, 716646245n],
+      [1527875717n, 302206499n],
+      [1714831849n, 1861755525n],
+      [1315656215n, 594434174n],
+    ];
+
+    it("matches Rust sponge_t4 for n = 1..8", async () => {
+      for (let n = 1; n <= 8; n++) {
+        const vals = Array.from({ length: n }, (_, i) => i + 1);
+        const out = await h.sponge(vals);
+        expect([BigInt(out[0]), BigInt(out[1])], `length ${n}`)
+          .to.deep.equal(SPONGE_1_TO_8[n - 1]);
+      }
+    });
+  });
 });

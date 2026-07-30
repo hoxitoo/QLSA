@@ -42,136 +42,208 @@ library Poseidon2M31T8 {
 
     uint256 internal constant P = M31.P; // 2^31 - 1
 
-    /// @dev a + b mod P.  Requires a, b < P.
-    function _add(uint256 a, uint256 b) private pure returns (uint256 r) {
-        unchecked { r = a + b; }
-        if (r >= P) r -= P;
-    }
+    // ── Lazy reduction ────────────────────────────────────────────────────────
+    //
+    // The linear layers below add WITHOUT reducing mod P.  This is exact, not an
+    // approximation: addition and multiplication mod P are ring homomorphisms, so
+    // an unreduced accumulator ≡ the reduced one (mod P), and every S-box goes
+    // through `mulmod(…, P)`, which reduces its output regardless of how large
+    // its inputs were.  Reduction therefore only has to happen where a value
+    // LEAVES the permutation (see the `% P` on permute8's return).
+    //
+    // Magnitude bound (why uint256 never overflows).  M_E's largest row-coefficient
+    // sum is 48 (2·M4 ‖ M4, M4's max row sum being 16), and every external round
+    // S-boxes before its linear layer, so M_E only ever sees inputs < 2^32 and
+    // emits < 48·2^32 < 2^38.  An internal round emits sum + μ_i·s_i < 8·B + P, so
+    // 14 of them starting from B < 2^38 stay under 8^14·2^38 < 2^80.  The following
+    // external round S-boxes first, collapsing back under P.  Peak ≈ 2^80 ≪ 2^256.
 
-    /// @dev x^5 mod P — the Poseidon2 S-box.  3 mulmod operations.
+    /// @dev x^5 mod P — the Poseidon2 S-box.  3 mulmods; accepts unreduced x.
     function _sbox(uint256 x) private pure returns (uint256) {
         uint256 x2 = mulmod(x, x, P);
         uint256 x4 = mulmod(x2, x2, P);
         return mulmod(x4, x, P);
     }
 
-    /// @dev M4 block multiply (Poseidon2 §5.1 fast path, 8 additions).
+    /// @dev M4 block multiply (Poseidon2 §5.1 fast path), unreduced.
     function _m4(uint256 a0, uint256 a1, uint256 a2, uint256 a3)
         private pure
         returns (uint256, uint256, uint256, uint256)
     {
-        uint256 t0 = _add(a0, a1);
-        uint256 t1 = _add(a2, a3);
-        uint256 t2 = _add(_add(a1, a1), t1);
-        uint256 t3 = _add(_add(a3, a3), t0);
-        uint256 t4 = _add(_add(_add(t1, t1), _add(t1, t1)), t3);
-        uint256 t5 = _add(_add(_add(t0, t0), _add(t0, t0)), t2);
-        return (_add(t3, t5), t5, _add(t2, t4), t4);
+        unchecked {
+            uint256 t0 = a0 + a1;
+            uint256 t1 = a2 + a3;
+            uint256 t2 = a1 + a1 + t1;
+            uint256 t3 = a3 + a3 + t0;
+            uint256 t4 = (t1 << 2) + t3;
+            uint256 t5 = (t0 << 2) + t2;
+            return (t3 + t5, t5, t2 + t4, t4);
+        }
     }
 
-    /// @dev External linear layer: M_E = [[2·M4, M4], [M4, 2·M4]].
+    /// @dev External linear layer: M_E = [[2·M4, M4], [M4, 2·M4]], unreduced.
     ///      out_block_i = M4·block_i + (M4·block_0 + M4·block_1).
-    function _matE(uint256[8] memory s) private pure {
-        (uint256 a0, uint256 a1, uint256 a2, uint256 a3) = _m4(s[0], s[1], s[2], s[3]);
-        (uint256 b0, uint256 b1, uint256 b2, uint256 b3) = _m4(s[4], s[5], s[6], s[7]);
-        uint256 g0 = _add(a0, b0);
-        uint256 g1 = _add(a1, b1);
-        uint256 g2 = _add(a2, b2);
-        uint256 g3 = _add(a3, b3);
-        s[0] = _add(a0, g0);
-        s[1] = _add(a1, g1);
-        s[2] = _add(a2, g2);
-        s[3] = _add(a3, g3);
-        s[4] = _add(b0, g0);
-        s[5] = _add(b1, g1);
-        s[6] = _add(b2, g2);
-        s[7] = _add(b3, g3);
+    function _matE(
+        uint256 s0, uint256 s1, uint256 s2, uint256 s3,
+        uint256 s4, uint256 s5, uint256 s6, uint256 s7
+    )
+        private pure
+        returns (uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256)
+    {
+        unchecked {
+            (uint256 a0, uint256 a1, uint256 a2, uint256 a3) = _m4(s0, s1, s2, s3);
+            (uint256 b0, uint256 b1, uint256 b2, uint256 b3) = _m4(s4, s5, s6, s7);
+            uint256 g0 = a0 + b0;
+            uint256 g1 = a1 + b1;
+            uint256 g2 = a2 + b2;
+            uint256 g3 = a3 + b3;
+            return (
+                a0 + g0, a1 + g1, a2 + g2, a3 + g3,
+                b0 + g0, b1 + g1, b2 + g2, b3 + g3
+            );
+        }
     }
 
     /// @dev Internal linear layer: out_i = (Σ_j s_j) + μ_i·s_i with μ = (1,…,8).
-    ///      μ_i·s_i computed as a single mulmod (== (i+1) repeated adds in the
-    ///      Rust reference, identical result mod P).
-    function _matI(uint256[8] memory s) private pure {
-        uint256 sum = 0;
-        for (uint256 i = 0; i < 8; i++) {
-            sum = _add(sum, s[i]);
+    ///      μ_i·s_i is one mulmod (== (i+1) repeated adds in the Rust reference,
+    ///      identical result mod P); the Σ is left unreduced.
+    function _matI(
+        uint256 s0, uint256 s1, uint256 s2, uint256 s3,
+        uint256 s4, uint256 s5, uint256 s6, uint256 s7
+    )
+        private pure
+        returns (uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256)
+    {
+        unchecked {
+            uint256 sum = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7;
+            return (
+                sum + (s0 % P),
+                sum + mulmod(2, s1, P),
+                sum + mulmod(3, s2, P),
+                sum + mulmod(4, s3, P),
+                sum + mulmod(5, s4, P),
+                sum + mulmod(6, s5, P),
+                sum + mulmod(7, s6, P),
+                sum + mulmod(8, s7, P)
+            );
         }
-        for (uint256 i = 0; i < 8; i++) {
-            s[i] = _add(sum, mulmod(i + 1, s[i], P));
-        }
-    }
-
-    /// @dev One external round: AddRC → SBox(all 8) → M_E.
-    function _ext(
-        uint256[8] memory s,
-        uint256 c0, uint256 c1, uint256 c2, uint256 c3,
-        uint256 c4, uint256 c5, uint256 c6, uint256 c7
-    ) private pure {
-        s[0] = _sbox(_add(s[0], c0));
-        s[1] = _sbox(_add(s[1], c1));
-        s[2] = _sbox(_add(s[2], c2));
-        s[3] = _sbox(_add(s[3], c3));
-        s[4] = _sbox(_add(s[4], c4));
-        s[5] = _sbox(_add(s[5], c5));
-        s[6] = _sbox(_add(s[6], c6));
-        s[7] = _sbox(_add(s[7], c7));
-        _matE(s);
     }
 
     /// @dev One internal round: AddRC to cell 0 → SBox(cell 0) → M_I.
-    function _int(uint256[8] memory s, uint256 c0) private pure {
-        s[0] = _sbox(_add(s[0], c0));
-        _matI(s);
+    function _int(
+        uint256 s0, uint256 s1, uint256 s2, uint256 s3,
+        uint256 s4, uint256 s5, uint256 s6, uint256 s7,
+        uint256 c0
+    )
+        private pure
+        returns (uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256)
+    {
+        unchecked {
+            return _matI(_sbox(s0 + c0), s1, s2, s3, s4, s5, s6, s7);
+        }
     }
 
-    /// @notice Apply the Poseidon2 t=8 permutation in place to an 8-cell state.
-    /// @dev All inputs must be < P; outputs are < P.
+    /// @notice Apply the Poseidon2 t=8 permutation to a state held on the stack.
+    /// @dev Inputs may exceed P (they are reduced through the first S-box layer);
+    ///      every returned cell is < P.  This is the hot path — the array-based
+    ///      `permute` below is a thin wrapper kept for callers/tests that already
+    ///      hold a `uint256[8]`.
+    function permute8(
+        uint256 s0, uint256 s1, uint256 s2, uint256 s3,
+        uint256 s4, uint256 s5, uint256 s6, uint256 s7
+    )
+        internal pure
+        returns (uint256, uint256, uint256, uint256, uint256, uint256, uint256, uint256)
+    {
+        unchecked {
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(s0, s1, s2, s3, s4, s5, s6, s7);
+
+            // External rounds 0..3 — RC[0..32).
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 2012176458), _sbox(s1 + 1849299961), _sbox(s2 + 1732939933), _sbox(s3 + 390435213),
+                _sbox(s4 + 1583598125), _sbox(s5 + 1521506328), _sbox(s6 + 1850315157), _sbox(s7 + 593064883)
+            );
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 442979704), _sbox(s1 + 49299287), _sbox(s2 + 668322884), _sbox(s3 + 1478447923),
+                _sbox(s4 + 2117627097), _sbox(s5 + 894462472), _sbox(s6 + 335092600), _sbox(s7 + 304090409)
+            );
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 1725083656), _sbox(s1 + 1823780446), _sbox(s2 + 1589693490), _sbox(s3 + 336928399),
+                _sbox(s4 + 1533176076), _sbox(s5 + 1472808391), _sbox(s6 + 1197491867), _sbox(s7 + 1980232791)
+            );
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 1332985942), _sbox(s1 + 553469441), _sbox(s2 + 542603061), _sbox(s3 + 145062400),
+                _sbox(s4 + 1801771230), _sbox(s5 + 501797052), _sbox(s6 + 191408558), _sbox(s7 + 124556117)
+            );
+
+            // Internal rounds 0..13 — RC[64..78).
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 672534258);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 1626884035);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 1258567472);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 1521030780);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 609641534);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 426249300);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 1360556010);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 668676905);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 453695314);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 178868843);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 1293599881);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 595916213);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 1841032014);
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _int(s0, s1, s2, s3, s4, s5, s6, s7, 29885509);
+
+            // External rounds 4..7 — RC[32..64).
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 767378382), _sbox(s1 + 870276988), _sbox(s2 + 2046892345), _sbox(s3 + 12605708),
+                _sbox(s4 + 1937961243), _sbox(s5 + 903615558), _sbox(s6 + 781360720), _sbox(s7 + 458985484)
+            );
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 768021800), _sbox(s1 + 1017409239), _sbox(s2 + 1219264179), _sbox(s3 + 1642454766),
+                _sbox(s4 + 518313705), _sbox(s5 + 101708341), _sbox(s6 + 1618375810), _sbox(s7 + 1323121046)
+            );
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 1721228118), _sbox(s1 + 339098950), _sbox(s2 + 1976827842), _sbox(s3 + 1756100371),
+                _sbox(s4 + 1309626382), _sbox(s5 + 451150501), _sbox(s6 + 491114795), _sbox(s7 + 994585973)
+            );
+            (s0, s1, s2, s3, s4, s5, s6, s7) = _matE(
+                _sbox(s0 + 1034786474), _sbox(s1 + 575533575), _sbox(s2 + 1809299734), _sbox(s3 + 1497205669),
+                _sbox(s4 + 961538106), _sbox(s5 + 1152123009), _sbox(s6 + 606500650), _sbox(s7 + 2046687220)
+            );
+
+            // The only place reduction is owed: on the way out.
+            return (s0 % P, s1 % P, s2 % P, s3 % P, s4 % P, s5 % P, s6 % P, s7 % P);
+        }
+    }
+
+    /// @notice Array-shaped wrapper around `permute8`.
+    /// @dev Inputs need not be < P; outputs are < P.
     function permute(uint256[8] memory s) internal pure returns (uint256[8] memory) {
-        _matE(s);
-
-        // External rounds 0..3 — RC[0..32).
-        _ext(s, 2012176458, 1849299961, 1732939933, 390435213, 1583598125, 1521506328, 1850315157, 593064883);
-        _ext(s, 442979704, 49299287, 668322884, 1478447923, 2117627097, 894462472, 335092600, 304090409);
-        _ext(s, 1725083656, 1823780446, 1589693490, 336928399, 1533176076, 1472808391, 1197491867, 1980232791);
-        _ext(s, 1332985942, 553469441, 542603061, 145062400, 1801771230, 501797052, 191408558, 124556117);
-
-        // Internal rounds 0..13 — RC[64..78).
-        _int(s, 672534258);
-        _int(s, 1626884035);
-        _int(s, 1258567472);
-        _int(s, 1521030780);
-        _int(s, 609641534);
-        _int(s, 426249300);
-        _int(s, 1360556010);
-        _int(s, 668676905);
-        _int(s, 453695314);
-        _int(s, 178868843);
-        _int(s, 1293599881);
-        _int(s, 595916213);
-        _int(s, 1841032014);
-        _int(s, 29885509);
-
-        // External rounds 4..7 — RC[32..64).
-        _ext(s, 767378382, 870276988, 2046892345, 12605708, 1937961243, 903615558, 781360720, 458985484);
-        _ext(s, 768021800, 1017409239, 1219264179, 1642454766, 518313705, 101708341, 1618375810, 1323121046);
-        _ext(s, 1721228118, 339098950, 1976827842, 1756100371, 1309626382, 451150501, 491114795, 994585973);
-        _ext(s, 1034786474, 575533575, 1809299734, 1497205669, 961538106, 1152123009, 606500650, 2046687220);
-
+        (s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]) =
+            permute8(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
         return s;
     }
 
     /// @notice Two-to-one compression for 124-bit wide Merkle nodes.
     /// @dev Node = 4 M31 words.  state = (l0..l3, r0..r3) → permute → (s0..s3).
     ///      Matches compress_t8 in poseidon2_t8.rs.
+    function compress4(
+        uint256 l0, uint256 l1, uint256 l2, uint256 l3,
+        uint256 r0, uint256 r1, uint256 r2, uint256 r3
+    )
+        internal pure
+        returns (uint256 o0, uint256 o1, uint256 o2, uint256 o3)
+    {
+        (o0, o1, o2, o3, , , , ) = permute8(l0, l1, l2, l3, r0, r1, r2, r3);
+    }
+
+    /// @notice Array-shaped wrapper around `compress4`.
     function compress(uint256[4] memory left, uint256[4] memory right)
         internal pure
         returns (uint256[4] memory out)
     {
-        uint256[8] memory s;
-        s[0] = left[0]; s[1] = left[1]; s[2] = left[2]; s[3] = left[3];
-        s[4] = right[0]; s[5] = right[1]; s[6] = right[2]; s[7] = right[3];
-        s = permute(s);
-        out[0] = s[0]; out[1] = s[1]; out[2] = s[2]; out[3] = s[3];
+        (out[0], out[1], out[2], out[3]) = compress4(
+            left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3]
+        );
     }
 
     /// @notice Rate-4 capacity-4 sponge over a sequence of M31 field elements.
@@ -190,25 +262,41 @@ library Poseidon2M31T8 {
     ///        VFRI pipeline every word is already a QM31 limb < P.
     /// @return out   The 4-word (124-bit) node: state cells 0..3 after absorption.
     function sponge(uint256[] memory values) internal pure returns (uint256[4] memory out) {
-        uint256[8] memory s;
-        uint256 n = values.length;
-        uint256 i = 0;
-        for (; i + 4 <= n; i += 4) {
-            s[0] = _add(s[0], values[i] % P);
-            s[1] = _add(s[1], values[i + 1] % P);
-            s[2] = _add(s[2], values[i + 2] % P);
-            s[3] = _add(s[3], values[i + 3] % P);
-            s = permute(s);
-        }
-        if (i < n) {
-            uint256 k = 0;
-            for (; i < n; i++) {
-                s[k] = _add(s[k], values[i] % P);
-                k++;
+        (out[0], out[1], out[2], out[3]) = sponge4(values);
+    }
+
+    /// @notice `sponge` returning the node's four words on the stack.
+    function sponge4(uint256[] memory values)
+        internal pure
+        returns (uint256 n0, uint256 n1, uint256 n2, uint256 n3)
+    {
+        unchecked {
+            uint256 s0;
+            uint256 s1;
+            uint256 s2;
+            uint256 s3;
+            uint256 s4;
+            uint256 s5;
+            uint256 s6;
+            uint256 s7;
+            uint256 n = values.length;
+            uint256 i = 0;
+            for (; i + 4 <= n; i += 4) {
+                // Absorbed sums stay < 2^32; permute8 tolerates unreduced inputs.
+                s0 += values[i] % P;
+                s1 += values[i + 1] % P;
+                s2 += values[i + 2] % P;
+                s3 += values[i + 3] % P;
+                (s0, s1, s2, s3, s4, s5, s6, s7) = permute8(s0, s1, s2, s3, s4, s5, s6, s7);
             }
-            s[7] = _add(s[7], 1);
-            s = permute(s);
+            if (i < n) {
+                s0 += values[i] % P;
+                if (i + 1 < n) s1 += values[i + 1] % P;
+                if (i + 2 < n) s2 += values[i + 2] % P;
+                s7 += 1;
+                (s0, s1, s2, s3, s4, s5, s6, s7) = permute8(s0, s1, s2, s3, s4, s5, s6, s7);
+            }
+            return (s0, s1, s2, s3);
         }
-        out[0] = s[0]; out[1] = s[1]; out[2] = s[2]; out[3] = s[3];
     }
 }

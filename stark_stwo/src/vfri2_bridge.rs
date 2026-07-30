@@ -8023,7 +8023,6 @@ mod tests_vfri8 {
     #[test]
     fn test_recursive_outer_trace_vfri11_hints() {
         use crate::recursive::composition_t8::outer_trace_columns_t8;
-        use sha3::{Digest as Sha3Digest, Keccak256};
 
         let n = 16usize;
         let cols: Vec<Vec<u32>> = (0..5)
@@ -8085,7 +8084,6 @@ mod tests_vfri8 {
     #[ignore = "regenerates contracts/test/fixtures/recursive_e2e.json"]
     fn write_recursive_e2e_fixture() {
         use crate::recursive::composition_t8::outer_trace_columns_t8;
-        use sha3::{Digest as Sha3Digest, Keccak256};
 
         // ── Inner VFRI11 statement (same params as the channel-replay fixture).
         let n = 16usize;

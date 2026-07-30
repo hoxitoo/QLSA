@@ -26,12 +26,22 @@ library Poseidon2MerkleVerifierT8 {
         return bytes32((n[0] << 96) | (n[1] << 64) | (n[2] << 32) | n[3]);
     }
 
-    function _unpack(bytes32 node) private pure returns (uint256[4] memory n) {
+    function _pack4(uint256 w0, uint256 w1, uint256 w2, uint256 w3)
+        private pure
+        returns (bytes32)
+    {
+        return bytes32((w0 << 96) | (w1 << 64) | (w2 << 32) | w3);
+    }
+
+    function _unpack4(bytes32 node)
+        private pure
+        returns (uint256 w0, uint256 w1, uint256 w2, uint256 w3)
+    {
         uint256 v = uint256(node);
-        n[0] = (v >> 96) & MASK32;
-        n[1] = (v >> 64) & MASK32;
-        n[2] = (v >> 32) & MASK32;
-        n[3] = v & MASK32;
+        w0 = (v >> 96) & MASK32;
+        w1 = (v >> 64) & MASK32;
+        w2 = (v >> 32) & MASK32;
+        w3 = v & MASK32;
     }
 
     // ── Leaf / pair hashing ───────────────────────────────────────────────────
@@ -42,12 +52,17 @@ library Poseidon2MerkleVerifierT8 {
         for (uint256 i = 0; i < colValues.length; i++) {
             vals[i] = uint256(colValues[i]);
         }
-        return _pack(Poseidon2M31T8.sponge(vals));
+        (uint256 n0, uint256 n1, uint256 n2, uint256 n3) = Poseidon2M31T8.sponge4(vals);
+        return _pack4(n0, n1, n2, n3);
     }
 
     /// @notice Wide Poseidon2 t=8 Merkle pair hash (8→4 compression).
     function hashPair(bytes32 left, bytes32 right) internal pure returns (bytes32) {
-        return _pack(Poseidon2M31T8.compress(_unpack(left), _unpack(right)));
+        (uint256 l0, uint256 l1, uint256 l2, uint256 l3) = _unpack4(left);
+        (uint256 r0, uint256 r1, uint256 r2, uint256 r3) = _unpack4(right);
+        (uint256 o0, uint256 o1, uint256 o2, uint256 o3) =
+            Poseidon2M31T8.compress4(l0, l1, l2, l3, r0, r1, r2, r3);
+        return _pack4(o0, o1, o2, o3);
     }
 
     // ── Proof verification ────────────────────────────────────────────────────

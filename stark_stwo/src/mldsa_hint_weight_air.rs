@@ -248,7 +248,6 @@ mod tests {
 
         let n_rows = 1usize << LOG_N_ROWS;
         let h_flat: Vec<i64> = {
-            let k = mldsa::params::K;
             let mut v = vec![0i64; n_rows];
             for (i, row) in h_bits.iter().enumerate() {
                 for (j, &b) in row.iter().enumerate() {

@@ -148,38 +148,40 @@ describe("QLSAVerifierVFRI10 — full V23 cross-bound E2E", function () {
     expect(rejected).to.equal(true, "t=4 verifier must not accept t=2 hints");
   });
 
-  // ── BatchRegistryV5 integration — gas-scale finding ──────────────────────────
+  // ── BatchRegistryV5 integration — single-transaction dual verify ─────────────
   //
-  // Gas finding (2026-06-14): each VFRI10 V23 group verify() fits within the
-  // 16.7M (2^24) per-tx gas cap INDIVIDUALLY (proven by the two acceptance
-  // tests above, ~8–10M each).  BatchRegistryV5.submitBatch runs BOTH t=4
-  // verifies in ONE transaction, so the combined ~16–20M exceeds the per-tx
-  // cap and the transaction runs out of gas in the second (LOG=8) verify.
-  // On Ethereum mainnet (30M block limit) the combined call is expected to fit;
-  // for the 16.7M-capped path, a per-group registry (one verify per tx) is the
-  // production route.  See Known Limitations #6.
+  // History: until 2026-07-30 the two t=4 V23 verifies cost ~10.6M + ~7.9M gas,
+  // so `submitBatch` (which runs BOTH in one transaction) overran the 16,777,216
+  // (2^24, EIP-7825) per-tx cap and ran out of gas in the second verify.  That is
+  // why BatchRegistryV6 splits the groups across two transactions.
+  //
+  // The lazy-reduction + stack-state rewrite of Poseidon2M31T4 cut the per-
+  // permutation cost ~4x (see Poseidon2M31T4.sol "Lazy reduction"), bringing each
+  // group to ~2.1M / ~1.6M and the combined single-transaction submit to ~3.7M —
+  // comfortably inside the cap.  The per-group split is now an option, not a
+  // requirement.
+  //
+  // NOTE on measurement: use the ACTUAL gasUsed from a sent transaction, not
+  // `estimateGas`.  For a transaction that makes nested calls, hardhat's estimator
+  // over-provisions (63/64 rule applied per call frame) and can report >18M for a
+  // transaction whose real cost is ~6M — then trip its own 2^24 cap check.
 
-  it("dual-VFRI10 submitBatch overruns the 16.7M per-tx cap (each group fits alone)", async function () {
+  it("dual-VFRI10 submitBatch finalizes in ONE transaction inside the 16.7M cap", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
-    this.timeout(120_000);
-    let outOfGas = false;
-    try {
-      const tx = await registry5.submitBatch(
-        fixture.merkleRoot,
-        fixture.log10_commitment, fixture.log10_proof, fixture.log10_queryHints,
-        fixture.log8_commitment, fixture.log8_proof, fixture.log8_queryHints,
-        { gasLimit: 16_777_216n }
-      );
-      await tx.wait();
-    } catch (e) {
-      outOfGas = /out of gas|reverted without a reason/i.test(e.message);
-    }
-    expect(outOfGas).to.equal(
-      true,
-      "two t=4 V23 verifies in one tx are expected to exceed 16.7M gas"
+    this.timeout(300_000);
+    const tx = await registry5.submitBatch(
+      fixture.merkleRoot,
+      fixture.log10_commitment, fixture.log10_proof, fixture.log10_queryHints,
+      fixture.log8_commitment, fixture.log8_proof, fixture.log8_queryHints,
+      { gasLimit: 16_777_215n }
     );
-    // Batch must NOT be finalized after a failed submit.
-    expect(await registry5.isBatchFinalized(fixture.merkleRoot)).to.equal(false);
+    const rc = await tx.wait();
+    console.log(`        [gas] dual-VFRI10 submitBatch used = ${rc.gasUsed}`);
+    expect(rc.gasUsed).to.be.lessThan(
+      16_777_216n,
+      "two t=4 V23 verifies must fit one transaction under the EIP-7825 cap"
+    );
+    expect(await registry5.isBatchFinalized(fixture.merkleRoot)).to.equal(true);
   });
 
   // ── Deployment-only checks (run even without fixture) ────────────────────────
