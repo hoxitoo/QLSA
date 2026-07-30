@@ -8258,6 +8258,121 @@ mod tests_vfri8 {
         }
     }
 
+    /// Scaling study: DIRECT VFRI11 verification vs the RECURSION, as a function of
+    /// the inner query count, at production depth/folds.
+    ///
+    /// R4.15 measured a single point (n_queries = 1) and found the recursion 2.7x
+    /// more expensive. The open question is where the two curves cross: direct
+    /// verification should scale linearly in n_queries, while the outer trace grows
+    /// only logarithmically. Both costs are essentially independent of the inner
+    /// column count — VFRI6+ moved the O(n_cols) composition work off-chain — so
+    /// synthetic statements at the real depth/folds give the real answer.
+    ///
+    /// Run with: cargo test write_recursion_scaling_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn write_recursion_scaling_fixture() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+
+        let tree_depth = 10u32;
+        let num_folds = 6usize;
+        let batch_root = [0x77u8; 32];
+        let n = 1usize << tree_depth;
+        let cols: Vec<Vec<u32>> = (0..5)
+            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+            .collect();
+        let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
+
+        let mut entries: Vec<String> = Vec::new();
+        for &q in &[1usize, 2, 4, 8] {
+            // ── DIRECT: what BatchRegistryV5 verifies today, per group.
+            let (d_proof, d_commit, d_hints) =
+                gen_vfri11_hints_from_cols_nfolds(&cols, tree_depth, &batch_root, q, Some(num_folds))
+                    .unwrap();
+
+            // ── RECURSIVE: the same statement proved by the recursion.
+            let ch = vfri11_fri_chain(&cols, tree_depth, &batch_root, q, Some(num_folds)).unwrap();
+            let rec =
+                gen_vfri11_recursion_inputs(&cols, tree_depth, &batch_root, q, Some(num_folds)).unwrap();
+            let (outer_cols, outer_log) =
+                outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths).unwrap();
+            let chan_inputs = Vfri11ChannelInputs {
+                trace_root: ch.trace_root,
+                oods_combo_pos: ch.oods_combo_pos,
+                oods_combo_neg: ch.oods_combo_neg,
+                comp_root: ch.comp_root,
+                fri_layer_roots: ch.layer_roots.clone(),
+                batch_root,
+                tree_depth,
+                n_queries: q,
+            };
+            let outer_bound: [u8; 32] = outer_binding_root(&chan_inputs);
+            // Scale the OUTER fold count with the outer trace. The on-chain
+            // last-layer check rebuilds a tree of 2^(outer_log − outer_folds)
+            // leaves, so a fixed fold count makes that term grow linearly with the
+            // outer trace and dominate everything else. Targeting a 32-leaf last
+            // layer keeps it constant instead.
+            let outer_folds = (outer_log as usize).saturating_sub(5).max(1);
+            let (o_proof, o_commit, o_hints) = gen_vfri11_hints_from_cols_nfolds(
+                &outer_cols, outer_log, &outer_bound, 1, Some(outer_folds),
+            )
+            .unwrap();
+
+            let roots_json: Vec<String> =
+                ch.layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
+            let evals_json: Vec<String> =
+                ch.layer_values[ch.num_folds].iter().map(|v| format!("\"{v}\"")).collect();
+
+            entries.push(format!(
+                concat!(
+                    "{{\n",
+                    "    \"nQueries\": {},\n",
+                    "    \"outerLog\": {},\n",
+                    "    \"direct\": {{\n",
+                    "      \"proof\": \"{}\",\n",
+                    "      \"commitment\": \"0x{}\",\n",
+                    "      \"batchRoot\": \"{}\",\n",
+                    "      \"hints\": \"{}\"\n",
+                    "    }},\n",
+                    "    \"recursive\": {{\n",
+                    "      \"inner\": {{\n",
+                    "        \"traceRoot\": \"{}\",\n",
+                    "        \"oodsComboPos\": \"{}\",\n",
+                    "        \"oodsComboNeg\": \"{}\",\n",
+                    "        \"compRoot\": \"{}\",\n",
+                    "        \"friLayerRoots\": [{}],\n",
+                    "        \"batchRoot\": \"{}\",\n",
+                    "        \"treeDepth\": {},\n",
+                    "        \"nQueries\": {}\n",
+                    "      }},\n",
+                    "      \"outerProof\": \"{}\",\n",
+                    "      \"outerCommitment\": \"0x{}\",\n",
+                    "      \"outerHints\": \"{}\",\n",
+                    "      \"lastLayerEvals\": [{}]\n",
+                    "    }}\n",
+                    "  }}"
+                ),
+                q, outer_log,
+                hx(&d_proof), d_commit, hx(&batch_root), hx(&d_hints),
+                hx(&ch.trace_root), ch.oods_combo_pos, ch.oods_combo_neg, hx(&ch.comp_root),
+                roots_json.join(", "), hx(&batch_root), tree_depth, q,
+                hx(&o_proof), o_commit, hx(&o_hints), evals_json.join(", "),
+            ));
+            println!(
+                "q={q}: outer_log={outer_log} outer_folds={outer_folds} direct_hints={}B outer_hints={}B",
+                d_hints.len(), o_hints.len(),
+            );
+        }
+
+        let json = format!("{{\n  \"points\": [{}]\n}}\n", entries.join(", "));
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/recursion_scaling.json"
+        );
+        std::fs::write(path, json).unwrap();
+        println!("wrote {path}");
+    }
+
     /// Sizing probe: how big is the OUTER recursive trace at production inner
     /// parameters?  The outer trace depends on (n_queries, num_folds, tree_depth)
     /// only — NOT on the inner column count — so a synthetic inner statement at
@@ -8399,9 +8514,17 @@ mod tests_vfri8 {
                 n_queries,
             };
             let outer_bound: [u8; 32] = outer_binding_root(&chan_inputs);
-            let (outer_proof, outer_commit_hex, outer_hints) =
-                gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &outer_bound, 1, Some(2))
-                    .unwrap();
+            // Scale the OUTER fold count with the outer trace: the on-chain
+            // last-layer check rebuilds 2^(outer_log − outer_folds) leaves, so a
+            // FIXED fold count makes that term grow linearly with the outer trace
+            // and dominate the whole verification (measured in R4.16 — it was what
+            // made R4.15 read "recursion is 2.7x more expensive"). Targeting a
+            // 32-leaf last layer keeps it constant.
+            let outer_folds = (outer_log as usize).saturating_sub(5).max(1);
+            let (outer_proof, outer_commit_hex, outer_hints) = gen_vfri11_hints_from_cols_nfolds(
+                &outer_cols, outer_log, &outer_bound, 1, Some(outer_folds),
+            )
+            .unwrap();
             let roots_json: Vec<String> =
                 ch.layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
             let evals_json: Vec<String> =
