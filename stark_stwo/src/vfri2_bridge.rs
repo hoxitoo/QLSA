@@ -8258,6 +8258,43 @@ mod tests_vfri8 {
         }
     }
 
+    /// Sizing probe: how big is the OUTER recursive trace at production inner
+    /// parameters?  The outer trace depends on (n_queries, num_folds, tree_depth)
+    /// only — NOT on the inner column count — so a synthetic inner statement at
+    /// the real config gives the real answer, and V23's 1298/2206 columns are
+    /// irrelevant here.
+    ///
+    /// Run with: cargo test probe_outer_trace_sizes -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_outer_trace_sizes() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        for &(tree_depth, num_folds, n_queries) in &[
+            (4u32, 3usize, 1usize),   // current toy fixture
+            (8, 6, 1),                // V23 LOG=8 group, 1 query
+            (10, 6, 1),               // V23 LOG=10 group, 1 query
+            (10, 6, 2),
+            (10, 6, 4),
+        ] {
+            let n = 1usize << tree_depth;
+            let cols: Vec<Vec<u32>> = (0..5)
+                .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
+                .collect();
+            let br = [0x5Cu8; 32];
+            match gen_vfri11_recursion_inputs(&cols, tree_depth, &br, n_queries, Some(num_folds)) {
+                Ok(rec) => match outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths) {
+                    Ok((outer_cols, outer_log)) => println!(
+                        "depth={tree_depth} folds={num_folds} queries={n_queries} -> outer_log={outer_log} rows={} cols={}",
+                        1usize << outer_log,
+                        outer_cols.len(),
+                    ),
+                    Err(e) => println!("depth={tree_depth} folds={num_folds} queries={n_queries} -> outer trace ERR {e}"),
+                },
+                Err(e) => println!("depth={tree_depth} folds={num_folds} queries={n_queries} -> inputs ERR {e}"),
+            }
+        }
+    }
+
     /// Writes the CROSS-BOUND PAIR fixture consumed by BatchRegistryV7E2E.test.js.
     ///
     /// A V23 batch is two trace groups, so BatchRegistryV7 takes two recursive
@@ -8275,22 +8312,53 @@ mod tests_vfri8 {
     #[test]
     #[ignore]
     fn write_recursive_pair_fixture() {
+        emit_recursive_pair_fixture("recursive_pair_e2e.json", (4, 3), (4, 3));
+    }
+
+    /// Same as above at PRODUCTION inner parameters: the V23 LOG=10 group is
+    /// tree_depth 10 and the LOG=8 group is tree_depth 8, both with num_folds=6.
+    /// The recursion's outer trace depends on (n_queries, num_folds, tree_depth)
+    /// only — not on the inner column count — so a synthetic inner statement at the
+    /// real config yields the real outer proof size, and V23's 1298/2206 columns
+    /// do not enter into it.
+    ///
+    /// Run with: cargo test write_recursive_pair_prod_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn write_recursive_pair_prod_fixture() {
+        emit_recursive_pair_fixture("recursive_pair_prod_e2e.json", (10, 6), (8, 6));
+    }
+
+    /// Shared generator for a cross-bound pair fixture.
+    fn emit_recursive_pair_fixture(
+        file_name: &str,
+        (depth_a, folds_a): (u32, usize),
+        (depth_b, folds_b): (u32, usize),
+    ) {
         use crate::recursive::composition_t8::outer_trace_columns_t8;
         use sha3::{Digest as Sha3Digest, Keccak256};
 
         let merkle_root = [0xA7u8; 32];
-        let (tree_depth, n_queries, num_folds) = (4u32, 1usize, 3usize);
-        let n = 16usize;
+        let n_queries = 1usize;
+        let mk_cols = |depth: u32, seed: usize, ncols: usize| -> Vec<Vec<u32>> {
+            let n = 1usize << depth;
+            (0..ncols)
+                .map(|j| {
+                    (0..n)
+                        .map(|i| ((i * 9 + j * 31 + seed) as u32) % 2_147_483_647)
+                        .collect()
+                })
+                .collect()
+        };
         // Two DISTINCT statements standing in for the LOG=10 / LOG=8 groups.
-        let cols_a: Vec<Vec<u32>> = (0..5)
-            .map(|j| (0..n).map(|i| ((i * 9 + j * 31 + 3) as u32) % 2_147_483_647).collect())
-            .collect();
-        let cols_b: Vec<Vec<u32>> = (0..4)
-            .map(|j| (0..n).map(|i| ((i * 13 + j * 7 + 11) as u32) % 2_147_483_647).collect())
-            .collect();
+        let cols_a = mk_cols(depth_a, 3, 5);
+        let cols_b = mk_cols(depth_b, 11, 4);
 
-        let chain = |cols: &Vec<Vec<u32>>, br: &[u8; 32]| {
-            vfri11_fri_chain(cols, tree_depth, br, n_queries, Some(num_folds)).unwrap()
+        let chain_a = |br: &[u8; 32]| {
+            vfri11_fri_chain(&cols_a, depth_a, br, n_queries, Some(folds_a)).unwrap()
+        };
+        let chain_b = |br: &[u8; 32]| {
+            vfri11_fri_chain(&cols_b, depth_b, br, n_queries, Some(folds_b)).unwrap()
         };
         let keccak2 = |a: &[u8; 32], b: &[u8; 32]| -> [u8; 32] {
             let mut h = Keccak256::new();
@@ -8300,21 +8368,22 @@ mod tests_vfri8 {
         };
 
         // Pass 1: provisional roots, only to learn each group's trace root.
-        let t_a = chain(&cols_a, &merkle_root).trace_root;
-        let t_b = chain(&cols_b, &merkle_root).trace_root;
+        let t_a = chain_a(&merkle_root).trace_root;
+        let t_b = chain_b(&merkle_root).trace_root;
 
         // Pass 2: each group bound to the OTHER's trace root.
         let bound_a = keccak2(&merkle_root, &t_b);
         let bound_b = keccak2(&merkle_root, &t_a);
-        let ch_a = chain(&cols_a, &bound_a);
-        let ch_b = chain(&cols_b, &bound_b);
+        let ch_a = chain_a(&bound_a);
+        let ch_b = chain_b(&bound_b);
         assert_eq!(ch_a.trace_root, t_a, "trace root must not depend on batchRoot");
         assert_eq!(ch_b.trace_root, t_b, "trace root must not depend on batchRoot");
 
         let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
 
         // Build one bundle's JSON from its chain + the batch root it was bound to.
-        let bundle_json = |cols: &Vec<Vec<u32>>, ch: &Vfri11Chain, br: &[u8; 32]| -> String {
+        let bundle_json = |cols: &Vec<Vec<u32>>, ch: &Vfri11Chain, br: &[u8; 32],
+                           tree_depth: u32, num_folds: usize| -> String {
             let rec =
                 gen_vfri11_recursion_inputs(cols, tree_depth, br, n_queries, Some(num_folds)).unwrap();
             let (outer_cols, outer_log) =
@@ -8374,12 +8443,16 @@ mod tests_vfri8 {
         let json = format!(
             "{{\n  \"merkleRoot\": \"{}\",\n  \"bundle10\": {},\n  \"bundle8\": {}\n}}\n",
             hx(&merkle_root),
-            bundle_json(&cols_a, &ch_a, &bound_a),
-            bundle_json(&cols_b, &ch_b, &bound_b),
+            bundle_json(&cols_a, &ch_a, &bound_a, depth_a, folds_a),
+            bundle_json(&cols_b, &ch_b, &bound_b, depth_b, folds_b),
         );
 
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/recursive_pair_e2e.json");
-        std::fs::write(path, json).unwrap();
+        let path = format!(
+            "{}/../contracts/test/fixtures/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            file_name
+        );
+        std::fs::write(&path, json).unwrap();
         println!("wrote {path}");
     }
 

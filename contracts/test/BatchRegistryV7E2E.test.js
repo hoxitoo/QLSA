@@ -212,6 +212,39 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     ).to.be.revertedWithCustomError(other, "SenderNonceTooLow");
   });
 
+  // PRODUCTION-CONFIG measurement. The V23 groups are tree_depth 10 (LOG=10) and 8
+  // (LOG=8), both num_folds=6 — versus the depth-4/3-fold toy statement above. The
+  // recursion's outer trace depends on (n_queries, num_folds, tree_depth) only, NOT
+  // on the inner column count, so a synthetic inner statement at the real config
+  // gives the real outer proof and hence the real on-chain cost. This is the number
+  // that decides whether a recursive production stack is viable at all.
+  it("finalizes at PRODUCTION inner parameters (depth 10 + depth 8, 6 folds)", async function () {
+    const p = path.join(__dirname, "fixtures", "recursive_pair_prod_e2e.json");
+    if (!fs.existsSync(p)) { this.skip(); return; }
+    this.timeout(900_000);
+    const pf = JSON.parse(fs.readFileSync(p, "utf8"));
+    expect(pf.bundle10.inner.treeDepth).to.equal(10);
+    expect(pf.bundle8.inner.treeDepth).to.equal(8);
+    expect(pf.bundle10.inner.friLayerRoots.length).to.equal(7, "num_folds = 6");
+
+    const [owner] = await ethers.getSigners();
+    const fresh = await (
+      await ethers.getContractFactory("BatchRegistryV7")
+    ).deploy(owner.address, await recursive.getAddress());
+
+    const tx = await fresh.submitBatch(
+      pf.merkleRoot, bundleTuple(pf.bundle10), bundleTuple(pf.bundle8),
+      { gasLimit: 16_777_215n }
+    );
+    const rc = await tx.wait();
+    console.log(`        [gas] V7 submitBatch @ PRODUCTION config = ${rc.gasUsed}`);
+    expect(rc.gasUsed).to.be.lessThan(
+      16_777_216n,
+      "a recursive production stack must fit one transaction"
+    );
+    expect(await fresh.isBatchFinalized(pf.merkleRoot)).to.equal(true);
+  });
+
   it("rejects mismatched sender/nonce arrays", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     await expect(
