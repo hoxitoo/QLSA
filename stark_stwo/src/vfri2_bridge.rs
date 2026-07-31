@@ -4639,6 +4639,178 @@ impl P2T8Channel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Poseidon2 t=16 hash backend — the 128-bit rung.
+//
+// The t=8 backend above carries 4-word (124-bit) nodes, so node collision costs
+// ~2^62. t=16 carries EIGHT words, which is 248 bits — and 32 bytes exactly, so
+// a node fills a whole `bytes32` with no padding, unlike t=8 (bytes[16..32]) or
+// t=4/t=2 (bytes[24..32]). Node collision rises to ~2^124 ≈ 128-bit, the level
+// the project targets and the width Stwo uses natively.
+//
+// Everything here is a width substitution on the t=8 originals; the transcript
+// and tree SHAPES are unchanged, which is what lets a VFRI12 be a VFRI11 with
+// five type swaps rather than a new protocol.
+// ---------------------------------------------------------------------------
+
+/// Read an 8-word t=16 node out of a `bytes32` (word k at bytes[4k..4k+4], BE).
+#[allow(dead_code)]
+fn p2t16_node_words(node: &[u8; 32]) -> [u64; 8] {
+    let mut w = [0u64; 8];
+    for k in 0..8 {
+        w[k] = u32::from_be_bytes(node[4 * k..4 * k + 4].try_into().unwrap()) as u64;
+    }
+    w
+}
+
+/// Pack an 8-word node into the full 32 bytes.
+#[allow(dead_code)]
+fn p2t16_pack(words: [u64; 8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for k in 0..8 {
+        out[4 * k..4 * k + 4].copy_from_slice(&(words[k] as u32).to_be_bytes());
+    }
+    out
+}
+
+/// t=16 leaf hash: rate-8 capacity-8 sponge over the column values.
+/// Node = state[0..8]. Matches `Poseidon2MerkleVerifierT16.hashLeaf` and the
+/// `sponge_t16` padding convention (odd-block flag in capacity cell 15).
+#[allow(dead_code)]
+fn hash_leaf_cols_p2t16(col_values: &[u32]) -> [u8; 32] {
+    let vals: Vec<u64> = col_values.iter().map(|&v| v as u64).collect();
+    let s = crate::poseidon2_t16::sponge_t16(&vals);
+    p2t16_pack([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
+}
+
+/// t=16 pair hash: 16→8 compression of two 8-word nodes via one permutation.
+/// Matches `Poseidon2MerkleVerifierT16.hashPair`.
+#[allow(dead_code)]
+fn hash_pair_p2t16(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let s = crate::poseidon2_t16::compress_t16(p2t16_node_words(left), p2t16_node_words(right));
+    p2t16_pack(s)
+}
+
+/// t=16 leaf hash for a single QM31 value (4 M31 words).
+#[allow(dead_code)]
+fn hash_leaf_qm31_p2t16(value: u128) -> [u8; 32] {
+    let words = qm31_words(value);
+    let vals: Vec<u64> = words.iter().map(|&w| w as u64).collect();
+    let s = crate::poseidon2_t16::sponge_t16(&vals);
+    p2t16_pack([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
+}
+
+#[allow(dead_code)]
+fn build_tree_p2t16(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
+    assert!(leaves.len().is_power_of_two(), "leaves.len() must be power of 2");
+    let mut levels = vec![leaves];
+    while levels.last().unwrap().len() > 1 {
+        let prev = levels.last().unwrap();
+        let mut next = Vec::with_capacity(prev.len() / 2);
+        for chunk in prev.chunks(2) {
+            next.push(hash_pair_p2t16(&chunk[0], &chunk[1]));
+        }
+        levels.push(next);
+    }
+    levels
+}
+
+/// Poseidon2 t=16 duplex Fiat-Shamir channel.
+///
+/// Absorb stays rate-1 into cell 0 — cells 1–15 form a 465-bit capacity — and a
+/// draw squeezes the two rate-adjacent cells, exactly as at t=4 and t=8. Keeping
+/// rate 1 rather than widening it is deliberate: the transcript byte sequence
+/// then differs from t=8 ONLY through the permutation, so a VFRI12 that swaps
+/// this in produces different query indices (as it must) without any change to
+/// the order or count of absorb/draw calls.
+#[allow(dead_code)]
+struct P2T16Channel {
+    s: [u64; 16],
+    n_draws: u32,
+}
+
+#[allow(dead_code)]
+impl P2T16Channel {
+    fn init() -> Self {
+        P2T16Channel { s: [0u64; 16], n_draws: 0 }
+    }
+
+    fn absorb(&mut self, word: u32) {
+        // `word` may be any u32, i.e. up to 2P+1, so two conditional
+        // subtractions are needed — one is not enough. Mirrors `_absorb` in
+        // Poseidon2ChannelT16.sol.
+        let mut w = word as u64;
+        if w >= crate::poseidon2::M31_P {
+            w -= crate::poseidon2::M31_P;
+        }
+        if w >= crate::poseidon2::M31_P {
+            w -= crate::poseidon2::M31_P;
+        }
+        self.s[0] = crate::poseidon2::m31_add(self.s[0], w);
+        crate::poseidon2_t16::permute_t16(&mut self.s);
+    }
+
+    fn mix_root(&mut self, root: &[u8; 32]) {
+        self.absorb(u32::from_be_bytes(root[28..32].try_into().unwrap()));
+        self.n_draws = 0;
+    }
+
+    /// Absorb the 8 words of a wide t=16 node. At this width that is the whole
+    /// 32 bytes, so `mix_root_w` and `mix_root_full` coincide — kept as separate
+    /// names because the CALLERS distinguish a node root from a foreign 32-byte
+    /// root (an embedded Stwo trace root, a batch merkle root), and only the
+    /// former is a t=16 node.
+    fn mix_root_w(&mut self, root: &[u8; 32]) {
+        for k in 0..8 {
+            self.absorb(u32::from_be_bytes(root[4 * k..4 * k + 4].try_into().unwrap()));
+        }
+        self.n_draws = 0;
+    }
+
+    fn mix_root_full(&mut self, root: &[u8; 32]) {
+        for i in 0..8 {
+            self.absorb(u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap()));
+        }
+        self.n_draws = 0;
+    }
+
+    fn mix_u32s(&mut self, words: &[u32]) {
+        for &w in words {
+            self.absorb(w);
+        }
+        self.n_draws = 0;
+    }
+
+    fn draw_pair(&mut self) -> (u32, u32) {
+        let w0 = self.s[0] as u32;
+        let w1 = self.s[1] as u32;
+        self.s[0] = crate::poseidon2::m31_add(self.s[0], self.n_draws as u64);
+        crate::poseidon2_t16::permute_t16(&mut self.s);
+        self.n_draws += 1;
+        (w0, w1)
+    }
+
+    fn draw_secure_felt(&mut self) -> u128 {
+        let (w0, w1) = self.draw_pair();
+        let (w2, w3) = self.draw_pair();
+        qm31_pack_c(cm31_pack(w0, w1), cm31_pack(w2, w3))
+    }
+
+    fn draw_queries(&mut self, log_domain_size: u32, n: usize) -> Vec<usize> {
+        let mask = ((1u64 << log_domain_size) - 1) as u32;
+        let mut queries = Vec::with_capacity(n);
+        while queries.len() < n {
+            let (w0, w1) = self.draw_pair();
+            queries.push((w0 & mask) as usize);
+            if queries.len() < n {
+                queries.push((w1 & mask) as usize);
+            }
+        }
+        queries.truncate(n);
+        queries
+    }
+}
+
 fn abi_encode_vfri9_hints(
     oods_combo_pos:   u128,
     oods_combo_neg:   u128,
@@ -7877,6 +8049,174 @@ mod tests_vfri8 {
     const REF_T8_QUERIES: [usize; 4] = [436, 378, 839, 927];
     const REF_T8_QUERIES_W: [usize; 4] = [301, 134, 1008, 447];
     const REF_T8_FELT: u128 = 133164500022319262877528816935901679472;
+
+    // ---- t=16 backend (the 128-bit rung) ----------------------------------
+
+    #[test]
+    #[ignore = "prints reference vectors for regeneration; values are frozen in test_p2t16_reference_vectors"]
+    fn test_p2t16_print_reference_vectors() {
+        // Run with: cargo test test_p2t16_print_reference_vectors -- --ignored --nocapture
+        let leaf = hash_leaf_cols_p2t16(&[1, 2, 3, 4]);
+        eprintln!("hash_leaf_cols_p2t16([1,2,3,4]) = {:?}", p2t16_node_words(&leaf));
+
+        let a = p2t16_pack([1, 2, 3, 4, 5, 6, 7, 8]);
+        let b = p2t16_pack([9, 10, 11, 12, 13, 14, 15, 16]);
+        eprintln!(
+            "hash_pair_p2t16(node[1..8],node[9..16]) = {:?}",
+            p2t16_node_words(&hash_pair_p2t16(&a, &b))
+        );
+
+        let mut ch = P2T16Channel::init();
+        ch.mix_root(&[0x11u8; 32]);
+        eprintln!("channel.mix_root(0x11..).draw_queries(10,4) = {:?}", ch.draw_queries(10, 4));
+
+        let mut chw = P2T16Channel::init();
+        chw.mix_root_w(&a);
+        eprintln!("channel.mix_root_w(node[1..8]).draw_queries(10,4) = {:?}", chw.draw_queries(10, 4));
+
+        let felt = { let mut c = P2T16Channel::init(); c.mix_u32s(&[1, 2, 3]); c.draw_secure_felt() };
+        eprintln!("channel.mix_u32s([1,2,3]).draw_secure_felt() = {felt}");
+    }
+
+    #[test]
+    fn test_p2t16_reference_vectors() {
+        // Frozen — Poseidon2T16Backend.test.js asserts the same outputs.
+        let leaf = hash_leaf_cols_p2t16(&[1, 2, 3, 4]);
+        assert_eq!(p2t16_node_words(&leaf), REF_T16_LEAF);
+
+        let pair = hash_pair_p2t16(
+            &p2t16_pack([1, 2, 3, 4, 5, 6, 7, 8]),
+            &p2t16_pack([9, 10, 11, 12, 13, 14, 15, 16]),
+        );
+        assert_eq!(p2t16_node_words(&pair), REF_T16_PAIR);
+        // hash_pair of those two nodes IS compress_t16 of their words — the
+        // packing must not perturb the value.
+        assert_eq!(
+            p2t16_node_words(&pair),
+            crate::poseidon2_t16::compress_t16([1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16])
+        );
+
+        let mut ch = P2T16Channel::init();
+        ch.mix_root(&[0x11u8; 32]);
+        assert_eq!(ch.draw_queries(10, 4), REF_T16_QUERIES.to_vec());
+
+        let mut chw = P2T16Channel::init();
+        chw.mix_root_w(&p2t16_pack([1, 2, 3, 4, 5, 6, 7, 8]));
+        assert_eq!(chw.draw_queries(10, 4), REF_T16_QUERIES_W.to_vec());
+
+        let felt = { let mut c = P2T16Channel::init(); c.mix_u32s(&[1, 2, 3]); c.draw_secure_felt() };
+        assert_eq!(felt, REF_T16_FELT);
+    }
+
+    // Frozen t=16 backend reference vectors (from test_p2t16_print_reference_vectors).
+    const REF_T16_LEAF: [u64; 8] = [
+        55566406, 1875114541, 1126231753, 1747661633, 1062235343, 1908581748, 1128601005, 1541813924,
+    ];
+    // Note this equals permute_t16([1..16])[0..8] — compress of nodes (1..8) and
+    // (9..16) is the permutation of their concatenation, so this vector also
+    // pins that p2t16_pack/node_words do not perturb the value.
+    const REF_T16_PAIR: [u64; 8] = [
+        1896676506, 1113082531, 1826142252, 1263581674, 694653155, 1856461508, 173489390, 625083048,
+    ];
+    const REF_T16_QUERIES: [usize; 4] = [139, 460, 377, 144];
+    const REF_T16_QUERIES_W: [usize; 4] = [860, 495, 487, 690];
+    const REF_T16_FELT: u128 = 141632388673796146040251654506986135892;
+
+    #[test]
+    fn test_p2t16_node_fills_the_whole_word() {
+        // t=2/t=4 use bytes[24..32], t=8 bytes[16..32]; t=16's eight words are
+        // exactly 32 bytes, so there is no zero padding left to distinguish.
+        // That is the point: 248 bits of node content, ~2^124 collision cost.
+        let h = hash_leaf_cols_p2t16(&[1, 2, 3, 4]);
+        assert_ne!(&h[..16], &[0u8; 16], "a t=16 node must use the full 32 bytes");
+        let s = crate::poseidon2_t16::sponge_t16(&[1, 2, 3, 4]);
+        assert_eq!(p2t16_node_words(&h), [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+        // Wider state and a different permutation ⇒ a different leaf than t=8.
+        assert_ne!(h, hash_leaf_cols_p2t8(&[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn test_p2t16_pack_roundtrips() {
+        let w = [1u64, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(p2t16_node_words(&p2t16_pack(w)), w);
+        // Every word position is distinguishable — a packing that dropped or
+        // aliased a word would still roundtrip the identity above.
+        for k in 0..8 {
+            let mut v = w;
+            v[k] += 1;
+            assert_ne!(p2t16_pack(v), p2t16_pack(w));
+        }
+    }
+
+    #[test]
+    fn test_p2t16_pair_order_sensitive_and_diffuses() {
+        let a = p2t16_pack([1, 2, 3, 7, 0, 0, 0, 0]);
+        let b = p2t16_pack([2, 2, 3, 7, 0, 0, 0, 0]);
+        let sib = p2t16_pack([5, 5, 5, 5, 5, 5, 5, 5]);
+        assert_ne!(hash_pair_p2t16(&a, &sib), hash_pair_p2t16(&b, &sib));
+        assert_ne!(hash_pair_p2t16(&a, &sib), hash_pair_p2t16(&sib, &a));
+    }
+
+    #[test]
+    fn test_p2t16_tree_roundtrip() {
+        let leaves: Vec<[u8; 32]> = (0..4u32)
+            .map(|j| hash_leaf_cols_p2t16(&[j, j + 1, j + 2]))
+            .collect();
+        let levels = build_tree_p2t16(leaves.clone());
+        let root = levels.last().unwrap()[0];
+        assert_eq!(levels.len(), 3); // 4 → 2 → 1
+        let mut cur = leaves[1];
+        cur = hash_pair_p2t16(&leaves[0], &cur); // idx 1 odd → sibling on the left
+        cur = hash_pair_p2t16(&cur, &levels[1][1]);
+        assert_eq!(cur, root);
+    }
+
+    #[test]
+    fn test_p2t16_channel_deterministic_and_binds() {
+        let mut a = P2T16Channel::init();
+        let mut b = P2T16Channel::init();
+        a.mix_root(&[0x11u8; 32]);
+        b.mix_root(&[0x11u8; 32]);
+        assert_eq!(a.draw_queries(10, 8), b.draw_queries(10, 8));
+
+        let mut c = P2T16Channel::init();
+        c.mix_root(&[0x12u8; 32]);
+        let mut d = P2T16Channel::init();
+        d.mix_root(&[0x11u8; 32]);
+        assert_ne!(c.draw_queries(10, 8), d.draw_queries(10, 8));
+
+        let mut e = P2T16Channel::init();
+        e.mix_root(&[0x11u8; 32]);
+        for q in e.draw_queries(10, 16) {
+            assert!(q < (1 << 10));
+        }
+    }
+
+    #[test]
+    fn test_p2t16_channel_differs_from_t8() {
+        // A VFRI12 must NOT accept VFRI11 hints: same transcript shape, but the
+        // permutation differs, so the derived query indices must differ too.
+        let mut t16 = P2T16Channel::init();
+        t16.mix_root_full(&[0x11u8; 32]);
+        let mut t8 = P2T8Channel::init();
+        t8.mix_root_full(&[0x11u8; 32]);
+        assert_ne!(t16.draw_queries(10, 8), t8.draw_queries(10, 8));
+    }
+
+    #[test]
+    fn test_p2t16_absorb_handles_unreduced_words() {
+        // A u32 can reach 2P+1, so `absorb` needs TWO conditional subtractions.
+        // Absorbing v and v+P must land in the same state; one subtraction would
+        // leave them apart for v+P ≥ 2P.
+        let p = crate::poseidon2::M31_P as u32;
+        for v in [0u32, 1, 7, p - 1] {
+            let mut a = P2T16Channel::init();
+            a.mix_u32s(&[v]);
+            let mut b = P2T16Channel::init();
+            b.mix_u32s(&[v.wrapping_add(p)]);
+            assert_eq!(a.draw_queries(10, 4), b.draw_queries(10, 4), "v = {v}");
+        }
+    }
 
     #[test]
     fn test_p2t8_leaf_is_wide_and_differs_from_t4() {

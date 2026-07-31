@@ -248,6 +248,49 @@ library Poseidon2M31T16 {
         }
     }
 
+    /// @notice Rate-8 capacity-8 sponge over M31 words; returns the 8-word node.
+    /// @dev Absorbs eight values per block into cells 0–7 and permutes after each.
+    ///      A trailing partial block additionally bumps capacity cell 15 as a
+    ///      domain-separation flag, so `[a,b]` and `[a,b,0,…]` cannot collide.
+    ///      An EMPTY input permutes zero times and returns the zero node — the
+    ///      same convention as `sponge_t16` in poseidon2_t16.rs.
+    function sponge8(uint256[] memory values)
+        internal pure
+        returns (uint256[8] memory node)
+    {
+        unchecked {
+            uint256[16] memory s;
+            uint256 n = values.length;
+            uint256 full = (n / 8) * 8;
+
+            for (uint256 i = 0; i < full; i += 8) {
+                for (uint256 k = 0; k < 8; k++) {
+                    s[k] = _addM31(s[k], values[i + k] % P);
+                }
+                permute(s);
+            }
+            if (full < n) {
+                for (uint256 k = 0; full + k < n; k++) {
+                    s[k] = _addM31(s[k], values[full + k] % P);
+                }
+                s[15] = _addM31(s[15], 1);
+                permute(s);
+            }
+
+            for (uint256 k = 0; k < 8; k++) {
+                node[k] = s[k];
+            }
+        }
+    }
+
+    /// @dev a + b mod P for a, b < P.
+    function _addM31(uint256 a, uint256 b) private pure returns (uint256 r) {
+        unchecked {
+            r = a + b;
+            if (r >= P) r -= P;
+        }
+    }
+
     /// @notice Two-to-one compression for 248-bit wide Merkle nodes.
     /// @dev Node = 8 M31 words. state = (left‖right) → permute → cells 0..7.
     ///      Matches `compress_t16` in poseidon2_t16.rs.
