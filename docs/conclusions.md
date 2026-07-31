@@ -184,7 +184,13 @@ in-circuit: compRoot ─(R4.12)─▶ compValue ─(R4.10)─▶ fₚ ─▶ fol
      `BatchRegistryV7.submitBatch` финализирует полный V23-батч
      **за 13 128 561 газа в ОДНОЙ транзакции** (запас 22% под cap). Прямая
      проверка того же утверждения в транзакцию не влезает вовсе.
-   - Осталось: PyO3 + `stark/prover.py`, деплой-скрипт, `--stack v8` в `testnet/e2e.py`.
+   - ✅ **Python-сторона готова (R4.20):** `gen_mldsa_v23_recursive_bundles` и
+     `prove_mldsa_sig_recursive_stark` (от настоящей подписи ML-DSA-65) через
+     PyO3-биндинг. `RecursiveBundle.as_inner_publics()` отдаёт ровно тот набор
+     полей, что ждёт on-chain `InnerPublics`. По умолчанию `n_queries=20` —
+     в отличие от прямых путей с 1, потому что весь смысл маршрута в 130 битах.
+     Проверено сквозным прогоном от реальной подписи; 5 тестов.
+   - Осталось: деплой-скрипт и `--stack v8` в `testnet/e2e.py`.
 3. **t=16 как inner hash** — путь к 128-битной стойкости узла.
 4. **Внешний аудит** — до mainnet.
 

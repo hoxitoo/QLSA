@@ -3068,3 +3068,106 @@ def test_prove_mldsa_sig_vfri11_stark_schema():
     assert len(bytes.fromhex(r.log8_commitment)) == 16
     assert r.batch_merkle_root == batch_root
     assert int.from_bytes(r.log10_proof[0:8], "little") == 5
+
+
+# ── v8 stack: cross-bound RECURSIVE bundles (R4.19) ───────────────────────────
+#
+# The recursive route exists for one reason: at the production n_queries=20
+# (130-bit soundness) DIRECT verification of a V23 group no longer fits an
+# Ethereum transaction, while the recursive one finalizes the whole batch in one.
+# Below ~2 queries direct is cheaper — see docs/conclusions.md §2.3.
+#
+# These run at q=2: identical SHAPE to q=20, a fraction of the proving time.
+
+def _v23_recursive_bundles(n_queries: int = 2):
+    from stark.prover import gen_mldsa_v23_recursive_bundles
+
+    z = [[(i * 7 + j * 3) % 1000 for i in range(256)] for j in range(5)]
+    c = [(i % 3) - 1 for i in range(256)]
+    t1 = [[(i * 5 + j) % 1024 for i in range(256)] for j in range(6)]
+    a_hat = [[(i * 11 + j * 13) % 8380417 for i in range(256)] for j in range(30)]
+    hints = [[False] * 256 for _ in range(6)]
+    root = bytes(range(32))
+    return gen_mldsa_v23_recursive_bundles(
+        z, c, t1, a_hat, hints, root, n_queries=n_queries, num_folds=6
+    ), root
+
+
+@needs_ext
+def test_v23_recursive_bundles_shape():
+    """Both groups come back with the real V23 shape and non-empty outer proofs."""
+    res, root = _v23_recursive_bundles()
+    assert res.log10.tree_depth == 10
+    assert res.log8.tree_depth == 8
+    # num_folds=6 → 7 layer roots; last layers 2^(depth−6).
+    assert res.log10.num_folds == 6 and res.log8.num_folds == 6
+    assert len(res.log10.last_layer_evals) == 16
+    assert len(res.log8.last_layer_evals) == 4
+    for b in (res.log10, res.log8):
+        assert b.outer_proof and b.outer_hints
+        assert b.outer_commitment.startswith(("0x", "")) and len(b.outer_commitment) == 32
+        assert b.n_queries == 2
+    assert res.batch_merkle_root == root
+
+
+@needs_ext
+def test_v23_recursive_bundles_cross_binding():
+    """Each group must be bound to the OTHER's trace root — the anti-mixing check."""
+    from Crypto.Hash import keccak
+
+    res, root = _v23_recursive_bundles()
+
+    def bound(other_trace_root: str) -> str:
+        h = keccak.new(digest_bits=256)
+        h.update(root)
+        h.update(bytes.fromhex(other_trace_root[2:]))
+        return "0x" + h.hexdigest()
+
+    assert res.log10.batch_root == bound(res.log8.trace_root)
+    assert res.log8.batch_root == bound(res.log10.trace_root)
+    # Distinct groups → distinct bound roots, and neither is the raw batch root.
+    assert res.log10.batch_root != res.log8.batch_root
+    assert res.log10.batch_root != "0x" + root.hex()
+
+
+@needs_ext
+def test_v23_recursive_bundle_inner_publics_shape():
+    """as_inner_publics() must match the on-chain InnerPublics field set exactly."""
+    res, _ = _v23_recursive_bundles()
+    inner = res.log10.as_inner_publics()
+    assert set(inner) == {
+        "traceRoot", "oodsComboPos", "oodsComboNeg", "compRoot",
+        "friLayerRoots", "batchRoot", "treeDepth", "nQueries",
+    }
+    # QM31 scalars are decimal strings (u128 — see the RecursiveBundle docstring).
+    assert isinstance(inner["oodsComboPos"], str) and inner["oodsComboPos"].isdigit()
+    assert inner["traceRoot"].startswith("0x") and len(inner["traceRoot"]) == 66
+    assert len(inner["friLayerRoots"]) == 7
+
+
+@needs_ext
+def test_v23_recursive_bundles_security_bits():
+    """security_bits reports the on-chain soundness the query count actually buys."""
+    res, _ = _v23_recursive_bundles(n_queries=2)
+    assert res.security_bits == 6 * 2 + 10
+    # The production target: 20 queries is what 130-bit requires.
+    from stark.prover import V23RecursiveBundlesResult
+    prod = V23RecursiveBundlesResult(res.log10, res.log8, res.batch_merkle_root, 20)
+    assert prod.security_bits == 130
+
+
+@needs_ext
+def test_v23_recursive_bundles_validation():
+    """Bad inputs fail fast rather than deep inside the prover."""
+    from stark.prover import gen_mldsa_v23_recursive_bundles
+
+    z = [[0] * 256 for _ in range(5)]
+    c = [0] * 256
+    t1 = [[0] * 256 for _ in range(6)]
+    a_hat = [[0] * 256 for _ in range(30)]
+    hints = [[False] * 256 for _ in range(6)]
+
+    with pytest.raises(ValueError, match="n_queries"):
+        gen_mldsa_v23_recursive_bundles(z, c, t1, a_hat, hints, bytes(32), n_queries=0)
+    with pytest.raises(ValueError, match="32 bytes"):
+        gen_mldsa_v23_recursive_bundles(z, c, t1, a_hat, hints, bytes(31), n_queries=1)
