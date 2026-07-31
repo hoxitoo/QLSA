@@ -4,22 +4,64 @@ Aggregate thousands of post-quantum signatures into a single constant-size proof
 
 **O(1) on-chain verification. No trusted setup. Quantum-safe by design.**
 
+*That is the architecture. What the code proves today is narrower — read the box
+below before relying on any claim here.*
+
 ---
 
 > **⚠ NOT PRODUCTION READY — Research Prototype**
 >
-> This codebase is a **research prototype / testnet demonstrator**.
-> It has **not** undergone an external cryptographic audit.
-> Known architectural limitations include:
-> - Off-chain STARK proof: `LOG_BLOWUP=6`, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit soundness
-> - On-chain verifier (VFRI9) uses Poseidon2 for Merkle + Fiat-Shamir. 20 queries ≤ 15M gas on mainnet.
-> - **Last-layer FRI check implemented in VFRI9 (2026-06-10)** — the final FRI layer is rebuilt on-chain and checked against `friLayerRoots[K]`. VFRI5–VFRI8 remain in the repo WITHOUT this check (regression only — do not deploy them).
-> - Poseidon2 t=2/M31: channel sponge state and VFRI9 wide Merkle nodes are 62-bit — collision bound ~2^31 (t=2 maximum). 128-bit binding requires t=4 or RPO256 (MVP-6).
-> - Merkle-node width sets the collision bound: t=4 (current production VFRI10) → ~2^31; t=8 (VFRI11) → ~2^62. Since 2026-07-30 a full-V23 **t=8** batch verifies on-chain in ONE transaction (6.06M gas), so the 2^62 level is deployable; 128-bit (t=16) needs proof recursion.
-> - `/batch/run` and `/batch/flush` support Bearer-token auth via `QLSA_API_TOKEN` (2026-06-10); unset = open (research default — set it on any non-local deployment).
+> This codebase is a **research prototype / testnet demonstrator**. It has **not**
+> undergone an external cryptographic audit.
 >
-> **Do not deploy to mainnet or use with real funds without a full external audit.**
-
+> ### What the on-chain proof does and does not establish
+>
+> Read this before treating any number in this repository as a security claim.
+>
+> **It establishes:** the ML-DSA-65 *arithmetic* relations hold for a committed
+> witness — `w' = A·z − c·t1·2^d` computed through NTT/INTT, `‖z‖∞ < γ₁−β`, the
+> hint decompression and the ω bound, and range membership — proved by a Circle
+> STARK at 130-bit FRI soundness and verified in one Ethereum transaction.
+>
+> **It does NOT establish that a signature exists.** The FIPS 204 hash step —
+> `c̃ = SHAKE-256(μ ‖ w1Encode(w1'))` and `c = SampleInBall(c̃)` — is **outside the
+> circuit**. `c̃` is bound into the Fiat-Shamir transcript, but nothing in the
+> constraint system ties it to `w1'`. A prover who picks a small-norm `z`, any
+> valid-shaped `c`, and their own `t1` can satisfy every constraint with no
+> signature involved. Closing this needs SHAKE-256 (Keccak-f[1600]) arithmetized
+> as an AIR; that work is **not started and not scheduled** — see limitation 2.
+>
+> In the shipped pipeline the prover *does* run a full `ml_dsa_verify` in Rust
+> before extracting the witness and refuses invalid signatures, so an honest
+> aggregator cannot prove a forgery. But that check is **off-chain and
+> unverifiable by the contract** — the on-chain verifier trusts the prover ran it.
+>
+> **It covers ONE signature per batch, not N.** `testnet/e2e.py` and
+> `aggregator/batcher.py` generate the ML-DSA witness proof for `tx[0]` only. The
+> remaining transactions are committed by the batch Merkle root but their
+> signatures are not proved. The separate `prove_mldsa_batch` path verifies N
+> signatures *in Rust* and proves only a hash chain over the results.
+>
+> Until both gaps are closed, the headline above describes the **architecture**,
+> not a property the deployed contracts enforce.
+>
+> ### Other known limitations
+>
+> - Off-chain STARK: `LOG_BLOWUP=6`, `N_FRI_QUERIES=20`, `POW_BITS=10` → 130-bit FRI soundness.
+> - Two production bounds are **not reachable together** today: the recursive v8 stack
+>   gives 130-bit FRI but ~2^62 Merkle nodes; `QLSAVerifierVFRI12` gives ~2^124 nodes
+>   but 16-bit FRI (`n_queries=1`; 2 queries already exceed the per-tx cap).
+> - `MAX_SENDERS = 3000` is declared in all six registries but is **not reachable**:
+>   the O(n²) duplicate-sender scan makes ~200 the practical limit on `BatchRegistryV5`
+>   and fewer on `BatchRegistryV7`, and exceeding it gives OUT OF GAS rather than a
+>   clean `SenderCountExceedsLimit`. `submitBatch` (without nonces) has no such loop.
+> - The `aggregator`, HTTP API and both SDKs emit VFRI7–VFRI10 proofs, which the
+>   default registry rejects **by design** (different hash backend → different query
+>   indices). Only `testnet/e2e.py` reaches a deployed stack.
+> - No public-testnet run: verified against a standalone JSON-RPC node only.
+> - `/batch/run` and `/batch/flush` support Bearer-token auth via `QLSA_API_TOKEN`;
+>   unset = open (research default — set it on any non-local deployment).
+>
 ---
 
 ## The Problem

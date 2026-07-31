@@ -925,6 +925,20 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 
 ## Known Limitations (Research Prototype)
 
+> **0. THE TRUST-MODEL GAP — read first.** The on-chain proof establishes the
+> ML-DSA *arithmetic* relations for a committed witness. It does NOT establish
+> that a signature exists: the FIPS 204 hash step (`c̃ = SHAKE-256(μ ‖
+> w1Encode(w1'))`, `c = SampleInBall(c̃)`) is outside the circuit, so a prover can
+> satisfy every constraint with a self-chosen `(z, c, t1)` and no signature.
+> `c̃` is Fiat-Shamir-bound but not tied to `w1'` by any constraint. The shipped
+> prover DOES run a full `ml_dsa_verify` in Rust before extracting the witness
+> (`extract_mldsa_witness_py` refuses invalid signatures), so an honest aggregator
+> cannot prove a forgery — but that check is off-chain and the contract cannot see
+> it. Closing this requires SHAKE-256/Keccak-f[1600] as an AIR: **not started, not
+> scheduled**. Also: only `tx[0]` of a batch gets a witness proof, so "N signatures
+> in one proof" is not what the deployed contracts enforce.
+
+
 1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
 3. Hash AIR: upgraded to Poseidon2-over-M31 (replaced H(a,b)=a³+b); full RPO256 in MVP-4
