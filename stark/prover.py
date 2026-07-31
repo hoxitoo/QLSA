@@ -3366,6 +3366,71 @@ def prove_mldsa_sig_vfri11_stark(
     )
 
 
+# ─── Witness-protocol registry ───────────────────────────────────────────────
+#
+# Every `prove_mldsa_sig_vfriN_stark` above returns the same six fields
+# (log10_proof / log10_commitment / log10_query_hints and the log8 trio), so a
+# caller that wants "the witness proof for the deployed stack" should select a
+# protocol by NAME rather than calling one of them directly.
+#
+# This exists because the product layer did not. `aggregator/batcher.py`,
+# `aggregator/api.py` and both SDKs each enumerated VFRI7/8/9/10 by hand — six
+# fields per protocol per layer — so when VFRI11 became the default stack, the
+# aggregator's proofs stopped being submittable to the default registry and
+# nobody had to change a line for that to happen. A name lookup makes adding a
+# protocol one entry instead of a four-layer edit.
+#
+# `recursive` is deliberately ABSENT: `prove_mldsa_sig_recursive_stark` returns
+# bundles, not (proof, commitment, hints) triples, so it is not substitutable
+# here. Wiring it needs a second shape, not another registry entry.
+
+#: Protocol name -> prover, for the uniform (log10, log8) hint protocols.
+WITNESS_PROTOCOLS: dict[str, Any] = {
+    "vfri7":  prove_mldsa_sig_vfri7_stark,
+    "vfri8":  prove_mldsa_sig_vfri8_stark,
+    "vfri9":  prove_mldsa_sig_vfri9_stark,
+    "vfri10": prove_mldsa_sig_vfri10_stark,
+    "vfri11": prove_mldsa_sig_vfri11_stark,
+}
+
+#: The protocol the deployed default stack (v7 = VFRI11 + BatchRegistryV5) needs.
+#: Change this together with `testnet/e2e.py`'s default `--stack`, never alone.
+DEFAULT_WITNESS_PROTOCOL = "vfri11"
+
+
+def prove_mldsa_sig_for_protocol(
+    protocol: str,
+    *,
+    pk: bytes,
+    msg: bytes,
+    sig: bytes,
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+) -> Any:
+    """Generate a cross-bound witness proof under the named protocol.
+
+    The return type is ``Any`` because each protocol has its own result class;
+    all of them expose the same six fields (``log10_proof``/``log10_commitment``/
+    ``log10_query_hints`` and the ``log8`` trio), which is what makes them
+    substitutable here.
+
+    Raises ``KeyError`` with the supported names if `protocol` is unknown, so a
+    typo fails at the call site instead of silently producing no proof.
+    """
+    try:
+        prover = WITNESS_PROTOCOLS[protocol]
+    except KeyError:
+        raise KeyError(
+            f"unknown witness protocol {protocol!r}; "
+            f"supported: {sorted(WITNESS_PROTOCOLS)}"
+        ) from None
+    return prover(
+        pk=pk, msg=msg, sig=sig,
+        batch_merkle_root=batch_merkle_root,
+        n_queries=n_queries,
+    )
+
+
 def prove_mldsa_sig_recursive_stark(
     pk: bytes,
     msg: bytes,

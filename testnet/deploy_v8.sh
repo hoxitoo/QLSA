@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# QLSA MVP-8 — Testnet Deployment Script (VFRI10 + BatchRegistryV7)
+# QLSA MVP-8 — Testnet Deployment Script (VFRI11 + QLSAVerifierRecursive + BatchRegistryV7)
 #
 # Deploys QLSAVerifierRecursive + BatchRegistryV7 to the configured network, then
 # saves the addresses to .env.deployed for use by e2e.py and monitor.py.
@@ -36,7 +36,7 @@ while [ $# -gt 0 ]; do
 done
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "=== QLSA MVP-8 — Testnet Deployment (VFRI10 + BatchRegistryV7) ==="
+echo "=== QLSA MVP-8 — Testnet Deployment (VFRI11 + Recursive + BatchRegistryV7) ==="
 echo "Network : $NETWORK"
 echo "Repo    : $REPO_ROOT"
 echo
