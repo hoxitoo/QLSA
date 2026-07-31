@@ -1,0 +1,72 @@
+{
+  "_README": [
+    "CANONICAL measured figures. Every gas or ratio claim in prose (CLAUDE.md,",
+    "README.md, docs/, NatSpec, commit messages) must agree with this file, and",
+    "this file is enforced by Measurements.test.js, which RE-MEASURES each entry",
+    "rather than trusting it.",
+    "",
+    "Why this exists: three strategic conclusions in this project were reversed",
+    "because a number was wrong, and each reversal was then APPENDED next to the",
+    "wrong claim instead of replacing it. A later reader — including a later",
+    "session — met the stale claim first and re-derived from it. The 'skip t=16'",
+    "decision was made from a >100M figure that was already known to be an",
+    "artefact. Prose cannot be kept in sync by discipline alone; this file can be",
+    "kept in sync by CI.",
+    "",
+    "HOW TO MEASURE (the three mistakes that produced the reversals):",
+    "  1. A gasLimit above 2^24 is REJECTED BEFORE EXECUTION (EIP-7825). A",
+    "     rejection is not an out-of-gas. Always confirm the call actually ran.",
+    "  2. estimateGas over-provisions nested calls by ~3x (63/64 rule per frame).",
+    "     Measure gasUsed of a SENT transaction; for a view function, binary",
+    "     search the smallest passing gasLimit.",
+    "  3. In a RATIO, shared overhead must cancel. Two single external calls both",
+    "     carry the 21,000 transaction base, which inflates the smaller one and",
+    "     understates the ratio. Measure marginally: gas(n+1) - gas(n).",
+    "",
+    "Tolerance is 3%: compiler and fixture regeneration move these slightly, a",
+    "real regression moves them much more."
+  ],
+  "tolerance": 0.03,
+  "cap": 16777216,
+  "entries": {
+    "permute_marginal_t8": {
+      "value": 12306,
+      "what": "one Poseidon2 t=8 permutation, marginal (gas(n=2) - gas(n=1))"
+    },
+    "permute_marginal_t16": {
+      "value": 37377,
+      "what": "one Poseidon2 t=16 permutation, marginal; 3.04x t=8 for 2x node width"
+    },
+    "v23_dual_submitBatch_t8": {
+      "value": 6058052,
+      "what": "BatchRegistryV5.submitBatch, both full-V23 groups, VFRI11 (t=8), n_queries=1",
+      "note": "was recorded as '>100M / unverifiable' before R4.8; that was Poseidon2 implementation overhead"
+    },
+    "v23_dual_submitBatch_t16": {
+      "value": 15436509,
+      "what": "BatchRegistryV5.submitBatch, both full-V23 groups, VFRI12 (t=16), n_queries=1",
+      "note": "128-bit NODE collision. FRI soundness is separate and is 16-bit at n_queries=1"
+    },
+    "outer_recursion_verify_t8": {
+      "value": 5441919,
+      "what": "VFRI11 verify of the OUTER recursion trace (87 cols, log=14, inner n_queries=20)"
+    },
+    "outer_recursion_verify_t16": {
+      "value": 16044328,
+      "what": "VFRI12 verify of the same outer trace — 96% of the cap, which is why a fully t=16 recursion does not fit"
+    }
+  },
+  "live_node_runs": {
+    "_note": [
+      "Reproduced against a standalone `npx hardhat node` (real JSON-RPC), NOT the",
+      "in-process test EVM and NOT a public testnet — outbound RPC is blocked in",
+      "this environment. A public-testnet run remains OUTSTANDING before mainnet."
+    ],
+    "v8_stack_full_e2e": {
+      "gasUsed": 13168471,
+      "what": "real ML-DSA-65 signatures -> V23 -> VFRI11 (20 queries) -> recursion -> BatchRegistryV7.submitBatchWithNonces, ONE transaction",
+      "soundness": "130-bit FRI, ~2^62 Merkle nodes",
+      "date": "2026-07-31"
+    }
+  }
+}

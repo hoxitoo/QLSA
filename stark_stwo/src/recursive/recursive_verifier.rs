@@ -148,6 +148,21 @@ pub fn pc_zx(k: usize) -> PreProcessedColumnId {
 /// `inv_p` — verifier-fixed twiddle inverse on every fold row; pins the trace's
 /// `inv` (yInv/xInv), which is index-derived, not prover-chosen (1a).
 pub fn pc_inv() -> PreProcessedColumnId { PreProcessedColumnId { id: "rv_inv".into() } }
+/// `cmp_p0..3` / `cmn_p0..3` — the verifier-fixed composition values at the query
+/// point and its antipode (QM31 limbs, step row).
+///
+/// These close the INPUT side of the C1 binding.  The trace derives
+/// `compValue = fₚ·(px − z_x) + oodsCombo` from the prover's `fₚ`, so without a pin
+/// the OODS relation is a tautology: any `fₚ` yields a self-consistent `compValue`
+/// and the whole fold chain hangs off an unconstrained value.  Pinning `compValue`
+/// to what the verifier authenticated against `compRoot` inverts the dependency —
+/// `fₚ` becomes fully determined by verifier-fixed data, exactly as on-chain.
+pub fn pc_comp_pos(k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("rv_cmp{k}") }
+}
+pub fn pc_comp_neg(k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("rv_cmn{k}") }
+}
 pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     vec![
         pc_is_step(),
@@ -167,6 +182,14 @@ pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
         pc_zx(2),
         pc_zx(3),
         pc_inv(),
+        pc_comp_pos(0),
+        pc_comp_pos(1),
+        pc_comp_pos(2),
+        pc_comp_pos(3),
+        pc_comp_neg(0),
+        pc_comp_neg(1),
+        pc_comp_neg(2),
+        pc_comp_neg(3),
     ]
 }
 
@@ -263,6 +286,18 @@ impl FrameworkEval for RecursiveVerifierEval {
             eval.get_preprocessed_column(pc_zx(3)),
         ];
         let inv_p = eval.get_preprocessed_column(pc_inv());
+        let comp_pin = [
+            eval.get_preprocessed_column(pc_comp_pos(0)),
+            eval.get_preprocessed_column(pc_comp_pos(1)),
+            eval.get_preprocessed_column(pc_comp_pos(2)),
+            eval.get_preprocessed_column(pc_comp_pos(3)),
+        ];
+        let comp_neg_pin = [
+            eval.get_preprocessed_column(pc_comp_neg(0)),
+            eval.get_preprocessed_column(pc_comp_neg(1)),
+            eval.get_preprocessed_column(pc_comp_neg(2)),
+            eval.get_preprocessed_column(pc_comp_neg(3)),
+        ];
 
         // Main columns. `a` (input/fPlus) and `out` need previous-row access for chaining.
         let [px] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0_isize]);
@@ -384,6 +419,18 @@ impl FrameworkEval for RecursiveVerifierEval {
         // ── C_chain: a_k = out_prev_k  (rows 1..K, gated by chain_on, deg 1) ─────
         for k in 0..4 {
             eval.add_constraint(chain_on.clone() * (a[k].clone() - out_prev[k].clone()));
+        }
+
+        // ── C_comp: comp_k = comp_pin_k  (step row, gated by is_step, deg 2) ────
+        // Pins the composition values to what the verifier authenticated against
+        // `compRoot`.  The trace DERIVES comp from the prover's fₚ, so without this
+        // the OODS relation is a tautology (any fₚ yields a self-consistent comp).
+        // With it, fₚ is fully determined by verifier-fixed data — the same
+        // dependency direction the on-chain verifier has.  Closes the INPUT side of
+        // C1; the output side is C_output below.
+        for k in 0..4 {
+            eval.add_constraint(is_step.clone() * (comp_pos[k].clone() - comp_pin[k].clone()));
+            eval.add_constraint(is_step.clone() * (comp_neg[k].clone() - comp_neg_pin[k].clone()));
         }
 
         // ── C_output: out_k = fin_k  (block output row, gated by is_output, deg 2)
@@ -521,6 +568,11 @@ pub struct QueryChallenges {
     pub z_x: u128,
     pub alphas: Vec<u128>,
     pub invs: Vec<u32>,
+    /// Composition value at the query point, as authenticated by the verifier
+    /// against `compRoot`.  Pinned in-circuit so the prover cannot choose `fₚ`.
+    pub comp_pos: u128,
+    /// Composition value at the antipodal point, likewise authenticated.
+    pub comp_neg: u128,
 }
 
 /// Extract query `q`'s verifier-fixed challenges from its `(step, rounds)`.
@@ -531,7 +583,18 @@ pub fn query_challenges(step: &StepOp, rounds: &[FoldRound]) -> QueryChallenges 
     let mut invs = Vec::with_capacity(1 + rounds.len());
     invs.push(step.7); // yInv (circle fold twiddle)
     invs.extend(rounds.iter().map(|&(_, _, x_inv)| x_inv));
-    QueryChallenges { px: step.2, z_x: step.3, alphas, invs }
+    // compValue is what the verifier authenticated against `compRoot`.  On the
+    // honest path it equals what build_trace derives from fₚ, so recompute it here
+    // with the SAME expression — the pin then holds for an honest prover and fails
+    // for any forged fₚ.
+    let (f_plus, f_minus, px, z_x, combo_pos, combo_neg, _, _) = *step;
+    let px_q = pack([px as u64, 0, 0, 0]);
+    let neg_px_q = sub_limbs([0, 0, 0, 0], limbs(px_q));
+    let d_pos = sub_limbs(limbs(px_q), limbs(z_x));
+    let d_neg = sub_limbs(neg_px_q, limbs(z_x));
+    let comp_pos = pack(add_limbs(mul_limbs(limbs(f_plus), d_pos), limbs(combo_pos)));
+    let comp_neg = pack(add_limbs(mul_limbs(limbs(f_minus), d_neg), limbs(combo_neg)));
+    QueryChallenges { px, z_x, alphas, invs, comp_pos, comp_neg }
 }
 
 /// Just the fold challenges of a query (`[friAlpha, round_alpha_1, …]`).
@@ -568,6 +631,10 @@ pub fn build_preproc(
     let mut zx_cols: [Vec<BaseField>; 4] =
         [vec![bf0; n], vec![bf0; n], vec![bf0; n], vec![bf0; n]];
     let mut inv_col = vec![bf0; n];
+    let mut cmp_cols: [Vec<BaseField>; 4] =
+        [vec![bf0; n], vec![bf0; n], vec![bf0; n], vec![bf0; n]];
+    let mut cmn_cols: [Vec<BaseField>; 4] =
+        [vec![bf0; n], vec![bf0; n], vec![bf0; n], vec![bf0; n]];
 
     for (q, &final_v) in finals.iter().enumerate() {
         let base = q * block;
@@ -592,6 +659,13 @@ pub fn build_preproc(
         for k in 0..4 {
             zx_cols[k][base] = BaseField::from_u32_unchecked(zl[k] as u32);
         }
+        // Row-0-only composition values (verifier-authenticated against compRoot).
+        let cpl = limbs(ch.comp_pos);
+        let cnl = limbs(ch.comp_neg);
+        for k in 0..4 {
+            cmp_cols[k][base] = BaseField::from_u32_unchecked(cpl[k] as u32);
+            cmn_cols[k][base] = BaseField::from_u32_unchecked(cnl[k] as u32);
+        }
         // Per-fold-row challenges: alpha, inv.
         for r in 0..block {
             let al = limbs(ch.alphas[r]);
@@ -608,6 +682,8 @@ pub fn build_preproc(
     all.push(px_col);
     all.extend(zx_cols);
     all.push(inv_col);
+    all.extend(cmp_cols);
+    all.extend(cmn_cols);
     for c in all.iter_mut() {
         bit_reverse_coset_to_circle_domain_order(c);
     }
@@ -1344,6 +1420,56 @@ mod tests {
         assert!(
             res.is_err(),
             "trace output ≠ claimed fin must violate the is_output constraint (C1)",
+        );
+    }
+
+    // C1 INPUT-side regression: a prover who picks a different fPlus cannot prove.
+    //
+    // Before the comp pin, the OODS relation was a tautology: build_trace DERIVES
+    // compValue = fₚ·(px − z_x) + oodsCombo from the prover's own fₚ, so ANY fₚ
+    // produced a self-consistent trace and the entire fold chain hung off an
+    // unconstrained value.  Pinning compValue to what the verifier authenticated
+    // against `compRoot` inverts the dependency: fₚ is now fully determined by
+    // verifier-fixed data, exactly as on-chain.
+    #[test]
+    fn test_forged_comp_cannot_prove() {
+        let mut s = 0xc0_de_u64;
+        let step = sample_step(&mut s);
+        let rounds = sample_rounds(&mut s, 2);
+        let log_size = compute_log_size(1 + rounds.len());
+
+        // A DIFFERENT fPlus — everything else (px, z_x, combos, alphas) identical.
+        let mut forged_step = step;
+        forged_step.0 = step.0 ^ 1;
+
+        // The prover builds an internally consistent trace for the forged fPlus...
+        let (forged_main, _) = build_trace(&forged_step, &rounds, log_size);
+        let forged_final = recursive_query_final(&forged_step, &rounds);
+        // ...but the verifier pins the composition value it actually authenticated,
+        // i.e. the one belonging to the HONEST fPlus.
+        let honest_challenges = query_challenges(&step, &rounds);
+        let preproc =
+            build_preproc(&[forged_final], &[honest_challenges.clone()], rounds.len(), log_size);
+
+        let res = prove_columns(preproc, forged_main, log_size, step.2, forged_final);
+        assert!(
+            res.is_err(),
+            "a forged fPlus must violate the pinned-compValue constraint (C1 input side)",
+        );
+
+        // Sanity: with the forged prover's OWN compValue pinned it would go through,
+        // which is exactly why the pin has to come from the verifier.
+        let (forged_main2, _) = build_trace(&forged_step, &rounds, log_size);
+        let forged_challenges = query_challenges(&forged_step, &rounds);
+        assert_ne!(
+            forged_challenges.comp_pos, honest_challenges.comp_pos,
+            "the forged fPlus must yield a different compValue, else the test proves nothing",
+        );
+        let preproc2 =
+            build_preproc(&[forged_final], &[forged_challenges], rounds.len(), log_size);
+        assert!(
+            prove_columns(preproc2, forged_main2, log_size, step.2, forged_final).is_ok(),
+            "self-consistent forged trace should prove when its own comp is pinned",
         );
     }
 

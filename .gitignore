@@ -218,3 +218,8 @@ stark_stwo/target/
 
 # Auto-generated testnet deployment output (contract addresses, keep locally)
 .env.deployed
+
+# Scaling-study artifact: 695 KB, regenerable via
+# `cargo test write_recursion_scaling_fixture -- --ignored`; the RESULT lives in
+# docs/conclusions.md, so the blob itself is not worth versioning.
+contracts/test/fixtures/recursion_scaling.json

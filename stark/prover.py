@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 try:
     import qlsa_stark_stwo as _ext
@@ -3197,6 +3198,137 @@ def gen_mldsa_v23_vfri11_cross_bound_hints(
     )
 
 
+@dataclass
+class RecursiveBundle:
+    """One trace group's recursive bundle, shaped for ``BatchRegistryV7``.
+
+    Field names match the on-chain ``RecursiveBundle`` / ``InnerPublics`` structs so
+    a submitter can pass this through with no renaming.  QM31 scalars are decimal
+    STRINGS (they are u128 — wider than a Solidity-safe JS number and awkward to
+    round-trip as Python ints through the ABI encoder), roots are 0x-hex.
+    """
+
+    trace_root: str
+    oods_combo_pos: str
+    oods_combo_neg: str
+    comp_root: str
+    fri_layer_roots: list[str]
+    #: The cross-bound root this group was generated against — the value the
+    #: registry recomputes as keccak256(merkleRoot ‖ otherTraceRoot).
+    batch_root: str
+    tree_depth: int
+    n_queries: int
+    last_layer_evals: list[str]
+
+    outer_proof: bytes
+    outer_commitment: str
+    outer_hints: bytes
+
+    @property
+    def num_folds(self) -> int:
+        """Inner fold count (``friLayerRoots`` holds one root per fold, plus layer 1)."""
+        return len(self.fri_layer_roots) - 1
+
+    def as_inner_publics(self) -> dict[str, Any]:
+        """The ``InnerPublics`` tuple as a dict, ready for ABI encoding."""
+        return {
+            "traceRoot": self.trace_root,
+            "oodsComboPos": self.oods_combo_pos,
+            "oodsComboNeg": self.oods_combo_neg,
+            "compRoot": self.comp_root,
+            "friLayerRoots": list(self.fri_layer_roots),
+            "batchRoot": self.batch_root,
+            "treeDepth": self.tree_depth,
+            "nQueries": self.n_queries,
+        }
+
+
+@dataclass
+class V23RecursiveBundlesResult:
+    """Cross-bound recursive bundles for a full V23 batch (the v8 stack)."""
+
+    log10: RecursiveBundle
+    log8: RecursiveBundle
+    batch_merkle_root: bytes
+    n_queries: int
+
+    @property
+    def security_bits(self) -> int:
+        """On-chain soundness: ``log_blowup(6) * n_queries + pow_bits(10)``."""
+        return 6 * self.n_queries + 10
+
+
+def _to_recursive_bundle(d: dict[str, Any]) -> RecursiveBundle:
+    return RecursiveBundle(
+        trace_root=d["traceRoot"],
+        oods_combo_pos=d["oodsComboPos"],
+        oods_combo_neg=d["oodsComboNeg"],
+        comp_root=d["compRoot"],
+        fri_layer_roots=list(d["friLayerRoots"]),
+        batch_root=d["batchRoot"],
+        tree_depth=int(d["treeDepth"]),
+        n_queries=int(d["nQueries"]),
+        last_layer_evals=list(d["lastLayerEvals"]),
+        outer_proof=bytes(d["outerProof"]),
+        outer_commitment=d["outerCommitment"],
+        outer_hints=bytes(d["outerHints"]),
+    )
+
+
+def gen_mldsa_v23_recursive_bundles(
+    z: list[list[int]],
+    c: list[int],
+    t1: list[list[int]],
+    a_hat: list[list[int]],
+    hints: list[list[bool]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = None,
+) -> V23RecursiveBundlesResult:
+    """Cross-bound RECURSIVE bundles for a full V23 batch — the v8 stack.
+
+    The recursive analogue of :func:`gen_mldsa_v23_vfri11_cross_bound_hints`:
+    instead of two directly-verifiable hint sets it returns two bundles for
+    ``BatchRegistryV7.submitBatch``, each group's chain bound to the OTHER group's
+    trace root::
+
+        log10.batch_root == keccak256(batch_merkle_root ‖ log8.trace_root)
+        log8.batch_root  == keccak256(batch_merkle_root ‖ log10.trace_root)
+
+    Why this path exists: at the production ``n_queries=20`` (130-bit soundness)
+    DIRECT verification of a V23 group no longer fits an Ethereum transaction,
+    while the recursive route finalizes the whole batch in one (measured — see
+    ``docs/conclusions.md``).  Below ~2 queries the direct route is cheaper, so
+    this is a soundness mechanism rather than a gas optimisation.
+    """
+    _require_ext("gen_mldsa_v23_recursive_bundles_py")
+    if n_queries < 1:
+        raise ValueError(f"n_queries must be >= 1, got {n_queries}")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(
+            f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}"
+        )
+    try:
+        b10, b8 = _ext.gen_mldsa_v23_recursive_bundles_py(
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+            list(batch_merkle_root),
+            n_queries,
+            num_folds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"gen_mldsa_v23_recursive_bundles failed: {exc}") from exc
+    return V23RecursiveBundlesResult(
+        log10=_to_recursive_bundle(b10),
+        log8=_to_recursive_bundle(b8),
+        batch_merkle_root=batch_merkle_root,
+        n_queries=n_queries,
+    )
+
+
 def prove_mldsa_sig_vfri11_stark(
     pk: bytes,
     msg: bytes,
@@ -3231,4 +3363,42 @@ def prove_mldsa_sig_vfri11_stark(
         n_queries=n_queries,
         num_folds_log10=num_folds_log10,
         num_folds_log8=num_folds_log8,
+    )
+
+
+def prove_mldsa_sig_recursive_stark(
+    pk: bytes,
+    msg: bytes,
+    sig: bytes,
+    batch_merkle_root: bytes,
+    n_queries: int = 20,
+    num_folds: int | None = 6,
+) -> V23RecursiveBundlesResult:
+    """Cross-bound RECURSIVE bundles from a real ML-DSA-65 signature (the v8 stack).
+
+    Decodes the signature to the arithmetic witness, then runs
+    :func:`gen_mldsa_v23_recursive_bundles` for both LOG groups.
+
+    ``n_queries`` defaults to **20**, unlike the direct
+    :func:`prove_mldsa_sig_vfri11_stark` paths which default to 1. That is the
+    point of this route: 20 queries is 130-bit on-chain soundness, at which direct
+    verification no longer fits a transaction while the recursive one does.
+    """
+    _require_ext("extract_mldsa_witness_py")
+    try:
+        z_raw, c_raw, t1_raw, a_hat_raw, hints_raw = _ext.extract_mldsa_witness_py(
+            bytes(pk), bytes(msg), bytes(sig),
+        )
+    except Exception as exc:
+        raise ValueError(f"extract_mldsa_witness_py failed: {exc}") from exc
+
+    return gen_mldsa_v23_recursive_bundles(
+        [list(p) for p in z_raw],
+        list(c_raw),
+        [list(p) for p in t1_raw],
+        [list(p) for p in a_hat_raw],
+        [list(h) for h in hints_raw],
+        batch_merkle_root,
+        n_queries=n_queries,
+        num_folds=num_folds,
     )

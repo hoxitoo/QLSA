@@ -6941,6 +6941,77 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
+/// gen_mldsa_v23_recursive_bundles_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
+///   -> (bundle10, bundle8)
+///
+/// Each bundle is a dict shaped for `BatchRegistryV7.submitBatch`:
+///
+///   {"traceRoot", "oodsComboPos", "oodsComboNeg", "compRoot", "friLayerRoots",
+///    "batchRoot", "treeDepth", "nQueries", "lastLayerEvals",
+///    "outerProof", "outerCommitment", "outerHints"}
+///
+/// QM31 scalars are returned as DECIMAL STRINGS because Python ints are unbounded
+/// but the values are u128 — passing them as ints through PyO3 would need a
+/// lossless bridge on both sides, and the on-chain ABI takes them as strings
+/// anyway. `friLayerRoots` / roots are 0x-prefixed hex.
+///
+/// This is the recursive analogue of gen_mldsa_v23_vfri11_cross_bound_hints_py:
+/// two-pass cross-binding, each group bound to the OTHER's trace root.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (z, c, t1, a_hat, hints, batch_root, n_queries=1, num_folds=None))]
+fn gen_mldsa_v23_recursive_bundles_py(
+    py:         Python<'_>,
+    z:          Vec<Vec<i64>>,
+    c:          Vec<i64>,
+    t1:         Vec<Vec<i64>>,
+    a_hat:      Vec<Vec<i64>>,
+    hints:      Vec<Vec<bool>>,
+    batch_root: Vec<u8>,
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+) -> PyResult<(pyo3::Py<pyo3::types::PyDict>, pyo3::Py<pyo3::types::PyDict>)> {
+    use pyo3::types::PyDict;
+
+    let z_arr = _conv_z(z)?;
+    let c_arr = _conv_c(c)?;
+    let t1_arr = _conv_t1(t1)?;
+    let a_hat_arr = _conv_a_hat(a_hat)?;
+    let hints_arr = _conv_hints(hints)?;
+
+    let (b10, b8) = vfri2_bridge::gen_mldsa_v23_recursive_bundles(
+        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
+        &batch_root, n_queries, num_folds,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    let to_dict = |b: &vfri2_bridge::RecursiveBundleData| -> PyResult<pyo3::Py<PyDict>> {
+        let hx = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
+        let d = PyDict::new(py);
+        d.set_item("traceRoot", hx(&b.trace_root))?;
+        d.set_item("oodsComboPos", b.oods_combo_pos.to_string())?;
+        d.set_item("oodsComboNeg", b.oods_combo_neg.to_string())?;
+        d.set_item("compRoot", hx(&b.comp_root))?;
+        d.set_item(
+            "friLayerRoots",
+            b.fri_layer_roots.iter().map(|r| hx(r)).collect::<Vec<_>>(),
+        )?;
+        d.set_item("batchRoot", hx(&b.bound_root))?;
+        d.set_item("treeDepth", b.tree_depth)?;
+        d.set_item("nQueries", b.n_queries)?;
+        d.set_item(
+            "lastLayerEvals",
+            b.last_layer_evals.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        )?;
+        d.set_item("outerProof", b.outer_proof.clone())?;
+        d.set_item("outerCommitment", b.outer_commitment.clone())?;
+        d.set_item("outerHints", b.outer_hints.clone())?;
+        Ok(d.into())
+    };
+
+    Ok((to_dict(&b10)?, to_dict(&b8)?))
+}
+
 #[cfg(feature = "python")]
 #[pymodule]
 fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -7050,6 +7121,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_log8_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_cross_bound_hints_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_v23_recursive_bundles_py, m)?)?;
     Ok(())
 }
 

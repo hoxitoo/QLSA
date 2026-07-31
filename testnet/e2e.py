@@ -11,7 +11,14 @@ Flow:
   5. Submit to the on-chain registry on the configured testnet
   6. Verify on-chain finalization
 
-Three contract stacks are supported via --stack:
+Four contract stacks are supported via --stack:
+  v8:           QLSAVerifierRecursive + BatchRegistryV7 — RECURSIVE proofs. The
+                registry verifies, per V23 group, a STARK attesting the inner
+                VFRI11 proof was verified. Defaults to n_queries=20, i.e. 130-bit
+                on-chain soundness, at which DIRECT verification no longer fits a
+                transaction at all; this route finalizes in one (~13.13M gas).
+                Below ~2 queries v7 is cheaper — this is a soundness mechanism,
+                not a gas optimisation. See docs/conclusions.md.
   v7 (default): QLSAVerifierVFRI11 + BatchRegistryV5 — Poseidon2 t=8 backend
                 (4-word/124-bit Merkle nodes → node collision ~2^62 vs t=4's
                 ~2^31), BOTH V23 groups verified in ONE atomic transaction
@@ -37,7 +44,7 @@ Environment (.env):
                          V6 for v6, V4 for v4)
 
 Usage:
-  python -m testnet.e2e [--stack v7|v6|v4] [--txs N] [--dry-run]
+  python -m testnet.e2e [--stack v8|v7|v6|v4] [--txs N] [--dry-run]
   bash testnet/deploy_v7.sh --network sepolia   # deploy the default stack
 """
 
@@ -65,6 +72,7 @@ from stark.prover import (
     prove_mldsa_sig_vfri7_stark,
     prove_mldsa_sig_vfri10_stark,
     prove_mldsa_sig_vfri11_stark,
+    prove_mldsa_sig_recursive_stark,
 )
 
 # num_folds=6 keeps the last layer at 16/4 evaluations. It was originally forced
@@ -73,6 +81,11 @@ from stark.prover import (
 # for both the t=4 (VFRI10) and t=8 (VFRI11) stacks.
 _VFRI10_NUM_FOLDS = 6
 _VFRI11_NUM_FOLDS = 6
+# The v8 stack exists for production soundness: 20 queries is 130-bit
+# (log_blowup(6)*20 + pow_bits(10)), the point at which direct verification stops
+# fitting a transaction. Overridable with --n-queries for a faster demo run.
+_V8_NUM_FOLDS = 6
+_V8_DEFAULT_QUERIES = 20
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,13 +144,19 @@ def build_sender_nonces(txs: list[Transaction]) -> dict[bytes, int]:
 
 def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = "v7") -> int:
     """Run the full E2E flow. Returns exit code (0 = success)."""
-    if stack not in ("v4", "v6", "v7"):
-        logger.error("unknown --stack %r (expected 'v7', 'v6' or 'v4')", stack)
+    if stack not in ("v4", "v6", "v7", "v8"):
+        logger.error("unknown --stack %r (expected 'v8', 'v7', 'v6' or 'v4')", stack)
         return 1
+    if stack == "v8" and n_queries == 1:
+        # The whole point of v8 is production soundness; 1 query would make it
+        # strictly worse than v7. Only override this deliberately.
+        n_queries = _V8_DEFAULT_QUERIES
+        logger.info("--stack v8: raising n_queries to %d (130-bit)", n_queries)
     # Security: log_blowup(6) × n_queries + pow_bits(10)
     # n=1 → 16-bit (demo); n=3 → 28-bit; n=20 → 130-bit (but ~300M gas — not feasible on mainnet).
     security_bits = 6 * n_queries + 10
     stack_label = {
+        "v8": "Recursive + BatchRegistryV7 (proof-of-verification, one tx)",
         "v7": "VFRI11 + BatchRegistryV5 (t=8, atomic dual verify, node ~2^62)",
         "v6": "VFRI10 + BatchRegistryV6 (t=4, per-group split, node ~2^31)",
         "v4": "VFRI7 + BatchRegistryV4 (single submitBatch)",
@@ -182,7 +201,7 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
     # and LOG=8 (AzFull+Ct1Full+RangeQBatch+WPrime+NormCheck+UseHint, 2206 cols).
     # The cross-bound roots bind each group's FRI query indices to the other
     # group's trace commitment, preventing adversarial proof mixing.
-    proto = {"v7": "VFRI11", "v6": "VFRI10", "v4": "VFRI7"}[stack]
+    proto = {"v8": "recursive", "v7": "VFRI11", "v6": "VFRI10", "v4": "VFRI7"}[stack]
     logger.info("Generating %s cross-bound V23 ML-DSA STARK proofs for tx[0]…", proto)
     tx0 = txs[0]
     if tx0.signature is None:
@@ -191,7 +210,16 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
     batch_merkle_root = batch.merkle_root[:32]
     t0 = time.monotonic()
     try:
-        if stack == "v7":
+        if stack == "v8":
+            result = prove_mldsa_sig_recursive_stark(
+                pk=tx0.public_key,
+                msg=tx0.to_bytes(),
+                sig=tx0.signature,
+                batch_merkle_root=batch_merkle_root,
+                n_queries=n_queries,
+                num_folds=_V8_NUM_FOLDS,
+            )
+        elif stack == "v7":
             result = prove_mldsa_sig_vfri11_stark(
                 pk=tx0.public_key,
                 msg=tx0.to_bytes(),
@@ -220,17 +248,28 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
                 n_queries=n_queries,
             )
         elapsed_v = time.monotonic() - t0
-        logger.info(
-            "  log10: proof=%d B commit=%s hints=%d B | "
-            "log8: proof=%d B commit=%s hints=%d B (%.2fs)",
-            len(result.log10_proof),
-            result.log10_commitment,
-            len(result.log10_query_hints),
-            len(result.log8_proof),
-            result.log8_commitment,
-            len(result.log8_query_hints),
-            elapsed_v,
-        )
+        if stack == "v8":
+            logger.info(
+                "  log10: outer=%d B hints=%d B lastLayer=%d | "
+                "log8: outer=%d B hints=%d B lastLayer=%d | %d-bit (%.2fs)",
+                len(result.log10.outer_proof), len(result.log10.outer_hints),
+                len(result.log10.last_layer_evals),
+                len(result.log8.outer_proof), len(result.log8.outer_hints),
+                len(result.log8.last_layer_evals),
+                result.security_bits, elapsed_v,
+            )
+        else:
+            logger.info(
+                "  log10: proof=%d B commit=%s hints=%d B | "
+                "log8: proof=%d B commit=%s hints=%d B (%.2fs)",
+                len(result.log10_proof),
+                result.log10_commitment,
+                len(result.log10_query_hints),
+                len(result.log8_proof),
+                result.log8_commitment,
+                len(result.log8_query_hints),
+                elapsed_v,
+            )
     except ValueError as exc:
         logger.error("ML-DSA signature invalid or witness extraction failed: %s", exc)
         return 1
@@ -239,7 +278,8 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
         return 1
 
     registry_name = {
-        "v7": "BatchRegistryV5", "v6": "BatchRegistryV6", "v4": "BatchRegistryV4",
+        "v8": "BatchRegistryV7", "v7": "BatchRegistryV5",
+        "v6": "BatchRegistryV6", "v4": "BatchRegistryV4",
     }[stack]
     if dry_run:
         logger.info("[DRY-RUN] Skipping on-chain submission.")
@@ -250,11 +290,55 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
 
     sender_nonces = build_sender_nonces(txs)
 
+    if stack == "v8":
+        return _submit_v8(result, batch_merkle_root, sender_nonces)
     if stack == "v7":
         return _submit_v7(result, batch_merkle_root, sender_nonces)
     if stack == "v6":
         return _submit_v6(result, batch_merkle_root, sender_nonces)
     return _submit_v4(result, batch_merkle_root, sender_nonces)
+
+
+def _submit_v8(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]) -> int:
+    """Submit cross-bound RECURSIVE bundles to BatchRegistryV7 in ONE transaction."""
+    try:
+        from testnet.submit import OnchainSubmitterV7
+        submitter = OnchainSubmitterV7.from_env()
+    except KeyError as exc:
+        logger.error("Missing env var: %s — run with --dry-run or set .env", exc)
+        return 1
+    except RuntimeError as exc:
+        logger.error("Cannot connect to RPC or wrong registry: %s", exc)
+        return 1
+
+    logger.info(
+        "Submitting to BatchRegistryV7 (recursive bundles, %d-bit soundness)…",
+        result.security_bits,
+    )
+    t0 = time.monotonic()
+    try:
+        tx_hash = submitter.submit_batch_with_nonces(
+            merkle_root=batch_merkle_root,
+            bundles=result,
+            senders=list(sender_nonces.keys()),
+            new_nonces=list(sender_nonces.values()),
+        )
+    except RuntimeError as exc:
+        logger.error("on-chain submission failed: %s", exc)
+        return 1
+    logger.info("  tx_hash=%s (%.2fs)", tx_hash, time.monotonic() - t0)
+
+    logger.info("Waiting for confirmation and verifying finalization…")
+    t0 = time.monotonic()
+    if not submitter.wait_and_verify(tx_hash, batch_merkle_root):
+        logger.error("Batch NOT finalized on-chain after tx confirmed — unexpected state")
+        return 1
+    logger.info("  finalized=True (%.2fs)", time.monotonic() - t0)
+    logger.info(
+        "=== E2E COMPLETE — batch finalized via RECURSION at %d-bit soundness ===",
+        result.security_bits,
+    )
+    return 0
 
 
 def _submit_v7(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]) -> int:
@@ -377,7 +461,7 @@ def _submit_v4(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="QLSA E2E testnet demo")
     p.add_argument(
-        "--stack", choices=["v7", "v6", "v4"], default="v7",
+        "--stack", choices=["v8", "v7", "v6", "v4"], default="v7",
         help=(
             "Contract stack: v7 = QLSAVerifierVFRI11 + BatchRegistryV5 (default; "
             "Poseidon2 t=8, atomic dual verify in one tx, node collision ~2^62 — "

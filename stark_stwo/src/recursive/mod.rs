@@ -39,6 +39,30 @@
 //! the query indices + fold challenges into the composition (no cherry-pick), swap
 //! the inner hash to t=16 for 128-bit, then on-chain `QLSAVerifierRecursive.sol`.
 //!
+//! # R4.10 (2026-07-30) — C1 INPUT-side binding: `compValue` pinned
+//!
+//! The output side of C1 was closed in the 2026-06-17 audit (the claimed final
+//! fold is pinned and forced to equal the trace's real output).  The INPUT side
+//! was still open: `build_trace` DERIVES
+//! `compValue = fₚ·(px − z_x) + oodsCombo` from the prover's own `fₚ`, so the OODS
+//! relation was a tautology — any `fₚ` yielded a self-consistent `compValue`, and
+//! the entire fold chain hung off an unconstrained value with nothing tying it to
+//! the inner proof's committed composition tree.
+//!
+//! `QueryChallenges` now carries `comp_pos`/`comp_neg` — the composition values the
+//! verifier authenticated against `compRoot` — pinned in 8 preprocessed columns
+//! (`rv_cmp0..3`, `rv_cmn0..3`) with `is_step`-gated equality constraints.  That
+//! inverts the dependency: `fₚ` is fully determined by verifier-fixed data, exactly
+//! as on-chain.  Regression `test_forged_comp_cannot_prove` (a forged `fₚ` is
+//! rejected, with a sanity assertion that it *would* prove under its own pin, so
+//! the test cannot pass vacuously).
+//!
+//! **Still open before a recursive proof could replace `verify()` outright:** the
+//! in-circuit Merkle path binding `hashLeaf(compValue) @ queryIndex → compRoot`
+//! (the input-side analogue of the last-layer path already proven), and the
+//! last-layer bounded-degree check.  Until both land, `BatchRegistryV7` would be
+//! premature — the recursion does not yet prove everything `verify()` checks.
+//!
 //! # Soundness status (audit 2026-06-17) — C1/C2 CLOSED for `recursive_verifier`
 //!
 //! These gadgets are correct arithmetic *relation* provers (each pins its output
