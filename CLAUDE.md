@@ -14,7 +14,7 @@ core/           ML-DSA-65 keys, signing, Merkle tree, batch creation
 stark_stwo/     Rust: Stwo Circle STARK prover + ML-DSA-65 verifier (PyO3 ext)
 stark/          Python wrappers: prove_batch, prove_mldsa_batch, witness pipeline V4–V23
 aggregator/     Mempool, Batcher, AggregatorNode, FastAPI HTTP API
-contracts/      Solidity: BatchRegistryV2/V3/V4/V5/V6, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/VFRI3/VFRI4/VFRI5/VFRI6/VFRI7/VFRI8/VFRI9/VFRI10, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2MerkleVerifierT4.sol, Poseidon2Channel.sol, Poseidon2ChannelT4.sol
+contracts/      Solidity: BatchRegistryV2/V3/V4/V5/V6/V7, QLSAVerifierV4/V5/V6/V7/V8/V9/V10/V11/V12/V13/VFRI/VFRI2/…/VFRI10/VFRI11/VFRI12, CM31.sol, QM31.sol, MerkleVerifier.sol, Poseidon2MerkleVerifier.sol, Poseidon2MerkleVerifierW.sol, Poseidon2MerkleVerifierT4.sol, Poseidon2Channel.sol, Poseidon2ChannelT4.sol, Poseidon2M31T8/T16.sol, Poseidon2MerkleVerifierT8/T16.sol, Poseidon2ChannelT8/T16.sol
 sdk/python/     Python SDK: LocalClient, HttpClient, Wallet, WitnessStatus
 sdk/js/         TypeScript SDK: AggregatorClient, types
 testnet/        e2e.py (--stack v7/v6/v4), deploy.sh, deploy_v6.sh, deploy_v7.sh, submit.py (V4/V5/V6 submitters), monitor.py
@@ -757,6 +757,11 @@ VFRI11 — the VFRI10 proof protocol on the Poseidon2 **t=8** hash backend.
   groups in **ONE transaction at 6,058,052 gas** — inside the 16,777,216 (2^24, EIP-7825) per-tx cap.
   **t=8 (node collision ~2^62) is therefore production-deployable in a single transaction**, a
   security upgrade over the t=4 stack. See `docs/roadmap/recursion.md` § R4.8.
+- **⚠ SUPERSEDED (2026-07-31, R4.22):** the "skip t=16" decision below was reversed by measurement —
+  `QLSAVerifierVFRI12` verifies BOTH full-V23 groups at **15,436,509 gas in one transaction**
+  (128-bit node collision). See `### contracts/src/QLSAVerifierVFRI12.sol` and Known Limitations #6.
+  Recursion remains the path to production 130-bit FRI soundness (20 queries), which fits no
+  transaction at any hash width — the two bounds are independent.
 - **Path decision (2026-06-17):** the standalone **t=16 verifier (VFRI12) is SKIPPED** in favour of
   going straight to **proof recursion**. Rationale: a standalone t=16 on-chain verifier has the same
   gas-wall problem as t=8 but ~4× worse (~400M+ gas for full V23) — it would only prove correctness at
@@ -766,6 +771,68 @@ VFRI11 — the VFRI10 proof protocol on the Poseidon2 **t=8** hash backend.
   becomes the recursion's inner hash function, not a separate verifier. Recursion delivers BOTH
   128-bit soundness AND production-feasible constant on-chain gas (~5M) in one step.
   See `docs/roadmap/recursion.md`.
+
+### `contracts/src/verifier/Poseidon2M31T16.sol` + `Poseidon2MerkleVerifierT16.sol` + `Poseidon2ChannelT16.sol`
+The **t=16** rung — the last of the node-width ladder, matching Stwo's native Poseidon2-16.
+- `Poseidon2M31T16`: R_F=8, R_P=14, α=5; M_E = circ(2·M4, M4, M4, M4); M_I = J+diag(1..16);
+  RC = K_RC[0..142]. State in `uint256[16] memory` but every round is straight-line with
+  CONSTANT indices and the round constants are packed eight-to-a-word as code immediates.
+  That combination matters: the fully-unrolled stack form that made t=8 cheap exhausts the
+  solc-js WASM compiler at t=16 (`std::bad_alloc`), while the naive loop form pays a bounds
+  check on every dynamic index plus a 128-element array literal per call — **199,608 gas**.
+  The middle path costs **64,812**, i.e. **1.79× a t=8 permute for TWICE the node width**, so
+  per bit of node capacity t=16 is *cheaper* than t=8.
+- `Poseidon2MerkleVerifierT16`: **8-word (248-bit) nodes → collision ~2^124 ≈ 128-bit**. Eight M31
+  words is exactly 32 bytes, so a node fills a whole `bytes32` with no padding (t=8 leaves 16
+  leading zero bytes, t=4 leaves 24). `hashLeaf` = rate-8 cap-8 `sponge8`; `hashPair` = 16→8
+  `compress8`. Matches Rust `hash_leaf_cols_p2t16` / `hash_pair_p2t16`.
+- `Poseidon2ChannelT16`: **rate-8 absorb** — up to 8 words per permutation, cells 8–15 an
+  eight-cell (248-bit) capacity. The narrower channels absorb one word per permutation; keeping
+  that at t=16 cost 8 permutations per 8-word root and made a full-V23 group 3.57× a t=8 one
+  against a 1.79× permutation ratio. A short block adds `8 - k` to capacity cell 15, so the pad
+  encodes the block LENGTH — a constant flag would let `[1,2,3]` and `[1,2,3,0]` collide. An
+  empty array absorbs nothing, as in the rate-1 channels. Squeeze stays rate-2 (a small share of
+  a verify). Matches Rust `P2T16Channel`.
+- Cross-check vectors (frozen in `vfri2_bridge.rs::test_p2t16_reference_vectors`):
+  `hashLeaf([1,2,3,4]) → [55566406, 1875114541, 1126231753, 1747661633, 1062235343, 1908581748, 1128601005, 1541813924]`
+  `hashPair(node[1..8],node[9..16]) → [1896676506, 1113082531, 1826142252, 1263581674, 694653155, 1856461508, 173489390, 625083048]`
+  (== `permute_t16([1..16])[0..8]`, so it also pins that packing does not perturb the value)
+  `mixRoot(0x11..).drawQueries(10,4) → [821, 259, 182, 183]`
+  `mixRootW(node[1..8]).drawQueries(10,4) → [362, 455, 247, 671]`
+  `mixU32s([1,2,3]).drawSecureFelt() → 1407887379921827972915931489114976420`
+- 10 Rust tests + 18 JS tests (`Poseidon2T16Backend.test.js`) + 7 JS permutation tests
+  (`Poseidon2M31T16.test.js`)
+
+### `contracts/src/QLSAVerifierVFRI12.sol`
+VFRI12 — the VFRI11 proof protocol on the Poseidon2 **t=16** hash backend.
+- Implements `IQLSAVerifierV4`; `queryHints` ABI **byte-identical to VFRI9/10/11** (6 head slots)
+- Only the hash backend changes vs VFRI11:
+  `Poseidon2MerkleVerifierT8 → …T16`, `Poseidon2ChannelT8 → …T16`
+- Keeps VFRI9's last-layer FRI bounded-degree check + full-root Fiat-Shamir; node encoding widens
+  from 4 words (124-bit) to **8 words (248-bit)** → node/transcript collision ~2^62 → **~2^124**
+- Proof version marker: `proof[0:8] = 6` (little-endian; VFRI11 uses 5)
+- VFRI11 hints are NOT accepted (different permutation → different trace root + query indices)
+- `verify()` is split into a guard frame + `_verifyDecoded(Decoded memory, …)` work frame: with the
+  wider backend the Yul stack allocator fails on VFRI11's shape ("Variable size is 1 too deep").
+  Neither a lower inlining budget nor scoping only the decode helps — the six decoded values stay
+  live across the body; one struct pointer does. **Codegen only** — identical checks, order, transcript.
+- **Gas (2026-07-31, R4.22) — measured `gasUsed` of sent transactions, never `estimateGas`:**
+  `BatchRegistryV5.submitBatch` finalizes BOTH full-V23 groups in **ONE transaction at 15,436,509
+  gas** (cap 16,777,216; 8% headroom). Per group: LOG=10 **9,036,930**, LOG=8 **6,511,542**
+  (via `BatchRegistryV6`). Fixtures use `n_queries=1` / `num_folds=6`, matching the VFRI11 fixture
+  so the two are directly comparable.
+  **Scope:** 128-bit is the MERKLE NODE / transcript bound. FRI soundness is separate —
+  `log_blowup(6) × n_queries + pow_bits(10)`, so `n_queries=1` is 16-bit. Production 130-bit needs
+  20 queries, which fits no transaction at ANY hash width; that stays recursion's job.
+- Rust bridges: `gen_vfri12_hints_from_cols_nfolds`, `gen_mldsa_v23_vfri12_hints[_log8]`,
+  `gen_mldsa_v23_vfri12_cross_bound_hints` (two-pass; **checks** rather than assumes that the trace
+  root is independent of the batch root)
+- The FRI chain is parameterised over the backend (`P2Backend` / `P2Chan` traits, `T8Backend` /
+  `T16Backend`), so VFRI11 and VFRI12 share ONE chain implementation and cannot drift from the ABI
+  encoder they must agree with byte-for-byte (the R4.1 discipline)
+- Tests: 4 Rust + 11 JS generic E2E (`vfri12_e2e.json`) + 11 JS full-V23 cross-bound E2E
+  (`full_v23_vfri12_cross_bound_e2e.json`); both fixtures regenerable from Rust
+  (`cargo test write_vfri12_e2e_fixture` / `write_v23_vfri12_fixture -- --ignored`)
 
 ### `contracts/src/verifier/Poseidon2MerkleVerifierT4.sol` (VFRI10 hash backend)
 Poseidon2 t=4 wide Merkle verification — the t=4 successor to `Poseidon2MerkleVerifierW`.
@@ -859,6 +926,32 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 4. FRI LOG_BLOWUP=6 → blowup=64, N_FRI_QUERIES=20, POW_BITS=10 → 6×20+10 = 130-bit soundness (PcsConfig security_bits formula: log_blowup × n_queries + pow_bits)
 5. `wipe_key()`: Rust `zeroize` wrapper (volatile writes) — Python-side liboqs copies still not guaranteed
 6. Poseidon2 t=2 permutation: channel sponge state is 62 bits and VFRI9 wide Merkle nodes are 62 bits — collision/transcript attacks at ~2^31 remain possible in principle; 128-bit binding requires t≥4 or RPO256 hash AIR (MVP-6). VFRI9 reaches the t=2 maximum. **MVP-6 groundwork (2026-06-12):** Poseidon2 t=4 permutation implemented and cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t4.rs` + `contracts/src/verifier/Poseidon2M31T4.sol`) — R_F=8 + R_P=21, α=5, M4 external matrix, J+diag(1,2,3,4) internal, SHA-256 K[0..53] constants; rate-2 capacity-2 sponge with capacity-cell odd-length flag; `compress` for 124-bit wide nodes (collision ~2^62). **Hash backend (2026-06-13):** `Poseidon2MerkleVerifierT4.sol` (t=4 wide Merkle) + `Poseidon2ChannelT4.sol` (t=4 Fiat-Shamir channel) + Rust references `hash_leaf_cols_p2t4` / `hash_pair_p2t4` / `P2T4Channel` in `vfri2_bridge.rs`, cross-checked bit-exact (18 tests). **VFRI10 verifier (2026-06-13):** `QLSAVerifierVFRI10.sol` wires the t=4 backend into the full VFRI9 proof path (identical ABI; only the hash backend changes) — `gen_vfri10_hints_from_cols_nfolds` bridge + on-chain `verify()==true` E2E (fixture `vfri10_e2e.json`, 11 JS tests). t=4 lifts the node/transcript collision wall above the t=2 ceiling (~2^31). **VFRI10 production pipeline (2026-06-14):** V23 cross-bound wrappers (`gen_mldsa_v23_vfri10_hints[_log8]`, `gen_mldsa_v23_vfri10_cross_bound_hints`) + PyO3 bindings + Python wrappers (`prove_mldsa_sig_vfri10_stark`) + on-chain dual-group E2E via `BatchRegistryV5` (8 Python + 10 JS tests, fixture `full_v23_vfri10_cross_bound_e2e.json`). **Gas finding:** each V23 group `verify()` fits within 16.7M gas individually (~8–10M) at `num_folds=6`; the dual-group `submitBatch` (both t=4 verifies in one tx) overruns the 16.7M per-tx cap — production needs a per-group registry (one verify per tx) or mainnet's 30M block limit. `num_folds=3` (128-eval last layer) overruns LOG=10 alone. **Per-group registry (2026-06-14):** `BatchRegistryV6` splits the dual-verify into one `verify()` per transaction (LOG=10 ~10.6M gas, LOG=8 ~7.9M gas — both ≤16.7M), finalizing the full V23 batch across two txs with the cross-proof binding preserved (consistency asserted at finalization). Remaining for a single-pass 128-bit verify: RPO256 hash AIR (t≥4 reaches the t=2 ceiling but a single-tx dual-verify still needs ~18M+). **Diagnosis refinement (2026-06-16):** the ~2^31 wall is set by node *width*, not the permutation family — VFRI10's t=4 backend still truncates Merkle nodes to 2 M31 words (62 bits → 2^31). The cheap lever to 128-bit is therefore *wider Poseidon2*, not RPO256: a wider state lets a 2-to-1 compression carry more words per node. **t=8 groundwork (2026-06-16):** Poseidon2 t=8 permutation cross-checked Rust↔Solidity (`stark_stwo/src/poseidon2_t8.rs` + `contracts/src/verifier/Poseidon2M31T8.sol`) — R_F=8 + R_P=14, α=5, block external matrix `[[2·M4,M4],[M4,2·M4]]`, J+diag(1..8) internal, SHA-256-domain RC[0..78]; rate-4 capacity-4 sponge, `compress` for **4-word (124-bit) nodes → ~2^62 collision** (11 JS + 12 Rust tests). Ladder: t=2/t=4 (2^31) → **t=8 (2^62)** → t=16 (8-word nodes, ~2^124 ≈ 128-bit, = Stwo's native Poseidon2-16). x^5 forward S-box keeps each path EVM-cheap (no inverse S-box, unlike RPO). **t=8 hash backend (2026-06-16):** `Poseidon2MerkleVerifierT8.sol` (4-word/124-bit nodes, rate-4 cap-4 leaf sponge + 8→4 pair compression) + `Poseidon2ChannelT8.sol` (t=8 duplex Fiat-Shamir, rate-1 absorb / 217-bit capacity) + Rust references `hash_leaf_cols_p2t8` / `hash_pair_p2t8` / `build_tree_p2t8` / `P2T8Channel` in `vfri2_bridge.rs`, cross-checked bit-exact (13 JS + 6 Rust tests). **VFRI11 verifier (2026-06-16):** `QLSAVerifierVFRI11.sol` wires the t=8 backend (clone of VFRI10 with the T8 hash backend + 4-word node encoding) — generic `verify()==true` at ~13.1M gas (depth-4), but full-V23 t=8 verify exceeds 100M gas on-chain. **Path decision (2026-06-17):** the standalone **t=16 verifier (VFRI12) is SKIPPED** — it would have the same gas wall ~4× worse and never deploy production V23. t=16 (full 128-bit) becomes the *inner hash AIR of a recursive proof*, where on-chain cost is constant. Going straight to **proof recursion** (see `docs/roadmap/recursion.md`) delivers both 128-bit soundness and constant ~5M on-chain gas.
+**R4.22 — t=16 (128-bit node collision) verifies a full V23 batch in ONE transaction (2026-07-31):**
+the "VFRI12 is SKIPPED" decision above is **SUPERSEDED**. `QLSAVerifierVFRI12.sol` (the VFRI11
+protocol on a t=16 hash backend: `Poseidon2MerkleVerifierT16` + `Poseidon2ChannelT16`,
+**8-word/248-bit nodes → ~2^124 ≈ 128-bit**) finalizes both full-V23 groups through
+`BatchRegistryV5.submitBatch` at **15,436,509 gas in one transaction** (per group: LOG=10
+**9,036,930** / LOG=8 **6,511,542**), inside the 16,777,216 (2^24) cap with 8% headroom. The
+`SKIPPED` reasoning ("same gas wall ~4× worse, could never deploy production V23") was an
+extrapolation from an unoptimised permutation — the same error R4.8 corrected for t=8.
+**Scope:** this is the MERKLE NODE / transcript collision bound. The fixtures use `n_queries=1`
+(16-bit FRI soundness), matching the VFRI11 fixture for comparability; production 130-bit FRI
+soundness needs 20 queries, where DIRECT verification does not fit a transaction at any hash
+width — that remains recursion's job. The two bounds are independent.
+Two implementation findings, both from measuring rather than reasoning:
+(a) the first build came in at **3.57×** a t=8 group against a **1.79×** permutation ratio, and the
+whole gap was the ABSORB COUNT — the channel had inherited rate-1 absorb from t=2/t=4/t=8, so each
+8-word root cost 8 permutations instead of 1. t=16's sponge has rate 8; rate-1 wastes 7/8 of its
+bandwidth for no security (capacity, not rate, sets the collision bound). Rate-8 absorb cut LOG=10
+by 24% and LOG=8 by 31% — that is what brought the pair under the cap. (b) a constant padding flag
+left `mix_u32s([1,2,3])` and `mix_u32s([1,2,3,0])` absorbing to the same state (both pad to the same
+8 cells); the pad now adds `8-k`, encoding the block length.
+Also: the FRI chain is parameterised over the hash backend (`P2Backend`/`P2Chan`) so VFRI11 and
+VFRI12 share ONE implementation and cannot drift from the ABI encoder (the R4.1 discipline);
+VFRI12's `verify()` is split into a guard frame and a work frame because the wider backend makes the
+Yul stack allocator fail on VFRI11's shape (codegen only — identical checks, order, transcript).
+Ladder complete on-chain: t=2/t=4 (2^31) → t=8 (2^62) → **t=16 (2^124)**.
+
 **R4.8 — the gas wall was implementation overhead, not width (2026-07-30):** every gas figure above
 was measured against a Solidity Poseidon2 whose per-permutation cost was ~97% overhead: `uint256[8]
 memory` state plumbing plus a branchy `if (r >= P) r -= P` on every linear-layer addition (t=8:
