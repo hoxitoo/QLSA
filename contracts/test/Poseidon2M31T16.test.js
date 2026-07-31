@@ -82,13 +82,30 @@ describe("Poseidon2M31T16 — t=16 permutation (128-bit node width)", function (
   });
 
   it("[gas] measures the t=16 permutation against t=8", async function () {
-    this.timeout(300_000);
-    const t8 = await (await ethers.getContractFactory("Poseidon2M31T8Harness")).deploy();
-    const g16 = await h.permute.estimateGas(Array.from({ length: 16 }, (_, i) => i + 1));
-    const g8 = await t8.permute.estimateGas([1, 2, 3, 4, 5, 6, 7, 8]);
-    console.log(`        [gas] t8.permute  = ${g8}`);
-    console.log(`        [gas] t16.permute = ${g16}`);
-    console.log(`        [gas] ratio       = ${(Number(g16) / Number(g8)).toFixed(2)}x`);
-    expect(g16).to.be.greaterThan(0n);
+    // MARGINAL cost: gas(n=2) - gas(n=1) is exactly one permutation. Measuring a
+    // single call instead charges the 21,000 transaction base to both widths,
+    // which inflates the smaller number and understates the ratio — the same
+    // shared-overhead mistake docs/conclusions.md §1 catalogues.
+    const marginal = async (h, vec) => {
+      const g1 = await h.permuteN.estimateGas(vec, 1);
+      const g2 = await h.permuteN.estimateGas(vec, 2);
+      return g2 - g1;
+    };
+    const h8 = await (await ethers.getContractFactory("Poseidon2M31T8Harness")).deploy();
+    const p8 = await marginal(h8, [1, 2, 3, 4, 5, 6, 7, 8]);
+    const p16 = await marginal(h, VEC_SEQ);
+
+    console.log(`        [gas] t8.permute  = ${p8}`);
+    console.log(`        [gas] t16.permute = ${p16}`);
+    console.log(`        [gas] ratio       = ${(Number(p16) / Number(p8)).toFixed(2)}x`);
+    console.log(`        [gas] per node bit: t8 ${(Number(p8) / 124).toFixed(0)}, ` +
+                `t16 ${(Number(p16) / 248).toFixed(0)}`);
+
+    // t=16 carries twice the node width (248-bit vs 124-bit). A ratio at or
+    // under 2 would make it cheaper per bit of node capacity; above 2 it is
+    // dearer. Pinning the bound keeps the documented claim honest if either
+    // implementation changes.
+    expect(Number(p16) / Number(p8)).to.be.greaterThan(1.0);
+    expect(Number(p16) / Number(p8)).to.be.lessThan(4.0);
   });
 });

@@ -779,9 +779,11 @@ The **t=16** rung — the last of the node-width ladder, matching Stwo's native 
   CONSTANT indices and the round constants are packed eight-to-a-word as code immediates.
   That combination matters: the fully-unrolled stack form that made t=8 cheap exhausts the
   solc-js WASM compiler at t=16 (`std::bad_alloc`), while the naive loop form pays a bounds
-  check on every dynamic index plus a 128-element array literal per call — **199,608 gas**.
-  The middle path costs **64,812**, i.e. **1.79× a t=8 permute for TWICE the node width**, so
-  per bit of node capacity t=16 is *cheaper* than t=8.
+  check on every dynamic index plus a 128-element array literal per call. The middle path cuts
+  that ~3×. **Marginal cost** (gas(n=2)−gas(n=1), so the 21,000 tx base cancels): **37,377**
+  against t=8's **12,306** = **3.04× for twice the node width**, i.e. 151 gas per bit of node
+  capacity against t=8's 99 — t=16 is **dearer per bit**, and is worth building because it
+  reaches a level t=8 cannot at all, not because it is more efficient.
 - `Poseidon2MerkleVerifierT16`: **8-word (248-bit) nodes → collision ~2^124 ≈ 128-bit**. Eight M31
   words is exactly 32 bytes, so a node fills a whole `bytes32` with no padding (t=8 leaves 16
   leading zero bytes, t=4 leaves 24). `hashLeaf` = rate-8 cap-8 `sponge8`; `hashPair` = 16→8
@@ -821,6 +823,9 @@ VFRI12 — the VFRI11 proof protocol on the Poseidon2 **t=16** hash backend.
   gas** (cap 16,777,216; 8% headroom). Per group: LOG=10 **9,036,930**, LOG=8 **6,511,542**
   (via `BatchRegistryV6`). Fixtures use `n_queries=1` / `num_folds=6`, matching the VFRI11 fixture
   so the two are directly comparable.
+  **Headroom is thin and one-directional:** at `n_queries=2` the direct path already exceeds the
+  cap, so VFRI12 is fixed at 16-bit FRI soundness. It is the 128-bit-NODE option, not a
+  general-purpose replacement for VFRI11.
   **Scope:** 128-bit is the MERKLE NODE / transcript bound. FRI soundness is separate —
   `log_blowup(6) × n_queries + pow_bits(10)`, so `n_queries=1` is 16-bit. Production 130-bit needs
   20 queries, which fits no transaction at ANY hash width; that stays recursion's job.
@@ -951,6 +956,23 @@ VFRI12 share ONE implementation and cannot drift from the ABI encoder (the R4.1 
 VFRI12's `verify()` is split into a guard frame and a work frame because the wider backend makes the
 Yul stack allocator fail on VFRI11's shape (codegen only — identical checks, order, transcript).
 Ladder complete on-chain: t=2/t=4 (2^31) → t=8 (2^62) → **t=16 (2^124)**.
+**R4.23 — the two production bounds still cannot be reached together (2026-07-31):** measured, a
+t=16 RECURSION does not fit. The recursion's on-chain cost is dominated by verifying the OUTER
+proof (the recursive circuit's own trace — 87 cols at `outer_log=14`, independent of inner size);
+on the real production outer trace (inner `n_queries=20`) that verify costs **5,441,919 gas at t=8
+but 16,044,328 at t=16** — 96% of the per-tx cap for ONE group, where `BatchRegistryV7` needs two
+plus the inner channel replay and last-layer check. So today:
+`recursion (t=8)` = 130-bit FRI **but ~2^62 nodes**; `VFRI12 direct` = ~2^124 nodes **but 16-bit
+FRI** (q=1 — q=2 already exceeds the cap). Neither reaches both. Closing the gap needs the outer
+verify roughly 2.3× cheaper at t=16; the obvious knobs do not give it (raising `outer_folds` shrinks
+the last-layer rebuild but grows the fold-chain Merkle work, netting ~1M). Probe:
+`contracts/test/OuterWidthProbe.test.js` + `write_outer_width_probe`.
+**This also corrects an error of mine:** the 1.79× permutation ratio recorded in R4.22 came from
+`estimateGas` on single external calls, which charges the shared 21,000 tx base to both widths and
+so understates the ratio. The marginal cost is **3.04×** (t=8 12,306 / t=16 37,377), which is what
+the 2.47–2.95× end-to-end ratios were showing all along. The 15,436,509 figure is unaffected — it
+is a sent-transaction `gasUsed` — but "t=16 is cheaper per bit of node capacity" was wrong: it is
+~1.5× dearer per bit.
 
 **R4.8 — the gas wall was implementation overhead, not width (2026-07-30):** every gas figure above
 was measured against a Solidity Poseidon2 whose per-permutation cost was ~97% overhead: `uint256[8]

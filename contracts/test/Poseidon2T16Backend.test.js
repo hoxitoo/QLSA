@@ -171,8 +171,10 @@ describe("Poseidon2T16Backend (t=16 hash backend — 128-bit nodes)", function (
       console.log(`        [gas] t8.hashPair  = ${pair8}`);
       console.log(`        [gas] t16.hashPair = ${pair16}`);
       console.log(`        [gas] ratio        = ${(Number(pair16) / Number(pair8)).toFixed(2)}x`);
-      // Both are dominated by one permutation, so this tracks the 1.79x
-      // permutation ratio — for twice the node width.
+      // Both figures include the shared 21,000 transaction base, so this ratio
+      // is a LOWER BOUND on the true one — the base inflates the smaller number.
+      // Poseidon2M31T16.test.js measures the marginal permutation cost properly
+      // (3.04x); do not quote this number as the width ratio.
       expect(Number(pair16) / Number(pair8)).to.be.lessThan(2.5);
     });
   });

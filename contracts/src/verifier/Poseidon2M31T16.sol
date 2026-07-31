@@ -30,11 +30,14 @@ import "./M31.sol";
 /// costs the naive loop form actually pays — a per-access bounds check on every
 /// dynamic index, and a 128-element array literal rebuilt on every call — while
 /// cutting the expression tree at each round's memory write-back, so the compiler
-/// never sees the tree that broke it. Measured: the naive loop form costs 199,608
-/// gas per permutation, this one 64,812 — 3.08x less, and only 1.79x a t=8
-/// permutation while carrying TWICE the node width. Per bit of node capacity t=16
-/// is therefore cheaper than t=8, which is why a t=16 on-chain verifier is worth
-/// building rather than a rung to be skipped.
+/// never sees the tree that broke it.
+///
+/// Measured MARGINAL cost (gas(n=2) - gas(n=1), so the 21,000 transaction base
+/// cancels): the naive loop form costs ~115,000 gas per permutation, this one
+/// 37,377 — about 3x less. Against t=8's 12,306 that is 3.04x for TWICE the node
+/// width, i.e. 151 gas per bit of node capacity against t=8's 99. So t=16 is
+/// DEARER per bit, not cheaper; it is worth building because it reaches a
+/// security level t=8 cannot at all, not because it is more efficient.
 ///
 /// Lazy reduction still applies: the linear layers add without `mod P`, which is
 /// exact because add/mul mod P are ring homomorphisms and every S-box passes

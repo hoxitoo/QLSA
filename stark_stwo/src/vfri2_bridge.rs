@@ -9709,6 +9709,63 @@ mod tests_vfri8 {
         eprintln!("wrote {path}");
     }
 
+    /// Measures the OUTER recursion proof under both hash widths.
+    ///
+    /// The recursion's on-chain cost is dominated by verifying the OUTER proof,
+    /// whose trace is the recursive circuit — ~87 columns at outer_log≈14,
+    /// regardless of how large the inner statement was. Whether the recursion
+    /// can be moved to t=16 (and so reach 128-bit NODE binding at the same time
+    /// as its 130-bit FRI soundness) turns on what that one verify costs.
+    ///
+    /// This emits the SAME outer trace, at production n_queries=20, proved twice
+    /// — once with the t=8 pipeline, once with t=16 — so the JS side can measure
+    /// both against the deployed verifiers and the difference is only the width.
+    /// Run with: cargo test write_outer_width_probe -- --ignored --nocapture
+    #[test]
+    #[ignore = "regenerates contracts/test/fixtures/outer_width_probe.json"]
+    fn write_outer_width_probe() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        // Production security: 20 FRI queries on the INNER statement.
+        let rec = gen_mldsa_v23_recursion_inputs_log10(
+            &z, &c, &t1, &a_hat, &merkle_root, 20, Some(6),
+        ).expect("recursion inputs");
+        let (outer_cols, outer_log) =
+            outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths)
+                .expect("outer trace");
+
+        // Same rule build_recursive_bundle uses (R4.16): a 32-leaf outer last
+        // layer, so the on-chain rebuild stays constant as the outer trace grows.
+        let outer_folds = (outer_log as usize).saturating_sub(5).max(1);
+        let bound = [0x5cu8; 32];
+
+        let (p11, c11, h11) =
+            gen_vfri11_hints_from_cols_nfolds(&outer_cols, outer_log, &bound, 1, Some(outer_folds))
+                .expect("outer VFRI11");
+        let (p12, c12, h12) =
+            gen_vfri12_hints_from_cols_nfolds(&outer_cols, outer_log, &bound, 1, Some(outer_folds))
+                .expect("outer VFRI12");
+
+        let json = format!(
+            "{{\n  \"note\": \"outer recursion trace, inner n_queries=20\",\n  \"n_cols\": {},\n  \"outer_log\": {},\n  \"outer_folds\": {},\n  \"boundRoot\": \"0x{}\",\n  \"vfri11\": {{\n    \"proof\": \"0x{}\",\n    \"commitment\": \"0x{}\",\n    \"queryHints\": \"0x{}\"\n  }},\n  \"vfri12\": {{\n    \"proof\": \"0x{}\",\n    \"commitment\": \"0x{}\",\n    \"queryHints\": \"0x{}\"\n  }}\n}}\n",
+            outer_cols.len(), outer_log, outer_folds,
+            hex::encode(bound),
+            hex::encode(&p11), c11, hex::encode(&h11),
+            hex::encode(&p12), c12, hex::encode(&h12),
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/outer_width_probe.json"
+        );
+        std::fs::write(path, json).expect("failed to write fixture");
+        eprintln!("wrote {path}");
+        eprintln!("  outer: {} cols, log={outer_log}, folds={outer_folds}", outer_cols.len());
+        eprintln!("  hints: vfri11={}B vfri12={}B", h11.len(), h12.len());
+    }
+
     /// Writes the FULL-V23 cross-bound VFRI12 fixture — the measurement that
     /// decides whether 128-bit node binding is directly deployable on-chain, or
     /// only reachable through recursion.
