@@ -6208,7 +6208,13 @@ pub fn gen_mldsa_v23_recursion_inputs_log10(
 }
 
 /// VFRI11 wrapper for V23 LOG=8 group (2206 cols).
-pub fn gen_mldsa_v23_vfri11_hints_log8(
+/// The V23 LOG=8 group's trace columns (AzFull + Ct1Full + RangeQBatch +
+/// WPrimeFull + NormCheckBatch + UseHintBatchV2, 2206 cols, depth=8).
+///
+/// Factored out of `gen_mldsa_v23_vfri11_hints_log8` for the same reason as the
+/// LOG=10 builder: the ABI hint generator and the recursion-input extractor must
+/// consume ONE implementation (the R4.1 pattern).
+fn v23_vfri11_cols_log8(
     z:                 &[[i64; 256]; 5],
     c:                 &[i64; 256],
     t1:                &[[i64; 256]; 6],
@@ -6216,8 +6222,7 @@ pub fn gen_mldsa_v23_vfri11_hints_log8(
     hints:             &[[bool; 256]; 6],
     batch_merkle_root: &[u8],
     n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+) -> Result<(Vec<Vec<u32>>, u32), String> {
     use crate::mldsa_ntt_batch_air;
     use crate::mldsa_intt_batch_air;
     use crate::mldsa_az_full_air;
@@ -6288,7 +6293,40 @@ pub fn gen_mldsa_v23_vfri11_hints_log8(
         }
     }
 
-    gen_vfri11_hints_from_cols_nfolds(&cols, TREE_DEPTH, batch_merkle_root, n_queries, num_folds)
+    Ok((cols, TREE_DEPTH))
+}
+
+/// VFRI11 wrapper for V23 LOG=8 group (2206 cols, depth=8).
+pub fn gen_mldsa_v23_vfri11_hints_log8(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    let (cols, tree_depth) =
+        v23_vfri11_cols_log8(z, c, t1, a_hat, hints, batch_merkle_root, n_queries)?;
+    gen_vfri11_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// Recursion inputs for the V23 LOG=8 group, from the SAME columns the ABI hint
+/// generator uses, so the two cannot drift (the R4.1 pattern).
+pub fn gen_mldsa_v23_recursion_inputs_log8(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<Vfri11RecursionInputs, String> {
+    let (cols, tree_depth) =
+        v23_vfri11_cols_log8(z, c, t1, a_hat, hints, batch_merkle_root, n_queries)?;
+    gen_vfri11_recursion_inputs(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
 }
 
 /// Generate cross-bound VFRI11 hints for V23's two trace groups.
@@ -6297,6 +6335,139 @@ pub fn gen_mldsa_v23_vfri11_hints_log8(
 /// generators.
 ///   bound_root_10 = keccak256(batch_root ‖ trace_root_8)
 ///   bound_root_8  = keccak256(batch_root ‖ trace_root_10)
+/// One trace group's complete recursive bundle — everything
+/// `QLSAVerifierRecursive.verifyRecursive` / `BatchRegistryV7` consumes.
+#[derive(Clone)]
+pub struct RecursiveBundleData {
+    /// Inner public statement (the `InnerPublics` struct on-chain).
+    pub trace_root: [u8; 32],
+    pub oods_combo_pos: u128,
+    pub oods_combo_neg: u128,
+    pub comp_root: [u8; 32],
+    pub fri_layer_roots: Vec<[u8; 32]>,
+    /// The cross-bound root this group's chain was generated against
+    /// (`keccak256(merkleRoot ‖ otherTraceRoot)`), i.e. `inner.batchRoot`.
+    pub bound_root: [u8; 32],
+    pub tree_depth: u32,
+    pub n_queries: usize,
+    /// The final FRI layer's evaluations for the on-chain bounded-degree check.
+    pub last_layer_evals: Vec<u128>,
+    /// Outer recursive proof (VFRI11 over the outer trace).
+    pub outer_proof: Vec<u8>,
+    /// Blake2s commitment hex of the outer proof.
+    pub outer_commitment: String,
+    /// VFRI11 ABI hints for the outer proof.
+    pub outer_hints: Vec<u8>,
+}
+
+/// Build one group's recursive bundle from its trace columns and bound root.
+fn build_recursive_bundle(
+    cols:       &[Vec<u32>],
+    tree_depth: u32,
+    bound_root: &[u8; 32],
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+) -> Result<RecursiveBundleData, String> {
+    use crate::recursive::composition_t8::outer_trace_columns_t8;
+
+    let ch = vfri11_fri_chain(cols, tree_depth, bound_root, n_queries, num_folds)?;
+    let rec = gen_vfri11_recursion_inputs(cols, tree_depth, bound_root, n_queries, num_folds)?;
+    let (outer_cols, outer_log) =
+        outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths)?;
+
+    let chan_inputs = Vfri11ChannelInputs {
+        trace_root: ch.trace_root,
+        oods_combo_pos: ch.oods_combo_pos,
+        oods_combo_neg: ch.oods_combo_neg,
+        comp_root: ch.comp_root,
+        fri_layer_roots: ch.layer_roots.clone(),
+        batch_root: *bound_root,
+        tree_depth,
+        n_queries,
+    };
+    let outer_bound: [u8; 32] = outer_binding_root(&chan_inputs);
+
+    // Scale the OUTER fold count with the outer trace (R4.16): a fixed count
+    // makes the on-chain last-layer rebuild grow linearly with the outer trace
+    // and dominate the whole cost. A 32-leaf outer last layer keeps it constant.
+    let outer_folds = (outer_log as usize).saturating_sub(5).max(1);
+    let (outer_proof, outer_commitment, outer_hints) = gen_vfri11_hints_from_cols_nfolds(
+        &outer_cols, outer_log, &outer_bound, 1, Some(outer_folds),
+    )?;
+
+    Ok(RecursiveBundleData {
+        trace_root: ch.trace_root,
+        oods_combo_pos: ch.oods_combo_pos,
+        oods_combo_neg: ch.oods_combo_neg,
+        comp_root: ch.comp_root,
+        fri_layer_roots: ch.layer_roots.clone(),
+        bound_root: *bound_root,
+        tree_depth,
+        n_queries,
+        last_layer_evals: ch.layer_values[ch.num_folds].clone(),
+        outer_proof,
+        outer_commitment,
+        outer_hints,
+    })
+}
+
+/// Cross-bound RECURSIVE bundles for a full V23 batch — the v8 stack's core.
+///
+/// The recursive analogue of `gen_mldsa_v23_vfri11_cross_bound_hints`: instead of
+/// two directly-verifiable hint sets, it produces two `RecursiveBundleData`
+/// ready for `BatchRegistryV7.submitBatch`, each group's chain bound to the
+/// OTHER group's trace root:
+///
+/// ```text
+/// bundle10.bound_root == keccak256(batch_root ‖ traceRoot8)
+/// bundle8.bound_root  == keccak256(batch_root ‖ traceRoot10)
+/// ```
+///
+/// Two passes; sound because the trace root is committed BEFORE the batch root
+/// enters the channel. That invariant is ASSERTED (pass-2 root must equal
+/// pass-1's), not assumed.
+pub fn gen_mldsa_v23_recursive_bundles(
+    z:          &[[i64; 256]; 5],
+    c:          &[i64; 256],
+    t1:         &[[i64; 256]; 6],
+    a_hat:      &[[i64; 256]],
+    hints:      &[[bool; 256]; 6],
+    batch_root: &[u8],
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+) -> Result<(RecursiveBundleData, RecursiveBundleData), String> {
+    use sha3::{Digest as Sha3Digest, Keccak256};
+
+    if batch_root.len() != 32 {
+        return Err(format!("batch_root must be 32 bytes, got {}", batch_root.len()));
+    }
+
+    let (cols10, depth10) = v23_vfri11_cols_log10(z, c, t1, a_hat, batch_root, n_queries)?;
+    let (cols8, depth8) = v23_vfri11_cols_log8(z, c, t1, a_hat, hints, batch_root, n_queries)?;
+
+    // Pass 1: learn each group's trace root (independent of the batch root).
+    let t10 = vfri11_fri_chain(&cols10, depth10, batch_root, 1, num_folds)?.trace_root;
+    let t8 = vfri11_fri_chain(&cols8, depth8, batch_root, 1, num_folds)?.trace_root;
+
+    let keccak2 = |a: &[u8], b: &[u8; 32]| -> [u8; 32] {
+        let mut h = Keccak256::new();
+        h.update(a);
+        h.update(b);
+        h.finalize().into()
+    };
+    let bound10 = keccak2(batch_root, &t8);
+    let bound8 = keccak2(batch_root, &t10);
+
+    // Pass 2: full bundles against the cross-bound roots.
+    let b10 = build_recursive_bundle(&cols10, depth10, &bound10, n_queries, num_folds)?;
+    let b8 = build_recursive_bundle(&cols8, depth8, &bound8, n_queries, num_folds)?;
+
+    if b10.trace_root != t10 || b8.trace_root != t8 {
+        return Err("trace root changed between passes — cross-binding would be unsound".into());
+    }
+    Ok((b10, b8))
+}
+
 pub fn gen_mldsa_v23_vfri11_cross_bound_hints(
     z:                 &[[i64; 256]; 5],
     c:                 &[i64; 256],
@@ -8288,6 +8459,133 @@ mod tests_vfri8 {
         for root in &r.roots[n..] {
             assert_eq!(*root, inputs.comp_root);
         }
+    }
+
+    /// The v8 core: cross-bound recursive bundles from REAL V23 data.
+    ///
+    /// Validates the wiring at q=2 (fast); the production-shaped fixture is
+    /// emitted by `write_v23_recursive_bundles_fixture` below.
+    ///
+    ///   cargo test test_v23_recursive_bundles -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn test_v23_recursive_bundles() {
+        use sha3::{Digest as Sha3Digest, Keccak256};
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(777);
+        let hints = [[false; 256]; 6];
+        let batch_root = [0x66u8; 32];
+
+        let (b10, b8) =
+            gen_mldsa_v23_recursive_bundles(&z, &c, &t1, &a_hat, &hints, &batch_root, 2, Some(6))
+                .unwrap();
+
+        // Groups and depths are the real V23 shape.
+        assert_eq!(b10.tree_depth, 10);
+        assert_eq!(b8.tree_depth, 8);
+        assert_eq!(b10.fri_layer_roots.len(), 7, "num_folds=6 -> 7 roots");
+        // Last layer sizes: 2^(10-6)=16 and 2^(8-6)=4.
+        assert_eq!(b10.last_layer_evals.len(), 16);
+        assert_eq!(b8.last_layer_evals.len(), 4);
+
+        // Cross-binding holds in BOTH directions and the roots differ.
+        let keccak2 = |a: &[u8], b: &[u8; 32]| -> [u8; 32] {
+            let mut h = Keccak256::new();
+            h.update(a);
+            h.update(b);
+            h.finalize().into()
+        };
+        assert_eq!(b10.bound_root, keccak2(&batch_root, &b8.trace_root));
+        assert_eq!(b8.bound_root, keccak2(&batch_root, &b10.trace_root));
+        assert_ne!(b10.bound_root, b8.bound_root);
+
+        // Each bundle's channel replay must succeed from its OWN publics alone —
+        // this is exactly what QLSAVerifierRecursive.replayChallenges recomputes.
+        for b in [&b10, &b8] {
+            let ch = vfri11_replay_channel(&Vfri11ChannelInputs {
+                trace_root: b.trace_root,
+                oods_combo_pos: b.oods_combo_pos,
+                oods_combo_neg: b.oods_combo_neg,
+                comp_root: b.comp_root,
+                fri_layer_roots: b.fri_layer_roots.clone(),
+                batch_root: b.bound_root,
+                tree_depth: b.tree_depth,
+                n_queries: b.n_queries,
+            })
+            .unwrap();
+            assert_eq!(ch.query_indices.len(), b.n_queries);
+            assert!(!b.outer_proof.is_empty() && !b.outer_hints.is_empty());
+        }
+    }
+
+    /// Emits the REAL-V23 recursive-bundle fixture for BatchRegistryV7's on-chain
+    /// E2E, at the PRODUCTION n_queries = 20 (130-bit). Slow (~10+ min).
+    ///
+    ///   cargo test write_v23_recursive_bundles_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn write_v23_recursive_bundles_fixture() {
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let hints = [[false; 256]; 6];
+        let batch_root = [0xB2u8; 32];
+        let n_queries = 20usize;
+
+        let (b10, b8) = gen_mldsa_v23_recursive_bundles(
+            &z, &c, &t1, &a_hat, &hints, &batch_root, n_queries, Some(6),
+        )
+        .unwrap();
+
+        let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
+        let bundle_json = |b: &RecursiveBundleData| -> String {
+            let roots: Vec<String> =
+                b.fri_layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
+            let evals: Vec<String> =
+                b.last_layer_evals.iter().map(|v| format!("\"{v}\"")).collect();
+            format!(
+                concat!(
+                    "{{\n",
+                    "      \"inner\": {{\n",
+                    "        \"traceRoot\": \"{}\",\n",
+                    "        \"oodsComboPos\": \"{}\",\n",
+                    "        \"oodsComboNeg\": \"{}\",\n",
+                    "        \"compRoot\": \"{}\",\n",
+                    "        \"friLayerRoots\": [{}],\n",
+                    "        \"batchRoot\": \"{}\",\n",
+                    "        \"treeDepth\": {},\n",
+                    "        \"nQueries\": {}\n",
+                    "      }},\n",
+                    "      \"outerProof\": \"{}\",\n",
+                    "      \"outerCommitment\": \"0x{}\",\n",
+                    "      \"outerHints\": \"{}\",\n",
+                    "      \"lastLayerEvals\": [{}]\n",
+                    "    }}"
+                ),
+                hx(&b.trace_root),
+                b.oods_combo_pos,
+                b.oods_combo_neg,
+                hx(&b.comp_root),
+                roots.join(", "),
+                hx(&b.bound_root),
+                b.tree_depth,
+                b.n_queries,
+                hx(&b.outer_proof),
+                b.outer_commitment,
+                hx(&b.outer_hints),
+                evals.join(", "),
+            )
+        };
+        let json = format!(
+            "{{\n  \"merkleRoot\": \"{}\",\n  \"bundle10\": {},\n  \"bundle8\": {}\n}}\n",
+            hx(&batch_root),
+            bundle_json(&b10),
+            bundle_json(&b8),
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/v23_recursive_bundles_e2e.json"
+        );
+        std::fs::write(path, json).unwrap();
+        println!("wrote {path}");
     }
 
     /// The recursion over REAL V23 data at PRODUCTION security (n_queries = 20).
