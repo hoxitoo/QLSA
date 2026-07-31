@@ -6,23 +6,32 @@ import "./Poseidon2M31T16.sol";
 /// @title Poseidon2ChannelT16 — Poseidon2 t=16 duplex Fiat-Shamir channel
 ///
 /// The t=16 analogue of Poseidon2ChannelT8, widened from 8 to 16 state cells.
-/// Absorb stays rate-1 into cell 0 — cells 1–15 form a 465-bit capacity — and a
-/// draw squeezes the two rate-adjacent cells (s0, s1).
+/// Absorb is RATE-8: up to eight words go into cells 0–7 and the state is
+/// permuted ONCE per block. Cells 8–15 are an eight-cell (248-bit) capacity, so
+/// transcript-collision cost is ~2^124 — the same 128-bit level as the node
+/// width, and the same rate/capacity split the leaf sponge already uses.
 ///
-/// Keeping rate 1 rather than widening it alongside the state is deliberate: the
-/// transcript's ORDER and COUNT of absorb/draw calls then match t=8 exactly, so a
-/// verifier swapping this in changes only the permutation. It still produces
-/// different query indices (as it must — VFRI11 hints are not VFRI12 hints), but
-/// no protocol-shape reasoning has to be redone to see that it is sound.
+/// The narrower channels (t=2/t=4/t=8) absorb one word per permutation. Carrying
+/// that over to t=16 would cost EIGHT permutations per 8-word root instead of
+/// one, and measurably did: a full-V23 t=16 group came out at 3.57x a t=8 one
+/// against a 1.79x permutation ratio, and the whole gap was the absorb count.
+/// Rate-1 at t=16 wastes seven eighths of the sponge's bandwidth for no security
+/// — capacity, not rate, sets the collision bound.
 ///
 /// State: (s[0..16]: M31 cells, nDraws: uint32).
 ///
 /// Absorb protocol (matches struct P2T16Channel in vfri2_bridge.rs):
-///   absorb(word):  s0 = (s0 + reduce(word)) mod P; permute_t16
-///   mixRoot:       absorb(bytes[28..32]); nDraws = 0
-///   mixRootW:      absorb the 8 node words; nDraws = 0
-///   mixRootFull:   absorb each of the 8 BE u32 words; nDraws = 0
-///   mixU32s:       absorb each word; nDraws = 0
+///   absorbBlock(w[0..k]): s_i += reduce(w_i) for i<k; if k<8 then s15 += 8-k
+///                         (length-encoding pad); permute_t16
+///   mixRoot:       absorbBlock([bytes[28..32]]); nDraws = 0
+///   mixRootW:      absorbBlock(the 8 node words); nDraws = 0
+///   mixRootFull:   absorbBlock(the 8 BE u32 words); nDraws = 0
+///   mixU32s:       absorb in blocks of 8; nDraws = 0
+///
+/// The pad must encode the block LENGTH, not merely that it was short: a constant
+/// flag would leave `[1,2,3]` and `[1,2,3,0]` absorbing to the same state, since
+/// both pad to the same eight cells. An empty array absorbs nothing at all, as in
+/// the rate-1 channels.
 ///
 /// At this width a node is the full 32 bytes, so `mixRootW` and `mixRootFull`
 /// absorb the same eight words. Both names are kept because the CALLERS mean
@@ -58,7 +67,9 @@ library Poseidon2ChannelT16 {
 
     /// @notice Absorb the low 4 bytes (bytes[28..32]) of a root; reset counter.
     function mixRoot(State memory st, bytes32 root) internal pure {
-        _absorb(st, uint256(root) & MASK32);
+        uint256[8] memory w;
+        w[0] = uint256(root) & MASK32;
+        _absorbBlock(st, w, 1);
         st.nDraws = 0;
     }
 
@@ -74,10 +85,18 @@ library Poseidon2ChannelT16 {
         _absorbAll8(st, root);
     }
 
-    /// @notice Absorb an array of uint32 words, then reset the draw counter.
+    /// @notice Absorb an array of uint32 words in rate-8 blocks, then reset the
+    ///         draw counter.
     function mixU32s(State memory st, uint32[] memory words) internal pure {
-        for (uint256 i = 0; i < words.length; i++) {
-            _absorb(st, uint256(words[i]));
+        // An empty array absorbs nothing, exactly as in the rate-1 channels.
+        uint256 n = words.length;
+        for (uint256 i = 0; i < n; i += 8) {
+            uint256 k = n - i < 8 ? n - i : 8;
+            uint256[8] memory blk;
+            for (uint256 j = 0; j < k; j++) {
+                blk[j] = uint256(words[i + j]);
+            }
+            _absorbBlock(st, blk, k);
         }
         st.nDraws = 0;
     }
@@ -114,25 +133,40 @@ library Poseidon2ChannelT16 {
 
     // ── Internal ──────────────────────────────────────────────────────────────
 
+    /// @dev A 32-byte root is exactly one rate block: eight BE u32 words, one
+    ///      permutation.
     function _absorbAll8(State memory st, bytes32 root) private pure {
-        uint256 v = uint256(root);
-        for (uint256 i = 0; i < 8; i++) {
-            _absorb(st, (v >> (224 - 32 * i)) & MASK32);
+        unchecked {
+            uint256 v = uint256(root);
+            uint256[8] memory w;
+            for (uint256 i = 0; i < 8; i++) {
+                w[i] = (v >> (224 - 32 * i)) & MASK32;
+            }
+            _absorbBlock(st, w, 8);
+            st.nDraws = 0;
         }
-        st.nDraws = 0;
     }
 
-    /// @dev Absorb one uint32 word into cell 0, then permute. Reduces the word to
-    ///      M31 first with TWO conditional subtractions: a u32 reaches 2^32-1 =
-    ///      2P+1, so one subtraction is not enough.
-    function _absorb(State memory st, uint256 word) private pure {
+    /// @dev Absorb `k <= 8` words into cells 0..k, then permute once.
+    ///
+    ///      Each word is reduced to M31 with TWO conditional subtractions: a u32
+    ///      reaches 2^32-1 = 2P+1, so one is not enough. A short block adds
+    ///      `8 - k` to capacity cell 15, so the pad encodes the block's length.
+    function _absorbBlock(State memory st, uint256[8] memory words, uint256 k) private pure {
         unchecked {
-            uint256 w = word;
-            if (w >= P) w -= P;
-            if (w >= P) w -= P;
-            uint256 s0 = st.s[0] + w;
-            if (s0 >= P) s0 -= P;
-            st.s[0] = s0;
+            for (uint256 i = 0; i < k; i++) {
+                uint256 w = words[i];
+                if (w >= P) w -= P;
+                if (w >= P) w -= P;
+                uint256 si = st.s[i] + w;
+                if (si >= P) si -= P;
+                st.s[i] = si;
+            }
+            if (k < 8) {
+                uint256 s15 = st.s[15] + (8 - k);
+                if (s15 >= P) s15 -= P;
+                st.s[15] = s15;
+            }
             Poseidon2M31T16.permute(st.s);
         }
     }

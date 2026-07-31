@@ -11,9 +11,9 @@ const PAIR = [
   1896676506n, 1113082531n, 1826142252n, 1263581674n,
   694653155n, 1856461508n, 173489390n, 625083048n,
 ]; // hash_pair_p2t16(node[1..8], node[9..16])
-const QUERIES_R11 = [139n, 460n, 377n, 144n];          // mixRoot(0x11..).drawQueries(10,4)
-const QUERIES_W_NODE = [860n, 495n, 487n, 690n];       // mixRootW(node[1..8]).drawQueries(10,4)
-const SECURE_FELT_123 = 141632388673796146040251654506986135892n; // mixU32s([1,2,3]).drawSecureFelt
+const QUERIES_R11 = [821n, 259n, 182n, 183n];          // mixRoot(0x11..).drawQueries(10,4)
+const QUERIES_W_NODE = [362n, 455n, 247n, 671n];       // mixRootW(node[1..8]).drawQueries(10,4)
+const SECURE_FELT_123 = 1407887379921827972915931489114976420n; // mixU32s([1,2,3]).drawSecureFelt
 
 // Pack eight M31 words into a t=16 node: word k at bytes[4k..4k+4], big-endian.
 // Unlike t=8 (bytes[16..32]) and t=4 (bytes[24..32]) this fills the whole word.

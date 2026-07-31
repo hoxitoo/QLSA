@@ -4557,7 +4557,7 @@ fn build_tree_p2t8(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
 /// (s0, s1).  Same interface so a future VFRI11 can swap it in for `P2T4Channel`
 /// with no transcript-shape changes — only the permutation widens.
 #[allow(dead_code)]
-struct P2T8Channel {
+pub(crate) struct P2T8Channel {
     s: [u64; 8],
     n_draws: u32,
 }
@@ -4717,14 +4717,26 @@ fn build_tree_p2t16(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
 
 /// Poseidon2 t=16 duplex Fiat-Shamir channel.
 ///
-/// Absorb stays rate-1 into cell 0 — cells 1–15 form a 465-bit capacity — and a
-/// draw squeezes the two rate-adjacent cells, exactly as at t=4 and t=8. Keeping
-/// rate 1 rather than widening it is deliberate: the transcript byte sequence
-/// then differs from t=8 ONLY through the permutation, so a VFRI12 that swaps
-/// this in produces different query indices (as it must) without any change to
-/// the order or count of absorb/draw calls.
+/// Absorb is **rate-8**: up to eight words go into cells 0–7 and the state is
+/// permuted ONCE per block. Cells 8–15 are an eight-cell (248-bit) capacity, so
+/// transcript-collision cost is ~2^124 — the same 128-bit level as the node
+/// width, and the same rate/capacity split `sponge_t16` already uses for leaves.
+/// A partial final block bumps capacity cell 15 as a domain-separation flag, so
+/// `[1,2,3]` and `[1,2,3,0,0,0,0,0]` cannot absorb to the same state.
+///
+/// The narrower channels (t=2/t=4/t=8) absorb one word per permutation. Carrying
+/// that over to t=16 would cost EIGHT permutations per 8-word root instead of
+/// one, and measurably did: a full-V23 t=16 group came out at 3.57x a t=8 one
+/// against a 1.79x permutation ratio, and the whole gap was the absorb count.
+/// Rate-1 at t=16 wastes seven eighths of the sponge's bandwidth for no security
+/// — capacity, not rate, sets the collision bound.
+///
+/// A draw still squeezes the two rate-adjacent cells (s0, s1), as at t=4 and
+/// t=8. Squeezing is a small share of a verify (~19 permutations against ~88 for
+/// absorb before this change), so widening it too is not worth the extra
+/// divergence from the narrower channels.
 #[allow(dead_code)]
-struct P2T16Channel {
+pub(crate) struct P2T16Channel {
     s: [u64; 16],
     n_draws: u32,
 }
@@ -4735,49 +4747,71 @@ impl P2T16Channel {
         P2T16Channel { s: [0u64; 16], n_draws: 0 }
     }
 
-    fn absorb(&mut self, word: u32) {
-        // `word` may be any u32, i.e. up to 2P+1, so two conditional
-        // subtractions are needed — one is not enough. Mirrors `_absorb` in
-        // Poseidon2ChannelT16.sol.
-        let mut w = word as u64;
-        if w >= crate::poseidon2::M31_P {
-            w -= crate::poseidon2::M31_P;
+    /// Absorb ONE block of at most 8 words, then permute once.
+    ///
+    /// Each word may be any u32, i.e. up to 2P+1, so two conditional
+    /// subtractions are needed — one is not enough.
+    ///
+    /// A block shorter than the rate adds `8 - len` to capacity cell 15. The
+    /// padding must encode the block's LENGTH, not merely that it was short: a
+    /// constant flag would leave `[1,2,3]` and `[1,2,3,0]` absorbing to the same
+    /// state, since both pad to the same eight cells. (`sponge_t16` uses a
+    /// constant flag, which is fine there — it hashes fixed-width column tuples,
+    /// not caller-chosen lengths.)
+    ///
+    /// Mirrors `_absorbBlock` in Poseidon2ChannelT16.sol.
+    fn absorb_block(&mut self, words: &[u32]) {
+        debug_assert!(words.len() <= 8);
+        for (k, &word) in words.iter().enumerate() {
+            let mut w = word as u64;
+            if w >= crate::poseidon2::M31_P {
+                w -= crate::poseidon2::M31_P;
+            }
+            if w >= crate::poseidon2::M31_P {
+                w -= crate::poseidon2::M31_P;
+            }
+            self.s[k] = crate::poseidon2::m31_add(self.s[k], w);
         }
-        if w >= crate::poseidon2::M31_P {
-            w -= crate::poseidon2::M31_P;
+        if words.len() < 8 {
+            self.s[15] = crate::poseidon2::m31_add(self.s[15], (8 - words.len()) as u64);
         }
-        self.s[0] = crate::poseidon2::m31_add(self.s[0], w);
         crate::poseidon2_t16::permute_t16(&mut self.s);
     }
 
+    /// Absorbing an empty slice is a no-op, exactly as in the rate-1 channels
+    /// (their `for &w in words` loop simply does not run). No caller absorbs a
+    /// caller-chosen-length array — the transcript's absorbs are fixed-width.
+    fn absorb_words(&mut self, words: &[u32]) {
+        for block in words.chunks(8) {
+            self.absorb_block(block);
+        }
+    }
+
     fn mix_root(&mut self, root: &[u8; 32]) {
-        self.absorb(u32::from_be_bytes(root[28..32].try_into().unwrap()));
+        self.absorb_block(&[u32::from_be_bytes(root[28..32].try_into().unwrap())]);
         self.n_draws = 0;
     }
 
-    /// Absorb the 8 words of a wide t=16 node. At this width that is the whole
-    /// 32 bytes, so `mix_root_w` and `mix_root_full` coincide — kept as separate
-    /// names because the CALLERS distinguish a node root from a foreign 32-byte
-    /// root (an embedded Stwo trace root, a batch merkle root), and only the
-    /// former is a t=16 node.
+    /// Absorb the 8 words of a wide t=16 node — exactly one rate block. At this
+    /// width a node is the whole 32 bytes, so `mix_root_w` and `mix_root_full`
+    /// coincide; both names are kept because the CALLERS distinguish a node root
+    /// from a foreign 32-byte root (an embedded Stwo trace root, a batch merkle
+    /// root), and only the former is a t=16 node.
     fn mix_root_w(&mut self, root: &[u8; 32]) {
-        for k in 0..8 {
-            self.absorb(u32::from_be_bytes(root[4 * k..4 * k + 4].try_into().unwrap()));
-        }
-        self.n_draws = 0;
+        self.mix_root_full(root);
     }
 
     fn mix_root_full(&mut self, root: &[u8; 32]) {
-        for i in 0..8 {
-            self.absorb(u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap()));
+        let mut words = [0u32; 8];
+        for (i, w) in words.iter_mut().enumerate() {
+            *w = u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap());
         }
+        self.absorb_block(&words);
         self.n_draws = 0;
     }
 
     fn mix_u32s(&mut self, words: &[u32]) {
-        for &w in words {
-            self.absorb(w);
-        }
+        self.absorb_words(words);
         self.n_draws = 0;
     }
 
@@ -5363,7 +5397,78 @@ struct Vfri11Chain {
 /// Run the full VFRI11 Fiat-Shamir + FRI fold chain (t=8 backend) and return
 /// every intermediate the hint generator / recursion bridge needs.  Pure code
 /// motion from `gen_vfri11_hints_from_cols_nfolds` — behavior-identical.
+/// The Fiat-Shamir channel operations the FRI chain needs, abstracted over the
+/// Poseidon2 width so ONE chain implementation serves every verifier version.
+pub(crate) trait P2Chan {
+    fn init() -> Self;
+    fn mix_root_full(&mut self, root: &[u8; 32]);
+    fn mix_root_w(&mut self, root: &[u8; 32]);
+    fn mix_u32s(&mut self, words: &[u32]);
+    fn draw_secure_felt(&mut self) -> u128;
+    fn draw_queries(&mut self, log_domain_size: u32, n: usize) -> Vec<usize>;
+}
+
+/// A Poseidon2 hash backend: node width, leaf/pair hashing, and channel.
+///
+/// VFRI11 (t=8) and VFRI12 (t=16) differ ONLY in this choice. Parameterising the
+/// chain rather than copying it is the same discipline as the `vfri11_fri_chain`
+/// extraction itself (R4.1): a duplicated chain could drift from the ABI encoder
+/// it must agree with byte-for-byte, and the drift would surface as an on-chain
+/// verification failure with no local test to catch it.
+pub(crate) trait P2Backend {
+    type Chan: P2Chan;
+    fn hash_leaf_cols(col_values: &[u32]) -> [u8; 32];
+    fn hash_leaf_qm31(value: u128) -> [u8; 32];
+    fn build_tree(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>>;
+}
+
+pub(crate) struct T8Backend;
+pub(crate) struct T16Backend;
+
+impl P2Chan for P2T8Channel {
+    fn init() -> Self { P2T8Channel::init() }
+    fn mix_root_full(&mut self, r: &[u8; 32]) { P2T8Channel::mix_root_full(self, r) }
+    fn mix_root_w(&mut self, r: &[u8; 32]) { P2T8Channel::mix_root_w(self, r) }
+    fn mix_u32s(&mut self, w: &[u32]) { P2T8Channel::mix_u32s(self, w) }
+    fn draw_secure_felt(&mut self) -> u128 { P2T8Channel::draw_secure_felt(self) }
+    fn draw_queries(&mut self, l: u32, n: usize) -> Vec<usize> { P2T8Channel::draw_queries(self, l, n) }
+}
+
+impl P2Chan for P2T16Channel {
+    fn init() -> Self { P2T16Channel::init() }
+    fn mix_root_full(&mut self, r: &[u8; 32]) { P2T16Channel::mix_root_full(self, r) }
+    fn mix_root_w(&mut self, r: &[u8; 32]) { P2T16Channel::mix_root_w(self, r) }
+    fn mix_u32s(&mut self, w: &[u32]) { P2T16Channel::mix_u32s(self, w) }
+    fn draw_secure_felt(&mut self) -> u128 { P2T16Channel::draw_secure_felt(self) }
+    fn draw_queries(&mut self, l: u32, n: usize) -> Vec<usize> { P2T16Channel::draw_queries(self, l, n) }
+}
+
+impl P2Backend for T8Backend {
+    type Chan = P2T8Channel;
+    fn hash_leaf_cols(c: &[u32]) -> [u8; 32] { hash_leaf_cols_p2t8(c) }
+    fn hash_leaf_qm31(v: u128) -> [u8; 32] { hash_leaf_qm31_p2t8(v) }
+    fn build_tree(l: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> { build_tree_p2t8(l) }
+}
+
+impl P2Backend for T16Backend {
+    type Chan = P2T16Channel;
+    fn hash_leaf_cols(c: &[u32]) -> [u8; 32] { hash_leaf_cols_p2t16(c) }
+    fn hash_leaf_qm31(v: u128) -> [u8; 32] { hash_leaf_qm31_p2t16(v) }
+    fn build_tree(l: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> { build_tree_p2t16(l) }
+}
+
+/// The VFRI11 FRI chain on the t=8 backend — the production path.
 fn vfri11_fri_chain(
+    cols:              &[Vec<u32>],
+    tree_depth:        u32,
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds_opt:     Option<usize>,
+) -> Result<Vfri11Chain, String> {
+    vfri_fri_chain::<T8Backend>(cols, tree_depth, batch_merkle_root, n_queries, num_folds_opt)
+}
+
+fn vfri_fri_chain<B: P2Backend>(
     cols:              &[Vec<u32>],
     tree_depth:        u32,
     batch_merkle_root: &[u8],
@@ -5389,15 +5494,15 @@ fn vfri11_fri_chain(
         }
     }
 
-    // Trace Merkle tree (t=8 wide Poseidon2 nodes)
+    // Trace Merkle tree (backend-width Poseidon2 nodes)
     let trace_leaves: Vec<[u8; 32]> = (0..n)
-        .map(|i| hash_leaf_cols_p2t8(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .map(|i| B::hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
         .collect();
-    let trace_levels = build_tree_p2t8(trace_leaves);
+    let trace_levels = B::build_tree(trace_leaves);
     let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
 
-    // Fiat-Shamir (t=8 Poseidon2 channel, full-root absorption)
-    let mut chan = P2T8Channel::init();
+    // Fiat-Shamir (backend Poseidon2 channel, full-root absorption)
+    let mut chan = B::Chan::init();
     chan.mix_root_full(&trace_root);
     let z_x        = chan.draw_secure_felt();
     let comp_alpha = chan.draw_secure_felt();
@@ -5441,9 +5546,9 @@ fn vfri11_fri_chain(
         acc
     }).collect();
 
-    // Composition Merkle tree (t=8 wide Poseidon2 nodes)
-    let comp_leaves: Vec<[u8; 32]> = comp_values.iter().map(|&v| hash_leaf_qm31_p2t8(v)).collect();
-    let comp_levels = build_tree_p2t8(comp_leaves);
+    // Composition Merkle tree (backend-width Poseidon2 nodes)
+    let comp_leaves: Vec<[u8; 32]> = comp_values.iter().map(|&v| B::hash_leaf_qm31(v)).collect();
+    let comp_levels = B::build_tree(comp_leaves);
     let comp_root: [u8; 32] = comp_levels.last().unwrap()[0];
 
     chan.mix_root_w(&comp_root);
@@ -5464,9 +5569,9 @@ fn vfri11_fri_chain(
         l1_values.push(circle_fold(f_plus, f_minus, fri_alpha, m31_inv(py)));
     }
 
-    // FRI L1 Merkle tree (t=8 wide Poseidon2 nodes)
-    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter().map(|&v| hash_leaf_qm31_p2t8(v)).collect();
-    let fri_l1_levels = build_tree_p2t8(fri_l1_leaves);
+    // FRI L1 Merkle tree (backend-width Poseidon2 nodes)
+    let fri_l1_leaves: Vec<[u8; 32]> = l1_values.iter().map(|&v| B::hash_leaf_qm31(v)).collect();
+    let fri_l1_levels = B::build_tree(fri_l1_leaves);
     let fri_layer1_root: [u8; 32] = fri_l1_levels.last().unwrap()[0];
     chan.mix_root_w(&fri_layer1_root);
 
@@ -5493,8 +5598,8 @@ fn vfri11_fri_chain(
             if twiddle == 0 { return Err(format!("zero twiddle at k={k}, j={j}")); }
             new_vals.push(line_fold(prev_vals[j], prev_vals[j + layer_sz], alpha_k, m31_inv(twiddle)));
         }
-        let new_leaves: Vec<[u8; 32]> = new_vals.iter().map(|&v| hash_leaf_qm31_p2t8(v)).collect();
-        let new_levels = build_tree_p2t8(new_leaves);
+        let new_leaves: Vec<[u8; 32]> = new_vals.iter().map(|&v| B::hash_leaf_qm31(v)).collect();
+        let new_levels = B::build_tree(new_leaves);
         let new_root   = new_levels.last().unwrap()[0];
         layer_values.push(new_vals);
         layer_roots.push(new_root);
@@ -5769,12 +5874,13 @@ pub fn vfri11_replay_channel(
     Ok(Vfri11ChannelChallenges { z_x, comp_alpha, fri_alpha, fri_alphas, query_indices })
 }
 
-pub fn gen_vfri11_hints_from_cols_nfolds(
+fn gen_vfri_hints_from_cols_nfolds<B: P2Backend>(
     cols:              &[Vec<u32>],
     tree_depth:        u32,
     batch_merkle_root: &[u8],
     n_queries:         usize,
     num_folds_opt:     Option<usize>,
+    version:           u64,
 ) -> Result<(Vec<u8>, String, Vec<u8>), String> {
     let Vfri11Chain {
         trace_root,
@@ -5792,7 +5898,7 @@ pub fn gen_vfri11_hints_from_cols_nfolds(
         num_folds,
         derived_indices,
         ..
-    } = vfri11_fri_chain(cols, tree_depth, batch_merkle_root, n_queries, num_folds_opt)?;
+    } = vfri_fri_chain::<B>(cols, tree_depth, batch_merkle_root, n_queries, num_folds_opt)?;
     let last_layer_evals: Vec<u128> = layer_values[num_folds].clone();
 
     let mut hint_structs: Vec<QueryHintDataV5> = Vec::new();
@@ -5850,7 +5956,7 @@ pub fn gen_vfri11_hints_from_cols_nfolds(
     }
 
     let mut proof = vec![0x01u8; 700];
-    proof[0..8].copy_from_slice(&5u64.to_le_bytes()); // VFRI11 version marker
+    proof[0..8].copy_from_slice(&version.to_le_bytes()); // verifier version marker
     proof[8..40].copy_from_slice(&trace_root);
 
     let mut hash_input = [0u8; 64];
@@ -5869,6 +5975,33 @@ pub fn gen_vfri11_hints_from_cols_nfolds(
     );
 
     Ok((proof, commitment_hex, query_hints))
+}
+
+/// VFRI11 generic hint generator — the t=8 backend (production).
+pub fn gen_vfri11_hints_from_cols_nfolds(
+    cols:              &[Vec<u32>],
+    tree_depth:        u32,
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds_opt:     Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    gen_vfri_hints_from_cols_nfolds::<T8Backend>(
+        cols, tree_depth, batch_merkle_root, n_queries, num_folds_opt, 5)
+}
+
+/// VFRI12 generic hint generator — the t=16 backend, 248-bit Merkle nodes.
+///
+/// Byte-identical ABI to VFRI11; only the hash width differs, so VFRI11 hints do
+/// NOT verify here (different trace root and different derived query indices).
+pub fn gen_vfri12_hints_from_cols_nfolds(
+    cols:              &[Vec<u32>],
+    tree_depth:        u32,
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds_opt:     Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    gen_vfri_hints_from_cols_nfolds::<T16Backend>(
+        cols, tree_depth, batch_merkle_root, n_queries, num_folds_opt, 6)
 }
 
 /// VFRI9 wrapper for V23 LOG=10 group (NttBatch + InttBatch, 1298 cols, tree_depth=10).
@@ -6684,6 +6817,106 @@ pub fn gen_mldsa_v23_vfri11_cross_bound_hints(
         gen_mldsa_v23_vfri11_hints(z, c, t1, a_hat, &bound_root_10, n_queries, num_folds)?;
     let (proof8, commit8, hints8) =
         gen_mldsa_v23_vfri11_hints_log8(z, c, t1, a_hat, hints, &bound_root_8, n_queries, num_folds)?;
+
+    Ok((proof10, commit10, hints10, proof8, commit8, hints8))
+}
+
+// ---------------------------------------------------------------------------
+// V23 × VFRI12 — the same production pipeline on the t=16 backend.
+//
+// These reuse the SAME column builders as the VFRI11 wrappers
+// (`v23_vfri11_cols_log10` / `_log8`), so the two verifier versions provably see
+// the same trace; only the hash width differs. Nothing about the V23 circuit or
+// the group split changes at 128-bit node width.
+// ---------------------------------------------------------------------------
+
+/// V23 LOG=10 group (NttBatch + InttBatch, 1298 cols) under VFRI12.
+pub fn gen_mldsa_v23_vfri12_hints(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    let (cols, tree_depth) = v23_vfri11_cols_log10(z, c, t1, a_hat, batch_merkle_root, n_queries)?;
+    gen_vfri12_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// V23 LOG=8 group (AzFull + Ct1Full + RangeQBatch + WPrimeFull + NormCheckBatch
+/// + UseHintBatchV2, 2206 cols) under VFRI12.
+pub fn gen_mldsa_v23_vfri12_hints_log8(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_merkle_root: &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    let (cols, tree_depth) =
+        v23_vfri11_cols_log8(z, c, t1, a_hat, hints, batch_merkle_root, n_queries)?;
+    gen_vfri12_hints_from_cols_nfolds(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// Two-pass cross-bound VFRI12 hints for both V23 groups.
+///
+/// Identical binding to the VFRI11 version: each group's proof is generated
+/// against `keccak256(batch_root ‖ <the OTHER group's trace root>)`, so a proof
+/// lifted from a different witness gets mismatched query indices on-chain.
+pub fn gen_mldsa_v23_vfri12_cross_bound_hints(
+    z:                 &[[i64; 256]; 5],
+    c:                 &[i64; 256],
+    t1:                &[[i64; 256]; 6],
+    a_hat:             &[[i64; 256]],
+    hints:             &[[bool; 256]; 6],
+    batch_root:        &[u8],
+    n_queries:         usize,
+    num_folds:         Option<usize>,
+) -> Result<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>), String> {
+    use sha3::{Keccak256, Digest as Sha3Digest};
+
+    if batch_root.len() != 32 {
+        return Err(format!("batch_root must be 32 bytes, got {}", batch_root.len()));
+    }
+
+    // Pass 1: extract each group's embedded trace root.
+    let (proof10_p1, _, _) = gen_mldsa_v23_vfri12_hints(z, c, t1, a_hat, batch_root, 1, num_folds)?;
+    let (proof8_p1,  _, _) =
+        gen_mldsa_v23_vfri12_hints_log8(z, c, t1, a_hat, hints, batch_root, 1, num_folds)?;
+
+    if proof10_p1.len() < 40 || proof8_p1.len() < 40 {
+        return Err("proof bytes too short to contain trace root at [8:40]".into());
+    }
+    let trace_root_10: [u8; 32] = proof10_p1[8..40].try_into().unwrap();
+    let trace_root_8:  [u8; 32] = proof8_p1[8..40].try_into().unwrap();
+
+    let bound_root_10: [u8; 32] = {
+        let mut h = Keccak256::new();
+        h.update(batch_root);
+        h.update(&trace_root_8);
+        h.finalize().into()
+    };
+    let bound_root_8: [u8; 32] = {
+        let mut h = Keccak256::new();
+        h.update(batch_root);
+        h.update(&trace_root_10);
+        h.finalize().into()
+    };
+
+    // Pass 2: regenerate against the cross-bound roots.
+    let (proof10, commit10, hints10) =
+        gen_mldsa_v23_vfri12_hints(z, c, t1, a_hat, &bound_root_10, n_queries, num_folds)?;
+    let (proof8, commit8, hints8) =
+        gen_mldsa_v23_vfri12_hints_log8(z, c, t1, a_hat, hints, &bound_root_8, n_queries, num_folds)?;
+
+    // The trace root must not depend on the batch root — the cross-binding
+    // argument assumes it. Check rather than assume (the R4.19 lesson).
+    if &proof10[8..40] != trace_root_10 || &proof8[8..40] != trace_root_8 {
+        return Err("trace root changed between passes; cross-binding would be unsound".into());
+    }
 
     Ok((proof10, commit10, hints10, proof8, commit8, hints8))
 }
@@ -8118,9 +8351,9 @@ mod tests_vfri8 {
     const REF_T16_PAIR: [u64; 8] = [
         1896676506, 1113082531, 1826142252, 1263581674, 694653155, 1856461508, 173489390, 625083048,
     ];
-    const REF_T16_QUERIES: [usize; 4] = [139, 460, 377, 144];
-    const REF_T16_QUERIES_W: [usize; 4] = [860, 495, 487, 690];
-    const REF_T16_FELT: u128 = 141632388673796146040251654506986135892;
+    const REF_T16_QUERIES: [usize; 4] = [821, 259, 182, 183];
+    const REF_T16_QUERIES_W: [usize; 4] = [362, 455, 247, 671];
+    const REF_T16_FELT: u128 = 1407887379921827972915931489114976420;
 
     #[test]
     fn test_p2t16_node_fills_the_whole_word() {
@@ -8201,6 +8434,74 @@ mod tests_vfri8 {
         let mut t8 = P2T8Channel::init();
         t8.mix_root_full(&[0x11u8; 32]);
         assert_ne!(t16.draw_queries(10, 8), t8.draw_queries(10, 8));
+    }
+
+    #[test]
+    fn test_p2t16_absorb_is_rate_8_with_padding_separation() {
+        // Rate 8: a full block is one permutation. The padding flag in capacity
+        // cell 15 is what keeps a short block from colliding with the same words
+        // zero-extended to the rate — without it, absorbing [1,2,3] and
+        // [1,2,3,0,0,0,0,0] would reach an identical state.
+        let short = { let mut c = P2T16Channel::init(); c.mix_u32s(&[1, 2, 3]); c.draw_queries(10, 4) };
+        let padded = {
+            let mut c = P2T16Channel::init();
+            c.mix_u32s(&[1, 2, 3, 0, 0, 0, 0, 0]);
+            c.draw_queries(10, 4)
+        };
+        assert_ne!(short, padded, "padding flag must separate a short block");
+
+        // The pad encodes the block LENGTH, so trailing zeros are not free:
+        // [1,2,3] and [1,2,3,0] pad to the same eight cells and would collide
+        // under a constant flag.
+        let three = { let mut c = P2T16Channel::init(); c.mix_u32s(&[1, 2, 3]); c.draw_queries(10, 4) };
+        let four = { let mut c = P2T16Channel::init(); c.mix_u32s(&[1, 2, 3, 0]); c.draw_queries(10, 4) };
+        assert_ne!(three, four, "padding must encode the block length");
+
+        // Absorbing an empty slice is a no-op, as in the rate-1 channels.
+        let empty = { let mut c = P2T16Channel::init(); c.mix_u32s(&[]); c.draw_queries(10, 4) };
+        let untouched = { let mut c = P2T16Channel::init(); c.draw_queries(10, 4) };
+        assert_eq!(empty, untouched);
+
+        // Nine words span two blocks; the ninth must still matter.
+        let a = { let mut c = P2T16Channel::init(); c.mix_u32s(&[1, 2, 3, 4, 5, 6, 7, 8, 9]); c.draw_queries(10, 4) };
+        let b = { let mut c = P2T16Channel::init(); c.mix_u32s(&[1, 2, 3, 4, 5, 6, 7, 8, 10]); c.draw_queries(10, 4) };
+        assert_ne!(a, b);
+
+        // Splitting a call ON a block boundary is indistinguishable — mix_u32s
+        // only resets an already-zero nDraws, so [1..8] then [9] absorbs exactly
+        // as [1..9] does. That holds at every width (the rate-1 channels have the
+        // same property for any split) and no caller depends on separating
+        // adjacent mixes; the transcript's structure is fixed.
+        let aligned = {
+            let mut c = P2T16Channel::init();
+            c.mix_u32s(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            c.mix_u32s(&[9]);
+            c.draw_queries(10, 4)
+        };
+        assert_eq!(a, aligned);
+
+        // Splitting OFF a block boundary is not, because the first half then
+        // pads. This is what makes the block structure observable at all.
+        let unaligned = {
+            let mut c = P2T16Channel::init();
+            c.mix_u32s(&[1, 2, 3, 4]);
+            c.mix_u32s(&[5, 6, 7, 8, 9]);
+            c.draw_queries(10, 4)
+        };
+        assert_ne!(a, unaligned);
+    }
+
+    #[test]
+    fn test_p2t16_mix_root_is_one_block() {
+        // A 32-byte root is exactly the rate, so mix_root_full must equal a
+        // single 8-word mix_u32s — no padding flag, one permutation.
+        let root = [0x5au8; 32];
+        let via_root = { let mut c = P2T16Channel::init(); c.mix_root_full(&root); c.draw_queries(10, 4) };
+        let words: Vec<u32> = (0..8)
+            .map(|i| u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap()))
+            .collect();
+        let via_words = { let mut c = P2T16Channel::init(); c.mix_u32s(&words); c.draw_queries(10, 4) };
+        assert_eq!(via_root, via_words);
     }
 
     #[test]
@@ -8363,6 +8664,56 @@ mod tests_vfri8 {
         let r1 = gen_vfri11_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
         let r2 = gen_vfri11_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn test_vfri12_smoke_small() {
+        let cols: Vec<Vec<u32>> = (0..4).map(|j| (0..16).map(|i| (i*4 + j) as u32).collect()).collect();
+        let batch_root = [0xceu8; 32];
+        let result = gen_vfri12_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2));
+        assert!(result.is_ok(), "VFRI12 smoke test failed: {:?}", result.err());
+        let (proof, commitment, hints) = result.unwrap();
+        assert!(proof.len() >= 700);
+        assert_eq!(commitment.len(), 32);
+        assert!(!hints.is_empty());
+        // VFRI12 version marker = 6.
+        assert_eq!(u64::from_le_bytes(proof[0..8].try_into().unwrap()), 6u64);
+    }
+
+    #[test]
+    fn test_vfri12_differs_from_vfri11() {
+        // Same inputs, t=16 vs t=8 hash backend → different trace root / hints.
+        // This is what makes VFRI11 hints unusable against VFRI12: the derived
+        // query indices differ, so the Merkle paths do not land.
+        let cols: Vec<Vec<u32>> = (0..4).map(|j| (0..16).map(|i| (i*4 + j) as u32).collect()).collect();
+        let batch_root = [0xceu8; 32];
+        let (p11, _, h11) = gen_vfri11_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        let (p12, _, h12) = gen_vfri12_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        assert_ne!(&p11[8..40], &p12[8..40], "t=16 trace root must differ from t=8");
+        assert_ne!(h11, h12, "VFRI12 hints must differ from VFRI11 (wider nodes)");
+        assert_eq!(u64::from_le_bytes(p12[0..8].try_into().unwrap()), 6u64);
+    }
+
+    #[test]
+    fn test_vfri12_deterministic() {
+        let cols: Vec<Vec<u32>> = (0..4).map(|j| (0..16).map(|i| (i*4 + j) as u32).collect()).collect();
+        let batch_root = [0x22u8; 32];
+        let r1 = gen_vfri12_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        let r2 = gen_vfri12_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn test_vfri12_hint_size_matches_vfri11() {
+        // The ABI is byte-COMPATIBLE across the width change — only node contents
+        // widen, and a node is a bytes32 either way. Equal encoded length is the
+        // cheap check that no layout drifted; the differing CONTENT is asserted
+        // by test_vfri12_differs_from_vfri11.
+        let cols: Vec<Vec<u32>> = (0..4).map(|j| (0..16).map(|i| (i*4 + j) as u32).collect()).collect();
+        let batch_root = [0x31u8; 32];
+        let (_, _, h11) = gen_vfri11_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        let (_, _, h12) = gen_vfri12_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2)).unwrap();
+        assert_eq!(h11.len(), h12.len());
     }
 
     // R4.1: the recursion bridge extracts per-query inputs from the REAL VFRI11
@@ -9354,6 +9705,69 @@ mod tests_vfri8 {
             hex::encode(&hints),
         );
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/vfri11_e2e.json");
+        std::fs::write(path, json).expect("failed to write fixture");
+        eprintln!("wrote {path}");
+    }
+
+    /// Writes the FULL-V23 cross-bound VFRI12 fixture — the measurement that
+    /// decides whether 128-bit node binding is directly deployable on-chain, or
+    /// only reachable through recursion.
+    ///
+    /// Same seed / n_queries / num_folds as full_v23_vfri11_cross_bound_e2e.json
+    /// so the two are directly comparable: identical trace, identical FRI shape,
+    /// only the hash width differs.
+    /// Run with: cargo test write_v23_vfri12_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore = "regenerates contracts/test/fixtures/full_v23_vfri12_cross_bound_e2e.json"]
+    fn write_v23_vfri12_fixture() {
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let hints = [[false; 256]; 6];
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        let (p10, c10, h10, p8, c8, h8) = gen_mldsa_v23_vfri12_cross_bound_hints(
+            &z, &c, &t1, &a_hat, &hints, &merkle_root, 1, Some(6),
+        ).expect("VFRI12 V23 cross-bound generation failed");
+
+        let json = format!(
+            "{{\n  \"merkleRoot\": \"0x{}\",\n  \"log10_proof\": \"0x{}\",\n  \"log10_commitment\": \"0x{}\",\n  \"log10_queryHints\": \"0x{}\",\n  \"log8_proof\": \"0x{}\",\n  \"log8_commitment\": \"0x{}\",\n  \"log8_queryHints\": \"0x{}\",\n  \"n_queries\": 1,\n  \"num_folds\": 6\n}}\n",
+            hex::encode(&merkle_root),
+            hex::encode(&p10), c10, hex::encode(&h10),
+            hex::encode(&p8),  c8,  hex::encode(&h8),
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/full_v23_vfri12_cross_bound_e2e.json"
+        );
+        std::fs::write(path, json).expect("failed to write fixture");
+        eprintln!("wrote {path}");
+        eprintln!("  log10 hints={}B  log8 hints={}B", h10.len(), h8.len());
+    }
+
+    /// Writes the VFRI12 E2E fixture consumed by QLSAVerifierVFRI12E2E.test.js.
+    /// Same shape as the VFRI11 fixture — the ABI is unchanged, only the width.
+    /// Run with: cargo test write_vfri12_e2e_fixture -- --ignored --nocapture
+    #[test]
+    #[ignore = "regenerates contracts/test/fixtures/vfri12_e2e.json"]
+    fn write_vfri12_e2e_fixture() {
+        let n = 16usize;
+        let cols: Vec<Vec<u32>> = (0..6)
+            .map(|j| (0..n).map(|i| ((i * 7 + j * 13 + 1) as u32) % 2_147_483_647).collect())
+            .collect();
+        let mut batch_root = [0u8; 32];
+        for (i, b) in batch_root.iter_mut().enumerate() { *b = (i as u8).wrapping_mul(9).wrapping_add(3); }
+
+        let (proof, commitment_hex, hints) =
+            gen_vfri12_hints_from_cols_nfolds(&cols, 4, &batch_root, 2, Some(2))
+                .expect("VFRI12 fixture generation failed");
+
+        let json = format!(
+            "{{\n  \"proof\": \"0x{}\",\n  \"commitment\": \"0x{}\",\n  \"merkleRoot\": \"0x{}\",\n  \"queryHints\": \"0x{}\",\n  \"n_queries\": 2,\n  \"num_folds\": 2,\n  \"tree_depth\": 4\n}}\n",
+            hex::encode(&proof),
+            commitment_hex,
+            hex::encode(batch_root),
+            hex::encode(&hints),
+        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/test/fixtures/vfri12_e2e.json");
         std::fs::write(path, json).expect("failed to write fixture");
         eprintln!("wrote {path}");
     }
