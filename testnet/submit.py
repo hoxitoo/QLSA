@@ -101,8 +101,9 @@ _REGISTRY_ABI = json.loads("""
 # mismatch surfaces legibly as Log10ProofInvalid from verify(), not as a decode
 # failure, so it needs no probe.
 
-_PER_GROUP = "per-group"        # BatchRegistryV6
+_PER_GROUP = "per-group"          # BatchRegistryV6
 _SINGLE_SUBMIT = "single-submit"  # BatchRegistryV4 / V5
+_RECURSIVE = "recursive"          # BatchRegistryV7
 
 # Only CONTRACT-level failures mean "this selector is not implemented".  A
 # transport failure (dead RPC, timeout, rate limit) must NOT be read as an answer:
@@ -115,6 +116,15 @@ _NO_SUCH_FUNCTION = (
     BadFunctionCallOutput,   # empty or undecodable return data
     DecodingError,           # return data did not match the probe ABI
 )
+
+#: `crossBoundRoot(bytes32,bytes32)` exists ONLY on BatchRegistryV7, so it is an
+#: exact discriminator for the recursive shape. Probed FIRST because a V7 also
+#: lacks `pendingGroups`, which would otherwise misread it as V4/V5.
+_CROSS_BOUND_ROOT_ABI = json.loads("""
+[
+  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes32","name":"otherTraceRoot","type":"bytes32"}],"name":"crossBoundRoot","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"pure","type":"function"}
+]
+""")
 
 _PENDING_GROUPS_ABI = json.loads("""
 [
@@ -136,6 +146,15 @@ def detect_registry_kind(w3: Web3, registry_address: str) -> str:
             f"no contract deployed at REGISTRY_ADDRESS={addr} "
             "(wrong network, or the address was never deployed)"
         )
+    # V7 first: it implements neither `pendingGroups` nor the V4/V5 flow, so
+    # probing `pendingGroups` alone would misclassify it as single-submit.
+    v7 = w3.eth.contract(address=addr, abi=_CROSS_BOUND_ROOT_ABI)
+    try:
+        v7.functions.crossBoundRoot(b"\x00" * 32, b"\x00" * 32).call()
+        return _RECURSIVE
+    except _NO_SUCH_FUNCTION as exc:
+        logger.debug("crossBoundRoot probe rejected by %s: %s", addr, exc)
+
     probe = w3.eth.contract(address=addr, abi=_PENDING_GROUPS_ABI)
     try:
         probe.functions.pendingGroups(b"\x00" * 32).call()
@@ -156,7 +175,7 @@ def require_registry_kind(
             f"REGISTRY_ADDRESS={registry_address} is a {kind} registry, but this "
             f"submitter expects {expected_kind} ({expected_registry}). Check --stack "
             "against the deployed contract: v4/v7 need BatchRegistryV4/V5, "
-            "v6 needs BatchRegistryV6."
+            "v6 needs BatchRegistryV6, v8 needs BatchRegistryV7."
         )
 
 
@@ -587,6 +606,145 @@ class OnchainSubmitterV5(OnchainSubmitterV4):
             confirm_timeout_s=confirm_timeout_s,
         )
         logger.info("stack: VFRI11 (Poseidon2 t=8, node ~2^62), atomic dual verify in one tx")
+
+
+_REGISTRY_V7_ABI = json.loads("""[{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"BatchAlreadyFinalized","type":"error"},{"inputs":[],"name":"CrossBindingMismatch","type":"error"},{"inputs":[],"name":"InvalidMerkleRoot","type":"error"},{"inputs":[],"name":"Log10ProofInvalid","type":"error"},{"inputs":[],"name":"Log8ProofInvalid","type":"error"},{"inputs":[],"name":"NoncesLengthMismatch","type":"error"},{"inputs":[],"name":"SenderCountExceedsLimit","type":"error"},{"inputs":[{"internalType":"bytes32","name":"sender","type":"bytes32"},{"internalType":"uint64","name":"provided","type":"uint64"},{"internalType":"uint64","name":"expected","type":"uint64"}],"name":"SenderNonceTooLow","type":"error"},{"inputs":[],"name":"ZeroAddressVerifier","type":"error"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":true,"internalType":"bytes16","name":"commitmentLog10","type":"bytes16"},{"indexed":false,"internalType":"bytes16","name":"commitmentLog8","type":"bytes16"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BatchFinalized","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"sender","type":"bytes32"},{"indexed":false,"internalType":"uint64","name":"newNonce","type":"uint64"}],"name":"NonceAdvanced","type":"event"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"batchCommitmentsLog10","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"batchCommitmentsLog8","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes32","name":"otherTraceRoot","type":"bytes32"}],"name":"crossBoundRoot","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"pure","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"isBatchFinalized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"senderNonces","outputs":[{"internalType":"uint64","name":"","type":"uint64"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle10","type":"tuple"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle8","type":"tuple"}],"name":"submitBatch","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle10","type":"tuple"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle8","type":"tuple"},{"internalType":"bytes32[]","name":"senders","type":"bytes32[]"},{"internalType":"uint64[]","name":"newNonces","type":"uint64[]"}],"name":"submitBatchWithNonces","outputs":[],"stateMutability":"nonpayable","type":"function"}]""")
+
+
+class OnchainSubmitterV7:
+    """Wraps web3 interaction with BatchRegistryV7 (RECURSIVE bundles, MVP-8).
+
+    The registry verifies, per V23 trace group, a STARK attesting that the inner
+    VFRI11 proof was verified — not the inner proof itself. Both groups finalize
+    in ONE transaction.
+
+    Use this stack for PRODUCTION soundness. At ``n_queries=20`` (130-bit) direct
+    verification of a V23 group no longer fits an Ethereum transaction, while this
+    route finalizes the whole batch in one (~13.13M gas measured). Below roughly 2
+    queries the direct v7 stack is cheaper — see ``docs/conclusions.md``.
+    """
+
+    _EXPECTED_KIND = _RECURSIVE
+    _EXPECTED_REGISTRY = "BatchRegistryV7"
+    _LOG_TAG = "V7reg"
+
+    def __init__(
+        self,
+        rpc_url: str,
+        private_key: str,
+        registry_address: str,
+        gas_limit: int = 16_700_000,
+        confirm_timeout_s: int = 180,
+    ) -> None:
+        self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+        self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        if not self.w3.is_connected():
+            raise RuntimeError(f"Cannot connect to RPC: {rpc_url}")
+        self.account = self.w3.eth.account.from_key(private_key)
+        self.registry = self.w3.eth.contract(
+            address=Web3.to_checksum_address(registry_address),
+            abi=_REGISTRY_V7_ABI,
+        )
+        require_registry_kind(
+            self.w3, registry_address, self._EXPECTED_KIND, self._EXPECTED_REGISTRY
+        )
+        self.gas_limit = gas_limit
+        self.confirm_timeout_s = confirm_timeout_s
+        logger.info(
+            "submitter%s ready: account=%s chain=%d",
+            self._LOG_TAG, self.account.address, self.w3.eth.chain_id,
+        )
+        logger.info("stack: recursive proofs (BatchRegistryV7), one atomic transaction")
+
+    @classmethod
+    def from_env(cls) -> "OnchainSubmitterV7":
+        rpc_url = os.environ["RPC_URL"]
+        private_key = os.environ.get("PRIVATE_KEY") or os.environ["DEPLOYER_PRIVATE_KEY"]
+        registry_address = os.environ["REGISTRY_ADDRESS"]
+        return cls(rpc_url=rpc_url, private_key=private_key, registry_address=registry_address)
+
+    @staticmethod
+    def _bundle_tuple(b) -> tuple:  # type: ignore[no-untyped-def]
+        """Convert a ``stark.prover.RecursiveBundle`` into the ABI tuple.
+
+        QM31 scalars arrive as decimal strings (they are u128) and roots as 0x-hex;
+        web3 wants ints and bytes respectively.
+        """
+        inner = (
+            bytes.fromhex(b.trace_root[2:]),
+            int(b.oods_combo_pos),
+            int(b.oods_combo_neg),
+            bytes.fromhex(b.comp_root[2:]),
+            [bytes.fromhex(r[2:]) for r in b.fri_layer_roots],
+            bytes.fromhex(b.batch_root[2:]),
+            int(b.tree_depth),
+            int(b.n_queries),
+        )
+        return (
+            inner,
+            bytes(b.outer_proof),
+            _decode_commitment16(b.outer_commitment, "outer_commitment"),
+            bytes(b.outer_hints),
+            [int(v) for v in b.last_layer_evals],
+        )
+
+    def _send(self, fn) -> str:  # type: ignore[no-untyped-def]
+        # "pending" rather than the default "latest": the deploying account may
+        # have transactions mined between the read and this send, and a stale
+        # count fails with "nonce too low" before the call is even attempted.
+        nonce = self.w3.eth.get_transaction_count(self.account.address, "pending")
+        tx = fn.build_transaction({
+            "from": self.account.address,
+            "nonce": nonce,
+            "gas": self.gas_limit,
+            "gasPrice": self.w3.eth.gas_price,
+        })
+        signed = self.account.sign_transaction(tx)
+        return self.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+
+    def submit_batch_with_nonces(
+        self,
+        merkle_root: bytes,
+        bundles,  # stark.prover.V23RecursiveBundlesResult
+        senders: list[bytes],
+        new_nonces: list[int],
+    ) -> str:
+        """Finalize a batch from two cross-bound recursive bundles, with nonces.
+
+        The registry recomputes the cross-binding itself and reverts with
+        ``CrossBindingMismatch`` if either bundle was not produced against the
+        other group's trace root — so a mismatched pair fails before any proof is
+        verified.
+        """
+        if len(senders) != len(new_nonces):
+            raise ValueError("senders and new_nonces must have equal length")
+        tx_hex = self._send(self.registry.functions.submitBatchWithNonces(
+            _as_bytes32(merkle_root, "merkle_root"),
+            self._bundle_tuple(bundles.log10),
+            self._bundle_tuple(bundles.log8),
+            _validate_senders(senders),
+            new_nonces,
+        ))
+        logger.info("%s submitBatchWithNonces: %s", self._LOG_TAG, tx_hex)
+        return tx_hex
+
+    def wait_and_verify(self, tx_hash: str, merkle_root: bytes) -> bool:
+        """Wait for confirmation, then read back whether the batch is finalized."""
+        logger.info("waiting for confirmation (timeout=%ds)…", self.confirm_timeout_s)
+        h = tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash
+        receipt = self.w3.eth.wait_for_transaction_receipt(h, timeout=self.confirm_timeout_s)
+        if receipt.status != 1:
+            logger.error("%s transaction reverted: %s", self._LOG_TAG, tx_hash)
+            return False
+        root_b32 = _as_bytes32(merkle_root, "merkle_root")
+        finalized: bool = self.registry.functions.isBatchFinalized(root_b32).call()
+        if finalized:
+            c10 = self.registry.functions.batchCommitmentsLog10(root_b32).call()
+            logger.info(
+                "%s batch finalized: root=%s commitmentLog10=%s gasUsed=%d",
+                self._LOG_TAG, root_b32.hex()[:16], c10.hex(), receipt.gasUsed,
+            )
+        return finalized
 
 
 class OnchainSubmitterV6:
