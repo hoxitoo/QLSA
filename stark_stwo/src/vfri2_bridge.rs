@@ -4727,7 +4727,7 @@ fn build_tree_p2t16(leaves: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
 /// The narrower channels (t=2/t=4/t=8) absorb one word per permutation. Carrying
 /// that over to t=16 would cost EIGHT permutations per 8-word root instead of
 /// one, and measurably did: a full-V23 t=16 group came out at 3.57x a t=8 one
-/// against a 1.79x permutation ratio, and the whole gap was the absorb count.
+/// against a 3.04x permutation ratio, and the gap was the absorb count.
 /// Rate-1 at t=16 wastes seven eighths of the sponge's bandwidth for no security
 /// — capacity, not rate, sets the collision bound.
 ///

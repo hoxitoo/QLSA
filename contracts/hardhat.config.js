@@ -59,6 +59,20 @@ module.exports = {
       allowUnlimitedContractSize: true,
     },
 
+    // A standalone `npx hardhat node` on 8546 — a REAL JSON-RPC server rather
+    // than the in-process EVM the test runner uses.
+    //
+    // This is not a formality. The in-process EVM hides everything that lives in
+    // the RPC round trip: nonce selection ("pending" vs "latest"), gas-limit
+    // rejection before execution, receipt handling, and calldata size limits.
+    // The pending-nonce bug in testnet/submit.py was only ever reachable here.
+    // Use it to check a claim that a stack works end to end; a passing hardhat
+    // test alone does not establish that.
+    localnode: {
+      url: process.env.LOCAL_RPC_URL || "http://127.0.0.1:8546",
+      accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
+    },
+
     // Polygon zkEVM testnet
     cardona: {
       url:      RPC_URL,

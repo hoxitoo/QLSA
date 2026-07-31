@@ -28,8 +28,10 @@ import "./verifier/CirclePoint.sol";
 /// on-chain verifier should be SKIPPED, on the reasoning that it would hit the
 /// same gas wall as t=8 roughly 4x worse and so could never verify production
 /// V23. That reasoning rested on a measurement of an unoptimised permutation.
-/// Measured properly, a t=16 permutation costs 1.79x a t=8 one — for twice the
-/// node width — so per bit of node capacity t=16 is CHEAPER than t=8. Since a
+/// Measured marginally (so the shared 21,000 tx base cancels), a t=16
+/// permutation costs 3.04x a t=8 one for twice the node width — i.e. DEARER per
+/// bit of node capacity, not cheaper. It is worth building because it reaches a
+/// level t=8 cannot reach at all. Since a
 /// full-V23 t=8 dual submitBatch fits in 6.06M of a 16.78M cap, the t=16
 /// equivalent has room. See docs/conclusions.md §1 on why the earlier figure
 /// measured the implementation rather than the width.

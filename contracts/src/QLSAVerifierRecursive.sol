@@ -159,26 +159,23 @@ contract QLSAVerifierRecursive {
 
     /// @notice Verify the recursive proof for one inner VFRI11 statement.
     ///
-    /// GAS (MEASURED, R4.6): this full path does NOT fit on-chain today. The
-    /// outer verification cost is dominated by Poseidon2-t8 Merkle/channel work
-    /// and was measured to exceed a **29M-gas call** (Ethereum's block ceiling)
-    /// BOTH with the original outer trace (log_size 7, 6 folds) AND with the
-    /// compacted one (log_size 5, 1 query, 2 folds; hints 4.6 KB -> 2.6 KB).
-    /// An earlier analytic estimate suggested the compact bundle would fit; the
-    /// CI measurement refuted it, so do NOT build a submission pipeline on this
-    /// entry point yet.
+    /// GAS (MEASURED, R4.8 / re-verified 2026-07-31): this full path DOES fit
+    /// on-chain. `verifyRecursive` costs ~2.29M gas returning ok=true, and
+    /// `BatchRegistryV7` finalizes a full V23 batch from two recursive bundles at
+    /// **13,168,471 gas in ONE transaction** at production 20 FRI queries
+    /// (130-bit) — reproduced end to end from real ML-DSA-65 signatures against a
+    /// standalone JSON-RPC node, not only the in-process test EVM.
     ///
-    /// What IS verified on-chain today: `replayChallenges` (the channel replay,
-    /// byte-identical to the Rust reference) and `outerBindingRoot`; and this
-    /// function correctly returns `false` for tampered inner publics or a wrong
-    /// outer commitment, because VFRI11 short-circuits those before the
-    /// expensive work.
+    /// An earlier revision of this comment said the opposite — that the path
+    /// exceeded a 29M-gas call and that no submission pipeline should be built on
+    /// it. That was wrong twice over: a `gasLimit` above 2^24 is rejected BEFORE
+    /// execution (EIP-7825), so the honest path had never actually run, and the
+    /// cost itself was Poseidon2 implementation overhead, removed in R4.8. The
+    /// stale warning outlived the correction by five commits and contradicted the
+    /// shipped v8 stack built on exactly this entry point. Numbers here are kept
+    /// honest by contracts/test/Measurements.test.js, which RE-MEASURES them
+    /// rather than trusting prose.
     ///
-    /// To make the honest path fit, the outer proof needs either a per-fold /
-    /// per-transaction split registry (à la `BatchRegistryV6`, which solved the
-    /// same wall for V23) or a cheaper outer backend (e.g. committing the outer
-    /// trace with the t=4 `QLSAVerifierVFRI10` — the outer commitment's hash
-    /// width is independent of the inner proof's t=8 backend).
     /// @param inner           the inner proof's public committed roots/combos
     /// @param outerProof      VFRI11-pipeline proof bytes over the OUTER trace
     /// @param outerCommitment Blake2s(outerProof[0:32] ‖ bindingRoot)[0:16]
