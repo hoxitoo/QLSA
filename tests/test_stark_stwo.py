@@ -3113,15 +3113,16 @@ def test_v23_recursive_bundles_shape():
 @needs_ext
 def test_v23_recursive_bundles_cross_binding():
     """Each group must be bound to the OTHER's trace root — the anti-mixing check."""
-    from Crypto.Hash import keccak
+    # eth_utils.keccak rather than pycryptodome: eth_utils is a first-class part of
+    # the web3 stack requirements-dev already declares, whereas pycryptodome only
+    # arrives as a transitive EXTRA of a transitive dependency — a dependency this
+    # test should not rest on.
+    from eth_utils import keccak
 
     res, root = _v23_recursive_bundles()
 
     def bound(other_trace_root: str) -> str:
-        h = keccak.new(digest_bits=256)
-        h.update(root)
-        h.update(bytes.fromhex(other_trace_root[2:]))
-        return "0x" + h.hexdigest()
+        return "0x" + keccak(root + bytes.fromhex(other_trace_root[2:])).hex()
 
     assert res.log10.batch_root == bound(res.log8.trace_root)
     assert res.log8.batch_root == bound(res.log10.trace_root)
