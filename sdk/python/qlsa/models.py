@@ -52,13 +52,35 @@ class TransactionStatus:
 
 @dataclass
 class WitnessStatus:
-    """Result of an ML-DSA-65 arithmetic witness STARK proof (VFRI7/VFRI8/VFRI9)."""
+    """Result of an ML-DSA-65 arithmetic witness STARK proof.
+
+    Carries a protocol-keyed view plus the historical flat fields; see
+    `protocols` / `commitments`.
+    """
 
     has_witness: bool
     # Legacy V3/V4 fields (kept for backward compatibility; None when VFRI7+ is used).
     onchain_commitment: str | None = None  # 32-char hex — mapped to vfri7_commitment_log10
     c_tilde_hex: str | None = None         # 96-char hex — not available in VFRI7+ path
     max_norms: list[int] = field(default_factory=list)
+    # ── Protocol-keyed view (preferred) ───────────────────────────────────────
+    #
+    # `protocols` names which verifier protocols a proof was generated under, and
+    # `commitments` carries each one's pair. Build against these: the flat
+    # `has_vfriN` fields below cannot express a protocol added after they were
+    # written, which is how this SDK came to report four `false`s when the
+    # default stack moved to VFRI11.
+    protocols: list[str] = field(default_factory=list)
+    commitments: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def commitment_for(self, protocol: str) -> dict[str, str] | None:
+        """The (log10, log8) commitment pair for `protocol`, or None."""
+        return self.commitments.get(protocol)
+
+    def has_protocol(self, protocol: str) -> bool:
+        return protocol in self.commitments
+
+    # ── Legacy flat fields (deprecated) ───────────────────────────────────────
     # VFRI7 cross-bound fields (MVP-5)
     has_vfri7: bool = False
     vfri7_commitment_log10: str | None = None  # 32-char hex
@@ -88,6 +110,24 @@ class BatchStatus:
     stark_commitment: str | None = None
     has_witness: bool = False
     witness_commitment: str | None = None  # 32-char hex (16-byte binding for tx[0])
+    # ── Protocol-keyed view (preferred) ───────────────────────────────────────
+    #
+    # `protocols` names which verifier protocols a proof was generated under, and
+    # `commitments` carries each one's pair. Build against these: the flat
+    # `has_vfriN` fields below cannot express a protocol added after they were
+    # written, which is how this SDK came to report four `false`s when the
+    # default stack moved to VFRI11.
+    protocols: list[str] = field(default_factory=list)
+    commitments: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def commitment_for(self, protocol: str) -> dict[str, str] | None:
+        """The (log10, log8) commitment pair for `protocol`, or None."""
+        return self.commitments.get(protocol)
+
+    def has_protocol(self, protocol: str) -> bool:
+        return protocol in self.commitments
+
+    # ── Legacy flat fields (deprecated) ───────────────────────────────────────
     # VFRI7 cross-bound ML-DSA V23 proofs (MVP-5)
     has_vfri7: bool = False
     vfri7_commitment_log10: str | None = None  # 32-char hex

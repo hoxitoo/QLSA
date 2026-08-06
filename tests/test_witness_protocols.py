@@ -123,3 +123,52 @@ def test_witness_for_returns_the_pair_or_none() -> None:
     # a result carrying only one is not submittable.
     assert w.log10.proof and w.log8.proof
     assert w.protocol == "vfri11"
+
+
+# ── API surface ──────────────────────────────────────────────────────────────
+
+def test_api_exposes_the_protocol_on_every_batch_endpoint() -> None:
+    """A client must be able to ask WHICH protocol a proof was generated under.
+
+    That question could not previously be asked: the response enumerated
+    VFRI7..VFRI10 as fixed keys, so when the default stack moved to VFRI11 the
+    API reported four `false`s and no field said why. The four endpoints are
+    checked together because they were four hand-written copies of the same
+    block, and three of them were missed on the first pass of this change.
+    """
+    from fastapi.testclient import TestClient
+
+    from aggregator.api import app
+    from core.keys import derive_address, generate_keypair
+    from core.signing import sign
+    from core.transaction import Transaction
+
+    with TestClient(app) as c:
+        pk, sk = generate_keypair()
+        addr = derive_address(pk)
+        tx = Transaction(sender=addr, recipient=addr, amount=5, nonce=0, public_key=pk)
+        tx.signature = sign(tx.to_bytes(), sk)
+        r = c.post("/transactions", json={
+            "sender": tx.sender, "recipient": tx.recipient, "amount": tx.amount,
+            "nonce": tx.nonce, "public_key": tx.public_key.hex(),
+            "signature": tx.signature.hex(),
+        })
+        assert r.json()["accepted"] is True
+
+        flushed = c.post("/batch/flush").json()
+        batch_id = flushed["batch_id"]
+
+        bodies = [
+            flushed,
+            c.get(f"/batch/{batch_id}").json(),
+            c.get(f"/batch/{batch_id}/witness").json(),
+            c.get("/batches").json()["batches"][0],
+        ]
+        for body in bodies:
+            # Present and correctly typed even with no witness proof — a field
+            # that appears and disappears with the answer is unusable.
+            assert isinstance(body.get("witness_protocols"), list)
+            assert isinstance(body.get("witness"), dict)
+            # The legacy keys must still be there for existing clients.
+            for legacy in ("vfri7", "vfri8", "vfri9", "vfri10"):
+                assert f"has_{legacy}" in body

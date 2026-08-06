@@ -517,40 +517,40 @@ def test_prove_witness_signed_tx_returns_witness_status():
     assert isinstance(ws.has_witness, bool)
     assert isinstance(ws.max_norms, list)
     if ws.has_witness:
-        # VFRI7 cross-bound path: onchain_commitment aliases vfri7_commitment_log10
+        # The SDK now proves the protocol the DEPLOYED default stack accepts,
+        # rather than VFRI7+VFRI8+VFRI9+VFRI10 unconditionally. At most one of
+        # those is ever submittable to a given registry — each verifier derives
+        # its own FRI query indices from its own hash backend — so generating
+        # four cost three full STARK proofs for nothing, and the set did not
+        # include the actual default.
+        from stark.prover import DEFAULT_WITNESS_PROTOCOL
+
         assert ws.onchain_commitment is not None
         assert len(ws.onchain_commitment) == 32
         int(ws.onchain_commitment, 16)  # valid hex
-        assert ws.has_vfri7 is True
-        assert ws.vfri7_commitment_log10 == ws.onchain_commitment
-        assert ws.vfri7_commitment_log8 is not None
-        assert len(ws.vfri7_commitment_log8) == 32
-        # c_tilde_hex is legacy V3/V4 only; VFRI7 path does not populate it
+
+        assert ws.protocols == [DEFAULT_WITNESS_PROTOCOL]
+        assert ws.has_protocol(DEFAULT_WITNESS_PROTOCOL)
+        pair = ws.commitment_for(DEFAULT_WITNESS_PROTOCOL)
+        assert pair is not None
+        assert pair["log10_commitment"] == ws.onchain_commitment
+        assert len(pair["log8_commitment"]) == 32
+        # Both groups are required: each is cross-bound to the OTHER's trace
+        # root, so a status carrying one alone is not submittable.
+        assert pair["log10_commitment"] != pair["log8_commitment"]
+
+        # c_tilde_hex is legacy V3/V4 only; the cross-bound path does not set it.
         assert ws.c_tilde_hex is None
-        # FRI security fields
         assert ws.n_fri_queries >= 1
-        # VFRI8 is also generated alongside VFRI7 when PyO3 is available
-        assert isinstance(ws.has_vfri8, bool)
-        if ws.has_vfri8:
-            assert ws.vfri8_commitment_log10 is not None
-            assert len(ws.vfri8_commitment_log10) == 32
-            assert ws.vfri8_commitment_log8 is not None
-            assert len(ws.vfri8_commitment_log8) == 32
-            # VFRI8 Poseidon2 commitments differ from VFRI7 Blake2s commitments
-            assert ws.vfri8_commitment_log10 != ws.vfri7_commitment_log10
-        # VFRI9 is also generated alongside VFRI7/VFRI8 when PyO3 is available
-        assert isinstance(ws.has_vfri9, bool)
-        if ws.has_vfri9:
-            assert ws.vfri9_commitment_log10 is not None
-            assert len(ws.vfri9_commitment_log10) == 32
-            assert ws.vfri9_commitment_log8 is not None
-            assert len(ws.vfri9_commitment_log8) == 32
-            # VFRI9 wide-node commitments differ from VFRI8 narrow-node commitments
-            assert ws.vfri9_commitment_log10 != ws.vfri8_commitment_log10
         assert ws.fri_security_bits == 6 * ws.n_fri_queries + 10
 
+        # The legacy flat fields stay present and stay FALSE for protocols that
+        # were not generated — they must not alias another protocol's data.
+        for legacy in ("vfri7", "vfri8", "vfri9", "vfri10"):
+            if legacy != DEFAULT_WITNESS_PROTOCOL:
+                assert getattr(ws, f"has_{legacy}") is False
+                assert getattr(ws, f"{legacy}_commitment_log10") is None
 
-# ── HttpClient ────────────────────────────────────────────────────────────────
 
 def test_http_client_health(http_client: HttpClient):
     assert http_client.health() is True

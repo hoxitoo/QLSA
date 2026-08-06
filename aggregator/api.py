@@ -379,6 +379,47 @@ def stats(request: Request) -> dict[str, Any]:
     }
 
 
+#: Protocols whose flat `has_vfriN` keys predate `witness_protocols`. Frozen —
+#: new protocols appear under `witness`, not as new flat keys.
+_LEGACY_WITNESS_KEYS = ['vfri7', 'vfri8', 'vfri9', 'vfri10']
+
+
+def _witness_fields(r: Any) -> dict[str, Any]:
+    """Witness-proof fields for a batch response.
+
+    Emits both shapes on purpose.
+
+    `witness_protocols` / `witness` are the ones to build against: they name the
+    protocol a proof was generated under, so a client can tell whether what the
+    aggregator produced is what the registry it targets will accept. That
+    question could not previously be asked — the response enumerated
+    VFRI7..VFRI10 as fixed keys, so when the default stack moved to VFRI11 the
+    API kept reporting four `false`s and no field said why.
+
+    The flat `has_vfriN` / `vfriN_commitment_*` keys are kept for existing
+    clients and are now DERIVED from the protocol registry rather than written
+    out by hand, so a new protocol appears here without editing this function.
+    """
+    fields: dict[str, Any] = {
+        "witness_protocols": r.witness_protocols,
+        "witness": {
+            name: {
+                "log10_commitment": w.log10.commitment,
+                "log8_commitment": w.log8.commitment,
+            }
+            for name, w in r.witness_proofs.items()
+        },
+    }
+    # Legacy flat keys. Only the protocols that existed when clients were written
+    # are emitted, so the response shape does not change under them.
+    for name in _LEGACY_WITNESS_KEYS:
+        w = r.witness_proofs.get(name)
+        fields[f"has_{name}"] = w is not None
+        fields[f"{name}_commitment_log10"] = w.log10.commitment if w else None
+        fields[f"{name}_commitment_log8"] = w.log8.commitment if w else None
+    return fields
+
+
 @app.get("/batches")
 def list_batches(
     request: Request,
@@ -406,18 +447,7 @@ def list_batches(
                 "stark_commitment": r.commitment,
                 "has_witness": r.has_witness,
                 "witness_commitment": r.witness_commitment,
-                "has_vfri7": r.has_vfri7,
-                "vfri7_commitment_log10": r.vfri7_commitment_log10,
-                "vfri7_commitment_log8": r.vfri7_commitment_log8,
-                "has_vfri8": r.has_vfri8,
-                "vfri8_commitment_log10": r.vfri8_commitment_log10,
-                "vfri8_commitment_log8": r.vfri8_commitment_log8,
-                "has_vfri9": r.has_vfri9,
-                "vfri9_commitment_log10": r.vfri9_commitment_log10,
-                "vfri9_commitment_log8": r.vfri9_commitment_log8,
-                "has_vfri10": r.has_vfri10,
-                "vfri10_commitment_log10": r.vfri10_commitment_log10,
-                "vfri10_commitment_log8": r.vfri10_commitment_log8,
+                **_witness_fields(r),
             }
             for r in sliced
         ],
@@ -597,18 +627,7 @@ def batch_run(
         "stark_commitment": result.commitment,
         "has_witness": result.has_witness,
         "witness_commitment": result.witness_commitment,
-        "has_vfri7": result.has_vfri7,
-        "vfri7_commitment_log10": result.vfri7_commitment_log10,
-        "vfri7_commitment_log8": result.vfri7_commitment_log8,
-        "has_vfri8": result.has_vfri8,
-        "vfri8_commitment_log10": result.vfri8_commitment_log10,
-        "vfri8_commitment_log8": result.vfri8_commitment_log8,
-        "has_vfri9": result.has_vfri9,
-        "vfri9_commitment_log10": result.vfri9_commitment_log10,
-        "vfri9_commitment_log8": result.vfri9_commitment_log8,
-        "has_vfri10": result.has_vfri10,
-        "vfri10_commitment_log10": result.vfri10_commitment_log10,
-        "vfri10_commitment_log8": result.vfri10_commitment_log8,
+        **_witness_fields(result),
     }
 
 
@@ -632,18 +651,7 @@ def batch_status(batch_id: str, request: Request) -> dict[str, Any]:
         "stark_commitment": result.commitment,
         "has_witness": result.has_witness,
         "witness_commitment": result.witness_commitment,
-        "has_vfri7": result.has_vfri7,
-        "vfri7_commitment_log10": result.vfri7_commitment_log10,
-        "vfri7_commitment_log8": result.vfri7_commitment_log8,
-        "has_vfri8": result.has_vfri8,
-        "vfri8_commitment_log10": result.vfri8_commitment_log10,
-        "vfri8_commitment_log8": result.vfri8_commitment_log8,
-        "has_vfri9": result.has_vfri9,
-        "vfri9_commitment_log10": result.vfri9_commitment_log10,
-        "vfri9_commitment_log8": result.vfri9_commitment_log8,
-        "has_vfri10": result.has_vfri10,
-        "vfri10_commitment_log10": result.vfri10_commitment_log10,
-        "vfri10_commitment_log8": result.vfri10_commitment_log8,
+        **_witness_fields(result),
     }
 
 
@@ -665,6 +673,8 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
     if not result.has_witness:
         return {
             "batch_id": batch_id, "has_witness": False,
+            "witness_protocols": [],
+            "witness": {},
             "has_vfri7": False, "has_vfri8": False, "has_vfri9": False, "has_vfri10": False,
             "n_fri_queries": n, "fri_security_bits": 6 * n + 10,
         }
@@ -674,18 +684,7 @@ def batch_witness(batch_id: str, request: Request) -> dict[str, Any]:
         "onchain_commitment": result.witness_commitment,
         "c_tilde_hex": result.witness_c_tilde_hex,
         "max_norms": result.witness_max_norms,
-        "has_vfri7": result.has_vfri7,
-        "vfri7_commitment_log10": result.vfri7_commitment_log10,
-        "vfri7_commitment_log8": result.vfri7_commitment_log8,
-        "has_vfri8": result.has_vfri8,
-        "vfri8_commitment_log10": result.vfri8_commitment_log10,
-        "vfri8_commitment_log8": result.vfri8_commitment_log8,
-        "has_vfri9": result.has_vfri9,
-        "vfri9_commitment_log10": result.vfri9_commitment_log10,
-        "vfri9_commitment_log8": result.vfri9_commitment_log8,
-        "has_vfri10": result.has_vfri10,
-        "vfri10_commitment_log10": result.vfri10_commitment_log10,
-        "vfri10_commitment_log8": result.vfri10_commitment_log8,
+        **_witness_fields(result),
         "n_fri_queries": n,
         "fri_security_bits": 6 * n + 10,
     }
@@ -708,16 +707,5 @@ def batch_flush(
         "stark_commitment": result.commitment,
         "has_witness": result.has_witness,
         "witness_commitment": result.witness_commitment,
-        "has_vfri7": result.has_vfri7,
-        "vfri7_commitment_log10": result.vfri7_commitment_log10,
-        "vfri7_commitment_log8": result.vfri7_commitment_log8,
-        "has_vfri8": result.has_vfri8,
-        "vfri8_commitment_log10": result.vfri8_commitment_log10,
-        "vfri8_commitment_log8": result.vfri8_commitment_log8,
-        "has_vfri9": result.has_vfri9,
-        "vfri9_commitment_log10": result.vfri9_commitment_log10,
-        "vfri9_commitment_log8": result.vfri9_commitment_log8,
-        "has_vfri10": result.has_vfri10,
-        "vfri10_commitment_log10": result.vfri10_commitment_log10,
-        "vfri10_commitment_log8": result.vfri10_commitment_log8,
+        **_witness_fields(result),
     }
