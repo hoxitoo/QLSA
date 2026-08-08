@@ -67,12 +67,26 @@ def _prove_witness_local(
     with no batch context — the commitment is bound to the all-zeros root, which
     suits capability testing and demos but is not submittable as a batch.
     """
-    from stark.prover import DEFAULT_WITNESS_PROTOCOL, prove_mldsa_sig_for_protocol
+    from stark.prover import (
+        DEFAULT_WITNESS_PROTOCOL,
+        WITNESS_PROTOCOLS,
+        prove_mldsa_sig_for_protocol,
+    )
 
     if tx.signature is None or tx.public_key is None:
         return WitnessStatus(has_witness=False)
 
     names = protocols if protocols is not None else (DEFAULT_WITNESS_PROTOCOL,)
+    # Validate up front, as Batcher does. Letting an unknown name fall into the
+    # loop below would return has_witness=False with no explanation — the same
+    # silent absence this registry exists to eliminate, and inconsistent with the
+    # aggregator, which raises on exactly this input.
+    unknown = [n for n in names if n not in WITNESS_PROTOCOLS]
+    if unknown:
+        raise ValueError(
+            f"unknown witness protocol(s): {unknown}; "
+            f"supported: {sorted(WITNESS_PROTOCOLS)}"
+        )
     status = WitnessStatus(has_witness=False)
 
     for name in names:
@@ -85,7 +99,10 @@ def _prove_witness_local(
                 batch_merkle_root=bytes(32),
                 n_queries=n_fri_queries,
             )
-        except (RuntimeError, ImportError, ValueError, KeyError):
+        except (RuntimeError, ImportError, ValueError):
+            # A prover that is unavailable or rejects this signature is a
+            # runtime condition; try the remaining protocols. An unknown NAME
+            # cannot reach here — it is rejected above.
             continue
 
         status.has_witness = True

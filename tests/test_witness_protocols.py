@@ -255,3 +255,25 @@ def test_batcher_leaves_the_query_count_to_the_protocol_by_default() -> None:
     assert Batcher(Mempool(), n_fri_queries=20).n_fri_queries == 20
     with pytest.raises(ValueError, match=r"n_fri_queries must be in \[1, 64\]"):
         Batcher(Mempool(), n_fri_queries=0)
+
+
+def test_sdk_rejects_an_unknown_protocol_loudly() -> None:
+    """The SDK must fail like the aggregator does, not return an empty status.
+
+    It previously caught KeyError inside the per-protocol loop and continued, so
+    asking for a protocol that does not exist gave `has_witness=False` with no
+    explanation — the silent absence this registry exists to eliminate, and
+    inconsistent with Batcher, which raises on the same input.
+    """
+    from core.keys import derive_address, generate_keypair
+    from core.signing import sign
+    from core.transaction import Transaction
+    from sdk.python.qlsa.client import _prove_witness_local
+
+    pk, sk = generate_keypair()
+    addr = derive_address(pk)
+    tx = Transaction(sender=addr, recipient=addr, amount=1, nonce=0, public_key=pk)
+    tx.signature = sign(tx.to_bytes(), sk)
+
+    with pytest.raises(ValueError, match="unknown witness protocol"):
+        _prove_witness_local(tx, protocols=("vfri99",))
