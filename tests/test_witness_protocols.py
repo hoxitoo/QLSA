@@ -19,7 +19,9 @@ from aggregator.batcher import Batcher, BatchResult, GroupProof, WitnessProof
 from aggregator.mempool import Mempool
 from stark.prover import (
     DEFAULT_WITNESS_PROTOCOL,
+    DIRECT_PROTOCOLS,
     WITNESS_PROTOCOLS,
+    WitnessGroup,
     prove_mldsa_sig_for_protocol,
 )
 
@@ -45,17 +47,30 @@ def test_default_protocol_is_what_the_deployed_stack_accepts() -> None:
     assert DEFAULT_WITNESS_PROTOCOL in WITNESS_PROTOCOLS
 
 
-def test_registry_covers_every_uniform_protocol() -> None:
-    assert set(WITNESS_PROTOCOLS) == {"vfri7", "vfri8", "vfri9", "vfri10", "vfri11"}
+def test_registry_covers_every_protocol() -> None:
+    assert set(WITNESS_PROTOCOLS) == set(DIRECT_PROTOCOLS) | {"recursive"}
+    assert set(DIRECT_PROTOCOLS) == {"vfri7", "vfri8", "vfri9", "vfri10", "vfri11"}
 
 
-def test_recursive_is_deliberately_absent() -> None:
-    """prove_mldsa_sig_recursive_stark returns bundles, not hint triples.
+def test_recursive_is_normalised_not_a_parallel_shape() -> None:
+    """The recursive prover returns bundles; an adapter maps it to WitnessProof.
 
-    It is not substitutable through this registry, and pretending otherwise
-    would produce an object whose fields the caller cannot use.
+    Its outer proof takes the same three fields as a direct protocol's, and the
+    inner publics that only BatchRegistryV7 needs live in `WitnessGroup.inner`.
+    So the product layer stores and forwards every protocol identically, and only
+    a submitter has to know which registry shape it is aiming at.
     """
-    assert "recursive" not in WITNESS_PROTOCOLS
+    assert "recursive" in WITNESS_PROTOCOLS
+    assert "recursive" not in DIRECT_PROTOCOLS
+
+
+def test_only_the_recursive_protocol_carries_inner_publics() -> None:
+    """`inner` is what distinguishes the two registry shapes downstream."""
+    direct = WitnessGroup(b"p", "a" * 32, b"h")
+    assert direct.inner is None
+    rec = WitnessGroup(b"p", "a" * 32, b"h", {"inner_publics": {}, "last_layer_evals": []})
+    assert rec.inner is not None
+    assert set(rec.inner) == {"inner_publics", "last_layer_evals"}
 
 
 def test_unknown_protocol_raises_with_the_supported_names() -> None:
@@ -172,3 +187,36 @@ def test_api_exposes_the_protocol_on_every_batch_endpoint() -> None:
             # The legacy keys must still be there for existing clients.
             for legacy in ("vfri7", "vfri8", "vfri9", "vfri10"):
                 assert f"has_{legacy}" in body
+
+
+def test_api_reports_which_registry_shape_a_proof_targets() -> None:
+    """A client cannot infer the registry from the protocol name.
+
+    Submitting a direct proof to BatchRegistryV7 (or the reverse) fails inside
+    the transaction rather than at the boundary, so the response says which
+    shape each proof is for.
+    """
+    from aggregator.api import _witness_fields
+    from stark.prover import WitnessGroup, WitnessProof
+
+    class _R:
+        witness_protocols = ["vfri11", "recursive"]
+        witness_proofs = {
+            "vfri11": WitnessProof(
+                "vfri11", WitnessGroup(b"a", "1" * 32, b"h"),
+                WitnessGroup(b"b", "2" * 32, b"h")),
+            "recursive": WitnessProof(
+                "recursive",
+                WitnessGroup(b"a", "3" * 32, b"h", {"inner_publics": {}, "last_layer_evals": []}),
+                WitnessGroup(b"b", "4" * 32, b"h", {"inner_publics": {}, "last_layer_evals": []})),
+        }
+
+    f = _witness_fields(_R())
+    assert f["witness"]["vfri11"]["registry"] == "direct"
+    assert f["witness"]["recursive"]["registry"] == "recursive"
+    # The legacy flat keys are frozen to the four protocols that predate
+    # `witness_protocols`: newer ones appear under `witness` only, so an existing
+    # client's response shape never changes under it.
+    legacy = {k for k in f if k.startswith("has_vfri")}
+    assert legacy == {"has_vfri7", "has_vfri8", "has_vfri9", "has_vfri10"}
+    assert "has_recursive" not in f and "has_vfri11" not in f

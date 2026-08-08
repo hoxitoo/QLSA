@@ -91,18 +91,18 @@ def _prove_witness_local(
         status.has_witness = True
         status.protocols.append(name)
         status.commitments[name] = {
-            "log10_commitment": vr.log10_commitment,
-            "log8_commitment": vr.log8_commitment,
+            "log10_commitment": vr.log10.commitment,
+            "log8_commitment": vr.log8.commitment,
         }
         if status.onchain_commitment is None:
-            status.onchain_commitment = vr.log10_commitment
+            status.onchain_commitment = vr.log10.commitment
             status.n_fri_queries = n_fri_queries
             status.fri_security_bits = 6 * n_fri_queries + 10
         # Legacy flat fields for the protocols that predate `protocols`.
         if name in ("vfri7", "vfri8", "vfri9", "vfri10"):
             setattr(status, f"has_{name}", True)
-            setattr(status, f"{name}_commitment_log10", vr.log10_commitment)
-            setattr(status, f"{name}_commitment_log8", vr.log8_commitment)
+            setattr(status, f"{name}_commitment_log10", vr.log10.commitment)
+            setattr(status, f"{name}_commitment_log8", vr.log8.commitment)
 
     return status
 

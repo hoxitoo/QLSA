@@ -11,28 +11,8 @@ from core.batch import Batch, InvalidSignatureError, BatchSizeError, create_batc
 from core.keys import DEFAULT_ALGORITHM
 from core.transaction import Transaction
 from aggregator.mempool import Mempool
-
-
-@dataclass(frozen=True)
-class GroupProof:
-    """One V23 trace group's cross-bound proof (LOG=10 or LOG=8)."""
-
-    proof: bytes
-    commitment: str          # 32-char hex (16-byte Blake2s binding)
-    hints: bytes
-
-
-@dataclass(frozen=True)
-class WitnessProof:
-    """A cross-bound ML-DSA V23 witness proof under one verifier protocol.
-
-    Both groups must be submitted together: each is bound to the OTHER's trace
-    root, so they are only valid as a pair.
-    """
-
-    protocol: str            # "vfri7".."vfri11"
-    log10: GroupProof
-    log8: GroupProof
+# Re-exported: these were defined here, and callers import them from here.
+from stark.prover import WitnessGroup as GroupProof, WitnessProof
 
 
 @dataclass
@@ -387,15 +367,9 @@ class Batcher:
                     exc_info=True)
                 continue
 
-            result.witness_proofs[protocol] = WitnessProof(
-                protocol=protocol,
-                log10=GroupProof(
-                    vr.log10_proof, vr.log10_commitment, vr.log10_query_hints),
-                log8=GroupProof(
-                    vr.log8_proof, vr.log8_commitment, vr.log8_query_hints),
-            )
+            result.witness_proofs[protocol] = vr
             if result.witness_commitment is None:
-                result.witness_commitment = vr.log10_commitment
+                result.witness_commitment = vr.log10.commitment
 
     def try_batch(self, prove_witnesses: bool = False) -> BatchResult | None:
         """Create a batch if the mempool has enough transactions.

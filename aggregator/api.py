@@ -379,6 +379,8 @@ def stats(request: Request) -> dict[str, Any]:
     }
 
 
+from stark.prover import DIRECT_PROTOCOLS
+
 #: Protocols whose flat `has_vfriN` keys predate `witness_protocols`. Frozen —
 #: new protocols appear under `witness`, not as new flat keys.
 _LEGACY_WITNESS_KEYS = ['vfri7', 'vfri8', 'vfri9', 'vfri10']
@@ -406,6 +408,10 @@ def _witness_fields(r: Any) -> dict[str, Any]:
             name: {
                 "log10_commitment": w.log10.commitment,
                 "log8_commitment": w.log8.commitment,
+                # Which registry SHAPE this proof can be submitted to. A client
+                # cannot infer it from the name, and submitting to the wrong one
+                # fails inside the transaction rather than at the boundary.
+                "registry": "direct" if name in DIRECT_PROTOCOLS else "recursive",
             }
             for name, w in r.witness_proofs.items()
         },
