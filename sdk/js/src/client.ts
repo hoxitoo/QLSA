@@ -33,6 +33,8 @@ interface RawBatchStatus {
   stark_commitment?: string;
   has_witness?: boolean;
   witness_commitment?: string;
+  witness_protocols?: string[];
+  witness?: Record<string, { log10_commitment: string; log8_commitment: string }>;
   has_vfri7?: boolean;
   vfri7_commitment_log10?: string;
   vfri7_commitment_log8?: string;
@@ -135,6 +137,8 @@ export class AggregatorClient {
         onchain_commitment?: string;
         c_tilde_hex?: string;
         max_norms?: number[];
+        witness_protocols?: string[];
+        witness?: Record<string, { log10_commitment: string; log8_commitment: string }>;
         has_vfri7?: boolean;
         vfri7_commitment_log10?: string;
         vfri7_commitment_log8?: string;
@@ -152,7 +156,7 @@ export class AggregatorClient {
       }>(`/batch/${batchId}/witness`);
       if (!data.has_witness) {
         return {
-          hasWitness: false, maxNorms: [],
+          hasWitness: false, maxNorms: [], protocols: [], commitments: {},
           hasVfri7: false, hasVfri8: false, hasVfri9: false, hasVfri10: false,
           nFriQueries: data.n_fri_queries ?? 0,
           friSecurityBits: data.fri_security_bits ?? 0,
@@ -160,6 +164,8 @@ export class AggregatorClient {
       }
       return {
         hasWitness: true,
+        protocols: data.witness_protocols ?? [],
+        commitments: data.witness ?? {},
         onchainCommitment: data.onchain_commitment,
         cTildeHex: data.c_tilde_hex,
         maxNorms: data.max_norms ?? [],
@@ -396,6 +402,8 @@ export class AggregatorClient {
       starkCommitment: data.stark_commitment,
       hasWitness: data.has_witness ?? false,
       witnessCommitment: data.witness_commitment,
+      protocols: data.witness_protocols ?? [],
+      commitments: data.witness ?? {},
       hasVfri7: data.has_vfri7 ?? false,
       vfri7CommitmentLog10: data.vfri7_commitment_log10,
       vfri7CommitmentLog8: data.vfri7_commitment_log8,

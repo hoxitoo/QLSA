@@ -34,6 +34,17 @@ export interface WitnessStatus {
   onchainCommitment?: string;  // 32-char hex — alias for vfri7CommitmentLog10 (backward compat)
   cTildeHex?: string;          // 96-char hex — legacy V3/V4 path only; undefined for VFRI7+
   maxNorms: number[];          // legacy V3/V4 path only; empty for VFRI7+
+  /**
+   * Commitment pair per verifier protocol, keyed by protocol name
+   * ("vfri7".."vfri11"). Build against this and `protocols`: the flat
+   * `hasVfriN` fields below cannot express a protocol added after they were
+   * written, which is how this SDK came to report four `false`s when the
+   * deployed default stack moved to VFRI11.
+   */
+  commitments?: Record<string, { log10_commitment: string; log8_commitment: string }>;
+  /** Protocols a proof was generated under, in generation order. */
+  protocols?: string[];
+  // ── Legacy flat fields (deprecated) ──
   // VFRI7 cross-bound ML-DSA V23 proof commitments (MVP-5)
   hasVfri7: boolean;
   vfri7CommitmentLog10?: string;  // 32-char hex (16-byte binding, LOG=10 group)
@@ -63,6 +74,17 @@ export interface BatchStatus {
   hasWitness: boolean;
   witnessCommitment?: string;  // 32-char hex (16-byte binding for tx[0])
   // VFRI7 cross-bound ML-DSA V23 proof commitments (MVP-5)
+  /**
+   * Commitment pair per verifier protocol, keyed by protocol name
+   * ("vfri7".."vfri11"). Build against this and `protocols`: the flat
+   * `hasVfriN` fields below cannot express a protocol added after they were
+   * written, which is how this SDK came to report four `false`s when the
+   * deployed default stack moved to VFRI11.
+   */
+  commitments?: Record<string, { log10_commitment: string; log8_commitment: string }>;
+  /** Protocols a proof was generated under, in generation order. */
+  protocols?: string[];
+  // ── Legacy flat fields (deprecated) ──
   hasVfri7: boolean;
   vfri7CommitmentLog10?: string;  // 32-char hex (16-byte binding, LOG=10 group)
   vfri7CommitmentLog8?: string;   // 32-char hex (16-byte binding, LOG=8 group)

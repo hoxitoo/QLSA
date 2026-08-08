@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +11,8 @@ from core.batch import Batch, InvalidSignatureError, BatchSizeError, create_batc
 from core.keys import DEFAULT_ALGORITHM
 from core.transaction import Transaction
 from aggregator.mempool import Mempool
+# Re-exported: these were defined here, and callers import them from here.
+from stark.prover import WitnessGroup as GroupProof, WitnessProof
 
 
 @dataclass
@@ -29,44 +32,17 @@ class BatchResult:
     witness_max_norms:    list[int] | None = None  # L=5 ‖z[j]‖_∞ values
     witness_c_tilde_hex:  str | None = None  # 96-char hex (48-byte ML-DSA-65 c̃)
 
-    # VFRI7 cross-bound ML-DSA V23 proofs for tx[0] (MVP-5).
-    # Populated when prove_witnesses=True and the PyO3 extension is available.
-    vfri7_proof_log10:      bytes | None = field(default=None, repr=False)
-    vfri7_commitment_log10: str | None = None   # 32-char hex (16-byte Blake2s binding)
-    vfri7_hints_log10:      bytes | None = field(default=None, repr=False)
-    vfri7_proof_log8:       bytes | None = field(default=None, repr=False)
-    vfri7_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
-    vfri7_hints_log8:       bytes | None = field(default=None, repr=False)
-
-    # VFRI8 Poseidon2 cross-bound ML-DSA V23 proofs for tx[0].
-    # Populated when prove_witnesses=True and the PyO3 extension is available.
-    vfri8_proof_log10:      bytes | None = field(default=None, repr=False)
-    vfri8_commitment_log10: str | None = None   # 32-char hex (16-byte Blake2s binding)
-    vfri8_hints_log10:      bytes | None = field(default=None, repr=False)
-    vfri8_proof_log8:       bytes | None = field(default=None, repr=False)
-    vfri8_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
-    vfri8_hints_log8:       bytes | None = field(default=None, repr=False)
-
-    # VFRI9 cross-bound ML-DSA V23 proofs for tx[0] (last-layer FRI check,
-    # wide Poseidon2 nodes, full-root Fiat-Shamir absorption).
-    # Populated when prove_witnesses=True and the PyO3 extension is available.
-    vfri9_proof_log10:      bytes | None = field(default=None, repr=False)
-    vfri9_commitment_log10: str | None = None   # 32-char hex (16-byte Blake2s binding)
-    vfri9_hints_log10:      bytes | None = field(default=None, repr=False)
-    vfri9_proof_log8:       bytes | None = field(default=None, repr=False)
-    vfri9_commitment_log8:  str | None = None   # 32-char hex (16-byte Blake2s binding)
-    vfri9_hints_log8:       bytes | None = field(default=None, repr=False)
-
-    # VFRI10 cross-bound ML-DSA V23 proofs for tx[0] (VFRI9 protocol on the
-    # Poseidon2 t=4 hash backend). Generated with num_folds=6 so each group's
-    # verify() fits within the ~16.7M per-tx gas cap on BatchRegistryV6.
-    # Populated when prove_witnesses=True and the PyO3 extension is available.
-    vfri10_proof_log10:      bytes | None = field(default=None, repr=False)
-    vfri10_commitment_log10: str | None = None  # 32-char hex (16-byte Blake2s binding)
-    vfri10_hints_log10:      bytes | None = field(default=None, repr=False)
-    vfri10_proof_log8:       bytes | None = field(default=None, repr=False)
-    vfri10_commitment_log8:  str | None = None  # 32-char hex (16-byte Blake2s binding)
-    vfri10_hints_log8:       bytes | None = field(default=None, repr=False)
+    # Cross-bound ML-DSA V23 witness proofs for tx[0], keyed by protocol name
+    # ("vfri7".."vfri11").  Populated when prove_witnesses=True and the PyO3
+    # extension is available.
+    #
+    # This replaced four hand-enumerated blocks of six fields each. That shape is
+    # why the aggregator fell behind the deployed stack: adding VFRI11 meant
+    # editing six fields in four layers, so it simply was not done, and the
+    # aggregator's proofs silently stopped being submittable to the default
+    # registry. The per-protocol `vfriN_*` attributes below are kept as read-only
+    # views over this dict so existing callers (API, SDKs) keep working.
+    witness_proofs: dict[str, WitnessProof] = field(default_factory=dict, repr=False)
 
     # Convenience properties for Solidity submission
     @property
@@ -95,31 +71,196 @@ class BatchResult:
     def is_proven(self) -> bool:
         return self.proof is not None and self.commitment is not None
 
+    def witness_for(self, protocol: str) -> WitnessProof | None:
+        """The witness proof generated under `protocol`, or None."""
+        return self.witness_proofs.get(protocol)
+
+    def has_protocol(self, protocol: str) -> bool:
+        return protocol in self.witness_proofs
+
+    @property
+    def witness_protocols(self) -> list[str]:
+        """Protocols for which a witness proof was generated, in insertion order."""
+        return list(self.witness_proofs)
+
+    # ── Deprecated per-protocol views ─────────────────────────────────────────
+    # Kept so aggregator/api.py and both SDKs keep working unchanged. Prefer
+    # `witness_proofs` / `witness_for(protocol)`; these cannot express a protocol
+    # added after they were written, which is exactly how VFRI11 got missed.
+
     @property
     def has_vfri7(self) -> bool:
-        return self.vfri7_proof_log10 is not None and self.vfri7_proof_log8 is not None
+        return self.has_protocol("vfri7")
 
     @property
     def has_vfri8(self) -> bool:
-        return self.vfri8_proof_log10 is not None and self.vfri8_proof_log8 is not None
+        return self.has_protocol("vfri8")
 
     @property
     def has_vfri9(self) -> bool:
-        return self.vfri9_proof_log10 is not None and self.vfri9_proof_log8 is not None
+        return self.has_protocol("vfri9")
 
     @property
     def has_vfri10(self) -> bool:
-        return self.vfri10_proof_log10 is not None and self.vfri10_proof_log8 is not None
+        return self.has_protocol("vfri10")
+
+    @property
+    def has_vfri11(self) -> bool:
+        return self.has_protocol("vfri11")
+
+    @property
+    def vfri7_proof_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri7")
+        return w.log10.proof if w else None
+
+    @property
+    def vfri7_commitment_log10(self) -> str | None:
+        w = self.witness_proofs.get("vfri7")
+        return w.log10.commitment if w else None
+
+    @property
+    def vfri7_hints_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri7")
+        return w.log10.hints if w else None
+
+    @property
+    def vfri7_proof_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri7")
+        return w.log8.proof if w else None
+
+    @property
+    def vfri7_commitment_log8(self) -> str | None:
+        w = self.witness_proofs.get("vfri7")
+        return w.log8.commitment if w else None
+
+    @property
+    def vfri7_hints_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri7")
+        return w.log8.hints if w else None
+
+    @property
+    def vfri8_proof_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri8")
+        return w.log10.proof if w else None
+
+    @property
+    def vfri8_commitment_log10(self) -> str | None:
+        w = self.witness_proofs.get("vfri8")
+        return w.log10.commitment if w else None
+
+    @property
+    def vfri8_hints_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri8")
+        return w.log10.hints if w else None
+
+    @property
+    def vfri8_proof_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri8")
+        return w.log8.proof if w else None
+
+    @property
+    def vfri8_commitment_log8(self) -> str | None:
+        w = self.witness_proofs.get("vfri8")
+        return w.log8.commitment if w else None
+
+    @property
+    def vfri8_hints_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri8")
+        return w.log8.hints if w else None
+
+    @property
+    def vfri9_proof_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri9")
+        return w.log10.proof if w else None
+
+    @property
+    def vfri9_commitment_log10(self) -> str | None:
+        w = self.witness_proofs.get("vfri9")
+        return w.log10.commitment if w else None
+
+    @property
+    def vfri9_hints_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri9")
+        return w.log10.hints if w else None
+
+    @property
+    def vfri9_proof_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri9")
+        return w.log8.proof if w else None
+
+    @property
+    def vfri9_commitment_log8(self) -> str | None:
+        w = self.witness_proofs.get("vfri9")
+        return w.log8.commitment if w else None
+
+    @property
+    def vfri9_hints_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri9")
+        return w.log8.hints if w else None
+
+    @property
+    def vfri10_proof_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri10")
+        return w.log10.proof if w else None
+
+    @property
+    def vfri10_commitment_log10(self) -> str | None:
+        w = self.witness_proofs.get("vfri10")
+        return w.log10.commitment if w else None
+
+    @property
+    def vfri10_hints_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri10")
+        return w.log10.hints if w else None
+
+    @property
+    def vfri10_proof_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri10")
+        return w.log8.proof if w else None
+
+    @property
+    def vfri10_commitment_log8(self) -> str | None:
+        w = self.witness_proofs.get("vfri10")
+        return w.log8.commitment if w else None
+
+    @property
+    def vfri10_hints_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri10")
+        return w.log8.hints if w else None
+
+    @property
+    def vfri11_proof_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri11")
+        return w.log10.proof if w else None
+
+    @property
+    def vfri11_commitment_log10(self) -> str | None:
+        w = self.witness_proofs.get("vfri11")
+        return w.log10.commitment if w else None
+
+    @property
+    def vfri11_hints_log10(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri11")
+        return w.log10.hints if w else None
+
+    @property
+    def vfri11_proof_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri11")
+        return w.log8.proof if w else None
+
+    @property
+    def vfri11_commitment_log8(self) -> str | None:
+        w = self.witness_proofs.get("vfri11")
+        return w.log8.commitment if w else None
+
+    @property
+    def vfri11_hints_log8(self) -> bytes | None:
+        w = self.witness_proofs.get("vfri11")
+        return w.log8.hints if w else None
 
     @property
     def has_witness(self) -> bool:
-        return (
-            self.witness_bundle is not None
-            or self.has_vfri7
-            or self.has_vfri8
-            or self.has_vfri9
-            or self.has_vfri10
-        )
+        return self.witness_bundle is not None or bool(self.witness_proofs)
 
     @property
     def witness_norm_bound_ok(self) -> bool:
@@ -151,14 +292,32 @@ class Batcher:
         min_batch_size: int = 1,
         max_batch_size: int = 3000,
         algorithm: str = DEFAULT_ALGORITHM,
-        n_fri_queries: int = 1,
+        n_fri_queries: int | None = None,
+        witness_protocols: tuple[str, ...] | None = None,
     ) -> None:
         if min_batch_size < 1:
             raise ValueError("min_batch_size must be at least 1")
         if max_batch_size < min_batch_size:
             raise ValueError("max_batch_size must be >= min_batch_size")
-        if n_fri_queries < 1 or n_fri_queries > 64:
+        # None means "each protocol's own default" — 1 for the direct
+        # protocols, 20 for `recursive`. A single shared default would hand the
+        # recursive route 16-bit soundness at more gas than direct verification.
+        if n_fri_queries is not None and (n_fri_queries < 1 or n_fri_queries > 64):
             raise ValueError(f"n_fri_queries must be in [1, 64], got {n_fri_queries}")
+        from stark.prover import DEFAULT_WITNESS_PROTOCOL, WITNESS_PROTOCOLS
+        # Default to the protocol the DEPLOYED default stack accepts, not to
+        # "all of them": only one can be submitted to any given registry, and
+        # generating the rest costs a full proof each for nothing.
+        self.witness_protocols: tuple[str, ...] = (
+            witness_protocols if witness_protocols is not None
+            else (DEFAULT_WITNESS_PROTOCOL,)
+        )
+        unknown = [p for p in self.witness_protocols if p not in WITNESS_PROTOCOLS]
+        if unknown:
+            raise ValueError(
+                f"unknown witness protocol(s): {unknown}; "
+                f"supported: {sorted(WITNESS_PROTOCOLS)}"
+            )
         self.mempool = mempool
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
@@ -168,6 +327,52 @@ class Batcher:
         self._retry_lock = threading.Lock()
         # Security level: log_blowup(6) × n_fri_queries + pow_bits(10)
         # n=1 → 16 bits (demo/testnet), n=3 → 28 bits, n=20 → 130 bits (but ~300M gas).
+
+    def _prove_witnesses(self, result: "BatchResult", tx0: Any) -> None:
+        """Generate the configured witness protocols for tx[0].
+
+        One loop over `self.witness_protocols`, where there used to be four
+        near-identical blocks — one per protocol, each duplicating the same
+        error handling. That duplication is why VFRI11 was never added: the cost
+        of a new protocol was six fields in four layers rather than one name.
+
+        Generating every protocol unconditionally, as the old code did, also cost
+        four proofs where at most one is submittable — the others cannot be
+        accepted by any single deployed registry, since each verifier derives its
+        own FRI query indices from its own hash backend.
+        """
+        from stark.prover import prove_mldsa_sig_for_protocol
+
+        for protocol in self.witness_protocols:
+            try:
+                vr = prove_mldsa_sig_for_protocol(
+                    protocol,
+                    pk=tx0.public_key,
+                    msg=tx0.to_bytes(),
+                    sig=tx0.signature,
+                    batch_merkle_root=result.merkle_root_onchain,
+                    n_queries=self.n_fri_queries,   # None → the protocol's default
+                )
+            except KeyError:
+                # An unknown name is a configuration error, not a runtime one:
+                # silently producing no proof is how this layer drifted before.
+                raise
+            except (RuntimeError, ImportError) as exc:
+                logger.warning("%s witness proof skipped: %s", protocol, exc)
+                continue
+            except ValueError as exc:
+                logger.warning(
+                    "ML-DSA signature invalid for %s proving: %s", protocol, exc)
+                continue
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error during %s proving: %s", protocol, exc,
+                    exc_info=True)
+                continue
+
+            result.witness_proofs[protocol] = vr
+            if result.witness_commitment is None:
+                result.witness_commitment = vr.log10.commitment
 
     def try_batch(self, prove_witnesses: bool = False) -> BatchResult | None:
         """Create a batch if the mempool has enough transactions.
@@ -293,105 +498,6 @@ class Batcher:
         if prove_witnesses and batch.transactions:
             tx0 = batch.transactions[0]
             if tx0.signature is not None and tx0.public_key is not None:
-                try:
-                    from stark.prover import prove_mldsa_sig_vfri7_stark
-                    vr = prove_mldsa_sig_vfri7_stark(
-                        pk=tx0.public_key,
-                        msg=tx0.to_bytes(),
-                        sig=tx0.signature,
-                        batch_merkle_root=result.merkle_root_onchain,
-                        n_queries=self.n_fri_queries,
-                    )
-                    result.vfri7_proof_log10      = vr.log10_proof
-                    result.vfri7_commitment_log10 = vr.log10_commitment
-                    result.vfri7_hints_log10      = vr.log10_query_hints
-                    result.vfri7_proof_log8       = vr.log8_proof
-                    result.vfri7_commitment_log8  = vr.log8_commitment
-                    result.vfri7_hints_log8       = vr.log8_query_hints
-                    result.witness_commitment     = vr.log10_commitment
-                except (RuntimeError, ImportError) as exc:
-                    logger.warning("VFRI7 witness proof skipped: %s", exc)
-                except ValueError as exc:
-                    logger.warning("ML-DSA signature invalid for VFRI7 proving: %s", exc)
-                except Exception as exc:
-                    logger.error("Unexpected error during VFRI7 proving: %s", exc, exc_info=True)
-
-                try:
-                    from stark.prover import prove_mldsa_sig_vfri8_stark
-                    vr8 = prove_mldsa_sig_vfri8_stark(
-                        pk=tx0.public_key,
-                        msg=tx0.to_bytes(),
-                        sig=tx0.signature,
-                        batch_merkle_root=result.merkle_root_onchain,
-                        n_queries=self.n_fri_queries,
-                    )
-                    result.vfri8_proof_log10      = vr8.log10_proof
-                    result.vfri8_commitment_log10 = vr8.log10_commitment
-                    result.vfri8_hints_log10      = vr8.log10_query_hints
-                    result.vfri8_proof_log8       = vr8.log8_proof
-                    result.vfri8_commitment_log8  = vr8.log8_commitment
-                    result.vfri8_hints_log8       = vr8.log8_query_hints
-                    # H5 fix: set witness_commitment from VFRI8 if VFRI7 didn't populate it
-                    if result.witness_commitment is None:
-                        result.witness_commitment = vr8.log10_commitment
-                except (RuntimeError, ImportError) as exc:
-                    logger.warning("VFRI8 witness proof skipped: %s", exc)
-                except ValueError as exc:
-                    logger.warning("ML-DSA signature invalid for VFRI8 proving: %s", exc)
-                except Exception as exc:
-                    logger.error("Unexpected error during VFRI8 proving: %s", exc, exc_info=True)
-
-                try:
-                    from stark.prover import prove_mldsa_sig_vfri9_stark
-                    vr9 = prove_mldsa_sig_vfri9_stark(
-                        pk=tx0.public_key,
-                        msg=tx0.to_bytes(),
-                        sig=tx0.signature,
-                        batch_merkle_root=result.merkle_root_onchain,
-                        n_queries=self.n_fri_queries,
-                    )
-                    result.vfri9_proof_log10      = vr9.log10_proof
-                    result.vfri9_commitment_log10 = vr9.log10_commitment
-                    result.vfri9_hints_log10      = vr9.log10_query_hints
-                    result.vfri9_proof_log8       = vr9.log8_proof
-                    result.vfri9_commitment_log8  = vr9.log8_commitment
-                    result.vfri9_hints_log8       = vr9.log8_query_hints
-                    if result.witness_commitment is None:
-                        result.witness_commitment = vr9.log10_commitment
-                except (RuntimeError, ImportError) as exc:
-                    logger.warning("VFRI9 witness proof skipped: %s", exc)
-                except ValueError as exc:
-                    logger.warning("ML-DSA signature invalid for VFRI9 proving: %s", exc)
-                except Exception as exc:
-                    logger.error("Unexpected error during VFRI9 proving: %s", exc, exc_info=True)
-
-                try:
-                    from stark.prover import prove_mldsa_sig_vfri10_stark
-                    vr10 = prove_mldsa_sig_vfri10_stark(
-                        pk=tx0.public_key,
-                        msg=tx0.to_bytes(),
-                        sig=tx0.signature,
-                        batch_merkle_root=result.merkle_root_onchain,
-                        n_queries=self.n_fri_queries,
-                        # num_folds=6 keeps each t=4 group verify() within the
-                        # ~16.7M per-tx gas cap on BatchRegistryV6 (num_folds=3
-                        # overruns the LOG=10 group alone).
-                        num_folds_log10=self.VFRI10_NUM_FOLDS,
-                        num_folds_log8=self.VFRI10_NUM_FOLDS,
-                    )
-                    result.vfri10_proof_log10      = vr10.log10_proof
-                    result.vfri10_commitment_log10 = vr10.log10_commitment
-                    result.vfri10_hints_log10      = vr10.log10_query_hints
-                    result.vfri10_proof_log8       = vr10.log8_proof
-                    result.vfri10_commitment_log8  = vr10.log8_commitment
-                    result.vfri10_hints_log8       = vr10.log8_query_hints
-                    if result.witness_commitment is None:
-                        result.witness_commitment = vr10.log10_commitment
-                except (RuntimeError, ImportError) as exc:
-                    logger.warning("VFRI10 witness proof skipped: %s", exc)
-                except ValueError as exc:
-                    logger.warning("ML-DSA signature invalid for VFRI10 proving: %s", exc)
-                except Exception as exc:
-                    logger.error("Unexpected error during VFRI10 proving: %s", exc, exc_info=True)
+                self._prove_witnesses(result, tx0)
 
         return result, prover_crashed

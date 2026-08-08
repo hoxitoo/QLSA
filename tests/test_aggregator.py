@@ -612,10 +612,20 @@ class TestAggregatorNode:
 
 
 class TestBatcherNFriQueries:
-    def test_default_is_one(self):
-        mp = Mempool()
-        b = Batcher(mp)
-        assert b.n_fri_queries == 1
+    def test_default_defers_to_the_protocol(self):
+        """None, not 1 — each protocol supplies its own default.
+
+        A shared default of 1 would hand the recursive route 16-bit soundness at
+        MORE gas than direct verification, which is the one configuration it must
+        never be entered in by accident. The effective value for the direct
+        protocols is still 1.
+        """
+        from stark.prover import DEFAULT_WITNESS_PROTOCOL, default_queries_for
+
+        b = Batcher(Mempool())
+        assert b.n_fri_queries is None
+        assert default_queries_for(DEFAULT_WITNESS_PROTOCOL) == 1
+        assert default_queries_for("recursive") == 20
 
     def test_custom_value(self):
         mp = Mempool()

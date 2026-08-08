@@ -3366,6 +3366,175 @@ def prove_mldsa_sig_vfri11_stark(
     )
 
 
+# ─── Witness-protocol registry ───────────────────────────────────────────────
+#
+# Every `prove_mldsa_sig_vfriN_stark` above returns the same six fields
+# (log10_proof / log10_commitment / log10_query_hints and the log8 trio), so a
+# caller that wants "the witness proof for the deployed stack" should select a
+# protocol by NAME rather than calling one of them directly.
+#
+# This exists because the product layer did not. `aggregator/batcher.py`,
+# `aggregator/api.py` and both SDKs each enumerated VFRI7/8/9/10 by hand — six
+# fields per protocol per layer — so when VFRI11 became the default stack, the
+# aggregator's proofs stopped being submittable to the default registry and
+# nobody had to change a line for that to happen. A name lookup makes adding a
+# protocol one entry instead of a four-layer edit.
+#
+# `recursive` is included through an adapter rather than a parallel type: its
+# prover returns bundles, so the adapter maps the outer proof onto the same
+# three fields and puts the inner publics in `WitnessGroup.inner`, which only a
+# BatchRegistryV7 submitter reads.
+
+@dataclass(frozen=True)
+class WitnessGroup:
+    """One V23 trace group's proof, in the shape a submitter needs.
+
+    `inner` is populated only by the recursive protocol: it carries the inner
+    proof's public roots and last-layer evaluations, which `BatchRegistryV7`
+    requires and the direct registries have no field for. Keeping it as an
+    optional member of ONE type, rather than a parallel hierarchy, means the
+    product layer stores and forwards every protocol the same way and only a
+    submitter has to know the difference.
+    """
+
+    proof: bytes
+    commitment: str          # 32-char hex (16-byte Blake2s binding)
+    hints: bytes
+    inner: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class WitnessProof:
+    """A cross-bound witness proof under one protocol.
+
+    Both groups must be submitted together: each is bound to the OTHER's trace
+    root, so neither is valid alone.
+    """
+
+    protocol: str
+    log10: WitnessGroup
+    log8: WitnessGroup
+
+
+def _uniform(protocol: str, fn: Any) -> Any:
+    """Adapt a `prove_mldsa_sig_vfriN_stark` result to `WitnessProof`."""
+
+    def run(**kw: Any) -> WitnessProof:
+        r = fn(**kw)
+        return WitnessProof(
+            protocol=protocol,
+            log10=WitnessGroup(r.log10_proof, r.log10_commitment, r.log10_query_hints),
+            log8=WitnessGroup(r.log8_proof, r.log8_commitment, r.log8_query_hints),
+        )
+
+    return run
+
+
+def _recursive(**kw: Any) -> WitnessProof:
+    """Adapt `prove_mldsa_sig_recursive_stark` to the same shape.
+
+    The recursive prover returns bundles rather than hint triples. Its query
+    count comes from `PROTOCOL_DEFAULT_QUERIES` when the caller does not choose
+    one — 20, because 130-bit soundness is the whole point of the route and at
+    one query it costs more gas than verifying directly.
+    """
+    r = prove_mldsa_sig_recursive_stark(**kw)
+
+    def group(b: Any) -> WitnessGroup:
+        return WitnessGroup(
+            proof=b.outer_proof,
+            commitment=b.outer_commitment,
+            hints=b.outer_hints,
+            inner={
+                "inner_publics": b.as_inner_publics(),
+                "last_layer_evals": b.last_layer_evals,
+            },
+        )
+
+    return WitnessProof(protocol="recursive", log10=group(r.log10), log8=group(r.log8))
+
+
+#: Protocol name -> prover returning a normalised `WitnessProof`.
+WITNESS_PROTOCOLS: dict[str, Any] = {
+    "vfri7":  _uniform("vfri7",  prove_mldsa_sig_vfri7_stark),
+    "vfri8":  _uniform("vfri8",  prove_mldsa_sig_vfri8_stark),
+    "vfri9":  _uniform("vfri9",  prove_mldsa_sig_vfri9_stark),
+    "vfri10": _uniform("vfri10", prove_mldsa_sig_vfri10_stark),
+    "vfri11": _uniform("vfri11", prove_mldsa_sig_vfri11_stark),
+    "recursive": _recursive,
+}
+
+#: Protocols whose proofs go to a DIRECT registry (BatchRegistryV4/V5/V6), as
+#: opposed to `recursive`, which targets BatchRegistryV7.
+#:
+#: DERIVED from the registry, so the two cannot drift. Consumers that need to
+#: know a PROOF's registry shape should read `WitnessGroup.inner` instead — that
+#: follows the payload and stays right even for a protocol added later.
+DIRECT_PROTOCOLS = tuple(n for n in WITNESS_PROTOCOLS if n != "recursive")
+
+#: FRI queries a protocol uses when the caller does not say.
+#:
+#: The recursive route is only worth taking at production security: on-chain
+#: soundness is `log_blowup(6) * n_queries + pow_bits(10)`, and at ONE query the
+#: recursion costs more gas than verifying directly, for 16 bits. Its own prover
+#: defaults to 20 for that reason — but a single shared default here would
+#: override it silently, which is how a caller ends up paying for recursion and
+#: getting 16-bit soundness. `testnet/e2e.py --stack v8` raises the count for the
+#: same reason; this puts the rule in one place instead of two.
+PROTOCOL_DEFAULT_QUERIES: dict[str, int] = {"recursive": 20}
+
+#: Default for the direct protocols, which are cheapest at one query.
+DEFAULT_FRI_QUERIES = 1
+
+
+def default_queries_for(protocol: str) -> int:
+    """FRI queries `protocol` uses when the caller does not specify."""
+    return PROTOCOL_DEFAULT_QUERIES.get(protocol, DEFAULT_FRI_QUERIES)
+
+#: The protocol the deployed default stack (v7 = VFRI11 + BatchRegistryV5) needs.
+#: Change this together with `testnet/e2e.py`'s default `--stack`, never alone.
+DEFAULT_WITNESS_PROTOCOL = "vfri11"
+
+
+def prove_mldsa_sig_for_protocol(
+    protocol: str,
+    *,
+    pk: bytes,
+    msg: bytes,
+    sig: bytes,
+    batch_merkle_root: bytes,
+    n_queries: int | None = None,
+) -> WitnessProof:
+    """Generate a cross-bound witness proof under the named protocol.
+
+    Every protocol is normalised to :class:`WitnessProof`, so a caller never has
+    to know which underlying prover ran.
+
+    `n_queries=None` means "this protocol's default" — 1 for the direct
+    protocols, 20 for `recursive`. Passing a fixed default here instead would
+    silently give the recursive route 16-bit soundness at more gas than direct
+    verification, which is the one configuration it must never be run in by
+    accident.
+
+    Raises ``KeyError`` with the supported names if `protocol` is unknown, so a
+    typo fails at the call site instead of silently producing no proof.
+    """
+    try:
+        prover = WITNESS_PROTOCOLS[protocol]
+    except KeyError:
+        raise KeyError(
+            f"unknown witness protocol {protocol!r}; "
+            f"supported: {sorted(WITNESS_PROTOCOLS)}"
+        ) from None
+    queries = n_queries if n_queries is not None else default_queries_for(protocol)
+    result: WitnessProof = prover(
+        pk=pk, msg=msg, sig=sig,
+        batch_merkle_root=batch_merkle_root,
+        n_queries=queries,
+    )
+    return result
+
+
 def prove_mldsa_sig_recursive_stark(
     pk: bytes,
     msg: bytes,

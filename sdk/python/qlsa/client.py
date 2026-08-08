@@ -21,6 +21,15 @@ def _batch_status(result: BatchResult) -> BatchStatus:
         stark_commitment=result.commitment,
         has_witness=result.has_witness,
         witness_commitment=result.witness_commitment,
+        protocols=result.witness_protocols,
+        commitments={
+            name: {
+                "log10_commitment": w.log10.commitment,
+                "log8_commitment": w.log8.commitment,
+            }
+            for name, w in result.witness_proofs.items()
+        },
+        # Legacy flat fields, derived rather than enumerated.
         has_vfri7=result.has_vfri7,
         vfri7_commitment_log10=result.vfri7_commitment_log10,
         vfri7_commitment_log8=result.vfri7_commitment_log8,
@@ -36,79 +45,82 @@ def _batch_status(result: BatchResult) -> BatchStatus:
     )
 
 
-def _prove_witness_local(tx: Transaction, n_fri_queries: int = 1) -> WitnessStatus:
-    """Prove VFRI7 + VFRI8 + VFRI9 + VFRI10 cross-bound V23 ML-DSA witness for a single transaction (local, no mempool).
+def _prove_witness_local(
+    tx: Transaction,
+    n_fri_queries: int = 1,
+    protocols: tuple[str, ...] | None = None,
+) -> WitnessStatus:
+    """Prove cross-bound V23 ML-DSA witnesses for one transaction (no mempool).
 
-    Uses a zero batch_merkle_root (bytes(32)) since this is a standalone per-tx operation
-    with no associated batch context.  The resulting commitment is therefore bound to the
-    all-zeros root, not a real batch; suitable for capability testing and SDK demos.
+    `protocols` defaults to the one the DEPLOYED default stack accepts. The old
+    code generated VFRI7, VFRI8, VFRI9 and VFRI10 unconditionally — four full
+    STARK proofs, of which at most one is submittable to any given registry,
+    since each verifier derives its own FRI query indices from its own hash
+    backend. It also lacked VFRI11, the actual default, so nothing it produced
+    could be submitted at all.
+
+    A protocol that fails no longer aborts the rest: previously a VFRI7 failure
+    returned `has_witness=False` even when the later protocols would have
+    succeeded.
+
+    Uses a zero `batch_merkle_root`, since this is a standalone per-tx operation
+    with no batch context — the commitment is bound to the all-zeros root, which
+    suits capability testing and demos but is not submittable as a batch.
     """
+    from stark.prover import (
+        DEFAULT_WITNESS_PROTOCOL,
+        WITNESS_PROTOCOLS,
+        prove_mldsa_sig_for_protocol,
+    )
+
     if tx.signature is None or tx.public_key is None:
-        return WitnessStatus(has_witness=False, has_vfri7=False)
-    try:
-        from stark.prover import prove_mldsa_sig_vfri7_stark
-        vr = prove_mldsa_sig_vfri7_stark(
-            pk=tx.public_key,
-            msg=tx.to_bytes(),
-            sig=tx.signature,
-            batch_merkle_root=bytes(32),
-            n_queries=n_fri_queries,
+        return WitnessStatus(has_witness=False)
+
+    names = protocols if protocols is not None else (DEFAULT_WITNESS_PROTOCOL,)
+    # Validate up front, as Batcher does. Letting an unknown name fall into the
+    # loop below would return has_witness=False with no explanation — the same
+    # silent absence this registry exists to eliminate, and inconsistent with the
+    # aggregator, which raises on exactly this input.
+    unknown = [n for n in names if n not in WITNESS_PROTOCOLS]
+    if unknown:
+        raise ValueError(
+            f"unknown witness protocol(s): {unknown}; "
+            f"supported: {sorted(WITNESS_PROTOCOLS)}"
         )
-        status = WitnessStatus(
-            has_witness=True,
-            onchain_commitment=vr.log10_commitment,
-            has_vfri7=True,
-            vfri7_commitment_log10=vr.log10_commitment,
-            vfri7_commitment_log8=vr.log8_commitment,
-            n_fri_queries=n_fri_queries,
-            fri_security_bits=6 * n_fri_queries + 10,
-        )
-    except (RuntimeError, ImportError, ValueError):
-        return WitnessStatus(has_witness=False, has_vfri7=False)
-    try:
-        from stark.prover import prove_mldsa_sig_vfri8_stark
-        vr8 = prove_mldsa_sig_vfri8_stark(
-            pk=tx.public_key,
-            msg=tx.to_bytes(),
-            sig=tx.signature,
-            batch_merkle_root=bytes(32),
-            n_queries=n_fri_queries,
-        )
-        status.has_vfri8 = True
-        status.vfri8_commitment_log10 = vr8.log10_commitment
-        status.vfri8_commitment_log8 = vr8.log8_commitment
-    except (RuntimeError, ImportError, ValueError):
-        pass
-    try:
-        from stark.prover import prove_mldsa_sig_vfri9_stark
-        vr9 = prove_mldsa_sig_vfri9_stark(
-            pk=tx.public_key,
-            msg=tx.to_bytes(),
-            sig=tx.signature,
-            batch_merkle_root=bytes(32),
-            n_queries=n_fri_queries,
-        )
-        status.has_vfri9 = True
-        status.vfri9_commitment_log10 = vr9.log10_commitment
-        status.vfri9_commitment_log8 = vr9.log8_commitment
-    except (RuntimeError, ImportError, ValueError):
-        pass
-    try:
-        from stark.prover import prove_mldsa_sig_vfri10_stark
-        vr10 = prove_mldsa_sig_vfri10_stark(
-            pk=tx.public_key,
-            msg=tx.to_bytes(),
-            sig=tx.signature,
-            batch_merkle_root=bytes(32),
-            n_queries=n_fri_queries,
-            num_folds_log10=6,
-            num_folds_log8=6,
-        )
-        status.has_vfri10 = True
-        status.vfri10_commitment_log10 = vr10.log10_commitment
-        status.vfri10_commitment_log8 = vr10.log8_commitment
-    except (RuntimeError, ImportError, ValueError):
-        pass
+    status = WitnessStatus(has_witness=False)
+
+    for name in names:
+        try:
+            vr = prove_mldsa_sig_for_protocol(
+                name,
+                pk=tx.public_key,
+                msg=tx.to_bytes(),
+                sig=tx.signature,
+                batch_merkle_root=bytes(32),
+                n_queries=n_fri_queries,
+            )
+        except (RuntimeError, ImportError, ValueError):
+            # A prover that is unavailable or rejects this signature is a
+            # runtime condition; try the remaining protocols. An unknown NAME
+            # cannot reach here — it is rejected above.
+            continue
+
+        status.has_witness = True
+        status.protocols.append(name)
+        status.commitments[name] = {
+            "log10_commitment": vr.log10.commitment,
+            "log8_commitment": vr.log8.commitment,
+        }
+        if status.onchain_commitment is None:
+            status.onchain_commitment = vr.log10.commitment
+            status.n_fri_queries = n_fri_queries
+            status.fri_security_bits = 6 * n_fri_queries + 10
+        # Legacy flat fields for the protocols that predate `protocols`.
+        if name in ("vfri7", "vfri8", "vfri9", "vfri10"):
+            setattr(status, f"has_{name}", True)
+            setattr(status, f"{name}_commitment_log10", vr.log10.commitment)
+            setattr(status, f"{name}_commitment_log8", vr.log8.commitment)
+
     return status
 
 
@@ -517,6 +529,8 @@ class HttpClient:
             onchain_commitment=data.get("onchain_commitment"),
             c_tilde_hex=data.get("c_tilde_hex"),
             max_norms=data.get("max_norms") or [],
+            protocols=list(data.get("witness_protocols") or []),
+            commitments=data.get("witness") or {},
             has_vfri7=data.get("has_vfri7", False),
             vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
             vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
@@ -683,6 +697,8 @@ class HttpClient:
             stark_commitment=data.get("stark_commitment"),
             has_witness=data.get("has_witness", False),
             witness_commitment=data.get("witness_commitment"),
+            protocols=list(data.get("witness_protocols") or []),
+            commitments=data.get("witness") or {},
             has_vfri7=data.get("has_vfri7", False),
             vfri7_commitment_log10=data.get("vfri7_commitment_log10"),
             vfri7_commitment_log8=data.get("vfri7_commitment_log8"),
