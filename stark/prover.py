@@ -3433,10 +3433,10 @@ def _uniform(protocol: str, fn: Any) -> Any:
 def _recursive(**kw: Any) -> WitnessProof:
     """Adapt `prove_mldsa_sig_recursive_stark` to the same shape.
 
-    The recursive prover returns bundles rather than hint triples, and defaults
-    to 20 FRI queries because 130-bit soundness is the whole point of the route:
-    at one query it is strictly more expensive than direct verification. The
-    caller's `n_queries` still wins when given explicitly.
+    The recursive prover returns bundles rather than hint triples. Its query
+    count comes from `PROTOCOL_DEFAULT_QUERIES` when the caller does not choose
+    one — 20, because 130-bit soundness is the whole point of the route and at
+    one query it costs more gas than verifying directly.
     """
     r = prove_mldsa_sig_recursive_stark(**kw)
 
@@ -3464,9 +3464,32 @@ WITNESS_PROTOCOLS: dict[str, Any] = {
     "recursive": _recursive,
 }
 
-#: Protocols whose proofs go to a DIRECT registry (BatchRegistryV4/V5/V6).
-#: `recursive` targets BatchRegistryV7 instead and carries `inner`.
-DIRECT_PROTOCOLS = ("vfri7", "vfri8", "vfri9", "vfri10", "vfri11")
+#: Protocols whose proofs go to a DIRECT registry (BatchRegistryV4/V5/V6), as
+#: opposed to `recursive`, which targets BatchRegistryV7.
+#:
+#: DERIVED from the registry, so the two cannot drift. Consumers that need to
+#: know a PROOF's registry shape should read `WitnessGroup.inner` instead — that
+#: follows the payload and stays right even for a protocol added later.
+DIRECT_PROTOCOLS = tuple(n for n in WITNESS_PROTOCOLS if n != "recursive")
+
+#: FRI queries a protocol uses when the caller does not say.
+#:
+#: The recursive route is only worth taking at production security: on-chain
+#: soundness is `log_blowup(6) * n_queries + pow_bits(10)`, and at ONE query the
+#: recursion costs more gas than verifying directly, for 16 bits. Its own prover
+#: defaults to 20 for that reason — but a single shared default here would
+#: override it silently, which is how a caller ends up paying for recursion and
+#: getting 16-bit soundness. `testnet/e2e.py --stack v8` raises the count for the
+#: same reason; this puts the rule in one place instead of two.
+PROTOCOL_DEFAULT_QUERIES: dict[str, int] = {"recursive": 20}
+
+#: Default for the direct protocols, which are cheapest at one query.
+DEFAULT_FRI_QUERIES = 1
+
+
+def default_queries_for(protocol: str) -> int:
+    """FRI queries `protocol` uses when the caller does not specify."""
+    return PROTOCOL_DEFAULT_QUERIES.get(protocol, DEFAULT_FRI_QUERIES)
 
 #: The protocol the deployed default stack (v7 = VFRI11 + BatchRegistryV5) needs.
 #: Change this together with `testnet/e2e.py`'s default `--stack`, never alone.
@@ -3480,12 +3503,18 @@ def prove_mldsa_sig_for_protocol(
     msg: bytes,
     sig: bytes,
     batch_merkle_root: bytes,
-    n_queries: int = 1,
+    n_queries: int | None = None,
 ) -> WitnessProof:
     """Generate a cross-bound witness proof under the named protocol.
 
     Every protocol is normalised to :class:`WitnessProof`, so a caller never has
     to know which underlying prover ran.
+
+    `n_queries=None` means "this protocol's default" — 1 for the direct
+    protocols, 20 for `recursive`. Passing a fixed default here instead would
+    silently give the recursive route 16-bit soundness at more gas than direct
+    verification, which is the one configuration it must never be run in by
+    accident.
 
     Raises ``KeyError`` with the supported names if `protocol` is unknown, so a
     typo fails at the call site instead of silently producing no proof.
@@ -3497,10 +3526,11 @@ def prove_mldsa_sig_for_protocol(
             f"unknown witness protocol {protocol!r}; "
             f"supported: {sorted(WITNESS_PROTOCOLS)}"
         ) from None
+    queries = n_queries if n_queries is not None else default_queries_for(protocol)
     result: WitnessProof = prover(
         pk=pk, msg=msg, sig=sig,
         batch_merkle_root=batch_merkle_root,
-        n_queries=n_queries,
+        n_queries=queries,
     )
     return result
 

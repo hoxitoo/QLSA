@@ -292,14 +292,17 @@ class Batcher:
         min_batch_size: int = 1,
         max_batch_size: int = 3000,
         algorithm: str = DEFAULT_ALGORITHM,
-        n_fri_queries: int = 1,
+        n_fri_queries: int | None = None,
         witness_protocols: tuple[str, ...] | None = None,
     ) -> None:
         if min_batch_size < 1:
             raise ValueError("min_batch_size must be at least 1")
         if max_batch_size < min_batch_size:
             raise ValueError("max_batch_size must be >= min_batch_size")
-        if n_fri_queries < 1 or n_fri_queries > 64:
+        # None means "each protocol's own default" — 1 for the direct
+        # protocols, 20 for `recursive`. A single shared default would hand the
+        # recursive route 16-bit soundness at more gas than direct verification.
+        if n_fri_queries is not None and (n_fri_queries < 1 or n_fri_queries > 64):
             raise ValueError(f"n_fri_queries must be in [1, 64], got {n_fri_queries}")
         from stark.prover import DEFAULT_WITNESS_PROTOCOL, WITNESS_PROTOCOLS
         # Default to the protocol the DEPLOYED default stack accepts, not to
@@ -348,7 +351,7 @@ class Batcher:
                     msg=tx0.to_bytes(),
                     sig=tx0.signature,
                     batch_merkle_root=result.merkle_root_onchain,
-                    n_queries=self.n_fri_queries,
+                    n_queries=self.n_fri_queries,   # None → the protocol's default
                 )
             except KeyError:
                 # An unknown name is a configuration error, not a runtime one:

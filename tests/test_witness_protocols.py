@@ -18,10 +18,13 @@ import pytest
 from aggregator.batcher import Batcher, BatchResult, GroupProof, WitnessProof
 from aggregator.mempool import Mempool
 from stark.prover import (
+    DEFAULT_FRI_QUERIES,
     DEFAULT_WITNESS_PROTOCOL,
     DIRECT_PROTOCOLS,
+    PROTOCOL_DEFAULT_QUERIES,
     WITNESS_PROTOCOLS,
     WitnessGroup,
+    default_queries_for,
     prove_mldsa_sig_for_protocol,
 )
 
@@ -220,3 +223,35 @@ def test_api_reports_which_registry_shape_a_proof_targets() -> None:
     legacy = {k for k in f if k.startswith("has_vfri")}
     assert legacy == {"has_vfri7", "has_vfri8", "has_vfri9", "has_vfri10"}
     assert "has_recursive" not in f and "has_vfri11" not in f
+
+
+# ── Query-count defaults ─────────────────────────────────────────────────────
+
+def test_recursive_defaults_to_production_security() -> None:
+    """The recursive route is pointless below production security.
+
+    On-chain soundness is log_blowup(6) * n_queries + pow_bits(10). At ONE query
+    the recursion costs MORE gas than verifying directly, for 16 bits — the one
+    configuration it must never be entered by accident.
+
+    This was a real regression: `prove_mldsa_sig_for_protocol` took
+    `n_queries: int = 1` and always passed it, so the recursive prover's own
+    default of 20 could never apply, and a caller who did not know to ask for 20
+    silently paid for recursion and got 16 bits.
+    """
+    assert default_queries_for("recursive") == 20
+    assert 6 * default_queries_for("recursive") + 10 == 130
+
+
+def test_direct_protocols_default_to_one_query() -> None:
+    for name in DIRECT_PROTOCOLS:
+        assert default_queries_for(name) == DEFAULT_FRI_QUERIES == 1
+        assert name not in PROTOCOL_DEFAULT_QUERIES
+
+
+def test_batcher_leaves_the_query_count_to_the_protocol_by_default() -> None:
+    """None must reach the registry, not be replaced by a shared default."""
+    assert Batcher(Mempool()).n_fri_queries is None
+    assert Batcher(Mempool(), n_fri_queries=20).n_fri_queries == 20
+    with pytest.raises(ValueError, match=r"n_fri_queries must be in \[1, 64\]"):
+        Batcher(Mempool(), n_fri_queries=0)
