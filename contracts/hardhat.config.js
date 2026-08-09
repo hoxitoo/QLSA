@@ -32,6 +32,7 @@ if (process.env.QLSA_LOCAL_SOLCJS === "1") {
 }
 
 const RPC_URL         = process.env.RPC_URL         || "";
+const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL || "";
 const POLYGON_ZKEVM   = process.env.POLYGON_ZKEVM_RPC || "";
 const PRIVATE_KEY     = process.env.PRIVATE_KEY      || "";
 
@@ -80,9 +81,12 @@ module.exports = {
       chainId:  2442,
     },
 
-    // Ethereum Sepolia testnet
+    // Ethereum Sepolia. The URL is configurable because a real deployment run
+    // needs a provider endpoint (Infura/Alchemy/self-hosted): the public node
+    // below rate-limits, and a hard-coded URL silently ignored an operator's
+    // RPC_URL, so `--network sepolia` would not use the endpoint they set up.
     sepolia: {
-      url:      "https://ethereum-sepolia-rpc.publicnode.com",
+      url:      SEPOLIA_RPC_URL || RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
       accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
       chainId:  11155111,
     },
