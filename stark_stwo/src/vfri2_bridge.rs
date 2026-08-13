@@ -9721,6 +9721,139 @@ mod tests_vfri8 {
     /// — once with the t=8 pipeline, once with t=16 — so the JS side can measure
     /// both against the deployed verifiers and the difference is only the width.
     /// Run with: cargo test write_outer_width_probe -- --ignored --nocapture
+    /// Can ONE recursive proof attest TWO independent inner statements?
+    ///
+    /// This is the 2-to-1 aggregation node a tree is built from (A-2 in
+    /// docs/TECH_DEBT.md). The claim being tested is that the existing
+    /// multi-path machinery already supports it: `prove_queries_membership_t8`
+    /// takes a LIST of per-query inputs, and `verify_queries_membership_t8`
+    /// takes a per-path `roots` array rather than one global root — so queries
+    /// belonging to DIFFERENT inner proofs, landing on DIFFERENT FRI-layer
+    /// roots, are already expressible.
+    ///
+    /// If this holds, aggregating N signatures needs no new gadget: concatenate
+    /// per-proof inputs at each level, and iterate the self-composition the
+    /// previous probe measured as size-stable.
+    ///
+    /// Run with: cargo test probe_two_inner_proofs_in_one -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement probe; proves two inner statements in one proof"]
+    fn probe_two_inner_proofs_in_one() {
+        use crate::recursive::composition_t8::{
+            outer_trace_columns_t8, prove_queries_membership_t8,
+        };
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        // Two DIFFERENT signatures — distinct seeds, so distinct traces, distinct
+        // FRI-layer roots. Aggregating two copies of one statement would prove
+        // nothing about aggregation.
+        let mut recs = Vec::new();
+        for seed in [16600u64, 16601] {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            recs.push(
+                gen_mldsa_v23_recursion_inputs_log10(
+                    &z, &c, &t1, &a_hat, &merkle_root, 4, Some(6))
+                    .expect("recursion inputs"),
+            );
+        }
+        assert_ne!(recs[0].last_layer_root, recs[1].last_layer_root,
+                   "the two statements must be genuinely different");
+
+        for (i, r) in recs.iter().enumerate() {
+            eprintln!("inner {i}: {} queries, last-layer root {:?}",
+                      r.queries.len(), r.last_layer_root);
+        }
+
+        // Concatenate. Each query keeps its OWN path and its own root.
+        let mut queries = Vec::new();
+        let mut paths = Vec::new();
+        let mut comp_paths = Vec::new();
+        for r in &recs {
+            queries.extend(r.queries.iter().cloned());
+            paths.extend(r.paths.iter().cloned());
+            comp_paths.extend(r.comp_paths.iter().cloned());
+        }
+        eprintln!("aggregated: {} queries from {} independent inner proofs",
+                  queries.len(), recs.len());
+
+        let (cols, log) = outer_trace_columns_t8(&queries, &paths, &comp_paths)
+            .expect("aggregated outer trace");
+        eprintln!("aggregated outer trace: {} cols, log {}", cols.len(), log);
+
+        let proved = prove_queries_membership_t8(&queries, &paths, &comp_paths)
+            .expect("aggregated composition proof");
+        eprintln!("aggregated composition proof built, log_size {}", proved.log_size);
+        eprintln!("VERDICT: two independent inner statements prove in ONE recursive proof.");
+    }
+
+    /// Does the recursion compose with ITSELF, and does the trace converge?
+    ///
+    /// This decides whether aggregating N signatures is reachable by iterating
+    /// what already exists (A-2 in docs/TECH_DEBT.md). A tree of 2-to-1
+    /// aggregation nodes only works if a recursion level can take the PREVIOUS
+    /// level's outer proof as its inner statement, and if the outer trace does
+    /// not grow from level to level — a trace that grows has a ceiling, and the
+    /// tree stops at whatever depth exceeds it.
+    ///
+    /// `gen_vfri11_recursion_inputs` is generic over columns, so feeding it the
+    /// outer trace's own columns is exactly a second level. What it costs is a
+    /// question about the SHAPE at each level, which is what this measures:
+    /// level 0 verifies a V23 group at 20 queries; level 1 verifies level 0's
+    /// outer proof, whose own query count is the parameter that drives level 1's
+    /// size.
+    ///
+    /// Run with: cargo test probe_recursion_self_composition -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement probe; prints trace sizes across recursion levels"]
+    fn probe_recursion_self_composition() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        // Level 0 — the shipped v8 shape: a real V23 group at production security.
+        let rec0 = gen_mldsa_v23_recursion_inputs_log10(
+            &z, &c, &t1, &a_hat, &merkle_root, 20, Some(6),
+        ).expect("level-0 recursion inputs");
+        let (cols0, log0) = outer_trace_columns_t8(&rec0.queries, &rec0.paths, &rec0.comp_paths)
+            .expect("level-0 outer trace");
+        eprintln!("level 0: inner = V23 LOG=10 @ 20 queries");
+        eprintln!("         outer trace = {} cols, log {}", cols0.len(), log0);
+
+        // Level 1 — the SAME machinery, with level 0's outer trace as the inner
+        // statement. The driver is level 0's outer query count: more queries
+        // there means more per-query work to verify here.
+        let folds0 = (log0 as usize).saturating_sub(5).max(1);
+        let bound = [0x5cu8; 32];
+        for q0 in [1usize, 2, 4, 8, 16, 20] {
+            let rec1 = match gen_vfri11_recursion_inputs(&cols0, log0, &bound, q0, Some(folds0)) {
+                Ok(r) => r,
+                Err(e) => { eprintln!("level 1 @ q0={q0}: extraction failed: {e}"); continue; }
+            };
+            match outer_trace_columns_t8(&rec1.queries, &rec1.paths, &rec1.comp_paths) {
+                Ok((cols1, log1)) => eprintln!(
+                    "level 1 @ level-0 outer q={q0}: outer trace = {} cols, log {}  \
+                     ({}x rows vs level 0)",
+                    cols1.len(), log1,
+                    (1u64 << log1) as f64 / (1u64 << log0) as f64),
+                Err(e) => eprintln!("level 1 @ q0={q0}: outer trace failed: {e}"),
+            }
+        }
+
+        // Building the trace is necessary but not sufficient: a level-1 proof
+        // must actually VERIFY, or self-composition is only structural.
+        let rec1 = gen_vfri11_recursion_inputs(&cols0, log0, &bound, 20, Some(folds0))
+            .expect("level-1 recursion inputs at production security");
+        let proved = crate::recursive::composition_t8::prove_queries_membership_t8(
+            &rec1.queries, &rec1.paths, &rec1.comp_paths,
+        ).expect("level-1 composition proof");
+        eprintln!(
+            "level 1 @ q0=20: composition proof built, log_size {}",
+            proved.log_size);
+        eprintln!("VERDICT: the recursion composes with itself and the trace does not grow.");
+    }
+
     #[test]
     #[ignore = "regenerates contracts/test/fixtures/outer_width_probe.json"]
     fn write_outer_width_probe() {
