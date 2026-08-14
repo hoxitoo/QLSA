@@ -9721,6 +9721,56 @@ mod tests_vfri8 {
     /// — once with the t=8 pipeline, once with t=16 — so the JS side can measure
     /// both against the deployed verifiers and the difference is only the width.
     /// Run with: cargo test write_outer_width_probe -- --ignored --nocapture
+    /// How long does one aggregation node take, and what does that make N?
+    ///
+    /// On-chain cost is constant in N (the recursion is a fixed point), so N is
+    /// chosen by PROVING time and latency, not by gas. A binary tree over N
+    /// signatures has N leaves and N−1 internal nodes; the leaves are V23 proofs
+    /// and the internal nodes are 87-column log-14 composition proofs. This
+    /// measures the internal node, which is the part that repeats N−1 times.
+    ///
+    /// Run with: cargo test probe_aggregation_node_cost -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement probe; times one aggregation node"]
+    fn probe_aggregation_node_cost() {
+        use crate::recursive::composition_t8::{
+            outer_trace_columns_t8, prove_queries_membership_t8,
+        };
+        use std::time::Instant;
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        let t0 = Instant::now();
+        let rec = gen_mldsa_v23_recursion_inputs_log10(
+            &z, &c, &t1, &a_hat, &merkle_root, 20, Some(6),
+        ).expect("leaf recursion inputs");
+        let leaf_inputs_s = t0.elapsed().as_secs_f64();
+
+        let (cols, log) = outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths)
+            .expect("outer trace");
+
+        let t1_ = Instant::now();
+        let _ = prove_queries_membership_t8(&rec.queries, &rec.paths, &rec.comp_paths)
+            .expect("aggregation node proof");
+        let node_s = t1_.elapsed().as_secs_f64();
+
+        eprintln!("leaf: recursion inputs from a real V23 group  = {leaf_inputs_s:.2} s");
+        eprintln!("node: {} cols, log {}, prove                 = {node_s:.2} s", cols.len(), log);
+        eprintln!();
+        eprintln!("A binary tree over N signatures: N leaves, N-1 internal nodes,");
+        eprintln!("log2(N) levels, each level internally parallel.");
+        for n in [64usize, 256, 512, 1024, 3000] {
+            let depth = (n as f64).log2().ceil();
+            // Wall clock on one core; a level is embarrassingly parallel, so with
+            // W workers divide each level's work by W.
+            let serial = n as f64 * leaf_inputs_s + (n - 1) as f64 * node_s;
+            eprintln!(
+                "  N={n:5}: depth {depth:.0}, serial {:.0} s, per-signature on-chain {:.0} gas",
+                serial, 13_168_471.0 / n as f64);
+        }
+    }
+
     /// Can ONE recursive proof attest TWO independent inner statements?
     ///
     /// This is the 2-to-1 aggregation node a tree is built from (A-2 in
