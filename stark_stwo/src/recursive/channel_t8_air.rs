@@ -1,4 +1,4 @@
-//! Poseidon2 **t=8** Fiat-Shamir channel as a provable AIR — absorb side.
+//! Poseidon2 **t=8** Fiat-Shamir channel as a provable AIR — absorb AND draw.
 //!
 //! # Why this exists
 //!
@@ -18,14 +18,19 @@
 //!
 //! # Shape
 //!
-//! An absorb is one addition into cell 0 followed by the 22-round permutation:
+//! Absorb and draw are the SAME operation on the state — add a value into cell 0
+//! and permute — differing only in what is added and whether anything is read
+//! out:
 //!
 //! ```text
-//!     s[0] += reduce(word);  permute_t8(s)
+//!     absorb(w):  s[0] += reduce(w);  permute_t8(s);  nDraws = 0
+//!     draw():     read (s[0], s[1]);  s[0] += nDraws;  permute_t8(s);  nDraws += 1
 //! ```
 //!
-//! So the trace is a chain of 22-round blocks, one per absorbed word, with the
-//! full 8-cell state carried across block boundaries. That is the same chaining
+//! So ONE AIR covers both: the trace is a chain of 22-round blocks with the full
+//! 8-cell state carried across block boundaries, and a preprocessed column says
+//! what each block adds. A second, near-identical AIR for draws is exactly the
+//! duplication that lets two implementations drift. That is the same chaining
 //! `merkle_path_t8_air` uses across compressions, and the round arithmetization
 //! is shared with `poseidon2_t8_air` rather than restated — the same discipline
 //! that keeps the FRI chain and its ABI encoder from drifting (R4.1).
@@ -37,6 +42,10 @@
 //!   each block start. Without it a prover could absorb values of its choosing
 //!   and still produce a self-consistent trace — the replay would attest a
 //!   transcript nobody committed to.
+//! - **[C1 draw]** each drawn pair is pinned and forced to equal the CARRIED
+//!   state's first two cells — the values the channel reads before mixing the
+//!   counter in. An unpinned draw would let the prover claim any challenge it
+//!   liked, which is the cherry-pick the recursion exists to prevent.
 //! - **[C1 output]** the digest is pinned and forced onto the last real row.
 //! - **[C2]** selectors, round constants and both pins come from the single
 //!   canonical `build_preproc`, whose commitment root `verify_channel_t8`
@@ -97,21 +106,49 @@ pub fn reduce_u32(word: u32) -> u64 {
     w
 }
 
-/// The absorb-side channel state the AIR will constrain.
+/// One transcript step.
+///
+/// Absorb and draw are the SAME operation on the state — add a value into cell 0
+/// and permute — differing only in what is added and whether anything is read
+/// out. Modelling them as one step keeps the AIR single: a second, near-identical
+/// AIR for draws is exactly the duplication that lets two implementations drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Absorb a transcript word (`mixU32s` / `mixRoot*`).
+    Absorb(u32),
+    /// Draw one pair (`drawSecureFelt` is two of these; `drawQueries` repeats).
+    Draw,
+}
+
+/// The channel state the AIR constrains, matching `P2T8Channel`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelT8State {
     pub s: [u64; 8],
+    /// Squeeze counter. Reset to 0 by every absorb, exactly as on-chain — that
+    /// reset is what stops two draws at the same state from colliding.
+    pub n_draws: u32,
 }
 
 impl ChannelT8State {
     pub fn init() -> Self {
-        ChannelT8State { s: [0u64; 8] }
+        ChannelT8State { s: [0u64; 8], n_draws: 0 }
     }
 
-    /// Absorb one word: add into cell 0, then permute.
+    /// Absorb one word: add into cell 0, permute, reset the draw counter.
     pub fn absorb(&mut self, word: u32) {
         self.s[0] = m31_add(self.s[0], reduce_u32(word));
         permute_t8(&mut self.s);
+        self.n_draws = 0;
+    }
+
+    /// Draw one pair: read cells 0 and 1 BEFORE mixing the counter in.
+    pub fn draw_pair(&mut self) -> (u32, u32) {
+        let w0 = self.s[0] as u32;
+        let w1 = self.s[1] as u32;
+        self.s[0] = m31_add(self.s[0], self.n_draws as u64);
+        permute_t8(&mut self.s);
+        self.n_draws += 1;
+        (w0, w1)
     }
 
     pub fn absorb_all(&mut self, words: &[u32]) {
@@ -119,38 +156,75 @@ impl ChannelT8State {
             self.absorb(w);
         }
     }
+
+    /// Run a transcript, returning the pairs each `Draw` produced.
+    pub fn run(&mut self, steps: &[Step]) -> Vec<(u32, u32)> {
+        let mut drawn = Vec::new();
+        for &st in steps {
+            match st {
+                Step::Absorb(w) => self.absorb(w),
+                Step::Draw => drawn.push(self.draw_pair()),
+            }
+        }
+        drawn
+    }
 }
 
-/// The state after each absorb, starting from the initial state.
+/// The value each step adds into cell 0, and the counter state it runs at.
 ///
-/// `states[0]` is the state before any absorb; `states[i+1]` is the state after
-/// absorbing `words[i]`. The AIR's row blocks interpolate between consecutive
-/// entries, so this is the skeleton the trace is built around.
-pub fn absorb_states(words: &[u32]) -> Vec<[u64; 8]> {
+/// This is what the preprocessed columns carry: the verifier knows the whole
+/// transcript, so both the absorbed words and the draw counters are public.
+pub fn step_addends(steps: &[Step]) -> Vec<u64> {
+    let mut n_draws = 0u32;
+    let mut out = Vec::with_capacity(steps.len());
+    for &st in steps {
+        match st {
+            Step::Absorb(w) => {
+                out.push(reduce_u32(w));
+                n_draws = 0;
+            }
+            Step::Draw => {
+                out.push(n_draws as u64);
+                n_draws += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The state after each step, starting from the initial state.
+///
+/// `states[0]` precedes every step; `states[i+1]` follows step `i`. The AIR's
+/// row blocks interpolate between consecutive entries, so this is the skeleton
+/// the trace is built around.
+pub fn step_states(steps: &[Step]) -> Vec<[u64; 8]> {
     let mut st = ChannelT8State::init();
-    let mut out = Vec::with_capacity(words.len() + 1);
+    let mut out = Vec::with_capacity(steps.len() + 1);
     out.push(st.s);
-    for &w in words {
-        st.absorb(w);
+    for &sp in steps {
+        match sp {
+            Step::Absorb(w) => st.absorb(w),
+            Step::Draw => { st.draw_pair(); }
+        }
         out.push(st.s);
     }
     out
 }
 
-/// Rows the trace needs for `n_words` absorbs.
-pub fn n_rows(n_words: usize) -> usize {
-    n_words * ROUNDS_PER_ABSORB
+/// Rows the trace needs for `n_steps` steps.
+pub fn n_rows(n_steps: usize) -> usize {
+    n_steps * ROUNDS_PER_ABSORB
 }
 
 pub const MIN_LOG_SIZE: u32 = 5;   // ≥ 32 rows = one absorb (22 rounds)
 pub const MAX_LOG_SIZE: u32 = 24;
-/// Most words one proof absorbs. A VFRI11 transcript absorbs well under this:
-/// a full root is 8 words, and a replay mixes roughly a dozen of them.
-pub const MAX_WORDS: usize = 512;
+/// Most steps one proof covers. A VFRI11 replay absorbs roughly a dozen roots
+/// (8 words each) and draws a few dozen pairs, so this leaves ample room.
+pub const MAX_STEPS: usize = 512;
 
-/// Smallest `log_size` holding `n_words` absorbs.
-pub fn compute_log_size(n_words: usize) -> u32 {
-    let rows = n_rows(n_words).max(1);
+/// Smallest `log_size` holding `n_steps` steps.
+pub fn compute_log_size(n_steps: usize) -> u32 {
+    let rows = n_rows(n_steps).max(1);
     let mut log = 1u32;
     while (1usize << log) < rows {
         log += 1;
@@ -177,7 +251,13 @@ pub fn pc_is_ext() -> PreProcessedColumnId { PreProcessedColumnId { id: "cht8_is
 pub fn pc_is_int() -> PreProcessedColumnId { PreProcessedColumnId { id: "cht8_is_int".into() } }
 pub fn pc_is_block_start() -> PreProcessedColumnId { PreProcessedColumnId { id: "cht8_is_block".into() } }
 pub fn pc_is_first_block() -> PreProcessedColumnId { PreProcessedColumnId { id: "cht8_is_first".into() } }
+/// The value each step adds into cell 0: an absorbed word, or the draw counter.
 pub fn pc_word() -> PreProcessedColumnId { PreProcessedColumnId { id: "cht8_word".into() } }
+/// 1 on a DRAW block's first row; the pinned pair is read there.
+pub fn pc_is_draw() -> PreProcessedColumnId { PreProcessedColumnId { id: "cht8_is_draw".into() } }
+pub fn pc_drawn(k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("cht8_drawn{k}") }
+}
 pub fn pc_is_last() -> PreProcessedColumnId { PreProcessedColumnId { id: "cht8_is_last".into() } }
 pub fn pc_digest(k: usize) -> PreProcessedColumnId {
     PreProcessedColumnId { id: format!("cht8_digest{k}") }
@@ -190,6 +270,9 @@ pub fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     ids.push(pc_is_block_start());
     ids.push(pc_is_first_block());
     ids.push(pc_word());
+    ids.push(pc_is_draw());
+    ids.push(pc_drawn(0));
+    ids.push(pc_drawn(1));
     ids.push(pc_is_last());
     for k in 0..T {
         ids.push(pc_digest(k));
@@ -221,6 +304,8 @@ impl FrameworkEval for ChannelT8Eval {
         let is_block = eval.get_preprocessed_column(pc_is_block_start());
         let is_first = eval.get_preprocessed_column(pc_is_first_block());
         let word_pin = eval.get_preprocessed_column(pc_word());
+        let is_draw = eval.get_preprocessed_column(pc_is_draw());
+        let drawn: Vec<E::F> = (0..2).map(|k| eval.get_preprocessed_column(pc_drawn(k))).collect();
         let is_last = eval.get_preprocessed_column(pc_is_last());
         let digest_pin: Vec<E::F> = (0..T).map(|k| eval.get_preprocessed_column(pc_digest(k))).collect();
 
@@ -286,6 +371,14 @@ impl FrameworkEval for ChannelT8Eval {
         // the replay would attest a transcript of the prover's choosing.
         eval.add_constraint(is_block.clone() * (word.clone() - word_pin.clone()));
 
+        // ── C1 draw binding: a drawn pair is the state BEFORE the counter is
+        //    mixed in, so it reads off the CARRIED state, not this row's output.
+        //    Pinning it is what makes the squeeze usable: an unpinned draw would
+        //    let the prover claim any challenge it liked.
+        for k in 0..2 {
+            eval.add_constraint(is_draw.clone() * (prev[k].clone() - drawn[k].clone()));
+        }
+
         // ── C1 output binding: the digest is verifier-fixed ──────────────────
         for k in 0..T {
             eval.add_constraint(is_last.clone() * (out[k].clone() - digest_pin[k].clone()));
@@ -305,7 +398,12 @@ fn new_component(log_n_rows: u32) -> ChannelT8Component {
 
 // ── Preprocessed columns (canonical source, C1/C2) ───────────────────────────
 
-pub fn build_preproc(words: &[u32], digest: [u64; T], log_size: u32) -> TraceColumns {
+pub fn build_preproc(
+    steps: &[Step],
+    drawn: &[(u32, u32)],
+    digest: [u64; T],
+    log_size: u32,
+) -> TraceColumns {
     let n = 1usize << log_size;
     let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
@@ -318,10 +416,14 @@ pub fn build_preproc(words: &[u32], digest: [u64; T], log_size: u32) -> TraceCol
     let mut is_block_c = vec![bf0; n];
     let mut is_first_c = vec![bf0; n];
     let mut word_c = vec![bf0; n];
+    let mut is_draw_c = vec![bf0; n];
+    let mut drawn_cols: Vec<Vec<BaseField>> = (0..2).map(|_| vec![bf0; n]).collect();
     let mut is_last_c = vec![bf0; n];
     let mut digest_cols: Vec<Vec<BaseField>> = (0..T).map(|_| vec![bf0; n]).collect();
 
-    let n_blocks = words.len().min(n / N_ROUNDS);
+    let addends = step_addends(steps);
+    let n_blocks = steps.len().min(n / N_ROUNDS);
+    let mut draw_i = 0usize;
     for b in 0..n_blocks {
         for r in 0..N_ROUNDS {
             let row = b * N_ROUNDS + r;
@@ -333,11 +435,20 @@ pub fn build_preproc(words: &[u32], digest: [u64; T], log_size: u32) -> TraceCol
         }
         let first = b * N_ROUNDS;
         is_block_c[first] = one;
-        // The word is pinned ALREADY REDUCED. The two conditional subtractions
-        // are not arithmetized: the verifier supplies the reduced value, so the
-        // circuit proves absorption of exactly what the verifier committed to.
-        word_c[first] = m31(reduce_u32(words[b]));
+        // Pinned ALREADY REDUCED: for an absorb the reduced word, for a draw the
+        // counter. The two conditional subtractions are not arithmetized — the
+        // verifier supplies the reduced value, so the circuit proves the step it
+        // committed to.
+        word_c[first] = m31(addends[b]);
         if b == 0 { is_first_c[first] = one; }
+        if matches!(steps[b], Step::Draw) {
+            is_draw_c[first] = one;
+            if let Some(&(w0, w1)) = drawn.get(draw_i) {
+                drawn_cols[0][first] = m31(w0 as u64);
+                drawn_cols[1][first] = m31(w1 as u64);
+            }
+            draw_i += 1;
+        }
     }
     if n_blocks >= 1 {
         let last = (n_blocks - 1) * N_ROUNDS + (N_ROUNDS - 1);
@@ -353,6 +464,8 @@ pub fn build_preproc(words: &[u32], digest: [u64; T], log_size: u32) -> TraceCol
     all.push(is_block_c);
     all.push(is_first_c);
     all.push(word_c);
+    all.push(is_draw_c);
+    all.extend(drawn_cols);
     all.push(is_last_c);
     all.extend(digest_cols);
     for col in all.iter_mut() {
@@ -362,7 +475,8 @@ pub fn build_preproc(words: &[u32], digest: [u64; T], log_size: u32) -> TraceCol
 }
 
 fn canonical_preproc_root(
-    words: &[u32],
+    steps: &[Step],
+    drawn: &[(u32, u32)],
     digest: [u64; T],
     log_size: u32,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
@@ -375,7 +489,7 @@ fn canonical_preproc_root(
     scheme.set_store_polynomials_coefficients();
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
-    tree.extend_evals(build_preproc(words, digest, log_size));
+    tree.extend_evals(build_preproc(steps, drawn, digest, log_size));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
@@ -390,23 +504,41 @@ pub type TraceColumns = Vec<TraceCol>;
 /// Every value is produced by the REFERENCE operations rather than recomputed
 /// from the constraint expressions, so the trace cannot satisfy a constraint the
 /// channel does not.
-pub fn build_trace(words: &[u32], log_size: u32) -> (TraceColumns, [u64; T]) {
+pub fn build_trace(
+    steps: &[Step],
+    log_size: u32,
+) -> (TraceColumns, [u64; T], Vec<(u32, u32)>) {
     let n = 1usize << log_size;
     let domain = CanonicCoset::new(log_size).circle_domain();
     let bf0 = BaseField::from_u32_unchecked(0);
     let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
 
     let mut cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
-    let n_blocks = words.len().min(n / N_ROUNDS);
+    let n_blocks = steps.len().min(n / N_ROUNDS);
 
-    let mut carried = [0u64; T];
+    // Drive the trace from the REFERENCE channel, so the trace cannot satisfy a
+    // constraint the channel does not.
+    let mut ch = ChannelT8State::init();
+    let mut drawn: Vec<(u32, u32)> = Vec::new();
+
     for b in 0..n_blocks {
-        // The absorb: add into cell 0, then the permutation's initial pre-mix.
-        let mut state = carried;
-        state[0] = m31_add(state[0], reduce_u32(words[b]));
-        cols[C_WORD][b * N_ROUNDS] = m31(reduce_u32(words[b]));
-        mat_external_ref(&mut state);
+        let carried = ch.s;
+        let addend = match steps[b] {
+            Step::Absorb(w) => reduce_u32(w),
+            Step::Draw => ch.n_draws as u64,
+        };
+        cols[C_WORD][b * N_ROUNDS] = m31(addend);
 
+        // Advance the reference; a draw also records its pair.
+        match steps[b] {
+            Step::Absorb(w) => ch.absorb(w),
+            Step::Draw => drawn.push(ch.draw_pair()),
+        }
+
+        // Replay the same permutation round by round into the trace.
+        let mut state = carried;
+        state[0] = m31_add(state[0], addend);
+        mat_external_ref(&mut state);
         for r in 0..N_ROUNDS {
             let row = b * N_ROUNDS + r;
             let (is_ext, rc) = round_schedule(r);
@@ -432,12 +564,11 @@ pub fn build_trace(words: &[u32], log_size: u32) -> (TraceColumns, [u64; T]) {
             }
             state = lin;
         }
-        carried = state;
+        debug_assert_eq!(state, ch.s, "trace block {b} diverged from the reference");
     }
 
-    // Padding rows: selectors are 0, so `out` must be 0 and `in` must chain from
-    // the previous output. sq/sbox still have to satisfy their ungated
-    // constraints, so they are filled from `in` with rc = 0.
+    // Padding rows: selectors are 0, so `out` must be 0 and `in` chains from the
+    // previous output. sq/sbox still have to satisfy their ungated constraints.
     for row in n_blocks * N_ROUNDS..n {
         let prev_out: [u64; T] = if row == 0 {
             [0u64; T]
@@ -456,34 +587,51 @@ pub fn build_trace(words: &[u32], log_size: u32) -> (TraceColumns, [u64; T]) {
     }
     (
         cols.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect(),
-        carried,
+        ch.s,
+        drawn,
     )
 }
 
 // ── Prove / verify ───────────────────────────────────────────────────────────
 
-fn mix_public(channel: &mut Blake2sM31Channel, words: &[u32], digest: [u64; T]) {
-    let mut v: Vec<u32> = Vec::with_capacity(words.len() + T + 1);
-    v.push(words.len() as u32);
-    v.extend(words.iter().map(|&w| (reduce_u32(w) % M31_P) as u32));
+fn mix_public(
+    channel: &mut Blake2sM31Channel,
+    steps: &[Step],
+    drawn: &[(u32, u32)],
+    digest: [u64; T],
+) {
+    let mut v: Vec<u32> = Vec::with_capacity(steps.len() * 2 + drawn.len() * 2 + T + 2);
+    v.push(steps.len() as u32);
+    for (st, add) in steps.iter().zip(step_addends(steps)) {
+        v.push(match st { Step::Absorb(_) => 0, Step::Draw => 1 });
+        v.push((add % M31_P) as u32);
+    }
+    v.push(drawn.len() as u32);
+    for &(a, b) in drawn {
+        v.push((a as u64 % M31_P) as u32);
+        v.push((b as u64 % M31_P) as u32);
+    }
     v.extend(digest.iter().map(|&d| (d % M31_P) as u32));
     channel.mix_u32s(&v);
 }
 
-/// Prove that absorbing `words` into a fresh t=8 channel yields the digest.
-pub fn prove_channel_t8(words: &[u32]) -> Result<(Vec<u8>, u32, [u64; T]), String> {
-    if words.is_empty() {
-        return Err("need ≥ 1 word to absorb".into());
+/// Prove a transcript: absorbs and draws through a fresh t=8 channel.
+///
+/// Returns the proof, its `log_size`, the final digest, and the pairs the draws
+/// produced — the challenges an intermediate tree level needs.
+pub fn prove_channel_t8(steps: &[Step]) -> Result<(Vec<u8>, u32, [u64; T], Vec<(u32, u32)>), String> {
+    if steps.is_empty() {
+        return Err("need ≥ 1 step".into());
     }
-    if words.len() > MAX_WORDS {
-        return Err(format!("word count {} exceeds MAX_WORDS {MAX_WORDS}", words.len()));
+    if steps.len() > MAX_STEPS {
+        return Err(format!("step count {} exceeds MAX_STEPS {MAX_STEPS}", steps.len()));
     }
-    let log_size = compute_log_size(words.len());
+    let log_size = compute_log_size(steps.len());
     if log_size > MAX_LOG_SIZE {
         return Err(format!("log_size {log_size} exceeds {MAX_LOG_SIZE}"));
     }
-    let (main_cols, digest) = build_trace(words, log_size);
-    let preproc = build_preproc(words, digest, log_size);
+    let (main_cols, digest, drawn) = build_trace(steps, log_size);
+    let preproc = build_preproc(steps, &drawn, digest, log_size);
 
     let config = make_config(log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -501,31 +649,35 @@ pub fn prove_channel_t8(words: &[u32]) -> Result<(Vec<u8>, u32, [u64; T]), Strin
     tree.extend_evals(main_cols);
     tree.commit(channel);
 
-    mix_public(channel, words, digest);
+    mix_public(channel, steps, &drawn, digest);
 
     let component = new_component(log_size);
     let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, commitment_scheme)
         .map_err(|e| format!("t8 channel proving error: {e:?}"))?;
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("t8 channel serialize error: {e:?}"))?;
-    Ok((bytes, log_size, digest))
+    Ok((bytes, log_size, digest, drawn))
 }
 
-/// Verify a proof from [`prove_channel_t8`] against the claimed `(words, digest)`.
+/// Verify a proof from [`prove_channel_t8`] against the claimed transcript.
 pub fn verify_channel_t8(
     proof_bytes: &[u8],
     log_size: u32,
-    words: &[u32],
+    steps: &[Step],
+    drawn: &[(u32, u32)],
     digest: [u64; T],
 ) -> Result<bool, String> {
     if !(MIN_LOG_SIZE..=MAX_LOG_SIZE).contains(&log_size) {
         return Err(format!("log_size {log_size} out of range [{MIN_LOG_SIZE}, {MAX_LOG_SIZE}]"));
     }
-    if words.is_empty() || words.len() > MAX_WORDS {
-        return Err(format!("word count {} out of range [1, {MAX_WORDS}]", words.len()));
+    if steps.is_empty() || steps.len() > MAX_STEPS {
+        return Err(format!("step count {} out of range [1, {MAX_STEPS}]", steps.len()));
     }
-    if n_rows(words.len()) > (1usize << log_size) {
-        return Err(format!("{} words exceed trace capacity at log_size {log_size}", words.len()));
+    if drawn.len() != steps.iter().filter(|s| matches!(s, Step::Draw)).count() {
+        return Err("drawn pairs do not match the number of Draw steps".into());
+    }
+    if n_rows(steps.len()) > (1usize << log_size) {
+        return Err(format!("{} steps exceed trace capacity at log_size {log_size}", steps.len()));
     }
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
@@ -549,15 +701,15 @@ pub fn verify_channel_t8(
         return Err(format!(
             "malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
-    // C2: pin the preprocessed tree. Without this a prover could forge
-    // `is_block_start ≡ 0`, absorbing nothing while claiming a digest.
-    if proof.commitments[0] != canonical_preproc_root(words, digest, log_size) {
+    // C2: pin the preprocessed tree. Without it a prover could forge
+    // `is_block_start ≡ 0`, running no steps while claiming a digest.
+    if proof.commitments[0] != canonical_preproc_root(steps, drawn, digest, log_size) {
         return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
 
-    mix_public(verifier_channel, words, digest);
+    mix_public(verifier_channel, steps, drawn, digest);
 
     let result = verify::<Blake2sM31MerkleChannel>(&[&component], verifier_channel, commitment_scheme, proof);
     Ok(result.is_ok())
@@ -567,25 +719,28 @@ pub fn verify_channel_t8(
 mod tests {
     use super::*;
 
-    /// The reference must reproduce `P2T8Channel` exactly.
+    fn absorbs(words: &[u32]) -> Vec<Step> {
+        words.iter().map(|&w| Step::Absorb(w)).collect()
+    }
+
+    /// The reference must reproduce `P2T8Channel` exactly — both sides.
     ///
-    /// This is the load-bearing test of the module: everything downstream proves
-    /// statements ABOUT this state chain, so if it diverges from the channel the
-    /// chain actually runs, the proof attests the wrong transcript.
+    /// This is the load-bearing test: everything downstream proves statements
+    /// ABOUT this state chain, so a divergence here means attesting a transcript
+    /// the chain never computed.
     #[test]
-    fn absorb_matches_the_production_channel() {
+    fn reference_matches_the_production_channel() {
         for words in [
             vec![],
             vec![0u32],
             vec![1, 2, 3],
-            vec![0xFFFF_FFFF],                 // 2P+1 — needs BOTH subtractions
+            vec![0xFFFF_FFFF],                       // 2P+1 — needs BOTH subtractions
             vec![M31_P as u32, M31_P as u32 + 1],
             (0..40u32).collect::<Vec<_>>(),
         ] {
             let mut mine = ChannelT8State::init();
             mine.absorb_all(&words);
 
-            // Same sequence through the production channel's own primitive.
             let mut theirs = [0u64; 8];
             for &w in &words {
                 let mut r = w as u64;
@@ -594,15 +749,45 @@ mod tests {
                 theirs[0] = m31_add(theirs[0], r);
                 permute_t8(&mut theirs);
             }
-            assert_eq!(mine.s, theirs, "diverged on {words:?}");
+            assert_eq!(mine.s, theirs, "absorb diverged on {words:?}");
         }
+
+        // Draw side: read cells 0,1 BEFORE mixing the counter, then permute.
+        let mut mine = ChannelT8State::init();
+        mine.absorb_all(&[7, 9]);
+        let got: Vec<(u32, u32)> = (0..3).map(|_| mine.draw_pair()).collect();
+
+        let mut theirs = [0u64; 8];
+        for &w in &[7u64, 9] {
+            theirs[0] = m31_add(theirs[0], w);
+            permute_t8(&mut theirs);
+        }
+        let mut n_draws = 0u64;
+        let want: Vec<(u32, u32)> = (0..3).map(|_| {
+            let pair = (theirs[0] as u32, theirs[1] as u32);
+            theirs[0] = m31_add(theirs[0], n_draws);
+            permute_t8(&mut theirs);
+            n_draws += 1;
+            pair
+        }).collect();
+        assert_eq!(got, want, "draw diverged");
+        assert_eq!(mine.s, theirs);
+    }
+
+    #[test]
+    fn an_absorb_resets_the_draw_counter() {
+        // The reset is what stops two draws at the same state from colliding.
+        let mut a = ChannelT8State::init();
+        a.absorb(1);
+        a.draw_pair();
+        assert_eq!(a.n_draws, 1);
+        a.absorb(2);
+        assert_eq!(a.n_draws, 0, "an absorb must reset the counter");
     }
 
     #[test]
     fn reduce_handles_the_full_u32_range() {
-        // A u32 reaches 2P+1, so one conditional subtraction is not enough.
         assert_eq!(reduce_u32(0), 0);
-        assert_eq!(reduce_u32(1), 1);
         assert_eq!(reduce_u32(M31_P as u32), 0);
         assert_eq!(reduce_u32(M31_P as u32 + 1), 1);
         assert_eq!(reduce_u32(u32::MAX), (u32::MAX as u64) - 2 * M31_P);
@@ -612,122 +797,143 @@ mod tests {
     }
 
     #[test]
-    fn absorbing_is_order_sensitive_and_length_sensitive() {
-        let a = { let mut c = ChannelT8State::init(); c.absorb_all(&[1, 2]); c.s };
-        let b = { let mut c = ChannelT8State::init(); c.absorb_all(&[2, 1]); c.s };
-        let c3 = { let mut c = ChannelT8State::init(); c.absorb_all(&[1, 2, 0]); c.s };
-        assert_ne!(a, b, "order must matter");
-        assert_ne!(a, c3, "a trailing zero word must matter");
+    fn step_addends_track_the_counter() {
+        let steps = vec![
+            Step::Absorb(5), Step::Draw, Step::Draw, Step::Absorb(6), Step::Draw,
+        ];
+        // Absorbs contribute their reduced word; draws contribute the counter,
+        // which the preceding absorb reset.
+        assert_eq!(step_addends(&steps), vec![5, 0, 1, 6, 0]);
     }
 
     #[test]
     fn states_line_up_with_the_row_blocks() {
-        let words = vec![5u32, 9, 13];
-        let states = absorb_states(&words);
-        assert_eq!(states.len(), words.len() + 1);
+        let steps = vec![Step::Absorb(5), Step::Draw, Step::Absorb(13)];
+        let states = step_states(&steps);
+        assert_eq!(states.len(), steps.len() + 1);
         assert_eq!(states[0], [0u64; 8], "chain starts at the zero state");
-
-        // Each entry is reachable from the previous by exactly one absorb — the
-        // property the per-block constraints will encode.
-        for (i, &w) in words.iter().enumerate() {
-            let mut st = ChannelT8State { s: states[i] };
-            st.absorb(w);
-            assert_eq!(st.s, states[i + 1], "block {i} does not chain");
-        }
-        assert_eq!(n_rows(words.len()), 3 * ROUNDS_PER_ABSORB);
+        assert_eq!(n_rows(steps.len()), 3 * ROUNDS_PER_ABSORB);
     }
 
     #[test]
     fn log_size_covers_the_rows_and_meets_the_floor() {
-        assert!(1usize << compute_log_size(0) >= 1);
         assert_eq!(compute_log_size(1), 5); // 22 rows → 32, the t=8 floor
         for n in [1usize, 2, 3, 8, 50] {
-            assert!(
-                1usize << compute_log_size(n) >= n_rows(n),
-                "log_size too small for {n} absorbs");
+            assert!(1usize << compute_log_size(n) >= n_rows(n), "too small for {n}");
         }
     }
 
     // ── Prove / verify roundtrip ─────────────────────────────────────────────
 
     #[test]
-    fn honest_absorb_proves_and_verifies() {
-        for words in [vec![7u32], vec![1, 2, 3], (0..6u32).map(|i| i * 977).collect()] {
-            let (proof, log_size, digest) = prove_channel_t8(&words).expect("prove");
+    fn an_honest_transcript_proves_and_verifies() {
+        for steps in [
+            absorbs(&[7]),
+            absorbs(&[1, 2, 3]),
+            vec![Step::Absorb(11), Step::Draw, Step::Draw],
+            vec![Step::Absorb(3), Step::Draw, Step::Absorb(5), Step::Draw],
+        ] {
+            let (proof, log_size, digest, drawn) = prove_channel_t8(&steps).expect("prove");
+
             let mut want = ChannelT8State::init();
-            want.absorb_all(&words);
+            let want_drawn = want.run(&steps);
             assert_eq!(digest, want.s, "proved digest differs from the reference");
-            assert!(verify_channel_t8(&proof, log_size, &words, digest).unwrap(),
-                    "honest proof must verify for {words:?}");
+            assert_eq!(drawn, want_drawn, "proved draws differ from the reference");
+
+            assert!(verify_channel_t8(&proof, log_size, &steps, &drawn, digest).unwrap(),
+                    "honest proof must verify for {steps:?}");
         }
     }
 
     #[test]
     fn a_wrong_digest_is_rejected() {
-        let words = vec![3u32, 5, 8];
-        let (proof, log_size, digest) = prove_channel_t8(&words).unwrap();
+        let steps = absorbs(&[3, 5, 8]);
+        let (proof, log_size, digest, drawn) = prove_channel_t8(&steps).unwrap();
         let mut bad = digest;
         bad[0] = (bad[0] + 1) % M31_P;
-        assert!(!verify_channel_t8(&proof, log_size, &words, bad).unwrap());
+        assert!(!verify_channel_t8(&proof, log_size, &steps, &drawn, bad).unwrap());
     }
 
     /// C1 input binding: the words are the inner proof's public roots, so a proof
-    /// of absorbing one sequence must not verify against another.
+    /// of one transcript must not verify against another.
     #[test]
-    fn a_different_word_sequence_is_rejected() {
-        let words = vec![3u32, 5, 8];
-        let (proof, log_size, digest) = prove_channel_t8(&words).unwrap();
-        assert!(!verify_channel_t8(&proof, log_size, &[3, 5, 9], digest).unwrap(),
-                "a changed word must not verify");
-        assert!(!verify_channel_t8(&proof, log_size, &[5, 3, 8], digest).unwrap(),
-                "reordered words must not verify");
+    fn a_different_transcript_is_rejected() {
+        let steps = absorbs(&[3, 5, 8]);
+        let (proof, log_size, digest, drawn) = prove_channel_t8(&steps).unwrap();
+        for other in [absorbs(&[3, 5, 9]), absorbs(&[5, 3, 8])] {
+            assert!(!verify_channel_t8(&proof, log_size, &other, &drawn, digest).unwrap(),
+                    "{other:?} must not verify against a proof of {steps:?}");
+        }
     }
 
-    /// C2: a forged preprocessed tree must not verify. `is_block_start ≡ 0`
-    /// absorbs nothing while still claiming a digest, so it is the forgery that
-    /// matters most here.
+    /// C1 draw binding — the point of the squeeze side. An unpinned draw would
+    /// let the prover claim any challenge it liked, which is exactly the
+    /// cherry-pick the recursion exists to prevent.
     #[test]
-    fn forged_preproc_is_rejected() {
-        let words = vec![11u32, 13];
-        let (proof_bytes, log_size, digest) = prove_channel_t8(&words).unwrap();
+    fn a_forged_drawn_pair_is_rejected() {
+        let steps = vec![Step::Absorb(11), Step::Draw, Step::Draw];
+        let (proof, log_size, digest, drawn) = prove_channel_t8(&steps).unwrap();
+        assert_eq!(drawn.len(), 2);
+
+        let mut bad = drawn.clone();
+        bad[0].0 = bad[0].0.wrapping_add(1);
+        assert!(!verify_channel_t8(&proof, log_size, &steps, &bad, digest).unwrap(),
+                "a tampered challenge must not verify");
+
+        let swapped = vec![drawn[1], drawn[0]];
+        assert!(!verify_channel_t8(&proof, log_size, &steps, &swapped, digest).unwrap(),
+                "reordered challenges must not verify");
+    }
+
+    /// C2: `is_block_start ≡ 0` runs no steps while claiming a digest, so it is
+    /// the forgery that matters most; the pinned tree refuses it.
+    #[test]
+    fn a_forged_preproc_is_rejected() {
+        let steps = absorbs(&[11, 13]);
+        let (proof_bytes, log_size, digest, drawn) = prove_channel_t8(&steps).unwrap();
         let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
             bincode::serde::decode_from_slice(&proof_bytes, bincode::config::standard()).unwrap();
 
-        // The honest tree is what the verifier rebuilds; anything else is refused
-        // before the STARK is even checked.
-        assert_eq!(proof.commitments[0], canonical_preproc_root(&words, digest, log_size));
-        assert_ne!(proof.commitments[0], canonical_preproc_root(&[11, 14], digest, log_size));
+        assert_eq!(proof.commitments[0],
+                   canonical_preproc_root(&steps, &drawn, digest, log_size));
+        assert_ne!(proof.commitments[0],
+                   canonical_preproc_root(&absorbs(&[11, 14]), &drawn, digest, log_size));
     }
 
     #[test]
     fn input_bounds_are_enforced() {
-        assert!(prove_channel_t8(&[]).is_err(), "empty absorb");
-        let big: Vec<u32> = (0..(MAX_WORDS + 1) as u32).collect();
-        assert!(prove_channel_t8(&big).is_err(), "over MAX_WORDS");
+        assert!(prove_channel_t8(&[]).is_err(), "empty transcript");
+        let big: Vec<Step> = (0..(MAX_STEPS + 1) as u32).map(Step::Absorb).collect();
+        assert!(prove_channel_t8(&big).is_err(), "over MAX_STEPS");
 
-        let words = vec![1u32];
-        let (proof, log_size, digest) = prove_channel_t8(&words).unwrap();
-        assert!(verify_channel_t8(&proof, MIN_LOG_SIZE - 1, &words, digest).is_err());
-        assert!(verify_channel_t8(&proof, MAX_LOG_SIZE + 1, &words, digest).is_err());
-        assert!(verify_channel_t8(&proof, log_size, &[], digest).is_err());
+        let steps = absorbs(&[1]);
+        let (proof, log_size, digest, drawn) = prove_channel_t8(&steps).unwrap();
+        assert!(verify_channel_t8(&proof, MIN_LOG_SIZE - 1, &steps, &drawn, digest).is_err());
+        assert!(verify_channel_t8(&proof, MAX_LOG_SIZE + 1, &steps, &drawn, digest).is_err());
+        assert!(verify_channel_t8(&proof, log_size, &[], &drawn, digest).is_err());
+        // A drawn-pair count that disagrees with the Draw steps is a caller bug.
+        assert!(verify_channel_t8(&proof, log_size, &steps, &[(1, 2)], digest).is_err());
     }
 
-    /// The whole point of the module: this must replay a REAL VFRI11 transcript
-    /// step. `mix_root_full` absorbs a 32-byte root as eight BE u32 words, so
-    /// proving that absorb is proving what the on-chain channel does.
+    /// The whole point: this replays a REAL VFRI11 transcript fragment.
+    /// `mix_root_full` absorbs a 32-byte root as eight BE u32 words, and
+    /// `drawSecureFelt` is two draws — so proving this is proving what the
+    /// on-chain channel does.
     #[test]
-    fn proves_a_real_mix_root_full_absorb() {
+    fn proves_a_real_mix_root_full_then_draw_secure_felt() {
         let root = [0x5au8; 32];
-        let words: Vec<u32> = (0..8)
-            .map(|i| u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap()))
+        let mut steps: Vec<Step> = (0..8)
+            .map(|i| Step::Absorb(u32::from_be_bytes(root[4 * i..4 * i + 4].try_into().unwrap())))
             .collect();
+        steps.push(Step::Draw);
+        steps.push(Step::Draw);
 
-        let (proof, log_size, digest) = prove_channel_t8(&words).expect("prove");
-        assert!(verify_channel_t8(&proof, log_size, &words, digest).unwrap());
+        let (proof, log_size, digest, drawn) = prove_channel_t8(&steps).expect("prove");
+        assert!(verify_channel_t8(&proof, log_size, &steps, &drawn, digest).unwrap());
 
-        // And the digest is the state the production channel reaches.
         let mut reference = ChannelT8State::init();
-        reference.absorb_all(&words);
+        let want = reference.run(&steps);
         assert_eq!(digest, reference.s);
+        assert_eq!(drawn, want, "the drawn challenges must be the channel's own");
     }
 }
