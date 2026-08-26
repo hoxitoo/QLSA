@@ -700,7 +700,7 @@ pub fn verify_aggregation_node(
 // `composition_t8` plus the channel — so a child is: its transcript, its fold
 // chain, and the membership paths that anchor both ends.
 
-use crate::recursive::composition_t8::{path_depths, CompMembership};
+use crate::recursive::composition_t8::CompMembership;
 use crate::recursive::integration::qm31_leaf_hash_t8;
 use crate::recursive::merkle_path_t8_air as merkle;
 
@@ -774,14 +774,32 @@ fn node_shape(statements: &[TreeStatement]) -> Result<NodeShape, String> {
     if num_folds > rv::MAX_NUM_FOLDS {
         return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
     }
-    let depth = statements[0].paths[0].0.len();
-    let comp_depth = statements[0].comp_paths[0].0.len();
-    if depth == 0 || comp_depth == 0 {
-        return Err("both path depths must be ≥ 1".into());
+    // Path depths are per STATEMENT, not global. A node's children can have
+    // traces of different sizes — a ragged tree's last node has fewer children
+    // than the rest, so its trace is smaller and its paths shorter — and
+    // requiring uniformity would force padding the leaf count to a power of the
+    // fan-in, proving statements nobody made. `merkle_path_t8_air` already
+    // carries per-path depth (R4.11), so this costs nothing.
+    let mut stmt_depth = Vec::with_capacity(statements.len());
+    let mut stmt_comp_depth = Vec::with_capacity(statements.len());
+    for (i, st) in statements.iter().enumerate() {
+        if st.paths.is_empty() || st.comp_paths.is_empty() {
+            return Err(format!("statement {i} has no paths"));
+        }
+        let d = st.paths[0].0.len();
+        let cd = st.comp_paths[0].0.len();
+        if d == 0 || cd == 0 {
+            return Err(format!("statement {i}: both path depths must be ≥ 1"));
+        }
+        if d > merkle::MAX_DEPTH || cd > merkle::MAX_DEPTH {
+            return Err(format!("statement {i}: a path depth exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
+        }
+        stmt_depth.push(d);
+        stmt_comp_depth.push(cd);
     }
-    if depth > merkle::MAX_DEPTH || comp_depth > merkle::MAX_DEPTH {
-        return Err(format!("a path depth exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
-    }
+    // Reported for the public inputs; the per-statement values are what bind.
+    let depth = stmt_depth[0];
+    let comp_depth = stmt_comp_depth[0];
 
     let mut challenges = Vec::new();
     let mut queries: Vec<(QueryStep, Vec<FoldRound>)> = Vec::new();
@@ -811,15 +829,16 @@ fn node_shape(statements: &[TreeStatement]) -> Result<NodeShape, String> {
                     "statement {i} query {q} has {} fold rounds, expected {num_folds}",
                     rounds.len()));
             }
-            if st.paths[q].0.len() != depth || st.paths[q].1.len() != depth {
-                return Err(format!("statement {i} query {q}: final-fold path is not depth {depth}"));
+            // Within a statement the depths must agree — they come from ONE
+            // inner trace — but across statements they need not.
+            let (d, cd) = (stmt_depth[i], stmt_comp_depth[i]);
+            if st.paths[q].0.len() != d || st.paths[q].1.len() != d {
+                return Err(format!("statement {i} query {q}: final-fold path is not depth {d}"));
             }
             let (ps, pb, ns, nb) = &st.comp_paths[q];
-            if ps.len() != comp_depth || pb.len() != comp_depth
-                || ns.len() != comp_depth || nb.len() != comp_depth
-            {
+            if ps.len() != cd || pb.len() != cd || ns.len() != cd || nb.len() != cd {
                 return Err(format!(
-                    "statement {i} query {q}: composition paths are not depth {comp_depth}"));
+                    "statement {i} query {q}: composition paths are not depth {cd}"));
             }
             let ch = rv::query_challenges(step, rounds);
             if ch.z_x != derived.z_x {
@@ -865,7 +884,19 @@ fn node_shape(statements: &[TreeStatement]) -> Result<NodeShape, String> {
     }
 
     let indices: Vec<u32> = bits.iter().map(|b| merkle::bits_to_index(b)).collect();
-    let depths = path_depths(queries.len(), depth, comp_depth);
+    // The same order as `leaves`/`sibs`/`bits`: all final-fold, then all
+    // compValue, then all compValueNeg — `path_depths`'s layout, but with each
+    // statement contributing its own depth rather than one shared value.
+    let mut depths: Vec<usize> = Vec::with_capacity(3 * queries.len());
+    for (i, st) in statements.iter().enumerate() {
+        depths.extend(std::iter::repeat(stmt_depth[i]).take(st.queries.len()));
+    }
+    for _ in 0..2 {
+        for (i, st) in statements.iter().enumerate() {
+            depths.extend(std::iter::repeat(stmt_comp_depth[i]).take(st.queries.len()));
+        }
+    }
+    debug_assert_eq!(depths.len(), 3 * queries.len());
 
     let log_size = channel::compute_log_size_multi(&transcripts)
         .max(rv::compute_log_size(queries.len() * (1 + num_folds)))
@@ -1538,13 +1569,26 @@ mod tests {
                 "a tampered final-fold root must not verify");
     }
 
+    /// Children of DIFFERENT trace sizes must compose. A ragged tree's last node
+    /// has fewer children than the rest, so its trace is smaller and its paths
+    /// shorter; requiring uniformity would force padding the leaf count to a
+    /// power of the fan-in, proving statements nobody made.
+    #[test]
+    fn statements_of_different_path_depths_compose() {
+        let mut s = 0x9C1_u64;
+        let shallow = statement(2, 2, 2, 2, 0xB1, &mut s);
+        let deep = statement(2, 2, 5, 4, 0xB2, &mut s);
+        let r = match prove_tree_node(&[shallow.clone(), deep.clone()]) {
+            Ok(r) => r,
+            Err(e) => panic!("mixed depths must compose: {e}"),
+        };
+        assert!(verify_tree_node(&r.proof, r.log_size, &[shallow, deep], &r.roots).unwrap());
+    }
+
     #[test]
     fn a_tree_node_checks_its_statement_shapes() {
         let mut s = 0x709_u64;
         let a = statement(2, 2, 2, 3, 0xF1, &mut s);
-        let b = statement(2, 2, 3, 3, 0xF2, &mut s); // a different path depth
-        assert!(prove_tree_node(&[a.clone(), b]).is_err(),
-                "mismatched final-fold depths must be refused");
 
         let mut c = statement(2, 2, 2, 3, 0xF3, &mut s);
         c.comp_paths[0].0.pop(); // a ragged composition path

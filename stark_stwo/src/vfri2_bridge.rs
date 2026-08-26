@@ -5659,6 +5659,13 @@ pub struct Vfri11RecursionInputs {
     pub finals: Vec<u128>,
     /// The embedded Stwo-style trace root (proof[8..40] of the ABI generator).
     pub trace_root: [u8; 32],
+    /// The public roots this statement's Fiat-Shamir runs on.
+    ///
+    /// Carried alongside the queries rather than rebuilt by the caller: both come
+    /// from the SAME chain run, so the transcript and the challenges the queries
+    /// ran under cannot disagree. Rebuilding it elsewhere is exactly how they
+    /// would drift.
+    pub channel_inputs: Vfri11ChannelInputs,
 }
 
 /// Extract recursion inputs from the same (cols, tree_depth, batch_merkle_root,
@@ -5760,6 +5767,20 @@ pub fn gen_vfri11_recursion_inputs(
         last_layer_root: p2t8_node_words(&ch.layer_roots[ch.num_folds]),
         finals,
         trace_root: ch.trace_root,
+        channel_inputs: Vfri11ChannelInputs {
+            trace_root: ch.trace_root,
+            oods_combo_pos: ch.oods_combo_pos,
+            oods_combo_neg: ch.oods_combo_neg,
+            comp_root: ch.comp_root,
+            fri_layer_roots: ch.layer_roots.clone(),
+            batch_root: {
+                let mut r = [0u8; 32];
+                r.copy_from_slice(batch_merkle_root);
+                r
+            },
+            tree_depth,
+            n_queries,
+        },
     })
 }
 
@@ -5819,6 +5840,164 @@ pub fn outer_binding_root(inp: &Vfri11ChannelInputs) -> [u8; 32] {
     h.update(inp.tree_depth.to_be_bytes());
     h.update((inp.n_queries as u32).to_be_bytes());
     h.finalize().into()
+}
+
+/// Where each challenge sits in a VFRI11 transcript's draws.
+///
+/// Fixed by `vfri11_transcript_steps`'s order: `z_x` is the first felt, then
+/// `comp_alpha`, then `fri_alpha`, then one alpha per fold round. The node only
+/// needs `z_x` and the fold challenges, so `comp_alpha`'s pair is skipped.
+pub fn vfri11_challenge_layout(
+    num_folds: usize,
+) -> crate::recursive::composition_channel_t8::ChallengeLayout {
+    crate::recursive::composition_channel_t8::ChallengeLayout {
+        z_x_at: 0,
+        // z_x is draws 0–1, comp_alpha 2–3, fri_alpha 4–5, then two per fold.
+        alpha_at: (0..1 + num_folds).map(|i| 4 + 2 * i).collect(),
+    }
+}
+
+/// Turn a proof's trace columns into the statement the NEXT tree level verifies.
+///
+/// This is the tree's level step: a node's columns become its parent's inner
+/// statement. The transcript and the queries both come from ONE chain run, so
+/// the challenges the queries ran under are the ones the transcript produces —
+/// asserted here rather than assumed, because a mismatch would surface only as
+/// an unprovable node much later.
+pub fn tree_statement_from_columns(
+    cols: &[Vec<u32>],
+    tree_depth: u32,
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<crate::recursive::composition_channel_t8::TreeStatement, String> {
+    use crate::recursive::composition_channel_t8 as node;
+
+    let rec = gen_vfri11_recursion_inputs(cols, tree_depth, batch_merkle_root, n_queries, num_folds)?;
+    let folds = rec.queries[0].1.len();
+    let steps = vfri11_transcript_steps(&rec.channel_inputs)?;
+    let layout = vfri11_challenge_layout(folds);
+
+    // The invariant the tree rests on: extraction and transcript agree with no
+    // adjustment. Checked here, once, rather than trusted at every level.
+    let derived = node::derive_challenges(&steps, &layout)?;
+    for (q, (step, rounds)) in rec.queries.iter().enumerate() {
+        let ch = crate::recursive::recursive_verifier::query_challenges(step, rounds);
+        if ch.z_x != derived.z_x {
+            return Err(format!(
+                "query {q}: the extracted z_x is not the transcript's — the two \
+                 derivations have drifted"));
+        }
+        if ch.alphas != derived.alphas {
+            return Err(format!(
+                "query {q}: the extracted fold challenges are not the transcript's"));
+        }
+    }
+
+    Ok(node::TreeStatement {
+        steps,
+        layout,
+        queries: rec.queries,
+        paths: rec.paths,
+        comp_paths: rec.comp_paths,
+    })
+}
+
+/// One level of a proved aggregation tree.
+pub struct TreeLevel {
+    /// The nodes proved at this level, left to right.
+    pub nodes: Vec<crate::recursive::composition_channel_t8::TreeNodeResult>,
+    /// Each node's own trace columns, which become the level above's statements.
+    pub columns: Vec<(Vec<Vec<u32>>, u32)>,
+}
+
+/// A proved aggregation tree over N statements.
+pub struct AggregationTree {
+    /// Bottom to top. The last level holds exactly one node — the root.
+    pub levels: Vec<TreeLevel>,
+    pub fan_in: usize,
+}
+
+impl AggregationTree {
+    pub fn root(&self) -> &crate::recursive::composition_channel_t8::TreeNodeResult {
+        &self.levels.last().expect("a tree has ≥ 1 level").nodes[0]
+    }
+    pub fn depth(&self) -> usize {
+        self.levels.len()
+    }
+    /// Nodes proved across the whole tree — the prover-side cost.
+    pub fn node_count(&self) -> usize {
+        self.levels.iter().map(|l| l.nodes.len()).sum()
+    }
+}
+
+/// Prove an aggregation tree over N inner statements.
+///
+/// Each level groups the level below into nodes of `fan_in`, proves each, and
+/// turns its columns into the next level's statements. The last level is one
+/// node — the root, and the only proof that reaches the chain.
+///
+/// A final group smaller than `fan_in` is proved as-is rather than padded: a
+/// node is the same object at any fan-in, so a ragged tree needs no special
+/// case and padding would prove statements nobody made.
+pub fn prove_aggregation_tree(
+    leaf_columns: &[(Vec<Vec<u32>>, u32)],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+    fan_in: usize,
+) -> Result<AggregationTree, String> {
+    use crate::recursive::composition_channel_t8 as node;
+
+    if leaf_columns.is_empty() {
+        return Err("a tree needs ≥ 1 leaf".into());
+    }
+    if fan_in < 2 {
+        return Err(format!("fan_in must be ≥ 2, got {fan_in}"));
+    }
+    // A tree over N leaves at fan-in f has ceil(log_f N) levels; the cap is a
+    // runaway guard, not a design limit.
+    if leaf_columns.len() > 4096 {
+        return Err(format!("leaf count {} exceeds 4096", leaf_columns.len()));
+    }
+
+    let mut statements: Vec<node::TreeStatement> = Vec::with_capacity(leaf_columns.len());
+    for (i, (cols, depth)) in leaf_columns.iter().enumerate() {
+        statements.push(
+            tree_statement_from_columns(cols, *depth, batch_merkle_root, n_queries, num_folds)
+                .map_err(|e| format!("leaf {i}: {e}"))?,
+        );
+    }
+
+    let mut levels: Vec<TreeLevel> = Vec::new();
+    while statements.len() > 1 || levels.is_empty() {
+        let mut nodes = Vec::new();
+        let mut columns = Vec::new();
+        for (g, group) in statements.chunks(fan_in).enumerate() {
+            let proved = node::prove_tree_node(group)
+                .map_err(|e| format!("level {} node {g}: {e}", levels.len()))?;
+            let cols = node::tree_node_trace_columns(group)
+                .map_err(|e| format!("level {} node {g} columns: {e}", levels.len()))?;
+            nodes.push(proved);
+            columns.push(cols);
+        }
+        let next: Result<Vec<_>, String> = columns
+            .iter()
+            .enumerate()
+            .map(|(g, (cols, depth))| {
+                tree_statement_from_columns(cols, *depth, batch_merkle_root, n_queries, num_folds)
+                    .map_err(|e| format!("level {} node {g} -> statement: {e}", levels.len()))
+            })
+            .collect();
+        let next = next?;
+        levels.push(TreeLevel { nodes, columns });
+        if levels.last().unwrap().nodes.len() == 1 {
+            break;
+        }
+        statements = next;
+    }
+
+    Ok(AggregationTree { levels, fan_in })
 }
 
 /// The VFRI11 transcript as a list of `channel_t8_air::Step`s.
@@ -9918,6 +10097,143 @@ mod tests_vfri8 {
         let other_steps = vfri11_transcript_steps(&other).unwrap();
         assert!(!verify_channel_t8(&proof, log_size, &other_steps, &drawn, digest).unwrap(),
                 "a changed trace root must not verify against the same proof");
+    }
+
+    /// The tree's level step, on REAL data: a V23 group becomes a statement, and
+    /// its challenges line up with its transcript without adjustment.
+    ///
+    /// That alignment is the invariant the whole tree rests on. The extraction
+    /// (`gen_vfri11_recursion_inputs`) and the transcript
+    /// (`vfri11_transcript_steps`) are two readings of one chain run; if they
+    /// ever drifted, every node above would simply fail to prove, with nothing
+    /// pointing at the cause.
+    #[test]
+    fn a_real_v23_group_becomes_a_tree_statement() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (cols, tree_depth) =
+            v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 4).expect("V23 columns");
+
+        let st = match tree_statement_from_columns(&cols, tree_depth, &merkle_root, 4, Some(6)) {
+            Ok(s) => s,
+            Err(e) => panic!("level step failed: {e}"),
+        };
+        assert_eq!(st.queries.len(), 4);
+        assert_eq!(st.paths.len(), 4);
+        assert_eq!(st.comp_paths.len(), 4);
+
+        // A node over it must build — which exercises the same binding check a
+        // second time, through the node rather than the level step.
+        let sized = node::tree_node_log_size(std::slice::from_ref(&st));
+        assert!(sized.is_ok(), "the statement must form a valid node: {sized:?}");
+    }
+
+    /// Two levels: a node's own columns become the next level's statement.
+    ///
+    /// This is the tree, twice. If it holds here it holds at any depth, because
+    /// the shape was measured to be a fixed point.
+    #[test]
+    fn a_node_s_columns_become_the_next_level_s_statement() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (cols0, depth0) =
+            v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 2).expect("V23 columns");
+
+        let st0 = tree_statement_from_columns(&cols0, depth0, &merkle_root, 2, Some(6))
+            .expect("level-0 statement");
+        let (cols1, depth1) = node::tree_node_trace_columns(std::slice::from_ref(&st0))
+            .expect("level-1 node columns");
+        eprintln!("level-1 node: {} cols, log {}", cols1.len(), depth1);
+
+        // And those columns are themselves a statement for the level above.
+        let st1 = match tree_statement_from_columns(&cols1, depth1, &merkle_root, 2, Some(6)) {
+            Ok(s) => s,
+            Err(e) => panic!("level-1 -> level-2 step failed: {e}"),
+        };
+        assert_eq!(st1.queries.len(), 2);
+        assert!(node::tree_node_log_size(std::slice::from_ref(&st1)).is_ok());
+    }
+
+    /// A whole tree over four real V23 statements, proved end to end.
+    ///
+    /// Four leaves at fan-in 2 is two levels: two nodes, then the root. That is
+    /// the smallest tree that exercises everything a deeper one does — a level
+    /// consuming the level below's columns — since the shape was measured to be
+    /// a fixed point, so depth adds no new behaviour.
+    #[test]
+    fn a_tree_over_four_real_statements_proves() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let mut leaves = Vec::new();
+        for seed in [16600u64, 16601, 16602, 16603] {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            leaves.push(
+                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1)
+                    .expect("V23 columns"),
+            );
+        }
+
+        let tree = match prove_aggregation_tree(&leaves, &merkle_root, 1, Some(6), 2) {
+            Ok(t) => t,
+            Err(e) => panic!("tree proving failed: {e}"),
+        };
+
+        // Four leaves, fan-in 2 → level 0 has two nodes, level 1 has the root.
+        assert_eq!(tree.depth(), 2, "four leaves at fan-in 2 is two levels");
+        assert_eq!(tree.levels[0].nodes.len(), 2);
+        assert_eq!(tree.levels[1].nodes.len(), 1);
+        assert_eq!(tree.node_count(), 3);
+
+        // The root is one proof, whatever the leaf count — the property the whole
+        // tree exists for.
+        let root = tree.root();
+        assert!(!root.proof.is_empty());
+        eprintln!(
+            "tree: {} leaves, {} levels, {} nodes, root log {}",
+            leaves.len(), tree.depth(), tree.node_count(), root.log_size);
+
+        // And the root verifies against the statements it was built from.
+        let (cols, depth) = &tree.levels[0].columns[0];
+        let a = tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6)).unwrap();
+        let (cols, depth) = &tree.levels[0].columns[1];
+        let b = tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6)).unwrap();
+        assert!(
+            node::verify_tree_node(&root.proof, root.log_size, &[a, b], &root.roots).unwrap(),
+            "the root must verify against its two children");
+    }
+
+    /// A ragged tree needs no padding: a node is the same object at any fan-in.
+    #[test]
+    fn a_tree_over_three_statements_is_not_padded() {
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let mut leaves = Vec::new();
+        for seed in [16700u64, 16701, 16702] {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            leaves.push(
+                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols"),
+            );
+        }
+        let tree = match prove_aggregation_tree(&leaves, &merkle_root, 1, Some(6), 2) {
+            Ok(t) => t, Err(e) => panic!("tree proving failed: {e}"),
+        };
+        // Three leaves at fan-in 2: a full pair and a lone one, then the root.
+        assert_eq!(tree.levels[0].nodes.len(), 2);
+        assert_eq!(tree.depth(), 2);
+        assert_eq!(tree.root().challenges.len(), 2, "the root has two children");
+    }
+
+    #[test]
+    fn a_tree_checks_its_inputs() {
+        let root = vec![0u8; 32];
+        assert!(prove_aggregation_tree(&[], &root, 1, Some(6), 2).is_err(), "no leaves");
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let one = vec![v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &root, 1).unwrap()];
+        assert!(prove_aggregation_tree(&one, &root, 1, Some(6), 1).is_err(), "fan_in 1 never ends");
     }
 
     /// Does the TREE NODE's shape reach a fixed point, as the 2-component one did?
