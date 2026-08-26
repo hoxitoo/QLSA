@@ -9920,6 +9920,137 @@ mod tests_vfri8 {
                 "a changed trace root must not verify against the same proof");
     }
 
+    /// Does the TREE NODE's shape reach a fixed point, as the 2-component one did?
+    ///
+    /// `probe_recursion_self_composition` measured the 87-column shape converging
+    /// at log 14. A tree node is three components — 120 columns — because the
+    /// channel rides along, so its trace is bigger, so the next level's Merkle
+    /// paths are deeper, so ITS trace is bigger. Whether that settles or runs
+    /// away is the question a tree builder is built on, and it is not answerable
+    /// by looking at the 2-component number.
+    ///
+    /// Run with: cargo test probe_tree_node_self_composition -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement probe; prints tree-node sizes across levels"]
+    fn probe_tree_node_self_composition() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        // Level 0: a real V23 group at production security.
+        let rec0 = gen_mldsa_v23_recursion_inputs_log10(
+            &z, &c, &t1, &a_hat, &merkle_root, 20, Some(6),
+        ).expect("level-0 recursion inputs");
+
+        let num_folds = rec0.queries[0].1.len();
+        let inp0 = Vfri11ChannelInputs {
+            trace_root: rec0.trace_root,
+            oods_combo_pos: 1,
+            oods_combo_neg: 2,
+            comp_root: [0x5cu8; 32],
+            fri_layer_roots: (0..=num_folds as u8)
+                .map(|k| { let mut r = [0u8; 32]; r[0] = k + 1; r })
+                .collect(),
+            batch_root: [0xa7u8; 32],
+            tree_depth: 10,
+            n_queries: 20,
+        };
+        let steps = vfri11_transcript_steps(&inp0).expect("transcript");
+        // The VFRI11 layout: z_x first, then friAlpha, then one alpha per fold.
+        let layout = node::ChallengeLayout {
+            z_x_at: 0,
+            alpha_at: (0..1 + num_folds).map(|i| 4 + 2 * i).collect(),
+        };
+
+        // The statement's queries must run under the transcript's challenges, so
+        // rebuild them from the derived values rather than reusing rec0's.
+        let derived = match node::derive_challenges(&steps, &layout) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("challenge derivation failed: {e}"); return; }
+        };
+        let queries: Vec<_> = rec0.queries.iter().map(|(st, rounds)| {
+            let mut st2 = *st;
+            st2.3 = derived.z_x;
+            st2.6 = derived.alphas[0];
+            let rounds2: Vec<_> = rounds.iter().enumerate()
+                .map(|(k, &(sib, _, inv))| (sib, derived.alphas[k + 1], inv))
+                .collect();
+            (st2, rounds2)
+        }).collect();
+
+        let statement = node::TreeStatement {
+            steps,
+            layout,
+            queries,
+            paths: rec0.paths.clone(),
+            comp_paths: rec0.comp_paths.clone(),
+        };
+
+        match node::tree_node_trace_columns(std::slice::from_ref(&statement)) {
+            Ok((cols, log)) => eprintln!(
+                "tree node over ONE real V23 statement (20 queries): {} cols, log {}",
+                cols.len(), log),
+            Err(e) => eprintln!("one-statement node failed: {e}"),
+        }
+        match node::tree_node_trace_columns(&[statement.clone(), statement.clone()]) {
+            Ok((cols, log)) => eprintln!(
+                "tree node over TWO such statements:               {} cols, log {}",
+                cols.len(), log),
+            Err(e) => eprintln!("two-statement node failed: {e}"),
+        }
+
+        // THE question a tree builder rests on. A node's trace is its parent's
+        // inner statement, so a deeper trace means deeper Merkle paths at the
+        // next level, which means a deeper trace again. Iterate the map and see
+        // whether it settles — the 2-component shape did, at log 14, but that
+        // number says nothing about this one.
+        eprintln!();
+        eprintln!("depth d of a child's trace  ->  log_size of the node above it");
+        let mut d = 14u32;
+        for step in 0..8 {
+            let sized = node::tree_node_log_size(&[
+                shape_at_depth(&statement, d),
+                shape_at_depth(&statement, d),
+            ]);
+            match sized {
+                Ok(next) => {
+                    eprintln!("  d = {d:2}  ->  log {next}");
+                    if next == d {
+                        eprintln!("FIXED POINT at log {d} (reached after {step} steps)");
+                        return;
+                    }
+                    d = next;
+                }
+                Err(e) => { eprintln!("  d = {d}: {e}"); return; }
+            }
+        }
+        eprintln!("NO FIXED POINT within 8 iterations — the tree would have a depth ceiling");
+    }
+
+    /// The same statement with its paths lengthened to `d`, standing in for a
+    /// child whose own trace is log-`d`. Only the LENGTHS matter for sizing.
+    fn shape_at_depth(
+        st: &crate::recursive::composition_channel_t8::TreeStatement,
+        d: u32,
+    ) -> crate::recursive::composition_channel_t8::TreeStatement {
+        let grow = |v: &(Vec<[u64; 4]>, Vec<bool>)| -> (Vec<[u64; 4]>, Vec<bool>) {
+            let mut s = v.0.clone();
+            let mut b = v.1.clone();
+            s.resize(d as usize, [0u64; 4]);
+            b.resize(d as usize, false);
+            (s, b)
+        };
+        let mut out = st.clone();
+        out.paths = st.paths.iter().map(grow).collect();
+        out.comp_paths = st.comp_paths.iter().map(|(ps, pb, ns, nb)| {
+            let (ps, pb) = grow(&(ps.clone(), pb.clone()));
+            let (ns, nb) = grow(&(ns.clone(), nb.clone()));
+            (ps, pb, ns, nb)
+        }).collect();
+        out
+    }
+
     /// How long does one aggregation node take, and what does that make N?
     ///
     /// On-chain cost is constant in N (the recursion is a fixed point), so N is

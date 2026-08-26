@@ -625,8 +625,27 @@ pub fn build_trace_multi(
     transcripts: &[Vec<Step>],
     log_size: u32,
 ) -> (TraceColumns, Vec<ChannelRun>) {
-    let n = 1usize << log_size;
+    let (mut cols, runs) = build_trace_multi_raw(transcripts, log_size);
     let domain = CanonicCoset::new(log_size).circle_domain();
+    for col in cols.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    (
+        cols.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect(),
+        runs,
+    )
+}
+
+/// The same trace, in natural row order and without the circle-domain wrapper.
+///
+/// A tree level feeds the node's columns to the NEXT level as its inner
+/// statement, and that path wants raw values — the same split
+/// `merkle_path_t8_air` and `recursive_verifier` already make.
+pub fn build_trace_multi_raw(
+    transcripts: &[Vec<Step>],
+    log_size: u32,
+) -> (Vec<Vec<BaseField>>, Vec<ChannelRun>) {
+    let n = 1usize << log_size;
     let bf0 = BaseField::from_u32_unchecked(0);
     let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
 
@@ -700,13 +719,7 @@ pub fn build_trace_multi(
         }
     }
 
-    for col in cols.iter_mut() {
-        bit_reverse_coset_to_circle_domain_order(col);
-    }
-    (
-        cols.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect(),
-        runs,
-    )
+    (cols, runs)
 }
 
 /// Preprocessed columns for several independent transcripts.

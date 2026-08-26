@@ -1094,6 +1094,38 @@ pub fn verify_tree_node(
     Ok(result.is_ok())
 }
 
+/// The node's own trace columns — what the NEXT tree level takes as its inner
+/// statement.
+///
+/// A tree is levels of these: a node's trace becomes the statement its parent
+/// verifies. Whether that terminates is a question about whether the shape
+/// reaches a fixed point, which is measured rather than assumed
+/// (`probe_tree_node_self_composition`).
+pub fn tree_node_trace_columns(
+    statements: &[TreeStatement],
+) -> Result<(Vec<Vec<u32>>, u32), String> {
+    let sh = node_shape(statements)?;
+    if sh.log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE) {
+        return Err(format!("tree node log_size {} too large", sh.log_size));
+    }
+
+    let rv_cols = rv::build_trace_multi_raw(&sh.queries, sh.log_size);
+    let (merkle_cols, _roots) =
+        merkle::build_trace_multi_raw(&sh.leaves, &sh.sibs, &sh.bits, sh.log_size);
+    let (chan_cols, _runs) = channel::build_trace_multi_raw(&sh.transcripts, sh.log_size);
+
+    let mut cols: Vec<Vec<u32>> =
+        Vec::with_capacity(rv_cols.len() + merkle_cols.len() + chan_cols.len());
+    for c in rv_cols
+        .into_iter()
+        .chain(merkle_cols.into_iter())
+        .chain(chan_cols.into_iter())
+    {
+        cols.push(c.into_iter().map(|v| v.0).collect());
+    }
+    Ok((cols, sh.log_size))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
