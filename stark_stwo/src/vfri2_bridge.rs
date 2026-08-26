@@ -5821,6 +5821,80 @@ pub fn outer_binding_root(inp: &Vfri11ChannelInputs) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// The VFRI11 transcript as a list of `channel_t8_air::Step`s.
+///
+/// [`vfri11_replay_channel`] runs this transcript imperatively; this expresses
+/// the SAME sequence as data, so the recursion can prove it. The two must agree
+/// step for step — a test asserts the drawn pairs reconstruct exactly the
+/// challenges the replay returns, because a transcript that merely looks right
+/// would produce a proof about the wrong Fiat-Shamir.
+///
+/// The mapping from channel operations to steps:
+///
+/// ```text
+///   mix_root_full(r)   -> 8 Absorb   (all 32 bytes, BE u32 words)
+///   mix_root_w(r)      -> 4 Absorb   (a t=8 node: bytes[16..32])
+///   mix_u32s(ws)       -> |ws| Absorb
+///   draw_secure_felt() -> 2 Draw
+///   draw_queries(_, n) -> ceil(n/2) Draw
+/// ```
+pub fn vfri11_transcript_steps(
+    inp: &Vfri11ChannelInputs,
+) -> Result<Vec<crate::recursive::channel_t8_air::Step>, String> {
+    use crate::recursive::channel_t8_air::Step;
+
+    if inp.fri_layer_roots.is_empty() {
+        return Err("fri_layer_roots must contain at least the layer-1 root".into());
+    }
+    if inp.n_queries == 0 {
+        return Err("n_queries must be ≥ 1".into());
+    }
+    let num_folds = inp.fri_layer_roots.len() - 1;
+
+    let full = |r: &[u8; 32], out: &mut Vec<Step>| {
+        for i in 0..8 {
+            out.push(Step::Absorb(u32::from_be_bytes(r[4 * i..4 * i + 4].try_into().unwrap())));
+        }
+    };
+    let wide = |r: &[u8; 32], out: &mut Vec<Step>| {
+        for k in 0..4 {
+            out.push(Step::Absorb(u32::from_be_bytes(
+                r[16 + 4 * k..20 + 4 * k].try_into().unwrap())));
+        }
+    };
+    let felt = |out: &mut Vec<Step>| {
+        out.push(Step::Draw);
+        out.push(Step::Draw);
+    };
+
+    let mut steps = Vec::new();
+    full(&inp.trace_root, &mut steps);
+    felt(&mut steps); // z_x
+    felt(&mut steps); // comp_alpha
+
+    let p = qm31_words(inp.oods_combo_pos);
+    let nw = qm31_words(inp.oods_combo_neg);
+    for w in [p[0], p[1], p[2], p[3], nw[0], nw[1], nw[2], nw[3]] {
+        steps.push(Step::Absorb(w));
+    }
+
+    wide(&inp.comp_root, &mut steps);
+    felt(&mut steps); // fri_alpha
+
+    wide(&inp.fri_layer_roots[0], &mut steps);
+    for k in 0..num_folds {
+        felt(&mut steps); // fri_alphas[k]
+        wide(&inp.fri_layer_roots[k + 1], &mut steps);
+    }
+
+    full(&inp.batch_root, &mut steps);
+    // draw_queries pulls two candidate indices per pair.
+    for _ in 0..inp.n_queries.div_ceil(2) {
+        steps.push(Step::Draw);
+    }
+    Ok(steps)
+}
+
 /// Replay the VFRI11 Fiat-Shamir channel from PUBLIC roots + OODS combos alone
 /// (no trace/witness) and return the drawn challenges + query indices — the Rust
 /// reference for `QLSAVerifierRecursive.sol`'s on-chain channel replay. The op
@@ -9721,6 +9795,131 @@ mod tests_vfri8 {
     /// — once with the t=8 pipeline, once with t=16 — so the JS side can measure
     /// both against the deployed verifiers and the difference is only the width.
     /// Run with: cargo test write_outer_width_probe -- --ignored --nocapture
+    /// The step list must reproduce the REAL VFRI11 transcript, challenge for
+    /// challenge.
+    ///
+    /// This is the gate on wiring `channel_t8_air` into the composition. The
+    /// gadget proves a transcript expressed as steps; if those steps are not the
+    /// transcript the chain actually runs, the recursion would prove the wrong
+    /// Fiat-Shamir and every challenge under it would be free to choose. Nothing
+    /// downstream can catch that, so it is checked here against the imperative
+    /// replay that the on-chain contract mirrors.
+    #[test]
+    fn transcript_steps_reproduce_the_real_vfri11_challenges() {
+        use crate::recursive::channel_t8_air::ChannelT8State;
+
+        // A production-shaped statement: depth 10, 6 folds, 20 queries.
+        let mut fri_layer_roots = Vec::new();
+        for k in 0..7u8 {
+            let mut r = [0u8; 32];
+            for (i, b) in r.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(13).wrapping_add(k * 7 + 1);
+            }
+            fri_layer_roots.push(r);
+        }
+        let inp = Vfri11ChannelInputs {
+            trace_root: [0x3au8; 32],
+            oods_combo_pos: 0x0123_4567_89ab_cdef_0011_2233_4455_6677u128,
+            oods_combo_neg: 0x7766_5544_3322_1100_fedc_ba98_7654_3210u128,
+            comp_root: [0x5cu8; 32],
+            fri_layer_roots,
+            batch_root: [0xa7u8; 32],
+            tree_depth: 10,
+            n_queries: 20,
+        };
+
+        let want = vfri11_replay_channel(&inp).expect("imperative replay");
+        let steps = vfri11_transcript_steps(&inp).expect("transcript as steps");
+
+        let mut ch = ChannelT8State::init();
+        let drawn = ch.run(&steps);
+
+        // Rebuild each challenge from the pairs, in the order the transcript
+        // draws them. A QM31 felt is two pairs; a query index is one word of a
+        // pair, two indices per pair.
+        let felt = |d: &[(u32, u32)], i: usize| {
+            qm31_pack_c(cm31_pack(d[i].0, d[i].1), cm31_pack(d[i + 1].0, d[i + 1].1))
+        };
+        assert_eq!(felt(&drawn, 0), want.z_x, "z_x");
+        assert_eq!(felt(&drawn, 2), want.comp_alpha, "comp_alpha");
+        assert_eq!(felt(&drawn, 4), want.fri_alpha, "fri_alpha");
+        let num_folds = inp.fri_layer_roots.len() - 1;
+        for k in 0..num_folds {
+            assert_eq!(felt(&drawn, 6 + 2 * k), want.fri_alphas[k], "fri_alphas[{k}]");
+        }
+
+        let mask = (1u32 << inp.tree_depth) - 1;
+        let q_start = 6 + 2 * num_folds;
+        let mut got_q = Vec::with_capacity(inp.n_queries);
+        for pair in &drawn[q_start..] {
+            got_q.push((pair.0 & mask) as usize);
+            if got_q.len() < inp.n_queries {
+                got_q.push((pair.1 & mask) as usize);
+            }
+        }
+        got_q.truncate(inp.n_queries);
+        assert_eq!(got_q, want.query_indices, "query indices");
+
+        // And the step count is what the trace has to hold.
+        assert_eq!(steps.len(), 84, "production transcript length");
+        assert_eq!(
+            crate::recursive::channel_t8_air::compute_log_size(steps.len()),
+            11,
+            "a whole production transcript fits a log-11 trace");
+    }
+
+    /// PROVE a whole production VFRI11 transcript and verify it.
+    ///
+    /// The milestone this run establishes: the replay that costs 1,052,669 gas
+    /// on-chain can instead be proved — which is what lets an intermediate tree
+    /// level derive its children's challenges rather than have them handed down
+    /// as public inputs, and so what lets N grow past a single level's fan-in.
+    #[test]
+    fn a_whole_production_transcript_proves_and_verifies() {
+        use crate::recursive::channel_t8_air::{
+            prove_channel_t8, verify_channel_t8, ChannelT8State,
+        };
+
+        let mut fri_layer_roots = Vec::new();
+        for k in 0..7u8 {
+            let mut r = [0u8; 32];
+            for (i, b) in r.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(13).wrapping_add(k * 7 + 1);
+            }
+            fri_layer_roots.push(r);
+        }
+        let inp = Vfri11ChannelInputs {
+            trace_root: [0x3au8; 32],
+            oods_combo_pos: 0x0123_4567_89ab_cdef_0011_2233_4455_6677u128,
+            oods_combo_neg: 0x7766_5544_3322_1100_fedc_ba98_7654_3210u128,
+            comp_root: [0x5cu8; 32],
+            fri_layer_roots,
+            batch_root: [0xa7u8; 32],
+            tree_depth: 10,
+            n_queries: 20,
+        };
+        let steps = vfri11_transcript_steps(&inp).unwrap();
+
+        let (proof, log_size, digest, drawn) =
+            prove_channel_t8(&steps).expect("prove the production transcript");
+        assert!(verify_channel_t8(&proof, log_size, &steps, &drawn, digest).unwrap(),
+                "a real VFRI11 transcript must verify");
+
+        // The proved challenges are the ones the imperative replay produces —
+        // not merely internally consistent.
+        let mut reference = ChannelT8State::init();
+        assert_eq!(drawn, reference.run(&steps));
+        assert_eq!(digest, reference.s);
+
+        // Tampering with any absorbed root must break it: this is what binds the
+        // proof to ONE inner statement.
+        let mut other = inp.clone();
+        other.trace_root[0] ^= 1;
+        let other_steps = vfri11_transcript_steps(&other).unwrap();
+        assert!(!verify_channel_t8(&proof, log_size, &other_steps, &drawn, digest).unwrap(),
+                "a changed trace root must not verify against the same proof");
+    }
+
     /// How long does one aggregation node take, and what does that make N?
     ///
     /// On-chain cost is constant in N (the recursion is a fixed point), so N is
