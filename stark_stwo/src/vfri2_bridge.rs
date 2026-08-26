@@ -6000,6 +6000,72 @@ pub fn prove_aggregation_tree(
     Ok(AggregationTree { levels, fan_in })
 }
 
+/// What a proved aggregation tree hands back.
+///
+/// Only the ROOT matters downstream — that is the point of the tree — but the
+/// shape is reported because it is what a caller sizes its worker pool by.
+pub struct AggregationTreeSummary {
+    pub root_proof: Vec<u8>,
+    pub root_log_size: u32,
+    pub root_roots: Vec<[u64; 4]>,
+    /// Statements the root attests, transitively.
+    pub leaf_count: usize,
+    pub depth: usize,
+    /// Proofs the prover had to produce — the cost, as opposed to the result.
+    pub node_count: usize,
+    pub fan_in: usize,
+}
+
+/// Aggregate N ML-DSA-65 witnesses into ONE root proof.
+///
+/// Each entry is one signature's extracted witness; every entry becomes a leaf
+/// statement, and the tree folds them to a single root. On-chain cost is the
+/// root's alone and does not depend on N — the shape is a fixed point at log 16
+/// (`probe_tree_node_self_composition`), so depth is free.
+///
+/// This is the aggregation the project's headline describes. Before it, the
+/// pipeline proved `tx[0]` and committed the rest by Merkle root alone.
+pub fn prove_mldsa_aggregation_tree(
+    entries: &[(
+        [[i64; 256]; 5],
+        [i64; 256],
+        [[i64; 256]; 6],
+        Vec<[i64; 256]>,
+    )],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+    fan_in: usize,
+) -> Result<AggregationTreeSummary, String> {
+    if entries.is_empty() {
+        return Err("need ≥ 1 signature to aggregate".into());
+    }
+    if batch_merkle_root.len() != 32 {
+        return Err(format!(
+            "batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
+    }
+
+    let mut leaves = Vec::with_capacity(entries.len());
+    for (i, (z, c, t1, a_hat)) in entries.iter().enumerate() {
+        leaves.push(
+            v23_vfri11_cols_log10(z, c, t1, a_hat, batch_merkle_root, n_queries)
+                .map_err(|e| format!("signature {i}: {e}"))?,
+        );
+    }
+
+    let tree = prove_aggregation_tree(&leaves, batch_merkle_root, n_queries, num_folds, fan_in)?;
+    let root = tree.root();
+    Ok(AggregationTreeSummary {
+        root_proof: root.proof.clone(),
+        root_log_size: root.log_size,
+        root_roots: root.roots.clone(),
+        leaf_count: entries.len(),
+        depth: tree.depth(),
+        node_count: tree.node_count(),
+        fan_in: tree.fan_in,
+    })
+}
+
 /// The VFRI11 transcript as a list of `channel_t8_air::Step`s.
 ///
 /// [`vfri11_replay_channel`] runs this transcript imperatively; this expresses

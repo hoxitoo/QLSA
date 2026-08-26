@@ -3535,6 +3535,89 @@ def prove_mldsa_sig_for_protocol(
     return result
 
 
+@dataclass(frozen=True)
+class AggregationTree:
+    """A proved aggregation tree over N ML-DSA-65 signatures.
+
+    Only `root_proof` goes on-chain — that is what the tree is for. The shape is
+    reported because it is what a caller sizes its worker pool by: `node_count`
+    proofs had to be produced, spread over `depth` levels, and each level is
+    internally parallel.
+    """
+
+    root_proof: bytes
+    root_log_size: int
+    #: Per-path roots the root proof commits to, as 4-word M31 nodes.
+    root_roots: list[list[int]]
+    leaf_count: int
+    depth: int
+    #: Proofs the prover produced — the cost, as opposed to the result.
+    node_count: int
+    fan_in: int
+
+
+def prove_mldsa_aggregation_tree(
+    entries: list[tuple[bytes, bytes, bytes]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = 6,
+    fan_in: int = 2,
+) -> AggregationTree:
+    """Aggregate N ML-DSA-65 signatures into ONE root proof.
+
+    Each entry is `(pk, msg, sig)`. Every signature is verified in full before
+    its witness is extracted — `extract_mldsa_witness_py` refuses an invalid one —
+    and then becomes a leaf of the tree.
+
+    On-chain cost is the root's alone and does NOT grow with N: the node shape is
+    a fixed point, so the tree's depth is absorbed by the prover. What grows with
+    N is proving time, since a tree over N leaves has N-1 internal nodes.
+
+    This is the aggregation the project's headline describes. The direct paths
+    (:func:`prove_mldsa_sig_vfri11_stark` and friends) prove ONE signature.
+    """
+    _require_ext("prove_mldsa_aggregation_tree_py")
+    if not entries:
+        raise ValueError("need at least one signature to aggregate")
+    if fan_in < 2:
+        raise ValueError(f"fan_in must be >= 2, got {fan_in}")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(
+            f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+
+    witnesses = []
+    for i, (pk, msg, sig) in enumerate(entries):
+        try:
+            z, c, t1, a_hat, _hints = _ext.extract_mldsa_witness_py(
+                bytes(pk), bytes(msg), bytes(sig))
+        except Exception as exc:
+            # Name the signature: with N of them, "extraction failed" alone
+            # leaves the caller to bisect.
+            raise ValueError(f"signature {i}: {exc}") from exc
+        witnesses.append((
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+        ))
+
+    try:
+        d = _ext.prove_mldsa_aggregation_tree_py(
+            witnesses, bytes(batch_merkle_root), n_queries, num_folds, fan_in)
+    except Exception as exc:
+        raise RuntimeError(f"aggregation tree proving failed: {exc}") from exc
+
+    return AggregationTree(
+        root_proof=bytes(d["rootProof"]),
+        root_log_size=int(d["rootLogSize"]),
+        root_roots=[list(r) for r in d["rootRoots"]],
+        leaf_count=int(d["leafCount"]),
+        depth=int(d["depth"]),
+        node_count=int(d["nodeCount"]),
+        fan_in=int(d["fanIn"]),
+    )
+
+
 def prove_mldsa_sig_recursive_stark(
     pk: bytes,
     msg: bytes,
