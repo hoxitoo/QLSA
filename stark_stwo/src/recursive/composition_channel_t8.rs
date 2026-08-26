@@ -688,6 +688,364 @@ pub fn verify_aggregation_node(
     Ok(result.is_ok())
 }
 
+// ── The complete tree node: channel + fold chain + Merkle membership ─────────
+//
+// `prove_aggregation_node` above proves the channel binding alone, which is the
+// unit worth testing in isolation but NOT a tree node: it does not tie a child's
+// fold-chain output to the FRI layer that child committed to. A node that
+// omitted that would let a prover fold to whatever it liked and still be
+// "bound to the transcript".
+//
+// The complete node is three components over one Tree 0 — the two of
+// `composition_t8` plus the channel — so a child is: its transcript, its fold
+// chain, and the membership paths that anchor both ends.
+
+use crate::recursive::composition_t8::{path_depths, CompMembership};
+use crate::recursive::integration::qm31_leaf_hash_t8;
+use crate::recursive::merkle_path_t8_air as merkle;
+
+/// One child of a tree node.
+#[derive(Clone)]
+pub struct TreeChild {
+    /// The child's transcript and where its challenges sit in it.
+    pub steps: Vec<channel::Step>,
+    pub layout: ChallengeLayout,
+    /// The fold chain the child ran.
+    pub step: QueryStep,
+    pub rounds: Vec<FoldRound>,
+    /// The final fold's membership path into the child's committed last FRI layer.
+    pub path: (Vec<[u64; 4]>, Vec<bool>),
+    /// The two composition-value paths into the child's committed compRoot.
+    pub comp_path: CompMembership,
+}
+
+pub struct TreeNodeResult {
+    pub proof: Vec<u8>,
+    pub log_size: u32,
+    pub num_folds: usize,
+    pub depth: usize,
+    pub comp_depth: usize,
+    pub challenges: Vec<rv::QueryChallenges>,
+    pub finals: Vec<u128>,
+    pub runs: Vec<channel::ChannelRun>,
+    /// Per-path roots, in `path_depths` order: N final-fold, N comp, N compNeg.
+    pub roots: Vec<[u64; 4]>,
+}
+
+/// Everything a tree node's two Merkle-side inputs are derived from, gathered
+/// once so prove and verify cannot disagree about the ordering.
+struct NodeShape {
+    num_folds: usize,
+    depth: usize,
+    comp_depth: usize,
+    log_size: u32,
+    challenges: Vec<rv::QueryChallenges>,
+    finals: Vec<u128>,
+    leaves: Vec<[u64; 4]>,
+    sibs: Vec<Vec<[u64; 4]>>,
+    bits: Vec<Vec<bool>>,
+    indices: Vec<u32>,
+    depths: Vec<usize>,
+    transcripts: Vec<Vec<channel::Step>>,
+    queries: Vec<(QueryStep, Vec<FoldRound>)>,
+}
+
+fn node_shape(children: &[TreeChild]) -> Result<NodeShape, String> {
+    if children.is_empty() {
+        return Err("a node needs ≥ 1 child".into());
+    }
+    if children.len() > rv::MAX_QUERIES {
+        return Err(format!("child count {} exceeds MAX_QUERIES {}", children.len(), rv::MAX_QUERIES));
+    }
+    let num_folds = children[0].rounds.len();
+    if num_folds > rv::MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
+    }
+    let depth = children[0].path.0.len();
+    let comp_depth = children[0].comp_path.0.len();
+    if depth == 0 || comp_depth == 0 {
+        return Err("both path depths must be ≥ 1".into());
+    }
+    if depth > merkle::MAX_DEPTH || comp_depth > merkle::MAX_DEPTH {
+        return Err(format!("a path depth exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
+    }
+
+    let mut challenges = Vec::with_capacity(children.len());
+    for (i, c) in children.iter().enumerate() {
+        if c.rounds.len() != num_folds {
+            return Err(format!(
+                "child {i} has {} fold rounds, child 0 has {num_folds}", c.rounds.len()));
+        }
+        if c.layout.alpha_at.len() != 1 + num_folds {
+            return Err(format!(
+                "child {i}'s layout names {} alphas, expected {}",
+                c.layout.alpha_at.len(), 1 + num_folds));
+        }
+        if c.path.0.len() != depth || c.path.1.len() != depth {
+            return Err(format!("child {i}'s final-fold path is not depth {depth}"));
+        }
+        let (ps, pb, ns, nb) = &c.comp_path;
+        if ps.len() != comp_depth || pb.len() != comp_depth
+            || ns.len() != comp_depth || nb.len() != comp_depth
+        {
+            return Err(format!("child {i}'s composition paths are not depth {comp_depth}"));
+        }
+
+        // The binding this node exists for, checked before it is proved.
+        let derived = derive_challenges(&c.steps, &c.layout)?;
+        let ch = rv::query_challenges(&c.step, &c.rounds);
+        if ch.z_x != derived.z_x {
+            return Err(format!("child {i}: z_x does not match its transcript's"));
+        }
+        if ch.alphas != derived.alphas {
+            return Err(format!("child {i}: fold challenges do not match its transcript's"));
+        }
+        challenges.push(ch);
+    }
+
+    let queries: Vec<(QueryStep, Vec<FoldRound>)> =
+        children.iter().map(|c| (c.step, c.rounds.clone())).collect();
+    let transcripts: Vec<Vec<channel::Step>> = children.iter().map(|c| c.steps.clone()).collect();
+    let finals = rv::recursive_queries_final(&queries);
+
+    // Path order is `composition_t8`'s, reused rather than restated: N
+    // final-fold, then N compValue, then N compValueNeg.
+    let mut leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_pos)));
+    leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_neg)));
+
+    let mut sibs: Vec<Vec<[u64; 4]>> = children.iter().map(|c| c.path.0.clone()).collect();
+    sibs.extend(children.iter().map(|c| c.comp_path.0.clone()));
+    sibs.extend(children.iter().map(|c| c.comp_path.2.clone()));
+
+    let mut bits: Vec<Vec<bool>> = children.iter().map(|c| c.path.1.clone()).collect();
+    bits.extend(children.iter().map(|c| c.comp_path.1.clone()));
+    bits.extend(children.iter().map(|c| c.comp_path.3.clone()));
+
+    let indices: Vec<u32> = bits.iter().map(|b| merkle::bits_to_index(b)).collect();
+    let depths = path_depths(children.len(), depth, comp_depth);
+
+    let log_size = channel::compute_log_size_multi(&transcripts)
+        .max(rv::compute_log_size(children.len() * (1 + num_folds)))
+        .max(merkle::compute_log_size_multi_var(&depths));
+
+    Ok(NodeShape {
+        num_folds, depth, comp_depth, log_size,
+        challenges, finals, leaves, sibs, bits, indices, depths,
+        transcripts, queries,
+    })
+}
+
+/// `log_size` a tree node of this shape uses.
+pub fn tree_node_log_size(children: &[TreeChild]) -> Result<u32, String> {
+    Ok(node_shape(children)?.log_size)
+}
+
+fn mix_public_tree(
+    ch: &mut Blake2sM31Channel,
+    sh: &NodeShape,
+    runs: &[channel::ChannelRun],
+    roots: &[[u64; 4]],
+) {
+    let w = |v: u64| (v % M31_P) as u32;
+    let mut v = vec![sh.queries.len() as u32, sh.depth as u32, sh.comp_depth as u32];
+    for ((s, _), t) in sh.queries.iter().zip(sh.transcripts.iter()) {
+        v.push(s.2);
+        v.push(t.len() as u32);
+    }
+    for f in &sh.finals {
+        v.extend(crate::recursive::qm31_mul_air::limbs(*f).iter().map(|&x| x as u32));
+    }
+    for l in &sh.leaves {
+        v.extend(l.iter().map(|&x| w(x)));
+    }
+    v.extend(sh.indices.iter().copied());
+    for r in roots {
+        v.extend(r.iter().map(|&x| w(x)));
+    }
+    for r in runs {
+        v.extend(r.digest.iter().map(|&d| w(d)));
+    }
+    ch.mix_u32s(&v);
+}
+
+fn tree_preproc_ids() -> Vec<PreProcessedColumnId> {
+    let mut ids = rv::preprocessed_column_ids();
+    ids.extend(merkle::preprocessed_column_ids());
+    ids.extend(channel::preprocessed_column_ids());
+    ids
+}
+
+fn canonical_tree_root(
+    sh: &NodeShape,
+    runs: &[channel::ChannelRun],
+    roots: &[[u64; 4]],
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(sh.log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(sh.log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut cols = rv::build_preproc(&sh.finals, &sh.challenges, sh.num_folds, sh.log_size);
+    cols.extend(merkle::build_preproc_multi_var(
+        &sh.leaves, &sh.indices, roots, &sh.depths, sh.log_size));
+    cols.extend(channel::build_preproc_multi(&sh.transcripts, runs, sh.log_size));
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(cols);
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
+fn tree_components(
+    log_size: u32,
+) -> (rv::RecursiveVerifierComponent, merkle::MerklePathT8Component, channel::ChannelT8Component) {
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&tree_preproc_ids());
+    let rv_comp = rv::RecursiveVerifierComponent::new(
+        &mut alloc,
+        rv::RecursiveVerifierEval { log_n_rows: log_size },
+        SecureField::from(0u32),
+    );
+    let merkle_comp = merkle::MerklePathT8Component::new(
+        &mut alloc,
+        merkle::MerklePathT8Eval { log_n_rows: log_size },
+        SecureField::from(0u32),
+    );
+    let chan_comp = channel::ChannelT8Component::new(
+        &mut alloc,
+        channel::ChannelT8Eval { log_n_rows: log_size },
+        SecureField::from(0u32),
+    );
+    (rv_comp, merkle_comp, chan_comp)
+}
+
+/// Prove a complete tree node.
+///
+/// For each child: its fold chain ran under the challenges its own transcript
+/// produces (the channel component), its final fold is a member of the FRI layer
+/// it committed to, and its composition values are members of its compRoot (the
+/// Merkle component). Value-bound end to end, in one proof.
+pub fn prove_tree_node(children: &[TreeChild]) -> Result<TreeNodeResult, String> {
+    let sh = node_shape(children)?;
+    if sh.log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE) {
+        return Err(format!("tree node log_size {} too large", sh.log_size));
+    }
+
+    let (rv_main, rv_preproc) = rv::build_trace_multi(&sh.queries, sh.log_size);
+    let (merkle_main, roots) =
+        merkle::build_trace_multi(&sh.leaves, &sh.sibs, &sh.bits, sh.log_size);
+    let merkle_preproc = merkle::build_preproc_multi_var(
+        &sh.leaves, &sh.indices, &roots, &sh.depths, sh.log_size);
+    let (chan_main, runs) = channel::build_trace_multi(&sh.transcripts, sh.log_size);
+    let chan_preproc = channel::build_preproc_multi(&sh.transcripts, &runs, sh.log_size);
+
+    let config = make_config(sh.log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(sh.log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let fs = &mut Blake2sM31Channel::default();
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+
+    let mut preproc = rv_preproc;
+    preproc.extend(merkle_preproc);
+    preproc.extend(chan_preproc);
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(preproc);
+    tree.commit(fs);
+
+    let mut main = rv_main;
+    main.extend(merkle_main);
+    main.extend(chan_main);
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(main);
+    tree.commit(fs);
+
+    mix_public_tree(fs, &sh, &runs, &roots);
+
+    let (rv_comp, merkle_comp, chan_comp) = tree_components(sh.log_size);
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
+        &[&rv_comp, &merkle_comp, &chan_comp], fs, scheme)
+        .map_err(|e| format!("tree node prove error: {e:?}"))?;
+    let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("tree node serialize error: {e:?}"))?;
+
+    Ok(TreeNodeResult {
+        proof: bytes,
+        log_size: sh.log_size,
+        num_folds: sh.num_folds,
+        depth: sh.depth,
+        comp_depth: sh.comp_depth,
+        challenges: sh.challenges,
+        finals: sh.finals,
+        runs,
+        roots,
+    })
+}
+
+/// Verify a tree node against the children it claims.
+///
+/// The verifier re-derives every challenge and re-hashes every leaf, so a proof
+/// verifies only against the children it was built from.
+pub fn verify_tree_node(
+    proof_bytes: &[u8],
+    log_size: u32,
+    children: &[TreeChild],
+    roots: &[[u64; 4]],
+) -> Result<bool, String> {
+    let sh = node_shape(children)?;
+    if log_size != sh.log_size {
+        return Err(format!("log_size {log_size} is not canonical for this node"));
+    }
+    if roots.len() != sh.depths.len() {
+        return Err(format!("expected {} roots, got {}", sh.depths.len(), roots.len()));
+    }
+    let (_, runs) = channel::build_trace_multi(&sh.transcripts, sh.log_size);
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("tree node deserialize error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
+
+    let (rv_comp, merkle_comp, chan_comp) = tree_components(log_size);
+    let components: [&dyn Component; 3] = [&rv_comp, &merkle_comp, &chan_comp];
+
+    let fs = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let mut sizes: Vec<Vec<u32>> = rv_comp.trace_log_degree_bounds().to_vec();
+    for (i, b) in merkle_comp.trace_log_degree_bounds().iter().enumerate() {
+        sizes[i].extend(b.iter().copied());
+    }
+    for (i, b) in chan_comp.trace_log_degree_bounds().iter().enumerate() {
+        sizes[i].extend(b.iter().copied());
+    }
+    if proof.commitments.len() < 2 {
+        return Err(format!(
+            "malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    if proof.commitments[0] != canonical_tree_root(&sh, &runs, roots) {
+        return Ok(false);
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], fs);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], fs);
+
+    mix_public_tree(fs, &sh, &runs, roots);
+
+    let result = verify::<Blake2sM31MerkleChannel>(&components, fs, commitment_scheme, proof);
+    Ok(result.is_ok())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -976,5 +1334,109 @@ mod tests {
             Ok(r) => r, Err(e) => panic!("prove failed: {e}"),
         };
         assert!(verify_aggregation_node(&r.proof, r.log_size, &children).unwrap());
+    }
+
+    // ── The complete tree node ───────────────────────────────────────────────
+
+    fn rand_node(seed: &mut u64) -> [u64; 4] {
+        [rand_m31(seed), rand_m31(seed), rand_m31(seed), rand_m31(seed)]
+    }
+
+    fn tree_child(
+        num_folds: usize,
+        depth: usize,
+        comp_depth: usize,
+        salt: u32,
+        seed: &mut u64,
+    ) -> TreeChild {
+        let c = child(num_folds, salt, seed);
+        let mk = |d: usize, seed: &mut u64| -> (Vec<[u64; 4]>, Vec<bool>) {
+            (
+                (0..d).map(|_| rand_node(seed)).collect(),
+                (0..d).map(|_| rand_m31(seed) & 1 == 1).collect(),
+            )
+        };
+        let path = mk(depth, seed);
+        let (ps, pb) = mk(comp_depth, seed);
+        let (ns, nb) = mk(comp_depth, seed);
+        TreeChild {
+            steps: c.steps,
+            layout: c.layout,
+            step: c.step,
+            rounds: c.rounds,
+            path,
+            comp_path: (ps, pb, ns, nb),
+        }
+    }
+
+    /// The tree's node, complete: channel binding AND membership, in one proof.
+    #[test]
+    fn a_two_child_tree_node_proves_and_verifies() {
+        let mut s = 0x4D6_u64;
+        let children = vec![
+            tree_child(2, 2, 3, 0xC1, &mut s),
+            tree_child(2, 2, 3, 0xC2, &mut s),
+        ];
+        let r = match prove_tree_node(&children) {
+            Ok(r) => r,
+            Err(e) => panic!("prove failed: {e}"),
+        };
+        // Path order is composition_t8's: N final-fold, N comp, N compNeg.
+        assert_eq!(r.roots.len(), 6);
+        assert_eq!(r.challenges.len(), 2);
+        assert_eq!(r.runs.len(), 2);
+        assert_ne!(r.runs[0].digest, r.runs[1].digest);
+
+        assert!(verify_tree_node(&r.proof, r.log_size, &children, &r.roots).unwrap(),
+                "an honest tree node must verify");
+    }
+
+    /// The channel binding still holds with the membership components present —
+    /// adding them must not create a path around it.
+    #[test]
+    fn a_tree_node_still_refuses_a_foreign_challenge() {
+        let mut s = 0x5E7_u64;
+        let mut children = vec![
+            tree_child(2, 2, 3, 0xD1, &mut s),
+            tree_child(2, 2, 3, 0xD2, &mut s),
+        ];
+        children[1].step.3 ^= 1; // a z_x the transcript did not produce
+        let err = match prove_tree_node(&children) {
+            Ok(_) => panic!("a foreign challenge must not be provable"),
+            Err(e) => e,
+        };
+        assert!(err.contains("child 1") && err.contains("z_x"), "unexpected error: {err}");
+    }
+
+    /// Membership is real: a tampered root must not verify. Without this the
+    /// Merkle component would be present but unbound, and a child could fold to
+    /// anything.
+    #[test]
+    fn a_tampered_root_is_rejected() {
+        let mut s = 0x6F8_u64;
+        let children = vec![tree_child(2, 2, 2, 0xE1, &mut s)];
+        let r = match prove_tree_node(&children) {
+            Ok(r) => r, Err(e) => panic!("prove failed: {e}"),
+        };
+        let mut bad = r.roots.clone();
+        bad[0][0] = (bad[0][0] + 1) % M31;
+        assert!(!verify_tree_node(&r.proof, r.log_size, &children, &bad).unwrap(),
+                "a tampered final-fold root must not verify");
+    }
+
+    #[test]
+    fn a_tree_node_checks_its_child_shapes() {
+        let mut s = 0x709_u64;
+        let a = tree_child(2, 2, 3, 0xF1, &mut s);
+        let mut b = tree_child(2, 3, 3, 0xF2, &mut s); // a different path depth
+        assert!(prove_tree_node(&[a.clone(), b.clone()]).is_err(),
+                "mismatched final-fold depths must be refused");
+
+        b = tree_child(2, 2, 3, 0xF3, &mut s);
+        b.comp_path.0.pop(); // a ragged composition path
+        assert!(prove_tree_node(&[a, b]).is_err(),
+                "a comp path of the wrong depth must be refused");
+
+        assert!(prove_tree_node(&[]).is_err(), "an empty node is meaningless");
     }
 }

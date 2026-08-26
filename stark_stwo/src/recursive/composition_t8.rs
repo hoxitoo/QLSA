@@ -335,7 +335,11 @@ pub fn verify_query_membership_t8(
 /// t=8 Merkle paths of `depth` compressions (22 rows each).
 /// Path depths for the 3N paths: N final-fold paths, then N compValue and N
 /// compValueNeg paths (which are deeper — see [`CompMembership`]).
-fn path_depths(n_queries: usize, depth: usize, comp_depth: usize) -> Vec<usize> {
+/// Path order and per-path depth: N final-fold paths, then N compValue, then N
+/// compValueNeg. `pub(crate)` so the tree node reuses the ordering rather than
+/// restating it — the two must agree or the Merkle component authenticates the
+/// wrong leaves.
+pub(crate) fn path_depths(n_queries: usize, depth: usize, comp_depth: usize) -> Vec<usize> {
     let mut d = vec![depth; n_queries];
     d.extend(std::iter::repeat(comp_depth).take(2 * n_queries));
     d
