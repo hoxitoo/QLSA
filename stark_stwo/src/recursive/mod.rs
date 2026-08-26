@@ -207,6 +207,7 @@
 
 pub mod channel_air;
 pub mod channel_t8_air;
+pub mod composition_channel_t8;
 pub mod composition;
 pub mod composition_t16;
 pub mod composition_t8;
