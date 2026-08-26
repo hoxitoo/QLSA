@@ -425,6 +425,269 @@ pub fn verify_channel_bound_query(
     Ok(result.is_ok())
 }
 
+// ── The two-child (in general N-child) aggregation node ──────────────────────
+
+/// One child of an aggregation node.
+///
+/// `steps`/`layout` are the child's transcript and where its challenges sit in
+/// it; `step`/`rounds` are the fold chain the child ran. The node proves the
+/// latter used exactly the challenges the former produces.
+#[derive(Clone)]
+pub struct Child {
+    pub steps: Vec<channel::Step>,
+    pub layout: ChallengeLayout,
+    pub step: QueryStep,
+    pub rounds: Vec<FoldRound>,
+}
+
+pub struct AggregationNodeResult {
+    pub proof: Vec<u8>,
+    pub log_size: u32,
+    pub num_folds: usize,
+    pub challenges: Vec<rv::QueryChallenges>,
+    pub finals: Vec<u128>,
+    pub runs: Vec<channel::ChannelRun>,
+}
+
+/// `log_size` a node of this shape uses. Both components share it, as elsewhere
+/// in the composition family.
+pub fn aggregation_node_log_size(children: &[Child]) -> u32 {
+    let transcripts: Vec<Vec<channel::Step>> = children.iter().map(|c| c.steps.clone()).collect();
+    let num_folds = children.first().map(|c| c.rounds.len()).unwrap_or(0);
+    channel::compute_log_size_multi(&transcripts)
+        .max(rv::compute_log_size(children.len() * (1 + num_folds)))
+}
+
+fn check_children(children: &[Child]) -> Result<(Vec<rv::QueryChallenges>, usize), String> {
+    if children.is_empty() {
+        return Err("a node needs ≥ 1 child".into());
+    }
+    let num_folds = children[0].rounds.len();
+    if num_folds > rv::MAX_NUM_FOLDS {
+        return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
+    }
+    let mut out = Vec::with_capacity(children.len());
+    for (i, c) in children.iter().enumerate() {
+        // `rv::build_preproc` takes ONE fold count for every query, so a node's
+        // children must share a shape. In a tree they do; saying so here beats
+        // a mismatch surfacing as a malformed trace.
+        if c.rounds.len() != num_folds {
+            return Err(format!(
+                "child {i} has {} fold rounds, child 0 has {num_folds}", c.rounds.len()));
+        }
+        if c.layout.alpha_at.len() != 1 + num_folds {
+            return Err(format!(
+                "child {i}'s layout names {} alphas, expected {}",
+                c.layout.alpha_at.len(), 1 + num_folds));
+        }
+        let derived = derive_challenges(&c.steps, &c.layout)?;
+        let ch = rv::query_challenges(&c.step, &c.rounds);
+        if ch.z_x != derived.z_x {
+            return Err(format!("child {i}: z_x does not match its transcript's"));
+        }
+        if ch.alphas != derived.alphas {
+            return Err(format!("child {i}: fold challenges do not match its transcript's"));
+        }
+        out.push(ch);
+    }
+    Ok((out, num_folds))
+}
+
+/// Prove an aggregation node: every child's fold chain ran under the challenges
+/// its OWN transcript produces.
+///
+/// This is the tree's internal node. Two children is the binary case; the
+/// function takes N because the shape is the same and a wider node is
+/// occasionally useful at the bottom.
+pub fn prove_aggregation_node(children: &[Child]) -> Result<AggregationNodeResult, String> {
+    let (challenges, num_folds) = check_children(children)?;
+
+    let log_size = aggregation_node_log_size(children);
+    if log_size > rv::MAX_LOG_SIZE.min(channel::MAX_LOG_SIZE) {
+        return Err(format!("node log_size {log_size} too large"));
+    }
+
+    let queries: Vec<(QueryStep, Vec<FoldRound>)> =
+        children.iter().map(|c| (c.step, c.rounds.clone())).collect();
+    let transcripts: Vec<Vec<channel::Step>> = children.iter().map(|c| c.steps.clone()).collect();
+
+    let finals = rv::recursive_queries_final(&queries);
+    let (rv_main, rv_preproc) = rv::build_trace_multi(&queries, log_size);
+    let (chan_main, runs) = channel::build_trace_multi(&transcripts, log_size);
+    let chan_preproc = channel::build_preproc_multi(&transcripts, &runs, log_size);
+
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let fs = &mut Blake2sM31Channel::default();
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+
+    let mut preproc_cols = rv_preproc;
+    preproc_cols.extend(chan_preproc);
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(preproc_cols);
+    tree.commit(fs);
+
+    let mut main_cols = rv_main;
+    main_cols.extend(chan_main);
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(main_cols);
+    tree.commit(fs);
+
+    mix_public_node(fs, children, &finals, &runs);
+
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&combined_preproc_ids());
+    let rv_comp = rv::RecursiveVerifierComponent::new(
+        &mut alloc,
+        rv::RecursiveVerifierEval { log_n_rows: log_size },
+        SecureField::from(0u32),
+    );
+    let chan_comp = channel::ChannelT8Component::new(
+        &mut alloc,
+        channel::ChannelT8Eval { log_n_rows: log_size },
+        SecureField::from(0u32),
+    );
+
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&rv_comp, &chan_comp], fs, scheme)
+        .map_err(|e| format!("aggregation node prove error: {e:?}"))?;
+    let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
+        .map_err(|e| format!("aggregation node serialize error: {e:?}"))?;
+
+    Ok(AggregationNodeResult {
+        proof: bytes,
+        log_size,
+        num_folds,
+        challenges,
+        finals,
+        runs,
+    })
+}
+
+fn mix_public_node(
+    ch: &mut Blake2sM31Channel,
+    children: &[Child],
+    finals: &[u128],
+    runs: &[channel::ChannelRun],
+) {
+    let mut v = vec![children.len() as u32];
+    for c in children {
+        v.push(c.step.2);
+        v.push(c.steps.len() as u32);
+    }
+    for f in finals {
+        v.extend(crate::recursive::qm31_mul_air::limbs(*f).iter().map(|&x| x as u32));
+    }
+    for r in runs {
+        v.extend(r.digest.iter().map(|&d| (d % M31_P) as u32));
+    }
+    ch.mix_u32s(&v);
+}
+
+fn canonical_node_root(
+    children: &[Child],
+    challenges: &[rv::QueryChallenges],
+    finals: &[u128],
+    runs: &[channel::ChannelRun],
+    num_folds: usize,
+    log_size: u32,
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let transcripts: Vec<Vec<channel::Step>> = children.iter().map(|c| c.steps.clone()).collect();
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut cols = rv::build_preproc(finals, challenges, num_folds, log_size);
+    cols.extend(channel::build_preproc_multi(&transcripts, runs, log_size));
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(cols);
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
+/// Verify an aggregation node.
+///
+/// The verifier is handed the CHILDREN — transcripts and fold-chain inputs — and
+/// re-derives every challenge itself, so a proof only verifies against the
+/// children it was actually built from.
+pub fn verify_aggregation_node(
+    proof_bytes: &[u8],
+    log_size: u32,
+    children: &[Child],
+) -> Result<bool, String> {
+    let (challenges, num_folds) = check_children(children)?;
+    if log_size != aggregation_node_log_size(children) {
+        return Err(format!("log_size {log_size} is not canonical for this node"));
+    }
+
+    let queries: Vec<(QueryStep, Vec<FoldRound>)> =
+        children.iter().map(|c| (c.step, c.rounds.clone())).collect();
+    let transcripts: Vec<Vec<channel::Step>> = children.iter().map(|c| c.steps.clone()).collect();
+    let finals = rv::recursive_queries_final(&queries);
+    let (_, runs) = channel::build_trace_multi(&transcripts, log_size);
+
+    let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+        bincode::serde::decode_from_slice(
+            proof_bytes,
+            bincode::config::standard().with_limit::<MAX_PROOF_BYTES>(),
+        )
+        .map_err(|e| format!("aggregation node deserialize error: {e:?}"))?;
+
+    let mut config = PcsConfig::default();
+    config.fri_config.log_blowup_factor = LOG_BLOWUP;
+    config.fri_config.n_queries = N_FRI_QUERIES;
+    config.pow_bits = POW_BITS;
+
+    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&combined_preproc_ids());
+    let rv_comp = rv::RecursiveVerifierComponent::new(
+        &mut alloc,
+        rv::RecursiveVerifierEval { log_n_rows: log_size },
+        SecureField::from(0u32),
+    );
+    let chan_comp = channel::ChannelT8Component::new(
+        &mut alloc,
+        channel::ChannelT8Eval { log_n_rows: log_size },
+        SecureField::from(0u32),
+    );
+    let components: [&dyn Component; 2] = [&rv_comp, &chan_comp];
+
+    let fs = &mut Blake2sM31Channel::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+    let sizes = rv_comp
+        .trace_log_degree_bounds()
+        .iter()
+        .zip(chan_comp.trace_log_degree_bounds().iter())
+        .map(|(a, b)| {
+            let mut v = a.clone();
+            v.extend(b.iter().copied());
+            v
+        })
+        .collect::<Vec<_>>();
+    if proof.commitments.len() < 2 {
+        return Err(format!(
+            "malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
+    }
+    if proof.commitments[0]
+        != canonical_node_root(children, &challenges, &finals, &runs, num_folds, log_size)
+    {
+        return Ok(false);
+    }
+    commitment_scheme.commit(proof.commitments[0], &sizes[0], fs);
+    commitment_scheme.commit(proof.commitments[1], &sizes[1], fs);
+
+    mix_public_node(fs, children, &finals, &runs);
+
+    let result = verify::<Blake2sM31MerkleChannel>(&components, fs, commitment_scheme, proof);
+    Ok(result.is_ok())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -624,5 +887,94 @@ mod tests {
             &r.proof, r.log_size, &steps, &layout, num_folds,
             step.2, r.final_fold, r.challenges.comp_pos, r.challenges.comp_neg,
             &r.challenges.invs[..1]).is_err());
+    }
+
+    // ── The aggregation node ─────────────────────────────────────────────────
+
+    fn child(num_folds: usize, salt: u32, seed: &mut u64) -> Child {
+        let (steps, layout) = transcript(num_folds, salt);
+        let derived = derive_challenges(&steps, &layout).unwrap();
+        let (step, rounds) = query_under(&derived, num_folds, seed);
+        Child { steps, layout, step, rounds }
+    }
+
+    /// The tree's internal node: two children, each bound to its OWN transcript.
+    #[test]
+    fn a_two_child_node_proves_and_verifies() {
+        let num_folds = 2;
+        let mut s = 0xE11_u64;
+        // Different salts, so genuinely different transcripts — two copies of one
+        // child would prove nothing about handling two.
+        let children = vec![child(num_folds, 0x71, &mut s), child(num_folds, 0x72, &mut s)];
+        assert_ne!(children[0].steps, children[1].steps);
+
+        let r = match prove_aggregation_node(&children) {
+            Ok(r) => r,
+            Err(e) => panic!("prove failed: {e}"),
+        };
+        assert_eq!(r.challenges.len(), 2);
+        assert_eq!(r.runs.len(), 2);
+        // Each child got its own challenges, not a shared set.
+        assert_ne!(r.challenges[0].z_x, r.challenges[1].z_x);
+        assert_ne!(r.runs[0].digest, r.runs[1].digest);
+
+        assert!(verify_aggregation_node(&r.proof, r.log_size, &children).unwrap(),
+                "an honest two-child node must verify");
+    }
+
+    /// The binding, at node level: one child running under a foreign challenge
+    /// must sink the whole node.
+    #[test]
+    fn a_node_with_one_bad_child_cannot_be_proved() {
+        let num_folds = 2;
+        let mut s = 0xF22_u64;
+        let mut children = vec![child(num_folds, 0x81, &mut s), child(num_folds, 0x82, &mut s)];
+        children[1].rounds[0].1 ^= 1;
+
+        let err = match prove_aggregation_node(&children) {
+            Ok(_) => panic!("a child under a foreign challenge must not be provable"),
+            Err(e) => e,
+        };
+        assert!(err.contains("child 1"), "the error should name the child: {err}");
+    }
+
+    /// Children must not be swappable: each is bound to its own transcript, so
+    /// exchanging them changes what the node claims.
+    #[test]
+    fn children_cannot_be_swapped() {
+        let num_folds = 2;
+        let mut s = 0x1A3_u64;
+        let children = vec![child(num_folds, 0x91, &mut s), child(num_folds, 0x92, &mut s)];
+        let r = match prove_aggregation_node(&children) {
+            Ok(r) => r, Err(e) => panic!("prove failed: {e}"),
+        };
+        let swapped = vec![children[1].clone(), children[0].clone()];
+        assert!(!verify_aggregation_node(&r.proof, r.log_size, &swapped).unwrap(),
+                "swapped children must not verify");
+    }
+
+    #[test]
+    fn a_node_rejects_mismatched_child_shapes() {
+        let mut s = 0x2B4_u64;
+        let a = child(2, 0xA1, &mut s);
+        let b = child(3, 0xA2, &mut s); // a different fold count
+        let err = match prove_aggregation_node(&[a, b]) {
+            Ok(_) => panic!("mismatched fold counts must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.contains("fold rounds"), "unexpected error: {err}");
+        assert!(prove_aggregation_node(&[]).is_err(), "an empty node is meaningless");
+    }
+
+    /// A node is the same object however many children it has, so the binary
+    /// case is not special-cased anywhere.
+    #[test]
+    fn a_one_child_node_is_the_degenerate_case_of_the_same_thing() {
+        let mut s = 0x3C5_u64;
+        let children = vec![child(2, 0xB1, &mut s)];
+        let r = match prove_aggregation_node(&children) {
+            Ok(r) => r, Err(e) => panic!("prove failed: {e}"),
+        };
+        assert!(verify_aggregation_node(&r.proof, r.log_size, &children).unwrap());
     }
 }

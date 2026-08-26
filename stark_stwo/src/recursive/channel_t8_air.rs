@@ -592,6 +592,212 @@ pub fn build_trace(
     )
 }
 
+// ── Multiple independent transcripts in one trace ────────────────────────────
+//
+// A two-child aggregation node derives BOTH children's challenges, so one proof
+// must carry two channel runs that each start from the zero state. The AIR
+// already expresses that: `is_first_block` zeroes the carried state, so marking
+// it at the start of EVERY transcript — rather than only at row 0 — gives
+// independent runs laid out back to back. Same trick `merkle_path_t8_air` uses
+// for multiple paths; the AIR itself is unchanged.
+
+/// Blocks a list of transcripts occupies.
+pub fn total_blocks(transcripts: &[Vec<Step>]) -> usize {
+    transcripts.iter().map(|t| t.len()).sum()
+}
+
+/// Smallest `log_size` holding every transcript.
+pub fn compute_log_size_multi(transcripts: &[Vec<Step>]) -> u32 {
+    compute_log_size(total_blocks(transcripts))
+}
+
+/// Per-transcript results of a multi-run trace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelRun {
+    pub digest: [u64; T],
+    pub drawn: Vec<(u32, u32)>,
+}
+
+/// Run several independent transcripts in one trace.
+///
+/// Each starts from the zero state; blocks are laid out in order.
+pub fn build_trace_multi(
+    transcripts: &[Vec<Step>],
+    log_size: u32,
+) -> (TraceColumns, Vec<ChannelRun>) {
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut cols: Vec<Vec<BaseField>> = vec![vec![bf0; n]; N_MAIN_COLS];
+    let mut runs: Vec<ChannelRun> = Vec::with_capacity(transcripts.len());
+    let mut block = 0usize;
+    let cap = n / N_ROUNDS;
+
+    for steps in transcripts {
+        let mut ch = ChannelT8State::init();
+        let mut drawn = Vec::new();
+        for &sp in steps.iter() {
+            if block >= cap {
+                break;
+            }
+            let carried = ch.s;
+            let addend = match sp {
+                Step::Absorb(w) => reduce_u32(w),
+                Step::Draw => ch.n_draws as u64,
+            };
+            cols[C_WORD][block * N_ROUNDS] = m31(addend);
+            match sp {
+                Step::Absorb(w) => ch.absorb(w),
+                Step::Draw => drawn.push(ch.draw_pair()),
+            }
+
+            let mut state = carried;
+            state[0] = m31_add(state[0], addend);
+            mat_external_ref(&mut state);
+            for r in 0..N_ROUNDS {
+                let row = block * N_ROUNDS + r;
+                let (is_ext, rc) = round_schedule(r);
+                let inp = state;
+                for i in 0..T {
+                    let y = m31_add(inp[i], rc[i]);
+                    cols[C_IN + i][row] = m31(inp[i]);
+                    cols[C_SQ + i][row] = m31(m31_mul(y, y));
+                    cols[C_SBOX + i][row] = m31(sbox_ref(y));
+                }
+                let mut lin = inp;
+                if is_ext {
+                    for i in 0..T {
+                        lin[i] = sbox_ref(m31_add(inp[i], rc[i]));
+                    }
+                    mat_external_ref(&mut lin);
+                } else {
+                    lin[0] = sbox_ref(m31_add(inp[0], rc[0]));
+                    mat_internal_ref(&mut lin);
+                }
+                for i in 0..T {
+                    cols[C_OUT + i][row] = m31(lin[i]);
+                }
+                state = lin;
+            }
+            debug_assert_eq!(state, ch.s, "multi-trace block {block} diverged");
+            block += 1;
+        }
+        runs.push(ChannelRun { digest: ch.s, drawn });
+    }
+
+    for row in block * N_ROUNDS..n {
+        let prev_out: [u64; T] = if row == 0 {
+            [0u64; T]
+        } else {
+            std::array::from_fn(|i| cols[C_OUT + i][row - 1].0 as u64)
+        };
+        for i in 0..T {
+            cols[C_IN + i][row] = m31(prev_out[i]);
+            cols[C_SQ + i][row] = m31(m31_mul(prev_out[i], prev_out[i]));
+            cols[C_SBOX + i][row] = m31(sbox_ref(prev_out[i]));
+        }
+    }
+
+    for col in cols.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    (
+        cols.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect(),
+        runs,
+    )
+}
+
+/// Preprocessed columns for several independent transcripts.
+pub fn build_preproc_multi(
+    transcripts: &[Vec<Step>],
+    runs: &[ChannelRun],
+    log_size: u32,
+) -> TraceColumns {
+    let n = 1usize << log_size;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let bf0 = BaseField::from_u32_unchecked(0);
+    let one = BaseField::from_u32_unchecked(1);
+    let m31 = |v: u64| BaseField::from_u32_unchecked((v % M31_P) as u32);
+
+    let mut rc_cols: Vec<Vec<BaseField>> = (0..T).map(|_| vec![bf0; n]).collect();
+    let mut is_ext_c = vec![bf0; n];
+    let mut is_int_c = vec![bf0; n];
+    let mut is_block_c = vec![bf0; n];
+    let mut is_first_c = vec![bf0; n];
+    let mut word_c = vec![bf0; n];
+    let mut is_draw_c = vec![bf0; n];
+    let mut drawn_cols: Vec<Vec<BaseField>> = (0..2).map(|_| vec![bf0; n]).collect();
+    let mut is_last_c = vec![bf0; n];
+    let mut digest_cols: Vec<Vec<BaseField>> = (0..T).map(|_| vec![bf0; n]).collect();
+
+    let cap = n / N_ROUNDS;
+    let mut block = 0usize;
+    for (t, steps) in transcripts.iter().enumerate() {
+        let addends = step_addends(steps);
+        let mut draw_i = 0usize;
+        let first_block_of_run = block;
+        let mut placed = 0usize;
+        for (b, sp) in steps.iter().enumerate() {
+            if block >= cap {
+                break;
+            }
+            for r in 0..N_ROUNDS {
+                let row = block * N_ROUNDS + r;
+                let (is_ext, rc) = round_schedule(r);
+                for i in 0..T {
+                    rc_cols[i][row] = m31(rc[i]);
+                }
+                if is_ext { is_ext_c[row] = one; } else { is_int_c[row] = one; }
+            }
+            let first = block * N_ROUNDS;
+            is_block_c[first] = one;
+            word_c[first] = m31(addends[b]);
+            if block == first_block_of_run {
+                is_first_c[first] = one;
+            }
+            if matches!(sp, Step::Draw) {
+                is_draw_c[first] = one;
+                if let Some(run) = runs.get(t) {
+                    if let Some(&(w0, w1)) = run.drawn.get(draw_i) {
+                        drawn_cols[0][first] = m31(w0 as u64);
+                        drawn_cols[1][first] = m31(w1 as u64);
+                    }
+                }
+                draw_i += 1;
+            }
+            block += 1;
+            placed += 1;
+        }
+        // Each run pins its OWN digest on its own last row.
+        if placed > 0 {
+            if let Some(run) = runs.get(t) {
+                let last = (block - 1) * N_ROUNDS + (N_ROUNDS - 1);
+                is_last_c[last] = one;
+                for k in 0..T {
+                    digest_cols[k][last] = m31(run.digest[k]);
+                }
+            }
+        }
+    }
+
+    let mut all = rc_cols;
+    all.push(is_ext_c);
+    all.push(is_int_c);
+    all.push(is_block_c);
+    all.push(is_first_c);
+    all.push(word_c);
+    all.push(is_draw_c);
+    all.extend(drawn_cols);
+    all.push(is_last_c);
+    all.extend(digest_cols);
+    for col in all.iter_mut() {
+        bit_reverse_coset_to_circle_domain_order(col);
+    }
+    all.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect()
+}
+
 // ── Prove / verify ───────────────────────────────────────────────────────────
 
 fn mix_public(
@@ -935,5 +1141,70 @@ mod tests {
         let want = reference.run(&steps);
         assert_eq!(digest, reference.s);
         assert_eq!(drawn, want, "the drawn challenges must be the channel's own");
+    }
+
+    // ── Multiple independent transcripts ─────────────────────────────────────
+
+    #[test]
+    fn multi_runs_are_independent_and_match_the_reference() {
+        // Two DIFFERENT transcripts: aggregating two copies of one would prove
+        // nothing about independence.
+        let a = vec![Step::Absorb(11), Step::Draw, Step::Draw];
+        let b = vec![Step::Absorb(11), Step::Absorb(29), Step::Draw];
+        let transcripts = vec![a.clone(), b.clone()];
+
+        let log_size = compute_log_size_multi(&transcripts);
+        let (_cols, runs) = build_trace_multi(&transcripts, log_size);
+        assert_eq!(runs.len(), 2);
+
+        for (run, steps) in runs.iter().zip([&a, &b]) {
+            let mut want = ChannelT8State::init();
+            let drawn = want.run(steps);
+            assert_eq!(run.digest, want.s, "digest for {steps:?}");
+            assert_eq!(run.drawn, drawn, "draws for {steps:?}");
+        }
+        // The runs must not have leaked into one another: the second starts from
+        // zero, not from the first's digest.
+        assert_ne!(runs[0].digest, runs[1].digest);
+    }
+
+    #[test]
+    fn a_multi_run_equals_the_single_run_it_contains() {
+        let steps = vec![Step::Absorb(5), Step::Draw, Step::Absorb(9)];
+        let log_size = compute_log_size_multi(std::slice::from_ref(&steps));
+        let (_c, runs) = build_trace_multi(std::slice::from_ref(&steps), log_size);
+        let (_c1, digest, drawn) = build_trace(&steps, log_size);
+        assert_eq!(runs[0].digest, digest);
+        assert_eq!(runs[0].drawn, drawn);
+    }
+
+    #[test]
+    fn multi_preproc_pins_each_run_s_own_digest() {
+        // A single shared digest column would let one run's digest stand for the
+        // other's; each must be pinned on its own last row.
+        let a = vec![Step::Absorb(3), Step::Draw];
+        let b = vec![Step::Absorb(4), Step::Draw];
+        let ts = vec![a, b];
+        let log_size = compute_log_size_multi(&ts);
+        let (_c, runs) = build_trace_multi(&ts, log_size);
+        assert_ne!(runs[0].digest, runs[1].digest);
+
+        let honest = build_preproc_multi(&ts, &runs, log_size);
+        // Swapping the two runs' results changes the tree, so the pins are
+        // per-run rather than shared.
+        let swapped = vec![runs[1].clone(), runs[0].clone()];
+        let other = build_preproc_multi(&ts, &swapped, log_size);
+        let differs = honest.iter().zip(other.iter()).any(|(x, y)| x.values != y.values);
+        assert!(differs, "swapping run results must change the preprocessed columns");
+    }
+
+    #[test]
+    fn multi_sizing_accounts_for_every_transcript() {
+        let ts = vec![
+            vec![Step::Absorb(1); 3],
+            vec![Step::Absorb(2); 5],
+        ];
+        assert_eq!(total_blocks(&ts), 8);
+        assert!(1usize << compute_log_size_multi(&ts) >= n_rows(8));
     }
 }
