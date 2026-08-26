@@ -704,19 +704,27 @@ use crate::recursive::composition_t8::{path_depths, CompMembership};
 use crate::recursive::integration::qm31_leaf_hash_t8;
 use crate::recursive::merkle_path_t8_air as merkle;
 
-/// One child of a tree node.
+/// One child STATEMENT of a tree node.
+///
+/// A child is a whole inner proof, not one of its queries. Its transcript is a
+/// property of the proof — `z_x` and the fold challenges are drawn once and every
+/// query runs under them — so grouping this way runs each transcript ONCE.
+///
+/// The first shape I wrote here was per-query, and it was both wasteful and
+/// wrong-headed: at the production 20 queries a transcript would have been
+/// replayed twenty times, taking the node's trace from log 14 to log 17 to prove
+/// the same thing repeatedly.
 #[derive(Clone)]
-pub struct TreeChild {
-    /// The child's transcript and where its challenges sit in it.
+pub struct TreeStatement {
+    /// The child proof's transcript and where its challenges sit in it.
     pub steps: Vec<channel::Step>,
     pub layout: ChallengeLayout,
-    /// The fold chain the child ran.
-    pub step: QueryStep,
-    pub rounds: Vec<FoldRound>,
-    /// The final fold's membership path into the child's committed last FRI layer.
-    pub path: (Vec<[u64; 4]>, Vec<bool>),
-    /// The two composition-value paths into the child's committed compRoot.
-    pub comp_path: CompMembership,
+    /// The child's FRI queries, all running under the transcript's challenges.
+    pub queries: Vec<(QueryStep, Vec<FoldRound>)>,
+    /// Per query: the final fold's path into the child's committed last FRI layer.
+    pub paths: Vec<(Vec<[u64; 4]>, Vec<bool>)>,
+    /// Per query: the two composition-value paths into the child's compRoot.
+    pub comp_paths: Vec<CompMembership>,
 }
 
 pub struct TreeNodeResult {
@@ -725,15 +733,18 @@ pub struct TreeNodeResult {
     pub num_folds: usize,
     pub depth: usize,
     pub comp_depth: usize,
+    /// Flattened across statements, in statement order.
     pub challenges: Vec<rv::QueryChallenges>,
     pub finals: Vec<u128>,
+    /// One per statement.
     pub runs: Vec<channel::ChannelRun>,
-    /// Per-path roots, in `path_depths` order: N final-fold, N comp, N compNeg.
+    /// Per-path roots, in `path_depths` order: Q final-fold, Q comp, Q compNeg,
+    /// where Q is the TOTAL query count across statements.
     pub roots: Vec<[u64; 4]>,
 }
 
-/// Everything a tree node's two Merkle-side inputs are derived from, gathered
-/// once so prove and verify cannot disagree about the ordering.
+/// Everything a tree node's inputs are derived from, gathered once so prove and
+/// verify cannot disagree about the ordering.
 struct NodeShape {
     num_folds: usize,
     depth: usize,
@@ -748,21 +759,23 @@ struct NodeShape {
     depths: Vec<usize>,
     transcripts: Vec<Vec<channel::Step>>,
     queries: Vec<(QueryStep, Vec<FoldRound>)>,
+    /// Queries per statement, so `mix_public` can describe the grouping.
+    counts: Vec<usize>,
 }
 
-fn node_shape(children: &[TreeChild]) -> Result<NodeShape, String> {
-    if children.is_empty() {
-        return Err("a node needs ≥ 1 child".into());
+fn node_shape(statements: &[TreeStatement]) -> Result<NodeShape, String> {
+    if statements.is_empty() {
+        return Err("a node needs ≥ 1 child statement".into());
     }
-    if children.len() > rv::MAX_QUERIES {
-        return Err(format!("child count {} exceeds MAX_QUERIES {}", children.len(), rv::MAX_QUERIES));
+    if statements[0].queries.is_empty() {
+        return Err("a statement needs ≥ 1 query".into());
     }
-    let num_folds = children[0].rounds.len();
+    let num_folds = statements[0].queries[0].1.len();
     if num_folds > rv::MAX_NUM_FOLDS {
         return Err(format!("num_folds {num_folds} exceeds MAX_NUM_FOLDS {}", rv::MAX_NUM_FOLDS));
     }
-    let depth = children[0].path.0.len();
-    let comp_depth = children[0].comp_path.0.len();
+    let depth = statements[0].paths[0].0.len();
+    let comp_depth = statements[0].comp_paths[0].0.len();
     if depth == 0 || comp_depth == 0 {
         return Err("both path depths must be ≥ 1".into());
     }
@@ -770,75 +783,104 @@ fn node_shape(children: &[TreeChild]) -> Result<NodeShape, String> {
         return Err(format!("a path depth exceeds MAX_DEPTH {}", merkle::MAX_DEPTH));
     }
 
-    let mut challenges = Vec::with_capacity(children.len());
-    for (i, c) in children.iter().enumerate() {
-        if c.rounds.len() != num_folds {
+    let mut challenges = Vec::new();
+    let mut queries: Vec<(QueryStep, Vec<FoldRound>)> = Vec::new();
+    let mut transcripts: Vec<Vec<channel::Step>> = Vec::new();
+    let mut counts = Vec::with_capacity(statements.len());
+
+    for (i, st) in statements.iter().enumerate() {
+        if st.queries.is_empty() {
+            return Err(format!("statement {i} has no queries"));
+        }
+        if st.paths.len() != st.queries.len() || st.comp_paths.len() != st.queries.len() {
+            return Err(format!("statement {i}: paths/comp_paths do not match its query count"));
+        }
+        if st.layout.alpha_at.len() != 1 + num_folds {
             return Err(format!(
-                "child {i} has {} fold rounds, child 0 has {num_folds}", c.rounds.len()));
-        }
-        if c.layout.alpha_at.len() != 1 + num_folds {
-            return Err(format!(
-                "child {i}'s layout names {} alphas, expected {}",
-                c.layout.alpha_at.len(), 1 + num_folds));
-        }
-        if c.path.0.len() != depth || c.path.1.len() != depth {
-            return Err(format!("child {i}'s final-fold path is not depth {depth}"));
-        }
-        let (ps, pb, ns, nb) = &c.comp_path;
-        if ps.len() != comp_depth || pb.len() != comp_depth
-            || ns.len() != comp_depth || nb.len() != comp_depth
-        {
-            return Err(format!("child {i}'s composition paths are not depth {comp_depth}"));
+                "statement {i}'s layout names {} alphas, expected {}",
+                st.layout.alpha_at.len(), 1 + num_folds));
         }
 
-        // The binding this node exists for, checked before it is proved.
-        let derived = derive_challenges(&c.steps, &c.layout)?;
-        let ch = rv::query_challenges(&c.step, &c.rounds);
-        if ch.z_x != derived.z_x {
-            return Err(format!("child {i}: z_x does not match its transcript's"));
+        // One transcript per STATEMENT: `z_x` and the fold challenges are drawn
+        // once for the whole proof, so every query must run under them. A query
+        // that does not is the cherry-pick this node exists to prevent.
+        let derived = derive_challenges(&st.steps, &st.layout)?;
+        for (q, (step, rounds)) in st.queries.iter().enumerate() {
+            if rounds.len() != num_folds {
+                return Err(format!(
+                    "statement {i} query {q} has {} fold rounds, expected {num_folds}",
+                    rounds.len()));
+            }
+            if st.paths[q].0.len() != depth || st.paths[q].1.len() != depth {
+                return Err(format!("statement {i} query {q}: final-fold path is not depth {depth}"));
+            }
+            let (ps, pb, ns, nb) = &st.comp_paths[q];
+            if ps.len() != comp_depth || pb.len() != comp_depth
+                || ns.len() != comp_depth || nb.len() != comp_depth
+            {
+                return Err(format!(
+                    "statement {i} query {q}: composition paths are not depth {comp_depth}"));
+            }
+            let ch = rv::query_challenges(step, rounds);
+            if ch.z_x != derived.z_x {
+                return Err(format!("statement {i} query {q}: z_x does not match its transcript's"));
+            }
+            if ch.alphas != derived.alphas {
+                return Err(format!(
+                    "statement {i} query {q}: fold challenges do not match its transcript's"));
+            }
+            challenges.push(ch);
+            queries.push((*step, rounds.clone()));
         }
-        if ch.alphas != derived.alphas {
-            return Err(format!("child {i}: fold challenges do not match its transcript's"));
-        }
-        challenges.push(ch);
+        counts.push(st.queries.len());
+        transcripts.push(st.steps.clone());
     }
 
-    let queries: Vec<(QueryStep, Vec<FoldRound>)> =
-        children.iter().map(|c| (c.step, c.rounds.clone())).collect();
-    let transcripts: Vec<Vec<channel::Step>> = children.iter().map(|c| c.steps.clone()).collect();
+    if queries.len() > rv::MAX_QUERIES {
+        return Err(format!(
+            "total query count {} exceeds MAX_QUERIES {}", queries.len(), rv::MAX_QUERIES));
+    }
+
     let finals = rv::recursive_queries_final(&queries);
 
-    // Path order is `composition_t8`'s, reused rather than restated: N
-    // final-fold, then N compValue, then N compValueNeg.
+    // Path order is `composition_t8`'s, reused rather than restated: Q
+    // final-fold, then Q compValue, then Q compValueNeg.
     let mut leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
     leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_pos)));
     leaves.extend(challenges.iter().map(|c| qm31_leaf_hash_t8(c.comp_neg)));
 
-    let mut sibs: Vec<Vec<[u64; 4]>> = children.iter().map(|c| c.path.0.clone()).collect();
-    sibs.extend(children.iter().map(|c| c.comp_path.0.clone()));
-    sibs.extend(children.iter().map(|c| c.comp_path.2.clone()));
-
-    let mut bits: Vec<Vec<bool>> = children.iter().map(|c| c.path.1.clone()).collect();
-    bits.extend(children.iter().map(|c| c.comp_path.1.clone()));
-    bits.extend(children.iter().map(|c| c.comp_path.3.clone()));
+    let mut sibs: Vec<Vec<[u64; 4]>> = Vec::new();
+    let mut bits: Vec<Vec<bool>> = Vec::new();
+    for st in statements {
+        sibs.extend(st.paths.iter().map(|(s, _)| s.clone()));
+        bits.extend(st.paths.iter().map(|(_, b)| b.clone()));
+    }
+    for st in statements {
+        sibs.extend(st.comp_paths.iter().map(|(ps, _, _, _)| ps.clone()));
+        bits.extend(st.comp_paths.iter().map(|(_, pb, _, _)| pb.clone()));
+    }
+    for st in statements {
+        sibs.extend(st.comp_paths.iter().map(|(_, _, ns, _)| ns.clone()));
+        bits.extend(st.comp_paths.iter().map(|(_, _, _, nb)| nb.clone()));
+    }
 
     let indices: Vec<u32> = bits.iter().map(|b| merkle::bits_to_index(b)).collect();
-    let depths = path_depths(children.len(), depth, comp_depth);
+    let depths = path_depths(queries.len(), depth, comp_depth);
 
     let log_size = channel::compute_log_size_multi(&transcripts)
-        .max(rv::compute_log_size(children.len() * (1 + num_folds)))
+        .max(rv::compute_log_size(queries.len() * (1 + num_folds)))
         .max(merkle::compute_log_size_multi_var(&depths));
 
     Ok(NodeShape {
         num_folds, depth, comp_depth, log_size,
         challenges, finals, leaves, sibs, bits, indices, depths,
-        transcripts, queries,
+        transcripts, queries, counts,
     })
 }
 
 /// `log_size` a tree node of this shape uses.
-pub fn tree_node_log_size(children: &[TreeChild]) -> Result<u32, String> {
-    Ok(node_shape(children)?.log_size)
+pub fn tree_node_log_size(statements: &[TreeStatement]) -> Result<u32, String> {
+    Ok(node_shape(statements)?.log_size)
 }
 
 fn mix_public_tree(
@@ -849,9 +891,15 @@ fn mix_public_tree(
 ) {
     let w = |v: u64| (v % M31_P) as u32;
     let mut v = vec![sh.queries.len() as u32, sh.depth as u32, sh.comp_depth as u32];
-    for ((s, _), t) in sh.queries.iter().zip(sh.transcripts.iter()) {
-        v.push(s.2);
+    // The GROUPING is public too: the same queries split differently across
+    // statements would be a different claim.
+    v.push(sh.counts.len() as u32);
+    for (c, t) in sh.counts.iter().zip(sh.transcripts.iter()) {
+        v.push(*c as u32);
         v.push(t.len() as u32);
+    }
+    for (s, _) in sh.queries.iter() {
+        v.push(s.2);
     }
     for f in &sh.finals {
         v.extend(crate::recursive::qm31_mul_air::limbs(*f).iter().map(|&x| x as u32));
@@ -927,8 +975,8 @@ fn tree_components(
 /// produces (the channel component), its final fold is a member of the FRI layer
 /// it committed to, and its composition values are members of its compRoot (the
 /// Merkle component). Value-bound end to end, in one proof.
-pub fn prove_tree_node(children: &[TreeChild]) -> Result<TreeNodeResult, String> {
-    let sh = node_shape(children)?;
+pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, String> {
+    let sh = node_shape(statements)?;
     if sh.log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE) {
         return Err(format!("tree node log_size {} too large", sh.log_size));
     }
@@ -993,10 +1041,10 @@ pub fn prove_tree_node(children: &[TreeChild]) -> Result<TreeNodeResult, String>
 pub fn verify_tree_node(
     proof_bytes: &[u8],
     log_size: u32,
-    children: &[TreeChild],
+    statements: &[TreeStatement],
     roots: &[[u64; 4]],
 ) -> Result<bool, String> {
-    let sh = node_shape(children)?;
+    let sh = node_shape(statements)?;
     if log_size != sh.log_size {
         return Err(format!("log_size {log_size} is not canonical for this node"));
     }
@@ -1342,100 +1390,139 @@ mod tests {
         [rand_m31(seed), rand_m31(seed), rand_m31(seed), rand_m31(seed)]
     }
 
-    fn tree_child(
+    /// One child proof: ONE transcript, `n_queries` queries under it.
+    fn statement(
         num_folds: usize,
+        n_queries: usize,
         depth: usize,
         comp_depth: usize,
         salt: u32,
         seed: &mut u64,
-    ) -> TreeChild {
-        let c = child(num_folds, salt, seed);
+    ) -> TreeStatement {
+        let (steps, layout) = transcript(num_folds, salt);
+        let derived = derive_challenges(&steps, &layout).unwrap();
         let mk = |d: usize, seed: &mut u64| -> (Vec<[u64; 4]>, Vec<bool>) {
             (
                 (0..d).map(|_| rand_node(seed)).collect(),
                 (0..d).map(|_| rand_m31(seed) & 1 == 1).collect(),
             )
         };
-        let path = mk(depth, seed);
-        let (ps, pb) = mk(comp_depth, seed);
-        let (ns, nb) = mk(comp_depth, seed);
-        TreeChild {
-            steps: c.steps,
-            layout: c.layout,
-            step: c.step,
-            rounds: c.rounds,
-            path,
-            comp_path: (ps, pb, ns, nb),
+        let mut queries = Vec::new();
+        let mut paths = Vec::new();
+        let mut comp_paths = Vec::new();
+        for _ in 0..n_queries {
+            // Every query runs under the STATEMENT's challenges — that is what
+            // makes one transcript per proof correct rather than per query.
+            queries.push(query_under(&derived, num_folds, seed));
+            paths.push(mk(depth, seed));
+            let (ps, pb) = mk(comp_depth, seed);
+            let (ns, nb) = mk(comp_depth, seed);
+            comp_paths.push((ps, pb, ns, nb));
         }
+        TreeStatement { steps, layout, queries, paths, comp_paths }
     }
 
-    /// The tree's node, complete: channel binding AND membership, in one proof.
+    /// The tree's node: two child PROOFS, each with several queries.
     #[test]
-    fn a_two_child_tree_node_proves_and_verifies() {
+    fn a_two_statement_tree_node_proves_and_verifies() {
         let mut s = 0x4D6_u64;
-        let children = vec![
-            tree_child(2, 2, 3, 0xC1, &mut s),
-            tree_child(2, 2, 3, 0xC2, &mut s),
+        let statements = vec![
+            statement(2, 3, 2, 3, 0xC1, &mut s),
+            statement(2, 3, 2, 3, 0xC2, &mut s),
         ];
-        let r = match prove_tree_node(&children) {
+        let r = match prove_tree_node(&statements) {
             Ok(r) => r,
             Err(e) => panic!("prove failed: {e}"),
         };
-        // Path order is composition_t8's: N final-fold, N comp, N compNeg.
-        assert_eq!(r.roots.len(), 6);
-        assert_eq!(r.challenges.len(), 2);
+        // 6 queries total → 18 paths (final-fold, comp, compNeg).
+        assert_eq!(r.challenges.len(), 6);
+        assert_eq!(r.roots.len(), 18);
+        // ONE channel run per statement, not per query — the whole point of
+        // grouping this way.
         assert_eq!(r.runs.len(), 2);
         assert_ne!(r.runs[0].digest, r.runs[1].digest);
+        // Queries of one statement share its challenges; the two statements differ.
+        assert_eq!(r.challenges[0].z_x, r.challenges[1].z_x);
+        assert_ne!(r.challenges[0].z_x, r.challenges[3].z_x);
 
-        assert!(verify_tree_node(&r.proof, r.log_size, &children, &r.roots).unwrap(),
+        assert!(verify_tree_node(&r.proof, r.log_size, &statements, &r.roots).unwrap(),
                 "an honest tree node must verify");
     }
 
-    /// The channel binding still holds with the membership components present —
-    /// adding them must not create a path around it.
+    /// One transcript per PROOF, not per query.
+    ///
+    /// The node's trace does grow with the query count — each query brings three
+    /// Merkle paths, and that is inherent. What must not grow with it is the
+    /// CHANNEL: `z_x` and the fold challenges are drawn once per proof, so
+    /// replaying the transcript per query would prove the same thing over and
+    /// over. At the production 84-step transcript and 20 queries that is the
+    /// difference between 168 and 1680 channel blocks.
+    #[test]
+    fn the_channel_runs_once_per_proof_not_once_per_query() {
+        let mut s = 0x8AB_u64;
+        let many = vec![statement(2, 8, 2, 2, 0xC5, &mut s)];
+        let r = match prove_tree_node(&many) {
+            Ok(r) => r, Err(e) => panic!("prove failed: {e}"),
+        };
+        assert_eq!(r.runs.len(), 1, "eight queries, one proof, one channel run");
+        assert_eq!(r.challenges.len(), 8);
+        // All eight queries ran under the SAME drawn challenges, which is what
+        // makes one run correct rather than a shortcut.
+        for c in &r.challenges[1..] {
+            assert_eq!(c.z_x, r.challenges[0].z_x);
+            assert_eq!(c.alphas, r.challenges[0].alphas);
+        }
+        assert!(verify_tree_node(&r.proof, r.log_size, &many, &r.roots).unwrap());
+    }
+
+    /// The channel binding still holds with the membership components present.
     #[test]
     fn a_tree_node_still_refuses_a_foreign_challenge() {
         let mut s = 0x5E7_u64;
-        let mut children = vec![
-            tree_child(2, 2, 3, 0xD1, &mut s),
-            tree_child(2, 2, 3, 0xD2, &mut s),
+        let mut statements = vec![
+            statement(2, 2, 2, 3, 0xD1, &mut s),
+            statement(2, 2, 2, 3, 0xD2, &mut s),
         ];
-        children[1].step.3 ^= 1; // a z_x the transcript did not produce
-        let err = match prove_tree_node(&children) {
+        statements[1].queries[1].0 .3 ^= 1; // a z_x the transcript did not produce
+        let err = match prove_tree_node(&statements) {
             Ok(_) => panic!("a foreign challenge must not be provable"),
             Err(e) => e,
         };
-        assert!(err.contains("child 1") && err.contains("z_x"), "unexpected error: {err}");
+        assert!(err.contains("statement 1") && err.contains("query 1") && err.contains("z_x"),
+                "the error should locate the query: {err}");
     }
 
-    /// Membership is real: a tampered root must not verify. Without this the
-    /// Merkle component would be present but unbound, and a child could fold to
-    /// anything.
+    /// Membership is real: a tampered root must not verify.
     #[test]
     fn a_tampered_root_is_rejected() {
         let mut s = 0x6F8_u64;
-        let children = vec![tree_child(2, 2, 2, 0xE1, &mut s)];
-        let r = match prove_tree_node(&children) {
+        let statements = vec![statement(2, 2, 2, 2, 0xE1, &mut s)];
+        let r = match prove_tree_node(&statements) {
             Ok(r) => r, Err(e) => panic!("prove failed: {e}"),
         };
         let mut bad = r.roots.clone();
         bad[0][0] = (bad[0][0] + 1) % M31;
-        assert!(!verify_tree_node(&r.proof, r.log_size, &children, &bad).unwrap(),
+        assert!(!verify_tree_node(&r.proof, r.log_size, &statements, &bad).unwrap(),
                 "a tampered final-fold root must not verify");
     }
 
     #[test]
-    fn a_tree_node_checks_its_child_shapes() {
+    fn a_tree_node_checks_its_statement_shapes() {
         let mut s = 0x709_u64;
-        let a = tree_child(2, 2, 3, 0xF1, &mut s);
-        let mut b = tree_child(2, 3, 3, 0xF2, &mut s); // a different path depth
-        assert!(prove_tree_node(&[a.clone(), b.clone()]).is_err(),
+        let a = statement(2, 2, 2, 3, 0xF1, &mut s);
+        let b = statement(2, 2, 3, 3, 0xF2, &mut s); // a different path depth
+        assert!(prove_tree_node(&[a.clone(), b]).is_err(),
                 "mismatched final-fold depths must be refused");
 
-        b = tree_child(2, 2, 3, 0xF3, &mut s);
-        b.comp_path.0.pop(); // a ragged composition path
-        assert!(prove_tree_node(&[a, b]).is_err(),
+        let mut c = statement(2, 2, 2, 3, 0xF3, &mut s);
+        c.comp_paths[0].0.pop(); // a ragged composition path
+        assert!(prove_tree_node(&[a.clone(), c]).is_err(),
                 "a comp path of the wrong depth must be refused");
+
+        let mut d = statement(2, 2, 2, 3, 0xF4, &mut s);
+        d.paths.pop(); // fewer paths than queries
+        assert!(prove_tree_node(&[a, d]).is_err(),
+                "a statement whose paths do not match its queries must be refused");
 
         assert!(prove_tree_node(&[]).is_err(), "an empty node is meaningless");
     }
