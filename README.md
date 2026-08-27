@@ -36,11 +36,22 @@ below before relying on any claim here.*
 > aggregator cannot prove a forgery. But that check is **off-chain and
 > unverifiable by the contract** — the on-chain verifier trusts the prover ran it.
 >
-> **It covers ONE signature per batch, not N.** `testnet/e2e.py` and
-> `aggregator/batcher.py` generate the ML-DSA witness proof for `tx[0]` only. The
-> remaining transactions are committed by the batch Merkle root but their
-> signatures are not proved. The separate `prove_mldsa_batch` path verifies N
-> signatures *in Rust* and proves only a hash chain over the results.
+> **What the deployed contracts enforce covers ONE signature per batch, not N.**
+> `testnet/e2e.py` and `aggregator/batcher.py` generate the ML-DSA witness proof
+> for `tx[0]` only. The remaining transactions are committed by the batch Merkle
+> root but their signatures are not proved. The separate `prove_mldsa_batch` path
+> verifies N signatures *in Rust* and proves only a hash chain over the results.
+>
+> **N-signature aggregation now works off-chain** (2026-08-27):
+> `stark.prover.prove_mldsa_aggregation_tree` folds N ML-DSA-65 signatures into
+> ONE root proof — four real signatures verified end to end. Two things separate
+> that from the claim on the tin, and both are open:
+> **(a)** no contract accepts a tree root yet, so nothing on-chain consumes it;
+> **(b)** the root proves N signatures were verified *under* a batch root, not
+> that they are that root's *members* — the batch root is a Fiat-Shamir binding,
+> not a membership proof (`docs/TECH_DEBT.md` § A-5). Wiring the root on-chain
+> without (b) would ship a contract whose guarantee is weaker than its interface
+> reads.
 >
 > Until both gaps are closed, the headline above describes the **architecture**,
 > not a property the deployed contracts enforce.
@@ -65,6 +76,110 @@ below before relying on any claim here.*
 > - `/batch/run` and `/batch/flush` support Bearer-token auth via `QLSA_API_TOKEN`;
 >   unset = open (research default — set it on any non-local deployment).
 >
+
+---
+
+## Public testnet run (Sepolia)
+
+Everything below is ready to run; it has not been exercised on a public network
+because outbound RPC is blocked in the development environment. It HAS been run
+end to end against a standalone JSON-RPC node: real ML-DSA-65 signatures through
+V23 → VFRI11 at 20 queries → recursion → `BatchRegistryV7`, finalized in one
+transaction at **13,168,471 gas**.
+
+### 0. What you need
+
+- An RPC endpoint. The public node in `.env.example` works but rate-limits, and a
+  13M-gas submission is not a small request — use Infura/Alchemy/self-hosted.
+- An account with Sepolia ETH. One submission is ~13.2M gas; **0.5 ETH** is ample
+  for deployment plus several runs. Any Sepolia faucet will do.
+- Rust nightly `2025-07-01`, Python 3.11+, Node 18+.
+
+### 1. Configure
+
+```bash
+cp .env.example .env
+```
+
+Set in `.env`:
+
+```
+PRIVATE_KEY=0x<key of the funded account>       # hardhat reads THIS name
+DEPLOYER_PRIVATE_KEY=0x<the same key>           # submit.py accepts either
+SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/<your-key>
+RPC_URL=https://sepolia.infura.io/v3/<your-key> # used by e2e.py / submit.py
+```
+
+`SEPOLIA_RPC_URL` overrides `RPC_URL` for `--network sepolia` only. Setting both
+to the same endpoint is the simple choice.
+
+### 2. Build
+
+```bash
+cd contracts && npm install && cd ..
+cd stark_stwo && maturin develop --features python --release && cd ..
+```
+
+The PyO3 extension is required — without it the prover degrades to unproven mode
+and `--dry-run` will tell you so rather than failing silently.
+
+### 3. Rehearse without spending gas
+
+```bash
+python -m testnet.e2e --stack v8 --txs 4 --dry-run
+```
+
+This runs the whole path up to submission: keypairs, signatures, batch, Merkle
+root, V23 witness, recursion. Expect proof sizes near `hints 10976 B` (LOG=10)
+and `9760 B` (LOG=8), and a line reporting 130-bit soundness. If this fails, the
+problem is local and no gas was spent finding out.
+
+### 4. Deploy
+
+```bash
+bash testnet/deploy_v8.sh --network sepolia
+```
+
+Deploys `QLSAVerifierVFRI11` + `QLSAVerifierRecursive` + `BatchRegistryV7` and
+writes the addresses to `.env.deployed` (mode 0600). Then:
+
+```bash
+cat .env.deployed >> .env
+```
+
+### 5. Submit
+
+```bash
+set -a && . ./.env && set +a
+python -m testnet.e2e --stack v8 --txs 4
+```
+
+`--stack v8` raises FRI queries to 20 on its own if you leave the default — at
+one query the recursive route costs more gas than direct verification for 16-bit
+soundness, so it refuses to run pointlessly.
+
+### 6. What to check
+
+- `gasUsed` around **13.2M**. Materially higher means something is off — compare
+  against `contracts/test/fixtures/measurements.json`, which the test suite
+  re-measures.
+- `finalized=True` and a `BatchFinalized` event. `python -m testnet.monitor`
+  follows the event stream.
+- On a registry-shape mismatch you get a clear error from `require_registry_kind`
+  before the transaction, not an opaque revert inside it.
+
+### If it fails
+
+- **`SenderNonceTooLow`** — the registry stores 0 for an unseen sender and
+  requires `newNonce > stored`, so the smallest submittable nonce is 1.
+  `testnet.e2e.build_sender_nonces()` handles the mapping; if you submit through
+  your own code, do the same.
+- **`nonce too low` before the call** — the account had transactions mined
+  between reading the counter and sending. The submitters read from `"pending"`
+  for this reason; a custom submitter should too.
+- **Out of gas above ~200 senders** — known, see `docs/TECH_DEBT.md` A-3. The
+  `MAX_SENDERS = 3000` constant is not reachable.
+
 ---
 
 ## The Problem

@@ -6941,6 +6941,65 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
+/// prove_mldsa_aggregation_tree_py(entries, batch_root, n_queries, num_folds, fan_in) -> dict
+///
+/// Aggregate N ML-DSA-65 witnesses into ONE root proof.
+///
+/// `entries` is a list of `(z, c, t1, a_hat)` — one extracted witness per
+/// signature. Every entry becomes a leaf statement and the tree folds them to a
+/// single root, whose on-chain cost does not depend on N: the node shape is a
+/// fixed point at log 16, so depth is free.
+///
+/// Returns `{"rootProof", "rootLogSize", "rootRoots", "leafCount", "depth",
+/// "nodeCount", "fanIn"}`. `nodeCount` is the prover's cost (proofs produced),
+/// as distinct from the result, which is the root alone.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (entries, batch_root, n_queries=1, num_folds=None, fan_in=2))]
+fn prove_mldsa_aggregation_tree_py(
+    py:         Python<'_>,
+    entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>)>,
+    batch_root: Vec<u8>,
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+    fan_in:     usize,
+) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
+    use pyo3::types::PyDict;
+
+    let mut conv = Vec::with_capacity(entries.len());
+    for (i, (z, c, t1, a_hat)) in entries.into_iter().enumerate() {
+        let e = (|| -> PyResult<_> {
+            Ok((_conv_z(z)?, _conv_c(c)?, _conv_t1(t1)?, _conv_a_hat(a_hat)?))
+        })()
+        .map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("signature {i}: {e}"))
+        })?;
+        conv.push(e);
+    }
+
+    let summary = vfri2_bridge::prove_mldsa_aggregation_tree(
+        &conv, &batch_root, n_queries, num_folds, fan_in,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    let d = PyDict::new(py);
+    d.set_item("rootProof", pyo3::types::PyBytes::new(py, &summary.root_proof))?;
+    d.set_item("rootLogSize", summary.root_log_size)?;
+    d.set_item(
+        "rootRoots",
+        summary
+            .root_roots
+            .iter()
+            .map(|r| r.iter().map(|&w| w as u32).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item("leafCount", summary.leaf_count)?;
+    d.set_item("depth", summary.depth)?;
+    d.set_item("nodeCount", summary.node_count)?;
+    d.set_item("fanIn", summary.fan_in)?;
+    Ok(d.into())
+}
+
 /// gen_mldsa_v23_recursive_bundles_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
 ///   -> (bundle10, bundle8)
 ///
@@ -7122,6 +7181,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_log8_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_cross_bound_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_recursive_bundles_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prove_mldsa_aggregation_tree_py, m)?)?;
     Ok(())
 }
 
