@@ -5908,6 +5908,9 @@ pub struct TreeLevel {
     /// The nodes proved at this level, left to right.
     pub nodes: Vec<crate::recursive::composition_channel_t8::TreeNodeResult>,
     /// Each node's own trace columns, which become the level above's statements.
+    ///
+    /// **Empty at the root level**, where nothing consumes them: building a
+    /// node's trace is not free, and the root has no parent to hand it to.
     pub columns: Vec<(Vec<Vec<u32>>, u32)>,
 }
 
@@ -5973,25 +5976,39 @@ pub fn prove_aggregation_tree(
     while statements.len() > 1 || levels.is_empty() {
         let mut nodes = Vec::new();
         let mut columns = Vec::new();
-        for (g, group) in statements.chunks(fan_in).enumerate() {
+        let groups: Vec<_> = statements.chunks(fan_in).collect();
+        // One group means this level IS the root: its columns feed nothing.
+        let root_level = groups.len() == 1;
+        for (g, group) in groups.iter().enumerate() {
             let proved = node::prove_tree_node(group)
                 .map_err(|e| format!("level {} node {g}: {e}", levels.len()))?;
-            let cols = node::tree_node_trace_columns(group)
-                .map_err(|e| format!("level {} node {g} columns: {e}", levels.len()))?;
             nodes.push(proved);
-            columns.push(cols);
+            if !root_level {
+                columns.push(
+                    node::tree_node_trace_columns(group)
+                        .map_err(|e| format!("level {} node {g} columns: {e}", levels.len()))?,
+                );
+            }
         }
-        let next: Result<Vec<_>, String> = columns
-            .iter()
-            .enumerate()
-            .map(|(g, (cols, depth))| {
-                tree_statement_from_columns(cols, *depth, batch_merkle_root, n_queries, num_folds)
-                    .map_err(|e| format!("level {} node {g} -> statement: {e}", levels.len()))
-            })
-            .collect();
-        let next = next?;
+        // The ROOT's statement is never consumed — nothing sits above it — and
+        // deriving one costs a full `gen_vfri11_recursion_inputs` extraction.
+        // Computing it before the break test threw that away on every tree.
+        let done = nodes.len() == 1;
+        let next: Vec<node::TreeStatement> = if done {
+            Vec::new()
+        } else {
+            columns
+                .iter()
+                .enumerate()
+                .map(|(g, (cols, depth))| {
+                    tree_statement_from_columns(
+                        cols, *depth, batch_merkle_root, n_queries, num_folds)
+                        .map_err(|e| format!("level {} node {g} -> statement: {e}", levels.len()))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
         levels.push(TreeLevel { nodes, columns });
-        if levels.last().unwrap().nodes.len() == 1 {
+        if done {
             break;
         }
         statements = next;

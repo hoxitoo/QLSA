@@ -36,11 +36,22 @@ below before relying on any claim here.*
 > aggregator cannot prove a forgery. But that check is **off-chain and
 > unverifiable by the contract** — the on-chain verifier trusts the prover ran it.
 >
-> **It covers ONE signature per batch, not N.** `testnet/e2e.py` and
-> `aggregator/batcher.py` generate the ML-DSA witness proof for `tx[0]` only. The
-> remaining transactions are committed by the batch Merkle root but their
-> signatures are not proved. The separate `prove_mldsa_batch` path verifies N
-> signatures *in Rust* and proves only a hash chain over the results.
+> **What the deployed contracts enforce covers ONE signature per batch, not N.**
+> `testnet/e2e.py` and `aggregator/batcher.py` generate the ML-DSA witness proof
+> for `tx[0]` only. The remaining transactions are committed by the batch Merkle
+> root but their signatures are not proved. The separate `prove_mldsa_batch` path
+> verifies N signatures *in Rust* and proves only a hash chain over the results.
+>
+> **N-signature aggregation now works off-chain** (2026-08-27):
+> `stark.prover.prove_mldsa_aggregation_tree` folds N ML-DSA-65 signatures into
+> ONE root proof — four real signatures verified end to end. Two things separate
+> that from the claim on the tin, and both are open:
+> **(a)** no contract accepts a tree root yet, so nothing on-chain consumes it;
+> **(b)** the root proves N signatures were verified *under* a batch root, not
+> that they are that root's *members* — the batch root is a Fiat-Shamir binding,
+> not a membership proof (`docs/TECH_DEBT.md` § A-5). Wiring the root on-chain
+> without (b) would ship a contract whose guarantee is weaker than its interface
+> reads.
 >
 > Until both gaps are closed, the headline above describes the **architecture**,
 > not a property the deployed contracts enforce.
