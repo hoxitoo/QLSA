@@ -4489,7 +4489,7 @@ impl P2T4Channel {
 
 /// Read the four BE u32 node words (bytes[16..32]) into a [u64; 4].
 #[allow(dead_code)]
-fn p2t8_node_words(node: &[u8; 32]) -> [u64; 4] {
+pub(crate) fn p2t8_node_words(node: &[u8; 32]) -> [u64; 4] {
     let mut w = [0u64; 4];
     for k in 0..4 {
         w[k] = u32::from_be_bytes(node[16 + 4 * k..20 + 4 * k].try_into().unwrap()) as u64;
@@ -4512,7 +4512,7 @@ fn p2t8_pack(words: [u64; 4]) -> [u8; 32] {
 /// Matches Poseidon2MerkleVerifierT8.hashLeaf and the `sponge_t8` padding
 /// convention (odd-length flag in capacity cell 7).
 #[allow(dead_code)]
-fn hash_leaf_cols_p2t8(col_values: &[u32]) -> [u8; 32] {
+pub(crate) fn hash_leaf_cols_p2t8(col_values: &[u32]) -> [u8; 32] {
     let vals: Vec<u64> = col_values.iter().map(|&v| v as u64).collect();
     let s = crate::poseidon2_t8::sponge_t8(&vals);
     p2t8_pack([s[0], s[1], s[2], s[3]])
@@ -4521,7 +4521,7 @@ fn hash_leaf_cols_p2t8(col_values: &[u32]) -> [u8; 32] {
 /// Wide t=8 pair hash: 8→4 compression of two 4-word nodes via a single t=8
 /// permutation.  Matches Poseidon2MerkleVerifierT8.hashPair.
 #[allow(dead_code)]
-fn hash_pair_p2t8(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn hash_pair_p2t8(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let s = crate::poseidon2_t8::compress_t8(p2t8_node_words(left), p2t8_node_words(right));
     p2t8_pack(s)
 }

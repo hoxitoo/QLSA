@@ -27,6 +27,7 @@ pub mod poseidon2_t16;
 pub mod recursive;
 pub mod trace;
 pub mod vfri2_bridge;
+pub mod batch_tree;
 
 use blake2::{Blake2s256, Digest};
 use stwo::core::air::Component;
