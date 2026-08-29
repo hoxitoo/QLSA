@@ -796,7 +796,7 @@ The **t=16** rung — the last of the node-width ladder, matching Stwo's native 
   empty array absorbs nothing, as in the rate-1 channels. Squeeze stays rate-2 (a small share of
   a verify). Matches Rust `P2T16Channel`.
 - Cross-check vectors (frozen in `vfri2_bridge.rs::test_p2t16_reference_vectors`):
-  `hashLeaf([1,2,3,4]) → [55566406, 1875114541, 1126231753, 1747661633, 1062235343, 1908581748, 1128601005, 1541813924]`
+  `hashLeaf([1,2,3,4]) → [1933241813, 1010030854, 312951712, 1497891741, 1179285824, 51901796, 1581778953, 222789585]`
   `hashPair(node[1..8],node[9..16]) → [1896676506, 1113082531, 1826142252, 1263581674, 694653155, 1856461508, 173489390, 625083048]`
   (== `permute_t16([1..16])[0..8]`, so it also pins that packing does not perturb the value)
   `mixRoot(0x11..).drawQueries(10,4) → [821, 259, 182, 183]`

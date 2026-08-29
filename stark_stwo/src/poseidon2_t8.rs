@@ -156,7 +156,13 @@ pub fn sponge_t8(values: &[u64]) -> [u64; 8] {
         for (k, &v) in rem.iter().enumerate() {
             state[k] = m31_add(state[k], v % M31_P);
         }
-        state[7] = m31_add(state[7], 1);
+        // The pad encodes the block LENGTH, not merely its presence. A constant
+        // flag makes trailing zeros invisible: with rate 4, remainders of
+        // different length inside the SAME partial block absorb to one state, so
+        // [1] and [1, 0] collide. (At rate 2 there is only one partial length, so
+        // this is the same value as before; the rule is written once for all
+        // widths rather than three times with an exception.)
+        state[7] = m31_add(state[7], (4 - rem.len()) as u64);
         permute_t8(&mut state);
     }
     state
@@ -411,17 +417,23 @@ mod sponge_length_vectors {
     /// are mirrored by the Solidity test `Poseidon2M31T8.test.js` ("sponge matches
     /// Rust for every tail length"), which is what makes the two implementations
     /// provably identical across the padding boundary rather than only on it.
+    ///
+    /// Regenerated 2026-08-28 when the pad changed from a constant to the block
+    /// LENGTH. Only n ≡ 1, 2 (mod 4) moved: a remainder of 3 already added 1, and
+    /// a remainder of 0 has no pad at all — which is why these vectors did not
+    /// catch the collision. They pinned the two implementations to each other,
+    /// faithfully including the defect.
     const SPONGE_1_TO_12: [[u64; 4]; 12] = [
-        [1602001037, 1159405765, 1921860026, 2002639276],
-        [1555987374, 1688093151, 2127323245, 361838150],
+        [1778937858, 1092274333, 1392769756, 1853700056],
+        [1906275406, 1293076465, 740448461, 1279527157],
         [112403478, 521399817, 1196614111, 2120628259],
         [1073120416, 1930841549, 67141568, 840805313],
-        [1211130541, 319063584, 2140513727, 749177741],
-        [467986364, 1089613104, 1110911080, 1548533126],
+        [784664899, 1058867826, 353306298, 487081611],
+        [1258158831, 1032395803, 1251332863, 622202906],
         [244352717, 1116616254, 1533576768, 1130591728],
         [1440998077, 1368105497, 587877558, 669993876],
-        [1146550239, 1854944943, 689231702, 1773328536],
-        [1823865393, 1869725030, 515593527, 2051133110],
+        [988315960, 445990629, 977359177, 1243386484],
+        [7951013, 692021204, 1439294326, 1207847477],
         [1512006615, 2120640284, 1191961299, 1220524832],
         [665623931, 104507602, 1166029400, 1568827346],
     ];
@@ -455,4 +467,27 @@ mod sponge_length_vectors {
         let shifted = sponge_t8(&[1 + M31_P, 2, 3 + M31_P]);
         assert_eq!(canonical, shifted);
     }
+
+    #[test]
+    fn sponge_t8_separates_tail_lengths_inside_one_block() {
+        // The case the older padding tests missed. They checked the boundary
+        // where the pad appears or disappears (a full block vs a padded one);
+        // this checks two remainders of DIFFERENT length inside the SAME partial
+        // block. With a constant flag those absorb to one state, so [1] and
+        // [1, 0] collided (found 2026-08-28). At rate 2 only one partial length
+        // exists, so t=4 was immune — the test is written for every width anyway,
+        // because the rule is what must hold, not the accident that saved one.
+        for a in 1..4usize {
+            for b in (a + 1)..4 {
+                let mut va: Vec<u64> = (1..=a as u64).collect();
+                let mut vb: Vec<u64> = (1..=a as u64).collect();
+                vb.resize(b, 0);          // same words, zero-extended
+                va.truncate(a);
+                assert_ne!(
+                    sponge_t8(&va), sponge_t8(&vb),
+                    "tail lengths {a} and {b} must not absorb to one state");
+            }
+        }
+    }
+
 }

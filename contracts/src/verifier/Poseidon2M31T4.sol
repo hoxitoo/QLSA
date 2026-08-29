@@ -183,7 +183,7 @@ library Poseidon2M31T4 {
     /// Protocol (matches sponge_t4 in poseidon2_t4.rs):
     ///   state ← (0, 0, 0, 0)
     ///   for each pair (v0, v1):  s0 += v0; s1 += v1; permute
-    ///   odd trailing word v:     s0 += v;  s3 += 1;  permute
+    ///   odd trailing k=1 word v:  s0 += v;  s3 += 2-k;  permute
     /// The odd-length flag lives in capacity cell 3 — outside the rate — so no
     /// choice of data words can imitate a padded final block.
     ///
@@ -211,7 +211,9 @@ library Poseidon2M31T4 {
             }
             if (i < n) {
                 s0 += values[i] % P;
-                s3 += 1;
+                // Rate 2 admits only one partial length, so this is 2-1=1 either
+                // way; written as the length rule so all three widths read alike.
+                s3 += 2 - (n - i);
                 (s0, s1, s2, s3) = permute(s0, s1, s2, s3);
             }
         }

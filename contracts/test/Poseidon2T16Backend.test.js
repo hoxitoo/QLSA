@@ -4,8 +4,8 @@ const { ethers } = require("hardhat");
 // Reference vectors frozen in stark_stwo/src/vfri2_bridge.rs
 // (tests_vfri8::test_p2t16_reference_vectors + test_p2t16_print_reference_vectors).
 const LEAF_1234 = [
-  55566406n, 1875114541n, 1126231753n, 1747661633n,
-  1062235343n, 1908581748n, 1128601005n, 1541813924n,
+  1933241813n, 1010030854n, 312951712n, 1497891741n,
+  1179285824n, 51901796n, 1581778953n, 222789585n,
 ]; // hash_leaf_cols_p2t16([1,2,3,4])
 const PAIR = [
   1896676506n, 1113082531n, 1826142252n, 1263581674n,

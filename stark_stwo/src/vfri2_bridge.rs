@@ -8678,8 +8678,13 @@ mod tests_vfri8 {
     }
 
     // Frozen t=16 backend reference vectors (from test_p2t16_print_reference_vectors).
+    // Regenerated 2026-08-28: the sponge pad now carries the block LENGTH rather
+    // than a constant. Four words at rate 8 is a PARTIAL block, so this vector
+    // moved; the pair/channel vectors below did not, because compression is a
+    // bare permutation and the t=16 channel has its own (already length-carrying)
+    // pad. That asymmetry is the check that the fix touched only padded blocks.
     const REF_T16_LEAF: [u64; 8] = [
-        55566406, 1875114541, 1126231753, 1747661633, 1062235343, 1908581748, 1128601005, 1541813924,
+        1933241813, 1010030854, 312951712, 1497891741, 1179285824, 51901796, 1581778953, 222789585,
     ];
     // Note this equals permute_t16([1..16])[0..8] — compress of nodes (1..8) and
     // (9..16) is the permutation of their concatenation, so this vector also

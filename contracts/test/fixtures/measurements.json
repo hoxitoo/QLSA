@@ -43,7 +43,7 @@
       "note": "was recorded as '>100M / unverifiable' before R4.8; that was Poseidon2 implementation overhead"
     },
     "v23_dual_submitBatch_t16": {
-      "value": 15436509,
+      "value": 15432163,
       "what": "BatchRegistryV5.submitBatch, both full-V23 groups, VFRI12 (t=16), n_queries=1",
       "note": "128-bit NODE collision. FRI soundness is separate and is 16-bit at n_queries=1"
     },

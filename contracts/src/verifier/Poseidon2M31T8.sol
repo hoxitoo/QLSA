@@ -251,9 +251,10 @@ library Poseidon2M31T8 {
     /// Protocol (matches sponge_t8 in poseidon2_t8.rs):
     ///   state ← (0,…,0)
     ///   for each 4-word block (v0..v3): s0..s3 += v0..v3; permute
-    ///   odd trailing 1..3 words:        s0.. += v..;  s7 += 1;  permute
-    /// The odd-length flag lives in capacity cell 7 — outside the rate — so no
-    /// choice of data words can imitate a padded final block.
+    ///   odd trailing k=1..3 words:      s0.. += v..;  s7 += 4-k;  permute
+    /// The pad lives in capacity cell 7 — outside the rate — so no choice of
+    /// data words can imitate it, AND it carries the block length, so two
+    /// partial blocks of different length cannot absorb to the same state.
     ///
     /// @param values Array of M31 field elements. Inputs are reduced mod P on
     ///        absorption so the on-chain hash matches the Rust `sponge_t8`
@@ -293,7 +294,12 @@ library Poseidon2M31T8 {
                 s0 += values[i] % P;
                 if (i + 1 < n) s1 += values[i + 1] % P;
                 if (i + 2 < n) s2 += values[i + 2] % P;
-                s7 += 1;
+                // The pad encodes the block LENGTH, not merely its presence. A
+                // constant flag makes trailing zeros invisible: two remainders of
+                // different length inside the SAME partial block absorb to one
+                // state, so [1] and [1,0] collide (found 2026-08-28). Matches the
+                // Rust reference, which is authoritative.
+                s7 += 4 - (n - i);
                 (s0, s1, s2, s3, s4, s5, s6, s7) = permute8(s0, s1, s2, s3, s4, s5, s6, s7);
             }
             return (s0, s1, s2, s3);
