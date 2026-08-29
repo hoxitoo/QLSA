@@ -195,6 +195,11 @@ A direct migration causes **~30–40x overhead per block**, collapsing throughpu
 
 > The bottleneck is not cryptography — it is infrastructure.
 
+**Where this is going, and what could stop it: [`ROADMAP.md`](ROADMAP.md).** It
+carries the measured economics — including the finding that inside a transaction's
+gas limit the system does not currently break even at *any* N, because per-sender
+nonce writes, not the proof, both eat the saving and set the ceiling.
+
 ---
 
 ## The Solution
