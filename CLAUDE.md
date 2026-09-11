@@ -39,7 +39,12 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (323 passing, 90 ignored slow STARK integration tests)
+# Run Rust tests (518 passing, 108 ignored slow STARK integration tests)
+#
+# ALWAYS use `cargo test`, never `cargo build`, to decide whether code is dead.
+# `cargo build` does not compile `#[cfg(test)]`, so its "never used" warning is
+# blind to every test-only caller. Deleting on that signal took the whole test
+# build down once (2026-09-11) and it was not noticed until an audit pass.
 cargo +nightly-2025-07-01 test --manifest-path stark_stwo/Cargo.toml
 
 # Run Rust tests including slow STARK integration tests
@@ -177,11 +182,16 @@ Always use `bincode::encode_to_vec` / `bincode::decode_from_slice` with these ty
 ## On-Chain Contracts
 
 > **Narrowed 2026-09-11 (Ф1).** This section used to catalogue 28 verifiers, 7
-> registries and 13 hash backends. All but the shipping set were removed: an
-> external audit is priced by volume, VFRI5–VFRI8 sat in `src/` carrying a "do
-> not deploy" note, and every extra version was a place for these docs to drift
-> from the code — which had happened three times. Everything removed is in git
-> history at commit `f2020d9` (the parent of this change).
+> registries and 13 hash backends. All but the shipping set were taken out of the
+> build: an external audit is priced by volume, VFRI5–VFRI8 sat in `src/` carrying
+> a "do not deploy" note, and every extra version was a place for these docs to
+> drift from the code — which had happened three times.
+>
+> **Everything removed lives in [`archive/`](../archive/README.md)** — 112 whole
+> files plus the fragments that were cut out of still-living files. Nothing there
+> compiles, imports or is tested; hardhat reads only `contracts/src` and
+> `contracts/test`, the Rust crate only its module tree, and CI scopes `pytest` to
+> `tests/`. Returning a file to the build is one `git mv`.
 
 ### Shipping set
 

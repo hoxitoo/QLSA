@@ -3591,15 +3591,6 @@ mod tests {
 
     // ── VFRI5 tests ───────────────────────────────────────────────────────────
 
-    fn make_vfri5_polys(n_polys: usize, seed: usize) -> Vec<[i64; 256]> {
-        (0..n_polys).map(|k| {
-            let mut p = [0i64; 256];
-            for (i, x) in p.iter_mut().enumerate() {
-                *x = ((seed + k * 257 + i + 1) % 500) as i64;
-            }
-            p
-        }).collect()
-    }
 
 
 
@@ -3619,114 +3610,16 @@ mod tests {
 
 
 
-    pub(super) fn make_log8_hints() -> [[bool; 256]; 6] {
-        [[false; 256]; 6]
-    }
-}
-// ── ML-DSA V23 VFRI6 test helpers (need access to private make_v23_inputs) ──
-#[cfg(test)]
-mod tests_v23_vfri6_inner {
-    use super::tests::make_v23_inputs;
-
-
-
-
-
-
-    // ── LOG=8 group tests ─────────────────────────────────────────────────────
-
-    pub(super) fn make_log8_hints() -> [[bool; 256]; 6] {
-        [[false; 256]; 6]
-    }
-
-
-
-
-
 }
 
-// ── ML-DSA V23 VFRI7 tests ───────────────────────────────────────────────────
-#[cfg(test)]
-mod tests_v23_vfri7 {
-    use super::tests::make_v23_inputs;
-
-    fn make_log8_hints() -> [[bool; 256]; 6] {
-        [[false; 256]; 6]
-    }
-
-    // ── LOG=10 smoke / determinism ────────────────────────────────────────────
-
-
-
-
-
-    // ── LOG=8 smoke / determinism ─────────────────────────────────────────────
-
-
-
-    // ── Cross-bound hints ─────────────────────────────────────────────────────
-
-
-
-
-
-
-}
-
-// ── ML-DSA V23 VFRI8 tests ───────────────────────────────────────────────────
 #[cfg(test)]
 mod tests_vfri8 {
     use super::*;
 
-    #[test]
-    fn test_p2_channel_deterministic() {
-        let mut c1 = P2Channel::init();
-        let mut c2 = P2Channel::init();
-        let root = [0x42u8; 32];
-        c1.mix_root(&root);
-        c2.mix_root(&root);
-        assert_eq!(c1.draw_secure_felt(), c2.draw_secure_felt());
-    }
 
-    #[test]
-    fn test_p2_channel_differs_from_blake2s() {
-        let mut p2 = P2Channel::init();
-        let mut b2 = Channel::init();
-        let root = [0x42u8; 32];
-        p2.mix_root(&root);
-        b2.mix_root(&root);
-        assert_ne!(p2.draw_secure_felt(), b2.draw_secure_felt(),
-            "P2Channel must produce different values than Blake2s channel");
-    }
 
-    #[test]
-    fn test_hash_pair_p2_deterministic() {
-        let left  = [0x11u8; 32];
-        let right = [0x22u8; 32];
-        let h1 = hash_pair_p2(&left, &right);
-        let h2 = hash_pair_p2(&left, &right);
-        assert_eq!(h1, h2);
-    }
 
-    #[test]
-    fn test_hash_pair_p2_not_commutative() {
-        let a = [0x01u8; 32];
-        let b = [0x02u8; 32];
-        let h_ab = hash_pair_p2(&a, &b);
-        let h_ba = hash_pair_p2(&b, &a);
-        assert_ne!(h_ab, h_ba, "hashPair should not be commutative");
-    }
 
-    #[test]
-    fn test_hash_leaf_cols_p2_consistency() {
-        let cols = vec![1u32, 2, 3, 4];
-        let h1 = hash_leaf_cols_p2(&cols);
-        let h2 = hash_leaf_cols_p2(&cols);
-        assert_eq!(h1, h2);
-        // Must differ from Blake2s leaf hash
-        let h_b2 = hash_leaf_cols(&cols);
-        assert_ne!(h1, h_b2, "P2 leaf hash must differ from Blake2s leaf hash");
-    }
 
 
 
@@ -3739,35 +3632,7 @@ mod tests_vfri8 {
 
     // ── VFRI9 tests ───────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_hash_pair_p2w_uses_both_words() {
-        // Two nodes that agree in s1 (low word) but differ in s0 (high word)
-        // must produce different parent hashes — this is exactly the collision
-        // VFRI8's 31-bit nodes could not prevent.
-        let mut a = [0u8; 32];
-        let mut b = [0u8; 32];
-        a[24..28].copy_from_slice(&1u32.to_be_bytes());
-        a[28..32].copy_from_slice(&7u32.to_be_bytes());
-        b[24..28].copy_from_slice(&2u32.to_be_bytes());
-        b[28..32].copy_from_slice(&7u32.to_be_bytes());
-        let sib = [0x05u8; 32];
-        assert_ne!(hash_pair_p2w(&a, &sib), hash_pair_p2w(&b, &sib));
-        assert_ne!(hash_pair_p2w(&sib, &a), hash_pair_p2w(&sib, &b));
-    }
 
-    #[test]
-    fn test_hash_leaf_cols_p2w_wide_output() {
-        let cols = vec![1u32, 2, 3, 4];
-        let h = hash_leaf_cols_p2w(&cols);
-        // Narrow VFRI8 leaf and wide VFRI9 leaf must differ in encoding
-        let h_narrow = hash_leaf_cols_p2(&cols);
-        assert_ne!(h, h_narrow);
-        // bytes[0..24] must be zero (62-bit content in low 8 bytes)
-        assert_eq!(&h[..24], &[0u8; 24]);
-        // Same sponge: wide s0 (bytes 24..28) equals narrow s0 (bytes 28..32)
-        assert_eq!(&h[24..28], &h_narrow[28..32],
-            "s0 word must match the narrow hash (same sponge)");
-    }
 
     // ── VFRI10 t=4 hash backend cross-check ──────────────────────────────────
 
@@ -3819,19 +3684,6 @@ mod tests_vfri8 {
         assert_eq!(u32::from_be_bytes(pair[28..32].try_into().unwrap()), 1_471_208_702);
     }
 
-    #[test]
-    fn test_p2t4_leaf_is_wide_and_sponge_consistent() {
-        let cols = vec![1u32, 2, 3, 4];
-        let h = hash_leaf_cols_p2t4(&cols);
-        // Content lives in the low 8 bytes; upper 24 bytes are zero.
-        assert_eq!(&h[..24], &[0u8; 24]);
-        // Leaf == sponge_t4 of the columns (first two words).
-        let s = crate::poseidon2_t4::sponge_t4(&[1, 2, 3, 4]);
-        assert_eq!(u32::from_be_bytes(h[24..28].try_into().unwrap()), s[0] as u32);
-        assert_eq!(u32::from_be_bytes(h[28..32].try_into().unwrap()), s[1] as u32);
-        // t=4 leaf differs from the t=2 wide leaf (different permutation).
-        assert_ne!(h, hash_leaf_cols_p2w(&cols));
-    }
 
     #[test]
     fn test_p2t4_pair_uses_both_words_and_order_sensitive() {
