@@ -96,7 +96,7 @@ python -m testnet.e2e --txs 8 --dry-run
 - Closes the primary soundness gap in AzFull multiplication constraints
 
 Prior witness pipelines (V4–V22) were removed with the Ф1 narrowing; they are in git
-history at tag `pre-narrowing`. V23 is the only pipeline that ships.
+history at commit `f2020d9` (the parent of this change). V23 is the only pipeline that ships.
 
 ### `stark_stwo/src/mldsa_verify_stark.rs`
 
@@ -181,7 +181,7 @@ Always use `bincode::encode_to_vec` / `bincode::decode_from_slice` with these ty
 > external audit is priced by volume, VFRI5–VFRI8 sat in `src/` carrying a "do
 > not deploy" note, and every extra version was a place for these docs to drift
 > from the code — which had happened three times. Everything removed is in git
-> history at tag `pre-narrowing`.
+> history at commit `f2020d9` (the parent of this change).
 
 ### Shipping set
 
@@ -273,7 +273,7 @@ the permutation family: t=2/t=4 truncate nodes to 2 M31 words (~2^31), t=8 carri
 (124-bit, ~2^62), t=16 carries 8 words (248-bit, ~2^124 ≈ 128-bit, matching Stwo's native
 Poseidon2-16). The ladder is complete on-chain and both shipping rungs are cross-checked
 bit-exact Rust↔Solidity. The t=2 and t=4 backends and the VFRI3–VFRI10 verifiers that used
-them were removed in the Ф1 narrowing (tag `pre-narrowing`); the detailed build log is in
+them were removed in the Ф1 narrowing (commit `f2020d9`); the detailed build log is in
 `docs/roadmap/recursion.md`.
 **R4.22 — t=16 (128-bit node collision) verifies a full V23 batch in ONE transaction (2026-07-31):**
 the "VFRI12 is SKIPPED" decision above is **SUPERSEDED**. `QLSAVerifierVFRI12.sol` (the VFRI11
