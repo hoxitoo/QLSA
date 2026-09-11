@@ -30,7 +30,7 @@ Four contract stacks are supported via --stack:
                 transaction matters more than the stronger node bound.
   v4:           QLSAVerifierVFRI7 + BatchRegistryV4 — single submitBatch (MVP-5).
 
-REGISTRY_ADDRESS must match the chosen stack's registry shape (v4/v7 -> V4/V5,
+REGISTRY_ADDRESS must match the chosen stack's registry shape (v7 -> V5,
 v6 -> V6).  A mismatch is detected and reported before anything is submitted.
 
 Prerequisites:
@@ -44,7 +44,7 @@ Environment (.env):
                          V6 for v6, V4 for v4)
 
 Usage:
-  python -m testnet.e2e [--stack v8|v7|v6|v4] [--txs N] [--dry-run]
+  python -m testnet.e2e [--stack v8|v7] [--txs N] [--dry-run]
   bash testnet/deploy_v7.sh --network sepolia   # deploy the default stack
 """
 
@@ -69,8 +69,6 @@ from core.keys import generate_keypair, derive_address, wipe_key
 from core.signing import sign
 from core.transaction import Transaction
 from stark.prover import (
-    prove_mldsa_sig_vfri7_stark,
-    prove_mldsa_sig_vfri10_stark,
     prove_mldsa_sig_vfri11_stark,
     prove_mldsa_sig_recursive_stark,
 )
@@ -144,8 +142,8 @@ def build_sender_nonces(txs: list[Transaction]) -> dict[bytes, int]:
 
 def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = "v7") -> int:
     """Run the full E2E flow. Returns exit code (0 = success)."""
-    if stack not in ("v4", "v6", "v7", "v8"):
-        logger.error("unknown --stack %r (expected 'v8', 'v7', 'v6' or 'v4')", stack)
+    if stack not in ("v7", "v8"):
+        logger.error("unknown --stack %r (expected 'v8' or 'v7')", stack)
         return 1
     if stack == "v8" and n_queries == 1:
         # The whole point of v8 is production soundness; 1 query would make it
@@ -158,8 +156,6 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
     stack_label = {
         "v8": "Recursive + BatchRegistryV7 (proof-of-verification, one tx)",
         "v7": "VFRI11 + BatchRegistryV5 (t=8, atomic dual verify, node ~2^62)",
-        "v6": "VFRI10 + BatchRegistryV6 (t=4, per-group split, node ~2^31)",
-        "v4": "VFRI7 + BatchRegistryV4 (single submitBatch)",
     }[stack]
     logger.info("=== QLSA — E2E Testnet Demo ===")
     logger.info("Stack: %s", stack_label)
@@ -201,7 +197,7 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
     # and LOG=8 (AzFull+Ct1Full+RangeQBatch+WPrime+NormCheck+UseHint, 2206 cols).
     # The cross-bound roots bind each group's FRI query indices to the other
     # group's trace commitment, preventing adversarial proof mixing.
-    proto = {"v8": "recursive", "v7": "VFRI11", "v6": "VFRI10", "v4": "VFRI7"}[stack]
+    proto = {"v8": "recursive", "v7": "VFRI11"}[stack]
     logger.info("Generating %s cross-bound V23 ML-DSA STARK proofs for tx[0]…", proto)
     tx0 = txs[0]
     if tx0.signature is None:
@@ -228,24 +224,6 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
                 n_queries=n_queries,
                 num_folds_log10=_VFRI11_NUM_FOLDS,
                 num_folds_log8=_VFRI11_NUM_FOLDS,
-            )
-        elif stack == "v6":
-            result = prove_mldsa_sig_vfri10_stark(
-                pk=tx0.public_key,
-                msg=tx0.to_bytes(),
-                sig=tx0.signature,
-                batch_merkle_root=batch_merkle_root,
-                n_queries=n_queries,
-                num_folds_log10=_VFRI10_NUM_FOLDS,
-                num_folds_log8=_VFRI10_NUM_FOLDS,
-            )
-        else:
-            result = prove_mldsa_sig_vfri7_stark(
-                pk=tx0.public_key,
-                msg=tx0.to_bytes(),
-                sig=tx0.signature,
-                batch_merkle_root=batch_merkle_root,
-                n_queries=n_queries,
             )
         elapsed_v = time.monotonic() - t0
         if stack == "v8":
@@ -279,7 +257,6 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
 
     registry_name = {
         "v8": "BatchRegistryV7", "v7": "BatchRegistryV5",
-        "v6": "BatchRegistryV6", "v4": "BatchRegistryV4",
     }[stack]
     if dry_run:
         logger.info("[DRY-RUN] Skipping on-chain submission.")
@@ -292,11 +269,7 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
 
     if stack == "v8":
         return _submit_v8(result, batch_merkle_root, sender_nonces)
-    if stack == "v7":
-        return _submit_v7(result, batch_merkle_root, sender_nonces)
-    if stack == "v6":
-        return _submit_v6(result, batch_merkle_root, sender_nonces)
-    return _submit_v4(result, batch_merkle_root, sender_nonces)
+    return _submit_v7(result, batch_merkle_root, sender_nonces)
 
 
 def _submit_v8(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]) -> int:
@@ -383,79 +356,7 @@ def _submit_v7(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]
     return 0
 
 
-def _submit_v6(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]) -> int:
-    """Submit a VFRI10 cross-bound proof to BatchRegistryV6 (two-tx split)."""
-    try:
-        from testnet.submit import OnchainSubmitterV6
-        submitter = OnchainSubmitterV6.from_env()
-    except KeyError as exc:
-        logger.error("Missing env var: %s — run with --dry-run or set .env", exc)
-        return 1
-    except RuntimeError as exc:
-        logger.error("Cannot connect to RPC: %s", exc)
-        return 1
 
-    logger.info("Submitting to BatchRegistryV6 (per-group split: group10 then group8+nonces)…")
-    t0 = time.monotonic()
-    try:
-        tx10, tx8 = submitter.finalize_batch(
-            merkle_root=batch_merkle_root,
-            vfri10_result=result,
-            senders=list(sender_nonces.keys()),
-            new_nonces=list(sender_nonces.values()),
-        )
-    except RuntimeError as exc:
-        logger.error("on-chain submission failed: %s", exc)
-        return 1
-    logger.info("  group10 tx=%s group8 tx=%s (%.2fs)", tx10, tx8, time.monotonic() - t0)
-
-    logger.info("Waiting for confirmation and verifying finalization…")
-    t0 = time.monotonic()
-    finalized = submitter.wait_and_verify(tx8, batch_merkle_root)
-    if not finalized:
-        logger.error("Batch NOT finalized on-chain after both groups confirmed — unexpected state")
-        return 1
-    logger.info("  finalized=True (%.2fs)", time.monotonic() - t0)
-    logger.info("=== E2E COMPLETE — batch finalized on testnet (VFRI10 per-group split) ===")
-    return 0
-
-
-def _submit_v4(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]) -> int:
-    """Submit a VFRI7 cross-bound proof to BatchRegistryV4 (single submitBatch)."""
-    try:
-        from testnet.submit import OnchainSubmitterV4
-        submitter = OnchainSubmitterV4.from_env()
-    except KeyError as exc:
-        logger.error("Missing env var: %s — run with --dry-run or set .env", exc)
-        return 1
-    except RuntimeError as exc:
-        logger.error("Cannot connect to RPC: %s", exc)
-        return 1
-
-    logger.info("Submitting batch to BatchRegistryV4 (VFRI7 cross-bound proofs + nonces)…")
-    t0 = time.monotonic()
-    tx_hash = submitter.submit_batch_with_nonces(
-        merkle_root=batch_merkle_root,
-        commitment_log10=result.log10_commitment,
-        proof_log10=result.log10_proof,
-        hints_log10=result.log10_query_hints,
-        commitment_log8=result.log8_commitment,
-        proof_log8=result.log8_proof,
-        hints_log8=result.log8_query_hints,
-        senders=list(sender_nonces.keys()),
-        new_nonces=list(sender_nonces.values()),
-    )
-    logger.info("  tx_hash=%s (%.2fs)", tx_hash, time.monotonic() - t0)
-
-    logger.info("Waiting for confirmation and verifying finalization…")
-    t0 = time.monotonic()
-    finalized = submitter.wait_and_verify(tx_hash, batch_merkle_root)
-    if not finalized:
-        logger.error("Batch NOT finalized on-chain after tx confirmed — unexpected state")
-        return 1
-    logger.info("  finalized=True (%.2fs)", time.monotonic() - t0)
-    logger.info("=== E2E COMPLETE — batch finalized on testnet (VFRI7 cross-bound) ===")
-    return 0
 
 
 def _parse_args() -> argparse.Namespace:

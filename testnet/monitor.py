@@ -2,7 +2,7 @@
 """
 QLSA Testnet Monitor — polls the registry for BatchFinalized events.
 
-Compatible with BatchRegistryV4 (VFRI7) and BatchRegistryV6 (VFRI10); both emit
+Compatible with BatchRegistryV5 (VFRI11) and BatchRegistryV7 (recursive); both emit
 an identical BatchFinalized event:
   BatchFinalized(bytes32 indexed merkleRoot,
                  bytes16  indexed commitmentLog10,
@@ -14,7 +14,7 @@ Usage:
 
 Environment (.env):
   RPC_URL          — L2 RPC endpoint
-  REGISTRY_ADDRESS — deployed BatchRegistryV4 or BatchRegistryV6 address
+  REGISTRY_ADDRESS — deployed BatchRegistryV5 or BatchRegistryV7 address
 """
 
 from __future__ import annotations

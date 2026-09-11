@@ -52,7 +52,7 @@ def test_default_protocol_is_what_the_deployed_stack_accepts() -> None:
 
 def test_registry_covers_every_protocol() -> None:
     assert set(WITNESS_PROTOCOLS) == set(DIRECT_PROTOCOLS) | {"recursive"}
-    assert set(DIRECT_PROTOCOLS) == {"vfri7", "vfri8", "vfri9", "vfri10", "vfri11"}
+    assert set(DIRECT_PROTOCOLS) == {"vfri11"}
 
 
 def test_recursive_is_normalised_not_a_parallel_shape() -> None:
@@ -97,8 +97,8 @@ def test_batcher_rejects_an_unknown_protocol_at_construction() -> None:
 
 
 def test_batcher_accepts_an_explicit_protocol_set() -> None:
-    b = Batcher(Mempool(), witness_protocols=("vfri10", "vfri11"))
-    assert b.witness_protocols == ("vfri10", "vfri11")
+    b = Batcher(Mempool(), witness_protocols=("vfri11", "recursive"))
+    assert b.witness_protocols == ("vfri11", "recursive")
 
 
 # ── BatchResult views ────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ def test_result_reports_generated_protocols() -> None:
 
     r.witness_proofs["vfri11"] = _wp("vfri11")
     assert r.witness_protocols == ["vfri11"]
-    assert r.has_protocol("vfri11") and not r.has_protocol("vfri10")
+    assert r.has_protocol("vfri11") and not r.has_protocol("recursive")
     assert r.has_witness is True
 
 
