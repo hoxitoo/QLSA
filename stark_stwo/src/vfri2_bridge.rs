@@ -330,6 +330,8 @@ impl Channel {
         result
     }
 
+
+
     /// drawSecureFelt → QM31 packed as u128
     /// Words [w0,w1,w2,w3] from first 16 bytes of raw hash (each 4-byte LE)
     /// QM31 = c0=(w0<<32|w1), c1=(w2<<32|w3)
@@ -3614,6 +3616,90 @@ mod tests {
 
 #[cfg(test)]
 mod tests_vfri8 {
+
+    /// Ф2 probe — what does putting a TREE ROOT on-chain cost?
+    ///
+    /// Run with: cargo test probe_tree_root_outer_shape -- --ignored --nocapture
+    ///
+    /// The tree root is a three-component node (fold chain + Merkle + channel),
+    /// not the single-statement shape `QLSAVerifierRecursive.InnerPublics`
+    /// describes. But `build_recursive_bundle` is generic over COLUMNS, so the
+    /// root can go through the existing recursion path with no new contract —
+    /// if its outer trace lands in the same shape a V23 group's does.
+    ///
+    /// That is the question this measures, and it decides two things at once:
+    /// whether Ф2 needs a new verifier, and whether t=8 or t=16 ships (VFRI11
+    /// has 10.7M of headroom, VFRI12 has 8%).
+    #[test]
+    #[ignore]
+    fn probe_tree_root_outer_shape() {
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        use crate::recursive::composition_channel_t8 as node;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        // Two real V23 statements — a tree's smallest honest shape.
+        let mut leaves = Vec::new();
+        for seed in [16600u64, 16601] {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            leaves.push(
+                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("leaf cols"),
+            );
+        }
+
+        let stmts: Vec<_> = leaves
+            .iter()
+            .map(|(cols, depth)| {
+                tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6))
+                    .expect("statement")
+            })
+            .collect();
+
+        let (root_cols, root_log) = node::tree_node_trace_columns(&stmts).expect("root cols");
+        eprintln!("root node: {} cols, log {}", root_cols.len(), root_log);
+
+        // The root as an inner statement for the existing recursion.
+        let rec = gen_vfri11_recursion_inputs(&root_cols, root_log, &merkle_root, 1, Some(6))
+            .expect("recursion inputs over the root");
+        let (outer_cols, outer_log) =
+            outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths).expect("outer");
+        eprintln!("outer over ROOT: {} cols, log {}", outer_cols.len(), outer_log);
+
+        // Same shape for a plain V23 group, for comparison — this is the trace
+        // whose on-chain verify is the measured 5,441,919 gas at t=8.
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let (g_cols, g_depth) =
+            v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("group cols");
+        let g_rec = gen_vfri11_recursion_inputs(&g_cols, g_depth, &merkle_root, 1, Some(6))
+            .expect("group recursion inputs");
+        let (gc, gl) = outer_trace_columns_t8(&g_rec.queries, &g_rec.paths, &g_rec.comp_paths)
+            .expect("group outer");
+        eprintln!("outer over GROUP: {} cols, log {}", gc.len(), gl);
+
+        eprintln!(
+            "at n_queries=1: {}",
+            if outer_cols.len() == gc.len() && outer_log == gl { "SAME shape" } else { "DIFFERS" }
+        );
+
+        // The demo config proves nothing about production. 20 queries is what
+        // 130-bit FRI soundness needs, and it is the config the 5,441,919 gas
+        // figure was measured at — so that is where the comparison must be made.
+        for q in [4usize, 20] {
+            let r = gen_vfri11_recursion_inputs(&root_cols, root_log, &merkle_root, q, Some(6))
+                .expect("root recursion inputs");
+            let (rc, rl) =
+                outer_trace_columns_t8(&r.queries, &r.paths, &r.comp_paths).expect("root outer");
+            let g = gen_vfri11_recursion_inputs(&g_cols, g_depth, &merkle_root, q, Some(6))
+                .expect("group recursion inputs");
+            let (ggc, ggl) =
+                outer_trace_columns_t8(&g.queries, &g.paths, &g.comp_paths).expect("group outer");
+            eprintln!(
+                "q={q:2}: outer over ROOT {} cols log {} | over GROUP {} cols log {} -> {}",
+                rc.len(), rl, ggc.len(), ggl,
+                if rc.len() == ggc.len() && rl == ggl { "SAME" } else { "DIFFERS" }
+            );
+        }
+    }
     use super::*;
 
 
