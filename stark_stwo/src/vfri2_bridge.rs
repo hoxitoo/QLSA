@@ -1,4 +1,45 @@
 /// VFRI2-compatible hint generator for the Poseidon2 hash-chain circuit.
+
+/// The batch tree over REAL V23 groups: one leaf per `(tx_hash, group)` pair.
+///
+/// A-5's leaf binds a batch member to the trace root of the proof that verifies
+/// its signature (`batch_tree::batch_leaf`). This is where that trace root comes
+/// from: the same `vfri11_fri_chain` run the hint generator and the recursion
+/// bridge already use, so the root in the leaf cannot drift from the root the
+/// proof commits to.
+///
+/// `cols`/`tree_depth` are a V23 group's columns — the LOG=10 group is the one
+/// carrying the signature arithmetic, so that is what a caller should pass.
+///
+/// The trace root enters the leaf EXACTLY: it is already a t=8 node (four M31
+/// words in the low 16 bytes), so nothing is truncated on that side. Only the
+/// transaction hash is a plain 32-byte digest and is cut to 124 bits.
+pub fn batch_tree_over_groups(
+    entries: &[([u8; 32], Vec<Vec<u32>>, u32)],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+) -> Result<(crate::batch_tree::BatchTree, Vec<([u64; 4], [u64; 4])>), String> {
+    use crate::batch_tree::{build_batch_tree_bound, words_from_hash};
+
+    if entries.is_empty() {
+        return Err("a batch needs ≥ 1 entry".into());
+    }
+    let mut pairs = Vec::with_capacity(entries.len());
+    for (i, (tx_hash, cols, depth)) in entries.iter().enumerate() {
+        let trace_root = vfri11_fri_chain(cols, *depth, batch_merkle_root, n_queries, num_folds)
+            .map_err(|e| format!("entry {i}: {e}"))?
+            .trace_root;
+        // The trace root is a t=8 NODE — four M31 words in bytes[16..32], with a
+        // zero prefix — so it goes in exactly. Only the transaction hash, a
+        // 32-byte digest, has to be truncated. Reading it with `words_from_hash`
+        // would read the zero padding and every leaf would carry the same root.
+        pairs.push((words_from_hash(tx_hash), p2t8_node_words(&trace_root)));
+    }
+    let tree = build_batch_tree_bound(&pairs)?;
+    Ok((tree, pairs))
+}
+
 ///
 /// Produces (proof_bytes, commitment_hex, abi_encoded_query_hints) that are
 /// accepted by QLSAVerifierVFRI2.sol's `verify()` function.
@@ -329,6 +370,8 @@ impl Channel {
         self.n_draws += 1;
         result
     }
+
+
 
 
 
@@ -1467,7 +1510,7 @@ pub(crate) fn p2t8_node_words(node: &[u8; 32]) -> [u64; 4] {
 
 /// Pack a 4-word node into bytes[16..32].
 #[allow(dead_code)]
-fn p2t8_pack(words: [u64; 4]) -> [u8; 32] {
+pub(crate) fn p2t8_pack(words: [u64; 4]) -> [u8; 32] {
     let mut out = [0u8; 32];
     for k in 0..4 {
         out[16 + 4 * k..20 + 4 * k].copy_from_slice(&(words[k] as u32).to_be_bytes());
@@ -3616,6 +3659,48 @@ mod tests {
 
 #[cfg(test)]
 mod tests_vfri8 {
+
+    /// A-5 on REAL data: two genuine V23 groups become batch leaves, and each
+    /// proves its membership. The synthetic tests in `batch_tree` show the leaf
+    /// shape behaves; this shows the trace root in the leaf is the one a real
+    /// proof commits to.
+    #[test]
+    fn real_v23_groups_become_bound_batch_leaves() {
+        use crate::batch_tree::{batch_leaf, verify_batch_membership, node_words};
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let mut entries = Vec::new();
+        for (k, seed) in [16600u64, 16601].into_iter().enumerate() {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            let (cols, depth) =
+                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols");
+            let tx_hash: [u8; 32] = std::array::from_fn(|i| ((k * 31 + i * 7) % 256) as u8);
+            entries.push((tx_hash, cols, depth));
+        }
+
+        let (tree, pairs) =
+            batch_tree_over_groups(&entries, &merkle_root, 1, Some(6)).expect("batch tree");
+        assert_eq!(pairs.len(), 2);
+        assert_ne!(pairs[0].1, pairs[1].1, "different signatures, different trace roots");
+
+        let root = tree.root();
+        for (i, (tx, tr)) in pairs.iter().enumerate() {
+            let (sibs, bits) = tree.membership_proof(i).unwrap();
+            assert!(verify_batch_membership(&root, &batch_leaf(*tx, *tr), &sibs, &bits),
+                    "real entry {i} failed to prove membership");
+        }
+
+        // The leaf carries the REAL trace root: swapping in the other group's
+        // root breaks membership even with the right transaction and path.
+        let (sibs, bits) = tree.membership_proof(0).unwrap();
+        let crossed = batch_leaf(pairs[0].0, pairs[1].1);
+        assert!(!verify_batch_membership(&root, &crossed, &sibs, &bits));
+
+        // And it is the root the proof actually commits to, not a copy.
+        let chain = vfri11_fri_chain(&entries[0].1, entries[0].2, &merkle_root, 1, Some(6)).unwrap();
+        assert_eq!(pairs[0].1, node_words(&chain.trace_root));
+        let _ = node_words(&root);
+    }
 
     /// Ф2 probe — what does putting a TREE ROOT on-chain cost?
     ///

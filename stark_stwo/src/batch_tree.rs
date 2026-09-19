@@ -33,7 +33,7 @@
 //! (R4.22), where a constant pad let two different absorbed sequences reach one
 //! state. A length-carrying tail is the fix in both places.
 
-use crate::vfri2_bridge::{hash_leaf_cols_p2t8, hash_pair_p2t8, p2t8_node_words};
+use crate::vfri2_bridge::{hash_leaf_cols_p2t8, hash_pair_p2t8, p2t8_node_words, p2t8_pack};
 
 /// Bytes per packed word. `2^24 < P = 2^31 - 1`, so a chunk is already reduced
 /// and the packing is injective without any modular arithmetic.
@@ -173,6 +173,97 @@ pub fn verify_batch_membership(
         cur = if right { hash_pair_p2t8(sib, &cur) } else { hash_pair_p2t8(&cur, sib) };
     }
     cur == *root
+}
+
+// ── A-5: the leaf that binds a batch member to the proof of its signature ────
+
+/// Domain tag separating a LEAF from an internal node.
+///
+/// `LEAF_DOMAIN[i] = u32_be(SHA-256("QLSA-batch-leaf-domain" ‖ i_be4)[..4]) mod P`,
+/// the same derivation rule the t=8 round constants use — regenerable, not
+/// picked by hand.
+///
+/// **This is load-bearing, not decoration.** An internal node is
+/// `compress_t8(left, right)`; if a leaf were the same function of its operands,
+/// a leaf and an internal node would be indistinguishable, which is the classic
+/// second-preimage attack on a Merkle tree — an attacker presents an internal
+/// node as a leaf and claims membership for something never inserted. Today's
+/// `batch_leaf_hash` is separated only by accident (leaf = sponge, node =
+/// compression); a compression-based leaf loses that accident and has to say it.
+/// Forging a leaf into an internal node now needs a preimage hashing to
+/// `LEAF_DOMAIN`, i.e. ~2^124.
+pub const LEAF_DOMAIN: [u64; 4] = [1421959497, 1730427068, 1993284430, 1732805141];
+
+/// The first 124 bits of a 32-byte hash, as four M31 words.
+///
+/// Used for BOTH operands of a leaf — the transaction hash and the Stwo trace
+/// root are both 32-byte digests and get the same treatment, so the truncation
+/// is written once rather than twice.
+///
+/// 31 bits per word, so the four words are already reduced and no modular
+/// arithmetic runs. **This truncates**: two digests agreeing on
+/// the first 124 bits collide, at ~2^62 work. That is exactly the t=8
+/// node-collision bound the whole tree already has, so it weakens nothing — but
+/// it is a truncation and is recorded as one rather than left to be discovered.
+pub fn words_from_hash(digest: &[u8; 32]) -> [u64; 4] {
+    let mut bits = 0u128;
+    for (i, &b) in digest.iter().take(16).enumerate() {
+        bits |= (b as u128) << (8 * i);
+    }
+    std::array::from_fn(|i| ((bits >> (31 * i)) & 0x7fff_ffff) as u64)
+}
+
+/// A batch leaf: the transaction's identity compressed with the trace root of
+/// the proof that verifies its signature.
+///
+/// ```text
+///     leaf = compress_t8( LEAF_DOMAIN, compress_t8(tx_id, trace_root) )
+/// ```
+///
+/// # What this proves, and what it does not
+///
+/// With this leaf shape the circuit can prove two things it could not before:
+/// that it verified the statement of THIS trace root, and that a leaf carrying
+/// that trace root is a member of the batch root. Until now nothing connected
+/// the batch root to any proof at all (`core/batch.py` hashes `tx.tx_hash()`,
+/// and the registry never interprets the root — it is a batch id and a
+/// cross-binding operand).
+///
+/// What it does NOT prove is that `tx_id` and `trace_root` belong together: that
+/// pairing is asserted by the aggregator. The residual trust is the same one
+/// limitation 0 already names — the aggregator pairing a witness with a claimed
+/// signature — not a new one. A-5 closes membership *modulo* that, and saying so
+/// is the point: "membership proved" without this sentence reads as more than it
+/// is.
+///
+/// Built from `compress_t8` rather than the leaf sponge because `compress_t8` is
+/// already arithmetized (`recursive::poseidon2_t8_air::prove_compress`) while a
+/// rate-4 sponge AIR does not exist — so membership needs no new gadget.
+pub fn batch_leaf(tx_id: [u64; 4], trace_root: [u64; 4]) -> [u8; 32] {
+    let inner = crate::poseidon2_t8::compress_t8(tx_id, trace_root);
+    p2t8_pack(crate::poseidon2_t8::compress_t8(LEAF_DOMAIN, inner))
+}
+
+/// Build a batch tree over `(tx_id, trace_root)` pairs.
+pub fn build_batch_tree_bound(pairs: &[([u64; 4], [u64; 4])]) -> Result<BatchTree, String> {
+    if pairs.is_empty() {
+        return Err("a batch tree needs ≥ 1 leaf".into());
+    }
+    if pairs.len() > MAX_LEAVES {
+        return Err(format!("leaf count {} exceeds MAX_LEAVES {MAX_LEAVES}", pairs.len()));
+    }
+    let mut level: Vec<[u8; 32]> = pairs.iter().map(|(t, r)| batch_leaf(*t, *r)).collect();
+    let mut levels = vec![level.clone()];
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            let right = if pair.len() == 2 { &pair[1] } else { &pair[0] };
+            next.push(hash_pair_p2t8(&pair[0], right));
+        }
+        level = next;
+        levels.push(level.clone());
+    }
+    Ok(BatchTree { levels })
 }
 
 #[cfg(test)]
@@ -335,6 +426,139 @@ mod tests {
         assert_ne!(root_w, node_words(&tree.root()));
         assert!(!verify_merkle_path_t8(
             &proof, log_size, sibs.len(), outsider, 5, node_words(&tree.root())).unwrap());
+    }
+
+// ── A-5: the bound leaf ─────────────────────────────────────────────────
+
+    fn w(n: u64) -> [u64; 4] { [n, n + 1, n + 2, n + 3] }
+
+    #[test]
+    fn a_leaf_is_not_an_internal_node_over_the_same_operands() {
+        // The reason LEAF_DOMAIN exists. Without it both would be
+        // compress_t8(a, b) and an attacker could present an internal node as a
+        // leaf — the classic Merkle second-preimage attack.
+        let (a, b) = (w(10), w(100));
+        let leaf = batch_leaf(a, b);
+        let internal = hash_pair_p2t8(&p2t8_pack(a), &p2t8_pack(b));
+        assert_ne!(leaf, internal, "a leaf must not collide with an internal node");
+    }
+
+    #[test]
+    fn the_trace_root_changes_the_leaf() {
+        assert_ne!(batch_leaf(w(1), w(50)), batch_leaf(w(1), w(60)));
+    }
+
+    #[test]
+    fn the_transaction_changes_the_leaf() {
+        assert_ne!(batch_leaf(w(1), w(50)), batch_leaf(w(2), w(50)));
+    }
+
+    #[test]
+    fn words_from_hash_is_deterministic_and_reduced() {
+        let h: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11));
+        let a = words_from_hash(&h);
+        assert_eq!(a, words_from_hash(&h), "must be a function of the hash alone");
+        for v in a {
+            assert!(v < crate::poseidon2::M31_P, "word {v} is not a field element");
+        }
+        // It reads the FIRST 16 bytes: touching byte 0 moves it, byte 31 does not.
+        let mut h0 = h; h0[0] ^= 1;
+        assert_ne!(a, words_from_hash(&h0));
+        let mut h31 = h; h31[31] ^= 1;
+        assert_eq!(a, words_from_hash(&h31), "documented truncation to 124 bits");
+    }
+
+    #[test]
+    fn every_bound_leaf_proves_its_membership() {
+        for n in [1usize, 2, 3, 5, 8] {
+            let pairs: Vec<_> = (0..n).map(|i| (w(i as u64 * 7), w(1000 + i as u64 * 13))).collect();
+            let tree = build_batch_tree_bound(&pairs).unwrap();
+            let root = tree.root();
+            for (i, (tx, tr)) in pairs.iter().enumerate() {
+                let (sibs, bits) = tree.membership_proof(i).unwrap();
+                assert!(verify_batch_membership(&root, &batch_leaf(*tx, *tr), &sibs, &bits),
+                        "leaf {i} of {n}");
+            }
+        }
+    }
+
+    /// **This is what A-5 is about.** Everything else shows that something
+    /// hashes; this shows that a signature proved under a DIFFERENT trace root
+    /// cannot claim membership in the batch.
+    #[test]
+    fn a_foreign_trace_root_does_not_reach_the_batch_root() {
+        let pairs: Vec<_> = (0..4u64).map(|i| (w(i * 7), w(1000 + i * 13))).collect();
+        let tree = build_batch_tree_bound(&pairs).unwrap();
+        let (sibs, bits) = tree.membership_proof(2).unwrap();
+
+        // Same transaction, someone else's proof.
+        let forged = batch_leaf(pairs[2].0, w(999_000));
+        assert!(!verify_batch_membership(&tree.root(), &forged, &sibs, &bits),
+                "a leaf carrying a foreign trace root must not verify");
+
+        // And the converse: the right proof filed under the wrong transaction.
+        let swapped = batch_leaf(pairs[3].0, pairs[2].1);
+        assert!(!verify_batch_membership(&tree.root(), &swapped, &sibs, &bits));
+    }
+
+// ── A-5 in-circuit: membership is PROVED, not just computed ─────────────
+
+    /// The leaf's two compressions and its path, each proved by an existing
+    /// gadget. No new AIR: `compress_t8` is arithmetized by `poseidon2_t8_air`
+    /// and the path by `merkle_path_t8_air`, which is why the leaf is built from
+    /// compressions rather than the leaf sponge (no rate-4 sponge AIR exists).
+    #[test]
+    fn membership_of_a_bound_leaf_is_provable_in_circuit() {
+        use crate::recursive::poseidon2_t8_air::{prove_compress, verify_compress};
+        use crate::recursive::merkle_path_t8_air::{prove_merkle_path_t8, verify_merkle_path_t8};
+
+        let pairs: Vec<_> = (0..4u64).map(|i| (w(i * 7), w(1000 + i * 13))).collect();
+        let tree = build_batch_tree_bound(&pairs).unwrap();
+        let root = tree.root();
+        let index = 2usize;
+        let (tx_id, trace_root) = pairs[index];
+
+        // 1. inner = compress(tx_id, trace_root) — binds the proof to the member.
+        let (p1, l1, inner) = prove_compress(tx_id, trace_root).unwrap();
+        assert!(verify_compress(&p1, l1, tx_id, trace_root, inner).unwrap());
+
+        // 2. leaf = compress(LEAF_DOMAIN, inner) — separates leaf from node.
+        let (p2, l2, leaf_w) = prove_compress(LEAF_DOMAIN, inner).unwrap();
+        assert!(verify_compress(&p2, l2, LEAF_DOMAIN, inner, leaf_w).unwrap());
+        assert_eq!(leaf_w, node_words(&batch_leaf(tx_id, trace_root)),
+                   "the circuit's leaf must be the tree's leaf");
+
+        // 3. the path from that leaf to the batch root.
+        let (sibs, bits) = tree.membership_proof(index).unwrap();
+        let sibs_w: Vec<[u64; 4]> = sibs.iter().map(node_words).collect();
+        let (p3, l3, root_w) = prove_merkle_path_t8(leaf_w, &sibs_w, &bits).unwrap();
+        assert_eq!(root_w, node_words(&root), "the circuit must land on the batch root");
+        assert!(verify_merkle_path_t8(&p3, l3, sibs.len(), leaf_w, index as u32, root_w).unwrap());
+    }
+
+    /// The negative half, and the one that carries the claim: a signature proved
+    /// under someone else's trace root cannot reach the batch root, even with a
+    /// genuine path and the right transaction.
+    #[test]
+    fn a_foreign_trace_root_cannot_be_proved_into_the_batch() {
+        use crate::recursive::poseidon2_t8_air::prove_compress;
+        use crate::recursive::merkle_path_t8_air::{prove_merkle_path_t8, verify_merkle_path_t8};
+
+        let pairs: Vec<_> = (0..4u64).map(|i| (w(i * 7), w(1000 + i * 13))).collect();
+        let tree = build_batch_tree_bound(&pairs).unwrap();
+        let index = 2usize;
+        let (sibs, bits) = tree.membership_proof(index).unwrap();
+        let sibs_w: Vec<[u64; 4]> = sibs.iter().map(node_words).collect();
+
+        let (_, _, inner) = prove_compress(pairs[index].0, w(999_000)).unwrap();
+        let (_, _, forged_leaf) = prove_compress(LEAF_DOMAIN, inner).unwrap();
+
+        let (p, l, got_root) = prove_merkle_path_t8(forged_leaf, &sibs_w, &bits).unwrap();
+        // The prover can always prove SOME root for its own leaf; what it cannot
+        // do is land on the batch's.
+        assert_ne!(got_root, node_words(&tree.root()));
+        assert!(!verify_merkle_path_t8(
+            &p, l, sibs.len(), forged_leaf, index as u32, node_words(&tree.root())).unwrap());
     }
 
     #[test]
