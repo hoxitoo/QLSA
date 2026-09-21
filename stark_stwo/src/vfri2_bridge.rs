@@ -2369,6 +2369,7 @@ pub fn tree_statement_from_columns(
     batch_merkle_root: &[u8],
     n_queries: usize,
     num_folds: Option<usize>,
+    membership: Option<crate::recursive::composition_channel_t8::BatchMembership>,
 ) -> Result<crate::recursive::composition_channel_t8::TreeStatement, String> {
     use crate::recursive::composition_channel_t8 as node;
 
@@ -2399,6 +2400,7 @@ pub fn tree_statement_from_columns(
         queries: rec.queries,
         paths: rec.paths,
         comp_paths: rec.comp_paths,
+        membership,
     })
 }
 
@@ -2444,6 +2446,7 @@ impl AggregationTree {
 /// case and padding would prove statements nobody made.
 pub fn prove_aggregation_tree(
     leaf_columns: &[(Vec<Vec<u32>>, u32)],
+    memberships: &[crate::recursive::composition_channel_t8::BatchMembership],
     batch_merkle_root: &[u8],
     n_queries: usize,
     num_folds: Option<usize>,
@@ -2462,11 +2465,23 @@ pub fn prove_aggregation_tree(
     if leaf_columns.len() > 4096 {
         return Err(format!("leaf count {} exceeds 4096", leaf_columns.len()));
     }
+    // A-5: every LEAF proves it belongs to the batch. Required rather than
+    // optional — a tree of statements nobody showed to be batch members proves
+    // "N signatures were verified", which is the claim this exists to stop being
+    // mistaken for "these N are the batch".  Internal levels carry `None`
+    // legitimately: a node's own columns have no transaction.
+    if memberships.len() != leaf_columns.len() {
+        return Err(format!(
+            "expected one batch membership per leaf: {} leaves, {} memberships",
+            leaf_columns.len(), memberships.len()));
+    }
 
     let mut statements: Vec<node::TreeStatement> = Vec::with_capacity(leaf_columns.len());
     for (i, (cols, depth)) in leaf_columns.iter().enumerate() {
         statements.push(
-            tree_statement_from_columns(cols, *depth, batch_merkle_root, n_queries, num_folds)
+            tree_statement_from_columns(
+                cols, *depth, batch_merkle_root, n_queries, num_folds,
+                Some(memberships[i].clone()))
                 .map_err(|e| format!("leaf {i}: {e}"))?,
         );
     }
@@ -2501,7 +2516,7 @@ pub fn prove_aggregation_tree(
                 .enumerate()
                 .map(|(g, (cols, depth))| {
                     tree_statement_from_columns(
-                        cols, *depth, batch_merkle_root, n_queries, num_folds)
+                        cols, *depth, batch_merkle_root, n_queries, num_folds, None)
                         .map_err(|e| format!("level {} node {g} -> statement: {e}", levels.len()))
                 })
                 .collect::<Result<Vec<_>, String>>()?
@@ -2548,13 +2563,22 @@ pub fn prove_mldsa_aggregation_tree(
         [[i64; 256]; 6],
         Vec<[i64; 256]>,
     )],
+    tx_hashes: &[[u8; 32]],
     batch_merkle_root: &[u8],
     n_queries: usize,
     num_folds: Option<usize>,
     fan_in: usize,
 ) -> Result<AggregationTreeSummary, String> {
+    use crate::batch_tree::{build_batch_tree_bound, node_words, words_from_hash};
+    use crate::recursive::composition_channel_t8::BatchMembership;
+
     if entries.is_empty() {
         return Err("need ≥ 1 signature to aggregate".into());
+    }
+    if tx_hashes.len() != entries.len() {
+        return Err(format!(
+            "one transaction hash per signature: {} signatures, {} hashes",
+            entries.len(), tx_hashes.len()));
     }
     if batch_merkle_root.len() != 32 {
         return Err(format!(
@@ -2569,7 +2593,33 @@ pub fn prove_mldsa_aggregation_tree(
         );
     }
 
-    let tree = prove_aggregation_tree(&leaves, batch_merkle_root, n_queries, num_folds, fan_in)?;
+    // A-5: the batch tree over (tx_id, trace_root) pairs, and each leaf's path
+    // into it. The trace roots come from the SAME chain run the leaf columns
+    // were extracted from, so the root in a leaf cannot drift from the root its
+    // proof commits to.
+    let mut pairs = Vec::with_capacity(entries.len());
+    for (i, ((cols, depth), tx_hash)) in leaves.iter().zip(tx_hashes).enumerate() {
+        let trace_root = vfri11_fri_chain(cols, *depth, batch_merkle_root, n_queries, num_folds)
+            .map_err(|e| format!("signature {i}: {e}"))?
+            .trace_root;
+        pairs.push((words_from_hash(tx_hash), p2t8_node_words(&trace_root)));
+    }
+    let batch_tree = build_batch_tree_bound(&pairs)?;
+    let batch_root = node_words(&batch_tree.root());
+    let mut memberships = Vec::with_capacity(pairs.len());
+    for (i, (tx_id, trace_root)) in pairs.iter().enumerate() {
+        let (sibs, bits) = batch_tree.membership_proof(i)?;
+        memberships.push(BatchMembership {
+            tx_id: *tx_id,
+            trace_root: *trace_root,
+            sibs: sibs.iter().map(node_words).collect(),
+            bits,
+            batch_root,
+        });
+    }
+
+    let tree = prove_aggregation_tree(
+        &leaves, &memberships, batch_merkle_root, n_queries, num_folds, fan_in)?;
     let root = tree.root();
     Ok(AggregationTreeSummary {
         root_proof: root.proof.clone(),
@@ -3660,6 +3710,173 @@ mod tests {
 #[cfg(test)]
 mod tests_vfri8 {
 
+    /// A-5 at the NODE level: a node over leaf statements proves each leaf's
+    /// batch membership alongside its fold chains and transcript.
+    #[test]
+    fn a_node_proves_its_leaves_batch_membership() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let leaves: Vec<_> = (0..2u64)
+            .map(|i| {
+                let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600 + i);
+                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols")
+            })
+            .collect();
+        let ms = memberships_for(&leaves, &merkle_root, 1, Some(6));
+        let stmts: Vec<_> = leaves
+            .iter()
+            .zip(&ms)
+            .map(|((c, d), m)| tree_statement_from_columns(
+                c, *d, &merkle_root, 1, Some(6), Some(m.clone())).expect("stmt"))
+            .collect();
+
+        let proved = node::prove_tree_node(&stmts).expect("node with membership");
+        assert!(node::verify_tree_node(&proved.proof, proved.log_size, &stmts, &proved.roots)
+            .expect("verify"));
+
+        // The last roots are the batch roots, one per statement — and they are
+        // the batch root, not something the prover chose.
+        let n_query_paths = proved.roots.len() - stmts.len();
+        for (k, m) in ms.iter().enumerate() {
+            assert_eq!(proved.roots[n_query_paths + k], m.batch_root);
+        }
+    }
+
+    /// **The claim.** A signature proved under someone else's trace root cannot
+    /// be carried into the node as a batch member, even with a genuine path and
+    /// the right transaction.
+    #[test]
+    fn a_node_rejects_a_leaf_whose_trace_root_is_not_its_own() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let leaves: Vec<_> = (0..2u64)
+            .map(|i| {
+                let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600 + i);
+                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols")
+            })
+            .collect();
+        let mut ms = memberships_for(&leaves, &merkle_root, 1, Some(6));
+
+        // Statement 0 keeps its transaction and its path, but claims the OTHER
+        // signature's proof.
+        ms[0].trace_root = ms[1].trace_root;
+
+        let stmts: Vec<_> = leaves
+            .iter()
+            .zip(&ms)
+            .map(|((c, d), m)| tree_statement_from_columns(
+                c, *d, &merkle_root, 1, Some(6), Some(m.clone())).expect("stmt"))
+            .collect();
+
+        let err = match node::prove_tree_node(&stmts) {
+            Err(e) => e,
+            Ok(_) => panic!("a foreign trace root must not produce a node"),
+        };
+        assert!(err.contains("batch"), "the error should name the batch: {err}");
+    }
+
+    /// Internal levels legitimately have no membership — a node's own columns
+    /// carry no transaction — but a LEAF without one is refused, and the message
+    /// says how many were expected.
+    #[test]
+    fn the_tree_builder_refuses_leaves_without_membership() {
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let leaves = vec![v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).unwrap()];
+
+        let err = match prove_aggregation_tree(&leaves, &[], &merkle_root, 1, Some(6), 2) {
+            Err(e) => e,
+            Ok(_) => panic!("a leaf without membership must be refused"),
+        };
+        assert!(err.contains("membership"), "{err}");
+    }
+
+    /// Ф2 Ш4 — what membership costs in node SIZE.
+    ///
+    /// A node takes `log_size = max(channel, rv, merkle)`. Membership adds one
+    /// Merkle path per statement, which grows the merkle component and MAY push
+    /// log_size up — and log_size is what sets proving time (27 s at log 16), so
+    /// it lands directly on the throughput figure in ROADMAP § 1.3. Measured
+    /// rather than assumed.
+    #[test]
+    #[ignore]
+    fn probe_membership_size_cost() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        for n_leaves in [2usize, 4] {
+            let leaves: Vec<_> = (0..n_leaves)
+                .map(|i| {
+                    let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600 + i as u64);
+                    v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols")
+                })
+                .collect();
+            let ms = memberships_for(&leaves, &merkle_root, 1, Some(6));
+
+            let without: Vec<_> = leaves
+                .iter()
+                .map(|(c, d)| tree_statement_from_columns(c, *d, &merkle_root, 1, Some(6), None)
+                    .expect("stmt"))
+                .collect();
+            let with: Vec<_> = leaves
+                .iter()
+                .zip(&ms)
+                .map(|((c, d), m)| tree_statement_from_columns(
+                    c, *d, &merkle_root, 1, Some(6), Some(m.clone())).expect("stmt"))
+                .collect();
+
+            let a = node::tree_node_log_size(&without).expect("log without");
+            let b = node::tree_node_log_size(&with).expect("log with");
+            eprintln!(
+                "{n_leaves} leaves: log {a} without membership -> log {b} with  ({})",
+                if a == b { "no cost" } else { "GREW — hits proving time" }
+            );
+        }
+    }
+
+    /// Batch memberships for a set of leaf columns — what a real caller builds,
+    /// reduced to the parts a test needs. Uses the SAME chain run the leaf
+    /// columns come from, so the trace roots are the genuine ones.
+    fn memberships_for(
+        leaves: &[(Vec<Vec<u32>>, u32)],
+        merkle_root: &[u8],
+        n_queries: usize,
+        num_folds: Option<usize>,
+    ) -> Vec<crate::recursive::composition_channel_t8::BatchMembership> {
+        use crate::batch_tree::{build_batch_tree_bound, node_words, words_from_hash};
+        use crate::recursive::composition_channel_t8::BatchMembership;
+
+        let pairs: Vec<_> = leaves
+            .iter()
+            .enumerate()
+            .map(|(i, (cols, depth))| {
+                let tr = vfri11_fri_chain(cols, *depth, merkle_root, n_queries, num_folds)
+                    .expect("chain")
+                    .trace_root;
+                let tx: [u8; 32] = std::array::from_fn(|j| ((i * 37 + j * 11) % 256) as u8);
+                (words_from_hash(&tx), p2t8_node_words(&tr))
+            })
+            .collect();
+        let tree = build_batch_tree_bound(&pairs).expect("batch tree");
+        let batch_root = node_words(&tree.root());
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (tx_id, trace_root))| {
+                let (sibs, bits) = tree.membership_proof(i).expect("path");
+                BatchMembership {
+                    tx_id: *tx_id,
+                    trace_root: *trace_root,
+                    sibs: sibs.iter().map(node_words).collect(),
+                    bits,
+                    batch_root,
+                }
+            })
+            .collect()
+    }
+
     /// A-5 on REAL data: two genuine V23 groups become batch leaves, and each
     /// proves its membership. The synthetic tests in `batch_tree` show the leaf
     /// shape behaves; this shows the trace root in the leaf is the one a real
@@ -3735,7 +3952,7 @@ mod tests_vfri8 {
         let stmts: Vec<_> = leaves
             .iter()
             .map(|(cols, depth)| {
-                tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6))
+                tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6), None)
                     .expect("statement")
             })
             .collect();
@@ -5523,7 +5740,7 @@ mod tests_vfri8 {
         let (cols, tree_depth) =
             v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 4).expect("V23 columns");
 
-        let st = match tree_statement_from_columns(&cols, tree_depth, &merkle_root, 4, Some(6)) {
+        let st = match tree_statement_from_columns(&cols, tree_depth, &merkle_root, 4, Some(6), None) {
             Ok(s) => s,
             Err(e) => panic!("level step failed: {e}"),
         };
@@ -5550,14 +5767,14 @@ mod tests_vfri8 {
         let (cols0, depth0) =
             v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 2).expect("V23 columns");
 
-        let st0 = tree_statement_from_columns(&cols0, depth0, &merkle_root, 2, Some(6))
+        let st0 = tree_statement_from_columns(&cols0, depth0, &merkle_root, 2, Some(6), None)
             .expect("level-0 statement");
         let (cols1, depth1) = node::tree_node_trace_columns(std::slice::from_ref(&st0))
             .expect("level-1 node columns");
         eprintln!("level-1 node: {} cols, log {}", cols1.len(), depth1);
 
         // And those columns are themselves a statement for the level above.
-        let st1 = match tree_statement_from_columns(&cols1, depth1, &merkle_root, 2, Some(6)) {
+        let st1 = match tree_statement_from_columns(&cols1, depth1, &merkle_root, 2, Some(6), None) {
             Ok(s) => s,
             Err(e) => panic!("level-1 -> level-2 step failed: {e}"),
         };
@@ -5585,7 +5802,7 @@ mod tests_vfri8 {
             );
         }
 
-        let tree = match prove_aggregation_tree(&leaves, &merkle_root, 1, Some(6), 2) {
+        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
             Ok(t) => t,
             Err(e) => panic!("tree proving failed: {e}"),
         };
@@ -5606,9 +5823,9 @@ mod tests_vfri8 {
 
         // And the root verifies against the statements it was built from.
         let (cols, depth) = &tree.levels[0].columns[0];
-        let a = tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6)).unwrap();
+        let a = tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6), None).unwrap();
         let (cols, depth) = &tree.levels[0].columns[1];
-        let b = tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6)).unwrap();
+        let b = tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6), None).unwrap();
         assert!(
             node::verify_tree_node(&root.proof, root.log_size, &[a, b], &root.roots).unwrap(),
             "the root must verify against its two children");
@@ -5625,7 +5842,7 @@ mod tests_vfri8 {
                 v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols"),
             );
         }
-        let tree = match prove_aggregation_tree(&leaves, &merkle_root, 1, Some(6), 2) {
+        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
             Ok(t) => t, Err(e) => panic!("tree proving failed: {e}"),
         };
         // Three leaves at fan-in 2: a full pair and a lone one, then the root.
@@ -5637,10 +5854,10 @@ mod tests_vfri8 {
     #[test]
     fn a_tree_checks_its_inputs() {
         let root = vec![0u8; 32];
-        assert!(prove_aggregation_tree(&[], &root, 1, Some(6), 2).is_err(), "no leaves");
+        assert!(prove_aggregation_tree(&[], &[], &root, 1, Some(6), 2).is_err(), "no leaves");
         let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
         let one = vec![v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &root, 1).unwrap()];
-        assert!(prove_aggregation_tree(&one, &root, 1, Some(6), 1).is_err(), "fan_in 1 never ends");
+        assert!(prove_aggregation_tree(&one, &memberships_for(&one, &root, 1, Some(6)), &root, 1, Some(6), 1).is_err(), "fan_in 1 never ends");
     }
 
     /// Does the TREE NODE's shape reach a fixed point, as the 2-component one did?
@@ -5708,6 +5925,7 @@ mod tests_vfri8 {
             queries,
             paths: rec0.paths.clone(),
             comp_paths: rec0.comp_paths.clone(),
+            membership: None,
         };
 
         match node::tree_node_trace_columns(std::slice::from_ref(&statement)) {

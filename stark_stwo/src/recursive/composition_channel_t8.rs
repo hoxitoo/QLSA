@@ -58,6 +58,66 @@ use crate::recursive::qm31_mul_air::pack;
 use crate::recursive::recursive_verifier as rv;
 use crate::recursive::recursive_verifier::FoldRound;
 
+
+/// A leaf statement's proof that its signature is a MEMBER of the batch (A-5).
+///
+/// The batch leaf is `compress_t8(LEAF_DOMAIN, compress_t8(tx_id, trace_root))`
+/// (`crate::batch_tree`). Its two compressions are the same operation a Merkle
+/// path step performs — `merkle_path_t8_air` computes
+/// `if bit { compress(sib, cur) } else { compress(cur, sib) }` — so the whole
+/// membership proof is ONE path of depth `2 + d` starting at `tx_id`, and needs
+/// no new AIR, no new component and no fourth component in the node:
+///
+/// | step | cur | sib | bit | result |
+/// |---|---|---|---|---|
+/// | 0 | `tx_id` | `trace_root` | `false` | `compress(tx_id, trace_root)` |
+/// | 1 | inner | `LEAF_DOMAIN` | `true` | the batch leaf |
+/// | 2… | leaf | real siblings | real bits | the batch root |
+///
+/// Only LEAF statements carry one. An internal tree level's statement comes from
+/// a node's own columns and has no transaction, so the field is `Option` for a
+/// structural reason rather than as optional security — `prove_aggregation_tree`
+/// refuses a level-0 statement without it.
+#[derive(Clone, Debug)]
+pub struct BatchMembership {
+    /// The transaction's identity: the first 124 bits of its hash.
+    pub tx_id: [u64; 4],
+    /// The trace root of the proof verifying this member's signature.
+    pub trace_root: [u64; 4],
+    /// Siblings on the path from the batch leaf to the batch root.
+    pub sibs: Vec<[u64; 4]>,
+    pub bits: Vec<bool>,
+    /// The batch root the path must land on.
+    pub batch_root: [u64; 4],
+}
+
+impl BatchMembership {
+    /// The full path the AIR authenticates: the leaf's two compressions, then
+    /// the batch path.
+    ///
+    /// The `[trace_root, LEAF_DOMAIN]` / `[false, true]` prefix lives HERE and
+    /// nowhere else. Written at each call site it would be two orderings to keep
+    /// in step — the same reason the FRI chain is one helper (R4.1).
+    pub fn path(&self) -> (Vec<[u64; 4]>, Vec<bool>) {
+        let mut sibs = Vec::with_capacity(2 + self.sibs.len());
+        sibs.push(self.trace_root);
+        sibs.push(crate::batch_tree::LEAF_DOMAIN);
+        sibs.extend_from_slice(&self.sibs);
+
+        let mut bits = Vec::with_capacity(2 + self.bits.len());
+        bits.push(false);
+        bits.push(true);
+        bits.extend_from_slice(&self.bits);
+
+        (sibs, bits)
+    }
+
+    /// Depth of that path — `2 + d`.
+    pub fn depth(&self) -> usize {
+        2 + self.sibs.len()
+    }
+}
+
 /// One query's OODS + circle-fold step, as `composition_t8` names it.
 pub type QueryStep = rv::StepOp;
 use crate::{make_config, LOG_BLOWUP, MAX_PROOF_BYTES, N_FRI_QUERIES, POW_BITS};
@@ -725,6 +785,9 @@ pub struct TreeStatement {
     pub paths: Vec<(Vec<[u64; 4]>, Vec<bool>)>,
     /// Per query: the two composition-value paths into the child's compRoot.
     pub comp_paths: Vec<CompMembership>,
+    /// A-5: for a LEAF statement, its membership in the batch. `None` for the
+    /// statements of internal tree levels, which have no transaction.
+    pub membership: Option<BatchMembership>,
 }
 
 pub struct TreeNodeResult {
@@ -739,7 +802,8 @@ pub struct TreeNodeResult {
     /// One per statement.
     pub runs: Vec<channel::ChannelRun>,
     /// Per-path roots, in `path_depths` order: Q final-fold, Q comp, Q compNeg,
-    /// where Q is the TOTAL query count across statements.
+    /// then ONE batch root per statement carrying a membership (A-5), where Q is
+    /// the TOTAL query count across statements.
     pub roots: Vec<[u64; 4]>,
 }
 
@@ -882,6 +946,18 @@ fn node_shape(statements: &[TreeStatement]) -> Result<NodeShape, String> {
         sibs.extend(st.comp_paths.iter().map(|(_, _, ns, _)| ns.clone()));
         bits.extend(st.comp_paths.iter().map(|(_, _, _, nb)| nb.clone()));
     }
+    // A-5, fourth and last group: ONE batch-membership path per statement that
+    // carries one — a leaf's, never an internal level's. The order is stated
+    // here as explicitly as the three above, because `leaves`, `sibs`, `bits`,
+    // `indices` and `depths` must all agree on it.
+    for st in statements {
+        if let Some(m) = &st.membership {
+            let (ms, mb) = m.path();
+            leaves.push(m.tx_id);
+            sibs.push(ms);
+            bits.push(mb);
+        }
+    }
 
     let indices: Vec<u32> = bits.iter().map(|b| merkle::bits_to_index(b)).collect();
     // The same order as `leaves`/`sibs`/`bits`: all final-fold, then all
@@ -897,6 +973,21 @@ fn node_shape(statements: &[TreeStatement]) -> Result<NodeShape, String> {
         }
     }
     debug_assert_eq!(depths.len(), 3 * queries.len());
+    // The membership group, same order as above.
+    let n_membership = statements.iter().filter(|st| st.membership.is_some()).count();
+    for st in statements {
+        if let Some(m) = &st.membership {
+            if m.sibs.len() != m.bits.len() {
+                return Err("membership: siblings and bits differ in length".into());
+            }
+            if m.depth() > merkle::MAX_DEPTH {
+                return Err(format!(
+                    "membership path depth {} exceeds MAX_DEPTH {}", m.depth(), merkle::MAX_DEPTH));
+            }
+            depths.push(m.depth());
+        }
+    }
+    debug_assert_eq!(depths.len(), 3 * queries.len() + n_membership);
 
     let log_size = channel::compute_log_size_multi(&transcripts)
         .max(rv::compute_log_size(queries.len() * (1 + num_folds)))
@@ -1015,6 +1106,21 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
     let (rv_main, rv_preproc) = rv::build_trace_multi(&sh.queries, sh.log_size);
     let (merkle_main, roots) =
         merkle::build_trace_multi(&sh.leaves, &sh.sibs, &sh.bits, sh.log_size);
+
+    // A-5: a membership path must land on the batch root it claims. The pinned
+    // preprocessed roots would make a mismatch fail verification anyway, but as
+    // an opaque "does not verify" — checked here it names the statement.
+    let n_query_paths = 3 * sh.queries.len();
+    for (k, st) in statements.iter().filter(|st| st.membership.is_some()).enumerate() {
+        let m = st.membership.as_ref().expect("filtered");
+        let got = roots[n_query_paths + k];
+        if got != m.batch_root {
+            return Err(format!(
+                "statement {k}: the membership path reaches {got:?}, not the batch root \
+                 {:?} — the leaf does not belong to this batch",
+                m.batch_root));
+        }
+    }
     let merkle_preproc = merkle::build_preproc_multi_var(
         &sh.leaves, &sh.indices, &roots, &sh.depths, sh.log_size);
     let (chan_main, runs) = channel::build_trace_multi(&sh.transcripts, sh.log_size);
@@ -1482,7 +1588,7 @@ mod tests {
             let (ns, nb) = mk(comp_depth, seed);
             comp_paths.push((ps, pb, ns, nb));
         }
-        TreeStatement { steps, layout, queries, paths, comp_paths }
+        TreeStatement { steps, layout, queries, paths, comp_paths, membership: None }
     }
 
     /// The tree's node: two child PROOFS, each with several queries.

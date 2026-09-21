@@ -5943,12 +5943,13 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
-/// prove_mldsa_aggregation_tree_py(entries, batch_root, n_queries, num_folds, fan_in) -> dict
+/// prove_mldsa_aggregation_tree_py(entries, tx_hashes, batch_root, n_queries, num_folds, fan_in) -> dict
 ///
 /// Aggregate N ML-DSA-65 witnesses into ONE root proof.
 ///
 /// `entries` is a list of `(z, c, t1, a_hat)` — one extracted witness per
-/// signature. Every entry becomes a leaf statement and the tree folds them to a
+/// signature; `tx_hashes` is the matching transaction hash for each, which goes
+/// into that member's batch leaf (A-5). Every entry becomes a leaf statement and the tree folds them to a
 /// single root, whose on-chain cost does not depend on N: the node shape is a
 /// fixed point at log 16, so depth is free.
 ///
@@ -5957,10 +5958,11 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
 /// as distinct from the result, which is the root alone.
 #[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(signature = (entries, batch_root, n_queries=1, num_folds=None, fan_in=2))]
+#[pyo3(signature = (entries, tx_hashes, batch_root, n_queries=1, num_folds=None, fan_in=2))]
 fn prove_mldsa_aggregation_tree_py(
     py:         Python<'_>,
     entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>)>,
+    tx_hashes:  Vec<Vec<u8>>,
     batch_root: Vec<u8>,
     n_queries:  usize,
     num_folds:  Option<usize>,
@@ -5979,8 +5981,16 @@ fn prove_mldsa_aggregation_tree_py(
         conv.push(e);
     }
 
+    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(tx_hashes.len());
+    for (i, h) in tx_hashes.iter().enumerate() {
+        hashes.push(h.as_slice().try_into().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "tx_hashes[{i}] must be 32 bytes, got {}", h.len()))
+        })?);
+    }
+
     let summary = vfri2_bridge::prove_mldsa_aggregation_tree(
-        &conv, &batch_root, n_queries, num_folds, fan_in,
+        &conv, &hashes, &batch_root, n_queries, num_folds, fan_in,
     )
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 

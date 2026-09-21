@@ -2592,6 +2592,7 @@ def prove_mldsa_aggregation_tree(
             f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
 
     witnesses = []
+    tx_hashes: list[bytes] = []
     for i, (pk, msg, sig) in enumerate(entries):
         try:
             z, c, t1, a_hat, _hints = _ext.extract_mldsa_witness_py(
@@ -2606,10 +2607,15 @@ def prove_mldsa_aggregation_tree(
             [list(p) for p in t1],
             [list(p) for p in a_hat],
         ))
+        # A-5: the leaf binds this member to the proof of its signature, so the
+        # member's identity has to come along. SHA3-256 of the signed bytes is
+        # what `core.transaction.Transaction.tx_hash` uses, mirrored here so a
+        # caller holding raw (pk, msg, sig) needs no Transaction object.
+        tx_hashes.append(hashlib.sha3_256(bytes(msg)).digest())
 
     try:
         d = _ext.prove_mldsa_aggregation_tree_py(
-            witnesses, bytes(batch_merkle_root), n_queries, num_folds, fan_in)
+            witnesses, tx_hashes, bytes(batch_merkle_root), n_queries, num_folds, fan_in)
     except Exception as exc:
         raise RuntimeError(f"aggregation tree proving failed: {exc}") from exc
 
