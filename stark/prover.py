@@ -2551,10 +2551,19 @@ class AggregationTree:
     internally parallel.
     """
 
+    #: The LOG=10 tree's root — the NTT/INTT half of every member's statement.
     root_proof: bytes
     root_log_size: int
     #: Per-path roots the root proof commits to, as 4-word M31 nodes.
     root_roots: list[list[int]]
+    #: The LOG=8 tree's root — the multiplication, the norm bound `‖z‖∞ < γ₁−β`
+    #: and the ω hint bound. BOTH are needed: a root over log10 alone attests
+    #: neither, and `BatchRegistryV7` takes two bundles for the same reason.
+    root_proof8: bytes
+    root_log_size8: int
+    root_roots8: list[list[int]]
+    #: The batch root both trees' membership paths land on (A-5).
+    batch_root: list[int]
     leaf_count: int
     depth: int
     #: Proofs the prover produced — the cost, as opposed to the result.
@@ -2569,7 +2578,14 @@ def prove_mldsa_aggregation_tree(
     num_folds: int | None = 6,
     fan_in: int = 2,
 ) -> AggregationTree:
-    """Aggregate N ML-DSA-65 signatures into ONE root proof.
+    """Aggregate N ML-DSA-65 signatures into TWO root proofs — one per V23 group.
+
+    A V23 statement is two FRI commitments and they prove different things: the
+    LOG=10 group the NTT/INTT transforms, the LOG=8 group the multiplication
+    `A·z`, the norm bound and the ω hint bound. A root over log10 alone attests
+    neither of the latter, so both trees are built; `BatchRegistryV7` takes two
+    cross-bound bundles for the same reason. One batch root covers both — the
+    leaf binds each member to both halves of its proof.
 
     Each entry is `(pk, msg, sig)`. Every signature is verified in full before
     its witness is extracted — `extract_mldsa_witness_py` refuses an invalid one —
@@ -2595,7 +2611,7 @@ def prove_mldsa_aggregation_tree(
     tx_hashes: list[bytes] = []
     for i, (pk, msg, sig) in enumerate(entries):
         try:
-            z, c, t1, a_hat, _hints = _ext.extract_mldsa_witness_py(
+            z, c, t1, a_hat, hints = _ext.extract_mldsa_witness_py(
                 bytes(pk), bytes(msg), bytes(sig))
         except Exception as exc:
             # Name the signature: with N of them, "extraction failed" alone
@@ -2606,6 +2622,7 @@ def prove_mldsa_aggregation_tree(
             list(c),
             [list(p) for p in t1],
             [list(p) for p in a_hat],
+            [list(h) for h in hints],
         ))
         # A-5: the leaf binds this member to the proof of its signature, so the
         # member's identity has to come along. SHA3-256 of the signed bytes is
@@ -2623,6 +2640,10 @@ def prove_mldsa_aggregation_tree(
         root_proof=bytes(d["rootProof"]),
         root_log_size=int(d["rootLogSize"]),
         root_roots=[list(r) for r in d["rootRoots"]],
+        root_proof8=bytes(d["rootProof8"]),
+        root_log_size8=int(d["rootLogSize8"]),
+        root_roots8=[list(r) for r in d["rootRoots8"]],
+        batch_root=list(d["batchRoot"]),
         leaf_count=int(d["leafCount"]),
         depth=int(d["depth"]),
         node_count=int(d["nodeCount"]),

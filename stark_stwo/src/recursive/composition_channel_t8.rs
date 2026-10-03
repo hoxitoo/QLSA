@@ -70,20 +70,37 @@ use crate::recursive::recursive_verifier::FoldRound;
 ///
 /// | step | cur | sib | bit | result |
 /// |---|---|---|---|---|
-/// | 0 | `tx_id` | `trace_root` | `false` | `compress(tx_id, trace_root)` |
-/// | 1 | inner | `LEAF_DOMAIN` | `true` | the batch leaf |
-/// | 2… | leaf | real siblings | real bits | the batch root |
+/// | 0 | this tree's root | the other group's root | by `side` | `compress(tr10, tr8)` |
+/// | 1 | inner2 | `tx_id` | `true` | `compress(tx_id, inner2)` |
+/// | 2 | inner | `LEAF_DOMAIN` | `true` | the batch leaf |
+/// | 3… | leaf | real siblings | real bits | the batch root |
 ///
 /// Only LEAF statements carry one. An internal tree level's statement comes from
 /// a node's own columns and has no transaction, so the field is `Option` for a
 /// structural reason rather than as optional security — `prove_aggregation_tree`
 /// refuses a level-0 statement without it.
+/// Which of a V23 proof's two FRI commitments a tree covers.
+///
+/// A V23 statement is two groups and they prove different things: log10 the
+/// NTT/INTT transforms, log8 the multiplication, the norm bound and the hint
+/// bound. One tree per group, so the batch leaf binds both and each tree starts
+/// its membership path at the root it actually commits to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Log10,
+    Log8,
+}
+
 #[derive(Clone, Debug)]
 pub struct BatchMembership {
     /// The transaction's identity: the first 124 bits of its hash.
     pub tx_id: [u64; 4],
-    /// The trace root of the proof verifying this member's signature.
-    pub trace_root: [u64; 4],
+    /// Trace root of this member's LOG=10 group proof.
+    pub tr10: [u64; 4],
+    /// Trace root of its LOG=8 group proof.
+    pub tr8: [u64; 4],
+    /// Which group THIS tree proves — decides where the path starts.
+    pub side: Group,
     /// Siblings on the path from the batch leaf to the batch root.
     pub sibs: Vec<[u64; 4]>,
     pub bits: Vec<bool>,
@@ -99,22 +116,48 @@ impl BatchMembership {
     /// nowhere else. Written at each call site it would be two orderings to keep
     /// in step — the same reason the FRI chain is one helper (R4.1).
     pub fn path(&self) -> (Vec<[u64; 4]>, Vec<bool>) {
-        let mut sibs = Vec::with_capacity(2 + self.sibs.len());
-        sibs.push(self.trace_root);
+        // `inner2 = compress(tr10, tr8)` puts tr10 on the LEFT, so a path
+        // starting at tr10 takes bit=false and one starting at tr8 takes
+        // bit=true. That single asymmetry is the whole difference between the
+        // two trees, and it lives here.
+        let (first_sib, first_bit) = match self.side {
+            Group::Log10 => (self.tr8, false),
+            Group::Log8 => (self.tr10, true),
+        };
+
+        let mut sibs = Vec::with_capacity(3 + self.sibs.len());
+        sibs.push(first_sib);
+        sibs.push(self.tx_id);
         sibs.push(crate::batch_tree::LEAF_DOMAIN);
         sibs.extend_from_slice(&self.sibs);
 
-        let mut bits = Vec::with_capacity(2 + self.bits.len());
-        bits.push(false);
+        let mut bits = Vec::with_capacity(3 + self.bits.len());
+        bits.push(first_bit);
+        bits.push(true);
         bits.push(true);
         bits.extend_from_slice(&self.bits);
 
         (sibs, bits)
     }
 
-    /// Depth of that path — `2 + d`.
+    /// The value the path STARTS from: this tree's own group root.
+    ///
+    /// Not `tx_id`. The AIR pins the start, the index and the root (C1) and
+    /// leaves siblings as witness — so the start has to be the value this tree's
+    /// proof commits to, or the tree is not bound to its own half. `tx_id` and
+    /// the other group's root stay siblings and are still constrained, through
+    /// the pinned batch root: siblings cannot be chosen freely when the root
+    /// must match.
+    pub fn start(&self) -> [u64; 4] {
+        match self.side {
+            Group::Log10 => self.tr10,
+            Group::Log8 => self.tr8,
+        }
+    }
+
+    /// Depth of that path — `3 + d`.
     pub fn depth(&self) -> usize {
-        2 + self.sibs.len()
+        3 + self.sibs.len()
     }
 }
 
@@ -953,7 +996,7 @@ fn node_shape(statements: &[TreeStatement]) -> Result<NodeShape, String> {
     for st in statements {
         if let Some(m) = &st.membership {
             let (ms, mb) = m.path();
-            leaves.push(m.tx_id);
+            leaves.push(m.start());
             sibs.push(ms);
             bits.push(mb);
         }

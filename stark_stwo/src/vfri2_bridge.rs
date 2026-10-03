@@ -2394,6 +2394,25 @@ pub fn tree_statement_from_columns(
         }
     }
 
+    // A-5's missing link. The membership proves "this LEAF is in the batch"; on
+    // its own that says nothing about WHICH proof the leaf describes, so a
+    // prover could pair signature A's columns with signature B's membership
+    // triple and the batch path would still verify. Tying the membership's own
+    // side to THESE columns' trace root is what makes the leaf about this proof.
+    //
+    // Found because a test asserting a swapped `side` breaks the node FAILED:
+    // swapping it yields the same leaf (both orientations compress to the same
+    // `compress(tr10, tr8)`), which showed the binding rested on the pinned path
+    // start — and nothing checked that start against the columns.
+    if let Some(m) = &membership {
+        let own = p2t8_node_words(&rec.trace_root);
+        if m.start() != own {
+            return Err(format!(
+                "membership claims trace root {:?} but these columns commit to {own:?} —                  the leaf does not describe this proof",
+                m.start()));
+        }
+    }
+
     Ok(node::TreeStatement {
         steps,
         layout,
@@ -2536,9 +2555,17 @@ pub fn prove_aggregation_tree(
 /// Only the ROOT matters downstream — that is the point of the tree — but the
 /// shape is reported because it is what a caller sizes its worker pool by.
 pub struct AggregationTreeSummary {
+    /// The LOG=10 tree's root — the NTT/INTT half of every member's statement.
     pub root_proof: Vec<u8>,
     pub root_log_size: u32,
     pub root_roots: Vec<[u64; 4]>,
+    /// The LOG=8 tree's root — the multiplication, the norm bound and the hint
+    /// bound. Both are needed: a root over log10 alone attests neither.
+    pub root_proof8: Vec<u8>,
+    pub root_log_size8: u32,
+    pub root_roots8: Vec<[u64; 4]>,
+    /// The batch root both trees' membership paths land on.
+    pub batch_root: [u64; 4],
     /// Statements the root attests, transitively.
     pub leaf_count: usize,
     pub depth: usize,
@@ -2549,8 +2576,10 @@ pub struct AggregationTreeSummary {
 
 /// Aggregate N ML-DSA-65 witnesses into ONE root proof.
 ///
-/// Each entry is one signature's extracted witness; every entry becomes a leaf
-/// statement, and the tree folds them to a single root. On-chain cost is the
+/// Each entry is one signature's extracted witness `(z, c, t1, a_hat, hints)`.
+/// Every entry becomes a leaf statement in TWO trees — one per V23 FRI group —
+/// because log10 carries the NTT/INTT and log8 the multiplication, the norm
+/// bound and the hint bound. `hints` is needed for log8's UseHintBatch. On-chain cost is the
 /// root's alone and does not depend on N — the shape is a fixed point at log 16
 /// (`probe_tree_node_self_composition`), so depth is free.
 ///
@@ -2562,6 +2591,7 @@ pub fn prove_mldsa_aggregation_tree(
         [i64; 256],
         [[i64; 256]; 6],
         Vec<[i64; 256]>,
+        [[bool; 256]; 6],
     )],
     tx_hashes: &[[u8; 32]],
     batch_merkle_root: &[u8],
@@ -2569,8 +2599,8 @@ pub fn prove_mldsa_aggregation_tree(
     num_folds: Option<usize>,
     fan_in: usize,
 ) -> Result<AggregationTreeSummary, String> {
-    use crate::batch_tree::{build_batch_tree_bound, node_words, words_from_hash};
-    use crate::recursive::composition_channel_t8::BatchMembership;
+    use crate::batch_tree::{build_batch_tree_dual, node_words, words_from_hash};
+    use crate::recursive::composition_channel_t8::{BatchMembership, Group};
 
     if entries.is_empty() {
         return Err("need ≥ 1 signature to aggregate".into());
@@ -2586,48 +2616,86 @@ pub fn prove_mldsa_aggregation_tree(
     }
 
     let mut leaves = Vec::with_capacity(entries.len());
-    for (i, (z, c, t1, a_hat)) in entries.iter().enumerate() {
+    for (i, (z, c, t1, a_hat, _hints)) in entries.iter().enumerate() {
         leaves.push(
             v23_vfri11_cols_log10(z, c, t1, a_hat, batch_merkle_root, n_queries)
                 .map_err(|e| format!("signature {i}: {e}"))?,
         );
     }
 
-    // A-5: the batch tree over (tx_id, trace_root) pairs, and each leaf's path
-    // into it. The trace roots come from the SAME chain run the leaf columns
-    // were extracted from, so the root in a leaf cannot drift from the root its
-    // proof commits to.
-    let mut pairs = Vec::with_capacity(entries.len());
-    for (i, ((cols, depth), tx_hash)) in leaves.iter().zip(tx_hashes).enumerate() {
-        let trace_root = vfri11_fri_chain(cols, *depth, batch_merkle_root, n_queries, num_folds)
-            .map_err(|e| format!("signature {i}: {e}"))?
-            .trace_root;
-        pairs.push((words_from_hash(tx_hash), p2t8_node_words(&trace_root)));
-    }
-    let batch_tree = build_batch_tree_bound(&pairs)?;
-    let batch_root = node_words(&batch_tree.root());
-    let mut memberships = Vec::with_capacity(pairs.len());
-    for (i, (tx_id, trace_root)) in pairs.iter().enumerate() {
-        let (sibs, bits) = batch_tree.membership_proof(i)?;
-        memberships.push(BatchMembership {
-            tx_id: *tx_id,
-            trace_root: *trace_root,
-            sibs: sibs.iter().map(node_words).collect(),
-            bits,
-            batch_root,
-        });
+    // The LOG=8 group too: a tree over log10 alone attests the NTT/INTT and
+    // neither the multiplication, the norm bound nor the hint bound — those live
+    // in log8. BatchRegistryV7 needs both bundles for the same reason.
+    let mut leaves8 = Vec::with_capacity(entries.len());
+    for (i, (z, c, t1, a_hat, hints)) in entries.iter().enumerate() {
+        leaves8.push(
+            v23_vfri11_cols_log8(z, c, t1, a_hat, hints, batch_merkle_root, n_queries)
+                .map_err(|e| format!("signature {i} (log8): {e}"))?,
+        );
     }
 
+    // A-5: ONE batch tree whose leaf binds the member to BOTH halves of its
+    // proof. The trace roots come from the SAME chain runs the leaf columns were
+    // extracted from, so a root in a leaf cannot drift from the root its proof
+    // commits to.
+    let mut triples = Vec::with_capacity(entries.len());
+    for (i, (((c10, d10), (c8, d8)), tx_hash)) in
+        leaves.iter().zip(&leaves8).zip(tx_hashes).enumerate()
+    {
+        let tr10 = vfri11_fri_chain(c10, *d10, batch_merkle_root, n_queries, num_folds)
+            .map_err(|e| format!("signature {i} (log10): {e}"))?
+            .trace_root;
+        let tr8 = vfri11_fri_chain(c8, *d8, batch_merkle_root, n_queries, num_folds)
+            .map_err(|e| format!("signature {i} (log8): {e}"))?
+            .trace_root;
+        triples.push((
+            words_from_hash(tx_hash),
+            p2t8_node_words(&tr10),
+            p2t8_node_words(&tr8),
+        ));
+    }
+    let batch_tree = build_batch_tree_dual(&triples)?;
+    let batch_root = node_words(&batch_tree.root());
+
+    let memberships_for_side = |side: Group| -> Result<Vec<BatchMembership>, String> {
+        triples
+            .iter()
+            .enumerate()
+            .map(|(i, (tx_id, tr10, tr8))| {
+                let (sibs, bits) = batch_tree.membership_proof(i)?;
+                Ok(BatchMembership {
+                    tx_id: *tx_id,
+                    tr10: *tr10,
+                    tr8: *tr8,
+                    side,
+                    sibs: sibs.iter().map(node_words).collect(),
+                    bits,
+                    batch_root,
+                })
+            })
+            .collect()
+    };
+
     let tree = prove_aggregation_tree(
-        &leaves, &memberships, batch_merkle_root, n_queries, num_folds, fan_in)?;
+        &leaves, &memberships_for_side(Group::Log10)?,
+        batch_merkle_root, n_queries, num_folds, fan_in)?;
+    let tree8 = prove_aggregation_tree(
+        &leaves8, &memberships_for_side(Group::Log8)?,
+        batch_merkle_root, n_queries, num_folds, fan_in)?;
+
     let root = tree.root();
+    let root8 = tree8.root();
     Ok(AggregationTreeSummary {
         root_proof: root.proof.clone(),
         root_log_size: root.log_size,
         root_roots: root.roots.clone(),
+        root_proof8: root8.proof.clone(),
+        root_log_size8: root8.log_size,
+        root_roots8: root8.roots.clone(),
+        batch_root,
         leaf_count: entries.len(),
         depth: tree.depth(),
-        node_count: tree.node_count(),
+        node_count: tree.node_count() + tree8.node_count(),
         fan_in: tree.fan_in,
     })
 }
@@ -3709,6 +3777,75 @@ mod tests {
 
 #[cfg(test)]
 mod tests_vfri8 {
+    /// **The gap a failing test exposed.** A membership proves "this LEAF is in
+    /// the batch" — which on its own says nothing about WHICH proof the leaf
+    /// describes. So signature A's columns could be paired with signature B's
+    /// WHOLE membership triple: the leaf is well-formed, the path reaches the
+    /// batch root, and nothing objected.
+    ///
+    /// The earlier test only mutated ONE root of the triple, which breaks the
+    /// leaf and so was caught by the batch-root check — it never reached this
+    /// case. `tree_statement_from_columns` now ties the membership's own side to
+    /// the columns' trace root, which is the link that makes the leaf about this
+    /// proof.
+    #[test]
+    fn a_consistent_membership_from_another_signature_is_refused() {
+        use crate::recursive::composition_channel_t8::Group;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (l10, l8) = dual_leaves(&[16600, 16601], &merkle_root, 1);
+        let ms = memberships_for(&l10, &l8, Group::Log10, &merkle_root, 1, Some(6));
+
+        // Statement 0's columns, statement 1's membership — entirely consistent
+        // in itself, and a valid member of the same batch.
+        let err = match tree_statement_from_columns(
+            &l10[0].0, l10[0].1, &merkle_root, 1, Some(6), Some(ms[1].clone()))
+        {
+            Err(e) => e,
+            Ok(_) => panic!("a membership describing another signature must be refused"),
+        };
+        assert!(err.contains("does not describe this proof"), "{err}");
+
+        // Its own membership is accepted.
+        tree_statement_from_columns(
+            &l10[0].0, l10[0].1, &merkle_root, 1, Some(6), Some(ms[0].clone()))
+            .expect("its own membership must be accepted");
+    }
+
+    /// The two orientations describe the SAME leaf — `compress(tr10, tr8)` either
+    /// way — so swapping `side` does not change the batch root. What it changes
+    /// is where the path STARTS, and the start is what the AIR pins (C1); so each
+    /// tree is bound to its own half through the start, not through a path that
+    /// fails. Recorded because the opposite was my first guess and it was wrong.
+    #[test]
+    fn the_orientations_share_a_leaf_but_differ_in_where_they_start() {
+        use crate::recursive::composition_channel_t8::Group;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (l10, l8) = dual_leaves(&[16600, 16601], &merkle_root, 1);
+        let m10 = memberships_for(&l10, &l8, Group::Log10, &merkle_root, 1, Some(6));
+        let m8 = memberships_for(&l10, &l8, Group::Log8, &merkle_root, 1, Some(6));
+
+        assert_eq!(m10[0].batch_root, m8[0].batch_root, "one batch root covers both groups");
+        assert_eq!(m10[0].start(), m10[0].tr10);
+        assert_eq!(m8[0].start(), m8[0].tr8);
+        assert_ne!(m10[0].start(), m8[0].start());
+
+        // And now that the statement checks the start against its columns, a
+        // swapped orientation IS refused — by that check, not by the path.
+        let mut crossed = m10[0].clone();
+        crossed.side = Group::Log8;
+        let err = match tree_statement_from_columns(
+            &l10[0].0, l10[0].1, &merkle_root, 1, Some(6), Some(crossed))
+        {
+            Err(e) => e,
+            Ok(_) => panic!("a swapped orientation must be refused"),
+        };
+        assert!(err.contains("does not describe this proof"), "{err}");
+    }
+
+
+
 
     /// A-5 at the NODE level: a node over leaf statements proves each leaf's
     /// batch membership alongside its fold chains and transcript.
@@ -3717,13 +3854,8 @@ mod tests_vfri8 {
         use crate::recursive::composition_channel_t8 as node;
 
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
-        let leaves: Vec<_> = (0..2u64)
-            .map(|i| {
-                let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600 + i);
-                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols")
-            })
-            .collect();
-        let ms = memberships_for(&leaves, &merkle_root, 1, Some(6));
+        let (leaves, l8) = dual_leaves(&[16600, 16601], &merkle_root, 1);
+        let ms = memberships_for(&leaves, &l8, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6));
         let stmts: Vec<_> = leaves
             .iter()
             .zip(&ms)
@@ -3743,38 +3875,33 @@ mod tests_vfri8 {
         }
     }
 
-    /// **The claim.** A signature proved under someone else's trace root cannot
-    /// be carried into the node as a batch member, even with a genuine path and
-    /// the right transaction.
+    /// A signature cannot be carried in under someone else's trace root.
+    ///
+    /// The rejection now comes EARLIER than it used to. This test previously
+    /// expected `prove_tree_node` to fail on the batch root; the columns-vs-
+    /// membership check added alongside it refuses the statement at
+    /// construction, which is both stricter and a clearer place to fail. Kept
+    /// because the inconsistent-mutation case is worth pinning separately from
+    /// the consistent one.
     #[test]
     fn a_node_rejects_a_leaf_whose_trace_root_is_not_its_own() {
-        use crate::recursive::composition_channel_t8 as node;
+        use crate::recursive::composition_channel_t8::Group;
 
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
-        let leaves: Vec<_> = (0..2u64)
-            .map(|i| {
-                let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600 + i);
-                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols")
-            })
-            .collect();
-        let mut ms = memberships_for(&leaves, &merkle_root, 1, Some(6));
+        let (l10, l8) = dual_leaves(&[16600, 16601], &merkle_root, 1);
+        let mut ms = memberships_for(&l10, &l8, Group::Log10, &merkle_root, 1, Some(6));
 
         // Statement 0 keeps its transaction and its path, but claims the OTHER
-        // signature's proof.
-        ms[0].trace_root = ms[1].trace_root;
+        // signature's log10 proof.
+        ms[0].tr10 = ms[1].tr10;
 
-        let stmts: Vec<_> = leaves
-            .iter()
-            .zip(&ms)
-            .map(|((c, d), m)| tree_statement_from_columns(
-                c, *d, &merkle_root, 1, Some(6), Some(m.clone())).expect("stmt"))
-            .collect();
-
-        let err = match node::prove_tree_node(&stmts) {
+        let err = match tree_statement_from_columns(
+            &l10[0].0, l10[0].1, &merkle_root, 1, Some(6), Some(ms[0].clone()))
+        {
             Err(e) => e,
-            Ok(_) => panic!("a foreign trace root must not produce a node"),
+            Ok(_) => panic!("a foreign trace root must not produce a statement"),
         };
-        assert!(err.contains("batch"), "the error should name the batch: {err}");
+        assert!(err.contains("does not describe this proof"), "{err}");
     }
 
     /// Internal levels legitimately have no membership — a node's own columns
@@ -3807,13 +3934,9 @@ mod tests_vfri8 {
 
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
         for n_leaves in [2usize, 4] {
-            let leaves: Vec<_> = (0..n_leaves)
-                .map(|i| {
-                    let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600 + i as u64);
-                    v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols")
-                })
-                .collect();
-            let ms = memberships_for(&leaves, &merkle_root, 1, Some(6));
+            let seeds: Vec<u64> = (0..n_leaves as u64).map(|i| 16600 + i).collect();
+            let (leaves, l8) = dual_leaves(&seeds, &merkle_root, 1);
+            let ms = memberships_for(&leaves, &l8, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6));
 
             let without: Vec<_> = leaves
                 .iter()
@@ -3836,39 +3959,65 @@ mod tests_vfri8 {
         }
     }
 
-    /// Batch memberships for a set of leaf columns — what a real caller builds,
-    /// reduced to the parts a test needs. Uses the SAME chain run the leaf
+    /// Both V23 groups' leaf columns for a set of seeds — what a real caller
+    /// builds. Hints are all-false (weight 0, inside the ω bound), which is a
+    /// valid witness rather than a stand-in.
+    fn dual_leaves(
+        seeds: &[u64],
+        merkle_root: &[u8],
+        n_queries: usize,
+    ) -> (Vec<(Vec<Vec<u32>>, u32)>, Vec<(Vec<Vec<u32>>, u32)>) {
+        let hints = [[false; 256]; 6];
+        let mut l10 = Vec::new();
+        let mut l8 = Vec::new();
+        for &seed in seeds {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            l10.push(v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, merkle_root, n_queries)
+                .expect("log10 cols"));
+            l8.push(v23_vfri11_cols_log8(&z, &c, &t1, &a_hat, &hints, merkle_root, n_queries)
+                .expect("log8 cols"));
+        }
+        (l10, l8)
+    }
+
+    /// Dual batch memberships for one side, over the SAME chain runs the leaf
     /// columns come from, so the trace roots are the genuine ones.
     fn memberships_for(
-        leaves: &[(Vec<Vec<u32>>, u32)],
+        l10: &[(Vec<Vec<u32>>, u32)],
+        l8: &[(Vec<Vec<u32>>, u32)],
+        side: crate::recursive::composition_channel_t8::Group,
         merkle_root: &[u8],
         n_queries: usize,
         num_folds: Option<usize>,
     ) -> Vec<crate::recursive::composition_channel_t8::BatchMembership> {
-        use crate::batch_tree::{build_batch_tree_bound, node_words, words_from_hash};
+        use crate::batch_tree::{build_batch_tree_dual, node_words, words_from_hash};
         use crate::recursive::composition_channel_t8::BatchMembership;
 
-        let pairs: Vec<_> = leaves
+        let triples: Vec<_> = l10
             .iter()
+            .zip(l8)
             .enumerate()
-            .map(|(i, (cols, depth))| {
-                let tr = vfri11_fri_chain(cols, *depth, merkle_root, n_queries, num_folds)
-                    .expect("chain")
-                    .trace_root;
+            .map(|(i, ((c10, d10), (c8, d8)))| {
+                let t10 = vfri11_fri_chain(c10, *d10, merkle_root, n_queries, num_folds)
+                    .expect("chain10").trace_root;
+                let t8 = vfri11_fri_chain(c8, *d8, merkle_root, n_queries, num_folds)
+                    .expect("chain8").trace_root;
                 let tx: [u8; 32] = std::array::from_fn(|j| ((i * 37 + j * 11) % 256) as u8);
-                (words_from_hash(&tx), p2t8_node_words(&tr))
+                (words_from_hash(&tx), p2t8_node_words(&t10), p2t8_node_words(&t8))
             })
             .collect();
-        let tree = build_batch_tree_bound(&pairs).expect("batch tree");
+        let tree = build_batch_tree_dual(&triples).expect("batch tree");
         let batch_root = node_words(&tree.root());
-        pairs
+        triples
             .iter()
             .enumerate()
-            .map(|(i, (tx_id, trace_root))| {
+            .map(|(i, (tx_id, tr10, tr8))| {
                 let (sibs, bits) = tree.membership_proof(i).expect("path");
                 BatchMembership {
                     tx_id: *tx_id,
-                    trace_root: *trace_root,
+                    tr10: *tr10,
+                    tr8: *tr8,
+                    side,
                     sibs: sibs.iter().map(node_words).collect(),
                     bits,
                     batch_root,
@@ -5793,16 +5942,9 @@ mod tests_vfri8 {
         use crate::recursive::composition_channel_t8 as node;
 
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
-        let mut leaves = Vec::new();
-        for seed in [16600u64, 16601, 16602, 16603] {
-            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
-            leaves.push(
-                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1)
-                    .expect("V23 columns"),
-            );
-        }
+        let (leaves, leaves8_) = dual_leaves(&[16600, 16601, 16602, 16603], &merkle_root, 1);
 
-        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
+        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &leaves8_, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
             Ok(t) => t,
             Err(e) => panic!("tree proving failed: {e}"),
         };
@@ -5835,14 +5977,8 @@ mod tests_vfri8 {
     #[test]
     fn a_tree_over_three_statements_is_not_padded() {
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
-        let mut leaves = Vec::new();
-        for seed in [16700u64, 16701, 16702] {
-            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
-            leaves.push(
-                v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &merkle_root, 1).expect("cols"),
-            );
-        }
-        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
+        let (leaves, leaves8_) = dual_leaves(&[16700, 16701, 16702], &merkle_root, 1);
+        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &leaves8_, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
             Ok(t) => t, Err(e) => panic!("tree proving failed: {e}"),
         };
         // Three leaves at fan-in 2: a full pair and a lone one, then the root.
@@ -5855,9 +5991,8 @@ mod tests_vfri8 {
     fn a_tree_checks_its_inputs() {
         let root = vec![0u8; 32];
         assert!(prove_aggregation_tree(&[], &[], &root, 1, Some(6), 2).is_err(), "no leaves");
-        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
-        let one = vec![v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &root, 1).unwrap()];
-        assert!(prove_aggregation_tree(&one, &memberships_for(&one, &root, 1, Some(6)), &root, 1, Some(6), 1).is_err(), "fan_in 1 never ends");
+        let (one, one8_) = dual_leaves(&[16600], &root, 1);
+        assert!(prove_aggregation_tree(&one, &memberships_for(&one, &one8_, crate::recursive::composition_channel_t8::Group::Log10, &root, 1, Some(6)), &root, 1, Some(6), 1).is_err(), "fan_in 1 never ends");
     }
 
     /// Does the TREE NODE's shape reach a fixed point, as the 2-component one did?

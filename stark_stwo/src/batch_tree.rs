@@ -213,8 +213,11 @@ pub fn words_from_hash(digest: &[u8; 32]) -> [u64; 4] {
     std::array::from_fn(|i| ((bits >> (31 * i)) & 0x7fff_ffff) as u64)
 }
 
-/// A batch leaf: the transaction's identity compressed with the trace root of
-/// the proof that verifies its signature.
+/// A batch leaf over ONE trace root — the single-group case.
+///
+/// **Superseded for production by [`batch_leaf_dual`]**, which binds both of a
+/// V23 proof's FRI commitments; a leaf over log10 alone leaves the norm bound
+/// and the multiplication unattested. Kept for the single-group case.
 ///
 /// ```text
 ///     leaf = compress_t8( LEAF_DOMAIN, compress_t8(tx_id, trace_root) )
@@ -253,6 +256,64 @@ pub fn build_batch_tree_bound(pairs: &[([u64; 4], [u64; 4])]) -> Result<BatchTre
         return Err(format!("leaf count {} exceeds MAX_LEAVES {MAX_LEAVES}", pairs.len()));
     }
     let mut level: Vec<[u8; 32]> = pairs.iter().map(|(t, r)| batch_leaf(*t, *r)).collect();
+    let mut levels = vec![level.clone()];
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            let right = if pair.len() == 2 { &pair[1] } else { &pair[0] };
+            next.push(hash_pair_p2t8(&pair[0], right));
+        }
+        level = next;
+        levels.push(level.clone());
+    }
+    Ok(BatchTree { levels })
+}
+
+/// A batch leaf binding a member to BOTH halves of its proof.
+///
+/// ```text
+///     inner2 = compress_t8(tr10, tr8)
+///     inner  = compress_t8(tx_id, inner2)
+///     leaf   = compress_t8(LEAF_DOMAIN, inner)
+/// ```
+///
+/// # Why both roots
+///
+/// A V23 proof is two FRI commitments, and they carry different things:
+///
+/// | group | contents | establishes |
+/// |---|---|---|
+/// | log10 (1298 cols) | NttBatch + InttBatch | the NTT/INTT transforms |
+/// | log8 (2206 cols) | AzFull, Ct1Full, RangeQBatch, WPrimeFull, NormCheckBatch, UseHintBatch | `A·z`, `c·t1`, `w'`, the norm bound `‖z‖∞ < γ₁−β`, the ω hint bound, the ranges |
+///
+/// [`batch_leaf`] binds one root, which was enough while the aggregation tree
+/// covered only log10 — but a root attesting log10 alone attests neither the
+/// multiplication nor the norm bound, i.e. not the arithmetic the whole thing
+/// exists for. **This is the production leaf; `batch_leaf` is kept for the
+/// single-group case and for comparison.**
+///
+/// Still three Merkle-path steps and still no new gadget: both trees share this
+/// one leaf and each starts its path at ITS OWN group's root — see
+/// `BatchMembership::path`.
+pub fn batch_leaf_dual(tx_id: [u64; 4], tr10: [u64; 4], tr8: [u64; 4]) -> [u8; 32] {
+    use crate::poseidon2_t8::compress_t8;
+    let inner2 = compress_t8(tr10, tr8);
+    let inner = compress_t8(tx_id, inner2);
+    p2t8_pack(compress_t8(LEAF_DOMAIN, inner))
+}
+
+/// Build a batch tree over `(tx_id, tr10, tr8)` triples — the production shape.
+pub fn build_batch_tree_dual(
+    triples: &[([u64; 4], [u64; 4], [u64; 4])],
+) -> Result<BatchTree, String> {
+    if triples.is_empty() {
+        return Err("a batch tree needs ≥ 1 leaf".into());
+    }
+    if triples.len() > MAX_LEAVES {
+        return Err(format!("leaf count {} exceeds MAX_LEAVES {MAX_LEAVES}", triples.len()));
+    }
+    let mut level: Vec<[u8; 32]> =
+        triples.iter().map(|(t, a, b)| batch_leaf_dual(*t, *a, *b)).collect();
     let mut levels = vec![level.clone()];
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
@@ -559,6 +620,72 @@ mod tests {
         assert_ne!(got_root, node_words(&tree.root()));
         assert!(!verify_merkle_path_t8(
             &p, l, sibs.len(), forged_leaf, index as u32, node_words(&tree.root())).unwrap());
+    }
+
+// ── Both V23 groups: the dual leaf ──────────────────────────────────────
+
+    #[test]
+    fn the_dual_leaf_binds_both_trace_roots() {
+        let (tx, a, b) = (w(1), w(50), w(90));
+        let base = batch_leaf_dual(tx, a, b);
+        assert_ne!(base, batch_leaf_dual(tx, w(51), b), "log10 root must matter");
+        assert_ne!(base, batch_leaf_dual(tx, a, w(91)), "log8 root must matter");
+        assert_ne!(base, batch_leaf_dual(w(2), a, b), "the transaction must matter");
+        // Order is not symmetric: swapping the halves is a different member.
+        assert_ne!(base, batch_leaf_dual(tx, b, a));
+    }
+
+    #[test]
+    fn the_dual_leaf_is_not_an_internal_node() {
+        let (tx, a, b) = (w(10), w(100), w(200));
+        let leaf = batch_leaf_dual(tx, a, b);
+        assert_ne!(leaf, hash_pair_p2t8(&p2t8_pack(a), &p2t8_pack(b)));
+        assert_ne!(leaf, hash_pair_p2t8(&p2t8_pack(tx), &p2t8_pack(a)));
+    }
+
+    #[test]
+    fn a_single_group_leaf_differs_from_a_dual_one() {
+        // They must not be confusable: a one-group leaf claimed as a two-group
+        // member would attest half of what it appears to.
+        let (tx, a, b) = (w(3), w(70), w(80));
+        assert_ne!(batch_leaf(tx, a), batch_leaf_dual(tx, a, b));
+    }
+
+    #[test]
+    fn every_dual_leaf_proves_its_membership() {
+        for n in [1usize, 2, 3, 5] {
+            let triples: Vec<_> = (0..n)
+                .map(|i| (w(i as u64 * 7), w(1000 + i as u64 * 13), w(2000 + i as u64 * 17)))
+                .collect();
+            let tree = build_batch_tree_dual(&triples).unwrap();
+            let root = tree.root();
+            for (i, (tx, a, b)) in triples.iter().enumerate() {
+                let (sibs, bits) = tree.membership_proof(i).unwrap();
+                assert!(verify_batch_membership(&root, &batch_leaf_dual(*tx, *a, *b), &sibs, &bits),
+                        "leaf {i} of {n}");
+            }
+        }
+    }
+
+    /// Each tree must pin ITS OWN half: substituting the other group's root
+    /// breaks membership for that tree.
+    #[test]
+    fn substituting_either_trace_root_breaks_membership() {
+        let triples: Vec<_> = (0..4u64)
+            .map(|i| (w(i * 7), w(1000 + i * 13), w(2000 + i * 17)))
+            .collect();
+        let tree = build_batch_tree_dual(&triples).unwrap();
+        let (sibs, bits) = tree.membership_proof(2).unwrap();
+        let (tx, tr10, tr8) = triples[2];
+
+        for (what, leaf) in [
+            ("a foreign log10 root", batch_leaf_dual(tx, triples[3].1, tr8)),
+            ("a foreign log8 root", batch_leaf_dual(tx, tr10, triples[3].2)),
+            ("a foreign transaction", batch_leaf_dual(triples[3].0, tr10, tr8)),
+        ] {
+            assert!(!verify_batch_membership(&tree.root(), &leaf, &sibs, &bits),
+                    "{what} must not verify");
+        }
     }
 
     #[test]

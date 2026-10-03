@@ -5947,13 +5947,18 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
 ///
 /// Aggregate N ML-DSA-65 witnesses into ONE root proof.
 ///
-/// `entries` is a list of `(z, c, t1, a_hat)` — one extracted witness per
+/// `entries` is a list of `(z, c, t1, a_hat, hints)` — one extracted witness per
 /// signature; `tx_hashes` is the matching transaction hash for each, which goes
-/// into that member's batch leaf (A-5). Every entry becomes a leaf statement and the tree folds them to a
+/// into that member's batch leaf (A-5).
+///
+/// TWO roots come back, one per V23 FRI group: log10 carries the NTT/INTT, log8
+/// the multiplication, the norm bound and the hint bound. A root over log10
+/// alone attests neither, and `BatchRegistryV7` needs both bundles. Every entry becomes a leaf statement and the tree folds them to a
 /// single root, whose on-chain cost does not depend on N: the node shape is a
 /// fixed point at log 16, so depth is free.
 ///
-/// Returns `{"rootProof", "rootLogSize", "rootRoots", "leafCount", "depth",
+/// Returns `{"rootProof", "rootLogSize", "rootRoots", "rootProof8",
+/// "rootLogSize8", "rootRoots8", "batchRoot", "leafCount", "depth",
 /// "nodeCount", "fanIn"}`. `nodeCount` is the prover's cost (proofs produced),
 /// as distinct from the result, which is the root alone.
 #[cfg(feature = "python")]
@@ -5961,7 +5966,7 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
 #[pyo3(signature = (entries, tx_hashes, batch_root, n_queries=1, num_folds=None, fan_in=2))]
 fn prove_mldsa_aggregation_tree_py(
     py:         Python<'_>,
-    entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>)>,
+    entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<bool>>)>,
     tx_hashes:  Vec<Vec<u8>>,
     batch_root: Vec<u8>,
     n_queries:  usize,
@@ -5971,9 +5976,9 @@ fn prove_mldsa_aggregation_tree_py(
     use pyo3::types::PyDict;
 
     let mut conv = Vec::with_capacity(entries.len());
-    for (i, (z, c, t1, a_hat)) in entries.into_iter().enumerate() {
+    for (i, (z, c, t1, a_hat, hints)) in entries.into_iter().enumerate() {
         let e = (|| -> PyResult<_> {
-            Ok((_conv_z(z)?, _conv_c(c)?, _conv_t1(t1)?, _conv_a_hat(a_hat)?))
+            Ok((_conv_z(z)?, _conv_c(c)?, _conv_t1(t1)?, _conv_a_hat(a_hat)?, _conv_hints(hints)?))
         })()
         .map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("signature {i}: {e}"))
@@ -5997,6 +6002,18 @@ fn prove_mldsa_aggregation_tree_py(
     let d = PyDict::new(py);
     d.set_item("rootProof", pyo3::types::PyBytes::new(py, &summary.root_proof))?;
     d.set_item("rootLogSize", summary.root_log_size)?;
+    d.set_item("rootProof8", pyo3::types::PyBytes::new(py, &summary.root_proof8))?;
+    d.set_item("rootLogSize8", summary.root_log_size8)?;
+    d.set_item(
+        "rootRoots8",
+        summary.root_roots8.iter()
+            .map(|r| r.iter().map(|&w| w as u32).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "batchRoot",
+        summary.batch_root.iter().map(|&w| w as u32).collect::<Vec<_>>(),
+    )?;
     d.set_item(
         "rootRoots",
         summary
