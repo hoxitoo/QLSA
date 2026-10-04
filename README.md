@@ -36,21 +36,27 @@ below before relying on any claim here.*
 > aggregator cannot prove a forgery. But that check is **off-chain and
 > unverifiable by the contract** — the on-chain verifier trusts the prover ran it.
 >
-> **`aggregator/batcher.py` still proves `tx[0]` only.** This is the gap between
-> what the protocol can now do and what the product does, and an audit on
-> 2026-10-04 found it after I had reported the phase complete.
+> **The product now proves every signature in a batch** (Ф2.3, 2026-10-04).
+> `Batcher.force_batch(prove_tree=True)` and `testnet/e2e.py --stack v8`
+> aggregate all N signatures into two tree roots (one per V23 FRI group), each
+> leaf binding its member to the trace roots of the proofs verifying its
+> signature (`docs/TECH_DEBT.md` § A-5), and `BatchRegistryV7` finalizes the
+> batch in ONE transaction at a measured **14,663,950 gas** with the batch
+> identifier DERIVED from the proofs. `tests/test_batch_tree_product.py` pins
+> the claim as `tree_leaf_count == len(batch.transactions)`.
 >
-> What IS done, and verified: N ML-DSA-65 signatures fold into two aggregation
-> tree roots (one per V23 FRI group), each leaf binds its member to the trace
-> roots of the proofs verifying its signature (`docs/TECH_DEBT.md` § A-5), and
-> `BatchRegistryV7` finalizes the batch in ONE transaction at a measured
-> **14,663,950 gas** with the batch identifier DERIVED from the proofs. All of
-> that lives in Rust and in a Solidity end-to-end test.
+> This was reported complete once before it was true: an audit on 2026-10-04
+> found that all of it lived in Rust and in a Solidity test while `Batcher`
+> still proved `tx[0]`. The condition above is a test rather than an
+> observation for that reason.
 >
-> What is NOT done: `Batcher` does not call it. It still generates the witness
-> proof for the first transaction of a batch; the rest are committed by the
-> transaction-list root and their signatures are not proved. So the deployed
-> product enforces one signature per batch, exactly as before.
+> **The two registries still prove different things, by design.**
+> `BatchRegistryV5` is the DIRECT path: `prove_witnesses=True` proves `tx[0]`
+> and commits the rest by transaction-list root, at a cost independent of N.
+> `BatchRegistryV7` is the TREE path: every signature proved, at a proving cost
+> that grows with N (≈ W/27 signatures per second — see `ROADMAP.md` § 1.3, and
+> note that tree nodes still prove sequentially). Choose by which registry you
+> target; `prove_tree` is opt-in and never implicit.
 >
 > The step is specified in [`ROADMAP.md`](ROADMAP.md) § "Следующий шаг — Ф2.3",
 > down to the test that would make it checkable rather than observable: a batch

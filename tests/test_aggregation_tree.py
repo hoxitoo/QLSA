@@ -122,3 +122,104 @@ def test_input_validation_needs_no_extension() -> None:
         prove_mldsa_aggregation_tree([])
     with pytest.raises(ValueError, match="fan_in must be"):
         prove_mldsa_aggregation_tree([(b"", b"", b"")], fan_in=1)
+
+
+# ── The bundles must be what the submitter accepts, not merely bundle-shaped ──
+
+
+@needs_ext
+def test_tree_bundles_are_accepted_by_the_real_submitter() -> None:
+    """The decisive test for a claim that was false for a week.
+
+    `gen_tree_recursive_bundles`'s docstring promised "a submitter written for
+    the single-signature path accepts these unchanged" while the function
+    returned raw dicts; `OnchainSubmitterV7._bundle_tuple` reads
+    `b.trace_root`, which on a dict is an `AttributeError`.
+
+    So this does not check that the fields look right — it feeds the result to
+    the SUBMITTER'S OWN encoder. Nothing else proves the two agree.
+    """
+    from stark.prover import gen_tree_recursive_bundles
+    from testnet.submit import OnchainSubmitterV7
+
+    res = gen_tree_recursive_bundles(_signatures(2), n_queries=1, fan_in=2)
+
+    for bundle in (res.log10, res.log8):
+        inner, outer_proof, outer_commitment, outer_hints, last_layer = (
+            OnchainSubmitterV7._bundle_tuple(bundle)
+        )
+        trace_root, oods_pos, oods_neg, comp_root, fri_roots, batch_root, depth, nq = inner
+        assert len(trace_root) == 32 and len(comp_root) == 32 and len(batch_root) == 32
+        assert isinstance(oods_pos, int) and isinstance(oods_neg, int)
+        assert all(len(r) == 32 for r in fri_roots)
+        assert depth > 0 and nq == 1
+        assert len(outer_proof) > 0 and len(outer_commitment) == 16
+        assert len(outer_hints) > 0 and len(last_layer) > 0
+
+
+@needs_ext
+def test_the_derived_root_is_bytes32_and_is_not_the_transaction_list_root() -> None:
+    """R comes BACK from the prover; the SHA3 list root goes on as txListRoot.
+
+    They are different values with different guarantees, and the registry takes
+    both. A test that only checked "a root came back" would pass if the two were
+    swapped.
+    """
+    from core.batch import create_batch
+    from core.transaction import Transaction
+    from stark.prover import gen_tree_recursive_bundles
+
+    # Build real transactions so the two roots are computed over the same members.
+    from core.keys import generate_keypair
+    from core.signing import sign
+
+    txs = []
+    for i in range(2):
+        pk, sk = generate_keypair()
+        tx = Transaction(
+            sender="%064x" % (i + 1),
+            recipient="%064x" % (i + 100),
+            amount=i + 1,
+            nonce=i,
+            public_key=pk,
+        )
+        tx.signature = sign(tx.to_bytes(), sk)
+        txs.append(tx)
+
+    batch = create_batch(txs)
+    res = gen_tree_recursive_bundles(
+        [(tx.public_key, tx.to_bytes(), tx.signature) for tx in txs],
+        n_queries=1,
+        fan_in=2,
+    )
+
+    assert isinstance(res.merkle_root, bytes) and len(res.merkle_root) == 32
+    assert res.leaf_count == len(txs)
+    assert res.merkle_root != batch.merkle_root_onchain(), (
+        "R and the SHA3 transaction-list root must be different values — "
+        "R is derived from the proofs' trace roots"
+    )
+
+
+@needs_ext
+def test_the_leaf_the_prover_derives_is_the_transactions_own_hash() -> None:
+    """The link that makes the tree about THESE transactions.
+
+    `gen_tree_recursive_bundles` derives each leaf as `sha3_256(msg)` and
+    `Transaction.tx_hash()` is `sha3_256(to_bytes())`. The product layer passes
+    `to_bytes()` as `msg`, so the two coincide — but only as long as both stay
+    SHA3-256 over the same bytes. Asserted rather than left to a comment.
+    """
+    import hashlib
+
+    from core.keys import generate_keypair
+    from core.signing import sign
+    from core.transaction import Transaction
+
+    pk, sk = generate_keypair()
+    tx = Transaction(
+        sender="11" * 32, recipient="22" * 32, amount=7, nonce=3, public_key=pk
+    )
+    tx.signature = sign(tx.to_bytes(), sk)
+
+    assert hashlib.sha3_256(tx.to_bytes()).digest() == tx.tx_hash()

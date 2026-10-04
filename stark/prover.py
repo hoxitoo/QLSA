@@ -2646,28 +2646,77 @@ def prove_mldsa_aggregation_tree(
         fan_in=int(d["fanIn"]),
     )
 
+
+@dataclass
+class TreeRecursiveBundlesResult:
+    """The aggregation tree's two roots, ready for ``BatchRegistryV7``.
+
+    Structurally the same as :class:`V23RecursiveBundlesResult` where it counts —
+    ``log10`` and ``log8`` are :class:`RecursiveBundle`, which is all
+    ``OnchainSubmitterV7._bundle_tuple`` touches — but a DISTINCT type, because
+    the root means something different and the two must not be conflated:
+
+    ======================================  ==========================================
+    ``V23RecursiveBundlesResult``            ``TreeRecursiveBundlesResult``
+    ======================================  ==========================================
+    one signature                            N signatures
+    ``batch_merkle_root`` goes IN             ``merkle_root`` comes BACK
+    it is the SHA3 transaction-list root      it is **R**, the membership root derived
+                                              from the proofs' own trace roots
+    ======================================  ==========================================
+
+    On the tree path the SHA3 transaction-list root does not disappear — it
+    becomes ``txListRoot``, which the registry records but cannot check. Keeping
+    the two in separately-named fields on separately-named types is deliberate;
+    see the ``merkleRoot`` table in CLAUDE.md for what each one attests.
+    """
+
+    log10: RecursiveBundle
+    log8: RecursiveBundle
+    #: **R** — the membership-tree root, and the Fiat-Shamir seed every proof
+    #: below it ran under. This is what goes on-chain as ``merkleRoot``.
+    merkle_root: bytes
+    #: How many signatures the tree aggregates. The product layer asserts this
+    #: equals the batch size, which is what "N signatures, one proof" means.
+    leaf_count: int
+    n_queries: int
+
+    @property
+    def security_bits(self) -> int:
+        """On-chain soundness: ``log_blowup(6) * n_queries + pow_bits(10)``."""
+        return 6 * self.n_queries + 10
+
+
 def gen_tree_recursive_bundles(
     entries: list[tuple[bytes, bytes, bytes]],
     n_queries: int = 1,
     num_folds: int | None = 6,
     fan_in: int = 2,
-) -> tuple[dict[str, object], dict[str, object], str]:
+) -> TreeRecursiveBundlesResult:
     """The aggregation tree's two roots as `BatchRegistryV7.submitBatch` bundles.
 
     This is the on-chain end of the aggregation: N signatures become two tree
-    roots (one per V23 FRI group) and ONE transaction finalizes the batch. Each
-    returned dict has the same shape as
-    :func:`gen_mldsa_v23_recursive_bundles`'s, so a submitter written for the
-    single-signature path accepts these unchanged.
+    roots (one per V23 FRI group) and ONE transaction finalizes the batch.
 
     Each entry is `(pk, msg, sig)`; every signature is verified in full before
     its witness is extracted, and a failure names WHICH signature.
 
-    Returns `(bundle10, bundle8, merkleRoot)`. The root comes BACK rather than
-    going in: it is the membership tree's root, derived from the trace roots, and
-    it is simultaneously the Fiat-Shamir seed every proof ran under. That is what
-    makes the registry's batch identifier derivable from the proofs instead of
-    being an unrelated SHA3 hash of the transaction list.
+    Returns a :class:`TreeRecursiveBundlesResult` whose `log10` / `log8` are
+    `RecursiveBundle`s — the type `OnchainSubmitterV7` already consumes.
+
+    .. note::
+       Until 2026-10-04 this returned raw `(dict, dict, str)` while claiming in
+       this docstring that "a submitter written for the single-signature path
+       accepts these unchanged". It did not: `_bundle_tuple` reads
+       `b.trace_root`, which on a dict raises `AttributeError`. The conversion
+       through :func:`_to_recursive_bundle` — which the single-signature twin
+       had used all along — is what makes the sentence true.
+
+    `merkle_root` comes BACK rather than going in: it is the membership tree's
+    root, derived from the trace roots, and simultaneously the Fiat-Shamir seed
+    every proof ran under. That is what makes the registry's batch identifier
+    derivable from the proofs instead of an unrelated SHA3 hash of the
+    transaction list.
 
     The bundles are cross-bound at the ROOT — the level
     `BatchRegistryV7._finalize` inspects — and each root's fold count is derived
@@ -2702,7 +2751,23 @@ def gen_tree_recursive_bundles(
             witnesses, tx_hashes, n_queries, num_folds, fan_in)
     except Exception as exc:
         raise RuntimeError(f"tree bundle generation failed: {exc}") from exc
-    return b10, b8, merkle_root
+
+    # The Rust side hands back R as 0x-hex; the registries take bytes32, and
+    # every other root crossing this boundary is already bytes.
+    root_hex = merkle_root[2:] if merkle_root.startswith("0x") else merkle_root
+    root = bytes.fromhex(root_hex)
+    if len(root) != 32:
+        raise RuntimeError(
+            f"derived merkle root is {len(root)} bytes, expected 32: {merkle_root!r}"
+        )
+
+    return TreeRecursiveBundlesResult(
+        log10=_to_recursive_bundle(b10),
+        log8=_to_recursive_bundle(b8),
+        merkle_root=root,
+        leaf_count=len(entries),
+        n_queries=n_queries,
+    )
 
 
 

@@ -12,7 +12,11 @@ from core.keys import DEFAULT_ALGORITHM
 from core.transaction import Transaction
 from aggregator.mempool import Mempool
 # Re-exported: these were defined here, and callers import them from here.
-from stark.prover import WitnessGroup as GroupProof, WitnessProof
+from stark.prover import (
+    TreeRecursiveBundlesResult,
+    WitnessGroup as GroupProof,
+    WitnessProof,
+)
 
 
 @dataclass
@@ -44,11 +48,72 @@ class BatchResult:
     # views over this dict so existing callers (API, SDKs) keep working.
     witness_proofs: dict[str, WitnessProof] = field(default_factory=dict, repr=False)
 
+    # ── The aggregation tree: ALL N signatures, not tx[0] ─────────────────────
+    #
+    # Deliberately NOT another entry in `witness_proofs`. That dict maps a
+    # protocol name to a prover of ONE signature (`WITNESS_PROTOCOLS` in
+    # stark/prover.py), and the tree has a different arity — it consumes the
+    # whole batch and yields one pair of bundles. Forcing it into the same dict
+    # would make `witness_protocols` report something that is not a
+    # per-signature protocol, and the API's per-protocol views would have to
+    # special-case it.
+    tree_bundles: "TreeRecursiveBundlesResult | None" = field(
+        default=None, repr=False
+    )
+
     # Convenience properties for Solidity submission
     @property
     def merkle_root_onchain(self) -> bytes:
-        """First 32 bytes of SHA3-512 Merkle root — use as bytes32 in Solidity."""
+        """First 32 bytes of the SHA3-512 Merkle root — ``bytes32`` in Solidity.
+
+        This is the PRE-PROOF identity of the batch: computable from the
+        transaction list alone, without running the prover, which is what the
+        mempool, the history index and `Batcher._proof_retries` need.
+
+        On the DIRECT path (`BatchRegistryV5`) it is also the on-chain
+        `merkleRoot`. On the TREE path (`BatchRegistryV7`) it is NOT — there the
+        `merkleRoot` is `tree_merkle_root` below, and this value goes on as
+        `txListRoot`. The two are not interchangeable; see the table in
+        CLAUDE.md for what each attests. Use `tx_list_root` when you mean the
+        latter, so the call site says which one it wants.
+        """
         return self.batch.merkle_root[:32]
+
+    @property
+    def tx_list_root(self) -> bytes:
+        """The same value as `merkle_root_onchain`, named for the tree path.
+
+        `BatchRegistryV7.txListRoot` is ATTESTED, NOT PROVED: the contract has
+        no transactions and cannot check it. Its worth is that a third party
+        holding the list can recompute it. A separate name because
+        `submitBatch(merkleRoot, txListRoot, …)` takes both, adjacent and both
+        `bytes32` — the one place they are easiest to transpose.
+        """
+        return self.merkle_root_onchain
+
+    @property
+    def tree_merkle_root(self) -> bytes | None:
+        """**R** — the on-chain `merkleRoot` for `BatchRegistryV7`, or None.
+
+        Derived from the proofs' own trace roots and simultaneously the
+        Fiat-Shamir seed they ran under, so it cannot be computed without the
+        prover. None when the tree was not proved.
+        """
+        return None if self.tree_bundles is None else self.tree_bundles.merkle_root
+
+    @property
+    def has_tree_proof(self) -> bool:
+        """Whether this batch carries a proof covering EVERY transaction in it."""
+        return self.tree_bundles is not None
+
+    @property
+    def tree_leaf_count(self) -> int | None:
+        """How many signatures the tree proof covers. None when unproved.
+
+        The claim "N signatures in one proof" is this number equalling
+        `len(batch.transactions)`; `Batcher` checks it rather than assuming it.
+        """
+        return None if self.tree_bundles is None else self.tree_bundles.leaf_count
 
     @property
     def stark_commitment_onchain(self) -> bytes | None:
@@ -374,7 +439,81 @@ class Batcher:
             if result.witness_commitment is None:
                 result.witness_commitment = vr.log10.commitment
 
-    def try_batch(self, prove_witnesses: bool = False) -> BatchResult | None:
+    def _prove_tree(self, result: "BatchResult", batch: Batch) -> None:
+        """Aggregate EVERY signature in the batch into one pair of bundles.
+
+        This is what "N signatures in one proof" means, and until 2026-10-04 no
+        product code path did it: `_prove_witnesses` above proves `tx[0]` and the
+        rest of the batch is only committed by Merkle root. The aggregation tree,
+        the derived root and the measured 14,663,950-gas submission all existed in
+        Rust and in a Solidity end-to-end test while the aggregator kept doing
+        what it did before.
+
+        The triple `gen_tree_recursive_bundles` wants is exactly what a
+        `Transaction` carries: `msg` is `to_bytes()`, and the prover derives each
+        leaf as `sha3_256(msg)`, which is `Transaction.tx_hash()` by definition.
+        That coincidence is what ties a leaf to a transaction, so
+        tests/test_aggregation_tree.py asserts it rather than trusting it.
+
+        Cost: proving time grows with N, where the single-signature path was
+        constant. That is the honest price of the stronger statement, not a
+        regression — see ROADMAP § 1.3 (≈ W/27 signatures per second, and
+        nodes still prove sequentially).
+        """
+        from stark.prover import gen_tree_recursive_bundles
+
+        entries = [
+            (tx.public_key, tx.to_bytes(), tx.signature)
+            for tx in batch.transactions
+            if tx.signature is not None and tx.public_key is not None
+        ]
+        if not entries:
+            logger.warning("tree proof skipped: no signed transactions in batch")
+            return
+        if len(entries) != len(batch.transactions):
+            # `_create_and_prove` drops unsigned transactions before building the
+            # batch, so this should be unreachable. Log rather than proceed: a
+            # tree over a subset would make `has_tree_proof` claim coverage the
+            # proof does not have, which is the exact overstatement being fixed.
+            logger.error(
+                "tree proof skipped: %d of %d transactions are unsigned",
+                len(batch.transactions) - len(entries), len(batch.transactions),
+            )
+            return
+
+        try:
+            res = gen_tree_recursive_bundles(
+                entries,
+                n_queries=self.n_fri_queries if self.n_fri_queries is not None else 1,
+            )
+        except (RuntimeError, ImportError) as exc:
+            logger.warning("tree proof skipped: %s", exc)
+            return
+        except ValueError as exc:
+            logger.warning("tree proof skipped, invalid signature: %s", exc)
+            return
+        except Exception as exc:
+            logger.error("Unexpected error during tree proving: %s", exc, exc_info=True)
+            return
+
+        if res.leaf_count != len(batch.transactions):
+            # The claim is coverage of the whole batch; check it instead of
+            # asserting it in a docstring.
+            logger.error(
+                "tree proof covers %d of %d transactions — discarding",
+                res.leaf_count, len(batch.transactions),
+            )
+            return
+
+        result.tree_bundles = res
+        logger.info(
+            "tree proof: %d signatures aggregated, merkleRoot=%s… (%d-bit FRI)",
+            res.leaf_count, res.merkle_root.hex()[:16], res.security_bits,
+        )
+
+    def try_batch(
+        self, prove_witnesses: bool = False, prove_tree: bool = False
+    ) -> BatchResult | None:
         """Create a batch if the mempool has enough transactions.
 
         Returns None if fewer than min_batch_size transactions are pending.
@@ -385,14 +524,22 @@ class Batcher:
 
         If prove_witnesses=True, also generates an ML-DSA arithmetic witness
         proof for the first transaction (MVP-3+, requires PyO3 extension).
+
+        If prove_tree=True, aggregates EVERY signature in the batch into one
+        pair of recursive bundles for `BatchRegistryV7` — the "N signatures,
+        one proof" path. Costs proving time proportional to N.
         """
         txs = self.mempool.drain_if_ready(self.min_batch_size, self.max_batch_size)
         if not txs:
             return None
 
-        return self._create_and_prove(txs, prove_witnesses=prove_witnesses)
+        return self._create_and_prove(
+            txs, prove_witnesses=prove_witnesses, prove_tree=prove_tree
+        )
 
-    def force_batch(self, prove_witnesses: bool = False) -> BatchResult | None:
+    def force_batch(
+        self, prove_witnesses: bool = False, prove_tree: bool = False
+    ) -> BatchResult | None:
         """Drain whatever is in the mempool (≥1 tx) and create a batch.
 
         Returns None if the mempool is empty.
@@ -401,18 +548,26 @@ class Batcher:
         are included in the next batch cycle.
 
         If prove_witnesses=True, also generates an ML-DSA arithmetic witness
-        proof for the first transaction (MVP-3+).
+        proof for the first transaction (MVP-3+). If prove_tree=True, proves
+        every signature in the batch instead of only the first.
         """
         txs = self.mempool.drain(self.max_batch_size)
         # Guard against TOCTOU: another thread may have drained the mempool
         # between a size() check and this drain call.
         if not txs:
             return None
-        return self._create_and_prove(txs, prove_witnesses=prove_witnesses)
+        return self._create_and_prove(
+            txs, prove_witnesses=prove_witnesses, prove_tree=prove_tree
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _create_and_prove(self, txs: list[Transaction], prove_witnesses: bool = False) -> BatchResult | None:
+    def _create_and_prove(
+        self,
+        txs: list[Transaction],
+        prove_witnesses: bool = False,
+        prove_tree: bool = False,
+    ) -> BatchResult | None:
         """Filter invalid-signature transactions, build a valid batch, and prove.
 
         Invalid transactions are logged and discarded.  Valid transactions that
@@ -441,7 +596,9 @@ class Batcher:
             self.mempool.prepend_batch(valid_txs)
             return None
 
-        result, prover_crashed = self._try_prove(batch, prove_witnesses=prove_witnesses)
+        result, prover_crashed = self._try_prove(
+            batch, prove_witnesses=prove_witnesses, prove_tree=prove_tree
+        )
 
         if prover_crashed:
             # Transient prover failure (NOT "extension missing"): return the
@@ -474,9 +631,19 @@ class Batcher:
         return result
 
     def _try_prove(
-        self, batch: Batch, prove_witnesses: bool = False
+        self, batch: Batch, prove_witnesses: bool = False, prove_tree: bool = False
     ) -> tuple[BatchResult, bool]:
-        """Run the STARK prover; optionally add an ML-DSA witness proof for tx[0].
+        """Run the STARK prover; optionally add ML-DSA witness proofs.
+
+        The two witness options are not alternatives of taste — they match the
+        two registries this repo ships, which prove different things:
+
+        ``prove_witnesses``  one signature (``tx[0]``), the rest committed by
+                             Merkle root. The DIRECT path, ``BatchRegistryV5``.
+                             Constant cost in N.
+        ``prove_tree``       every signature in the batch, aggregated to two
+                             roots. The TREE path, ``BatchRegistryV7``. Cost
+                             grows with N.
 
         Returns (result, prover_crashed).  prover_crashed is True only when the
         prover raised unexpectedly — not when the PyO3 extension is missing,
@@ -499,5 +666,8 @@ class Batcher:
             tx0 = batch.transactions[0]
             if tx0.signature is not None and tx0.public_key is not None:
                 self._prove_witnesses(result, tx0)
+
+        if prove_tree and batch.transactions:
+            self._prove_tree(result, batch)
 
         return result, prover_crashed

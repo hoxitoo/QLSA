@@ -69,20 +69,24 @@ from core.keys import generate_keypair, derive_address, wipe_key
 from core.signing import sign
 from core.transaction import Transaction
 from stark.prover import (
+    gen_tree_recursive_bundles,
     prove_mldsa_sig_vfri11_stark,
-    prove_mldsa_sig_recursive_stark,
 )
 
 # num_folds=6 keeps the last layer at 16/4 evaluations. It was originally forced
 # by the per-tx gas cap (num_folds=3 overran the LOG=10 group alone); after the
 # R4.8 Poseidon2 rewrite there is ample headroom, but 6 stays the tested default
-# for both the t=4 (VFRI10) and t=8 (VFRI11) stacks.
-_VFRI10_NUM_FOLDS = 6
+# for the t=8 (VFRI11) stack.
+#
+# `_VFRI10_NUM_FOLDS` and `_V8_NUM_FOLDS` used to sit here too. The first went
+# dead with the Ф1 narrowing (no VFRI10 prover remains); the second with the move
+# to the aggregation tree, which derives each root's fold count from that root's
+# OWN depth — the fix for the revert in a4742b5, where one fold count for both
+# left the on-chain last-layer rebuild 32x too large.
 _VFRI11_NUM_FOLDS = 6
 # The v8 stack exists for production soundness: 20 queries is 130-bit
 # (log_blowup(6)*20 + pow_bits(10)), the point at which direct verification stops
 # fitting a transaction. Overridable with --n-queries for a faster demo run.
-_V8_NUM_FOLDS = 6
 _V8_DEFAULT_QUERIES = 20
 
 logging.basicConfig(
@@ -198,24 +202,41 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
     # The cross-bound roots bind each group's FRI query indices to the other
     # group's trace commitment, preventing adversarial proof mixing.
     proto = {"v8": "recursive", "v7": "VFRI11"}[stack]
-    logger.info("Generating %s cross-bound V23 ML-DSA STARK proofs for tx[0]…", proto)
     tx0 = txs[0]
     if tx0.signature is None:
         logger.error("tx[0] has no signature — _make_transactions failed to sign")
         return 1
-    batch_merkle_root = batch.merkle_root[:32]
+    # The SHA3 transaction-list root. On the v7 (direct) path this IS the
+    # on-chain `merkleRoot`. On the v8 (tree) path it is only `txListRoot`, and
+    # the on-chain `merkleRoot` is R, which comes back from the prover below.
+    tx_list_root = batch.merkle_root[:32]
+    batch_merkle_root = tx_list_root
     t0 = time.monotonic()
     try:
         if stack == "v8":
-            result = prove_mldsa_sig_recursive_stark(
-                pk=tx0.public_key,
-                msg=tx0.to_bytes(),
-                sig=tx0.signature,
-                batch_merkle_root=batch_merkle_root,
-                n_queries=n_queries,
-                num_folds=_V8_NUM_FOLDS,
+            # ALL N signatures, not tx[0]. This is what the v8 stack exists for:
+            # BatchRegistryV7 takes two cross-bound tree roots and finalizes the
+            # whole batch in one transaction. Until 2026-10-04 this branch proved
+            # tx[0] like the v7 one, so "N signatures in one proof" was true of
+            # the Rust path and of a Solidity test, and of nothing that shipped.
+            logger.info(
+                "Generating recursive AGGREGATION TREE over all %d signatures…",
+                len(txs),
             )
+            unsigned = [i for i, t in enumerate(txs) if t.signature is None]
+            if unsigned:
+                logger.error("transactions %s have no signature", unsigned)
+                return 1
+            result = gen_tree_recursive_bundles(
+                [(t.public_key, t.to_bytes(), t.signature) for t in txs],
+                n_queries=n_queries,
+            )
+            # R, derived from the proofs' trace roots — NOT the SHA3 list root.
+            batch_merkle_root = result.merkle_root
         elif stack == "v7":
+            logger.info(
+                "Generating %s cross-bound V23 ML-DSA STARK proofs for tx[0]…", proto
+            )
             result = prove_mldsa_sig_vfri11_stark(
                 pk=tx0.public_key,
                 msg=tx0.to_bytes(),
@@ -235,6 +256,17 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
                 len(result.log8.outer_proof), len(result.log8.outer_hints),
                 len(result.log8.last_layer_evals),
                 result.security_bits, elapsed_v,
+            )
+            # R's leading 16 bytes are zero BY CONSTRUCTION: it is a Poseidon2
+            # t=8 node, four big-endian u32 words living in bytes[16..32]. The
+            # usual `.hex()[:16]` prefix therefore prints all zeros for every
+            # batch, which reads like a bug and distinguishes nothing. Show the
+            # bytes that carry the value.
+            logger.info(
+                "  %d signatures aggregated | merkleRoot(R)=…%s txListRoot=%s…",
+                result.leaf_count,
+                batch_merkle_root[16:].hex(),
+                tx_list_root.hex()[:16],
             )
         else:
             logger.info(
@@ -268,12 +300,22 @@ def run(n_txs: int = 8, dry_run: bool = False, n_queries: int = 1, stack: str = 
     sender_nonces = build_sender_nonces(txs)
 
     if stack == "v8":
-        return _submit_v8(result, batch_merkle_root, sender_nonces)
+        return _submit_v8(result, batch_merkle_root, sender_nonces, tx_list_root)
     return _submit_v7(result, batch_merkle_root, sender_nonces)
 
 
-def _submit_v8(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]) -> int:
-    """Submit cross-bound RECURSIVE bundles to BatchRegistryV7 in ONE transaction."""
+def _submit_v8(
+    result,
+    batch_merkle_root: bytes,
+    sender_nonces: dict[bytes, int],
+    tx_list_root: bytes,
+) -> int:
+    """Submit the aggregation tree's two roots to BatchRegistryV7 in ONE transaction.
+
+    ``batch_merkle_root`` here is **R** — derived from the proofs — while
+    ``tx_list_root`` is the SHA3 transaction-list commitment the registry
+    records but cannot verify.
+    """
     try:
         from testnet.submit import OnchainSubmitterV7
         submitter = OnchainSubmitterV7.from_env()
@@ -285,8 +327,9 @@ def _submit_v8(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]
         return 1
 
     logger.info(
-        "Submitting to BatchRegistryV7 (recursive bundles, %d-bit soundness)…",
-        result.security_bits,
+        "Submitting to BatchRegistryV7 (%d signatures via tree roots, "
+        "%d-bit soundness)…",
+        result.leaf_count, result.security_bits,
     )
     t0 = time.monotonic()
     try:
@@ -295,6 +338,7 @@ def _submit_v8(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]
             bundles=result,
             senders=list(sender_nonces.keys()),
             new_nonces=list(sender_nonces.values()),
+            tx_list_root=tx_list_root,
         )
     except RuntimeError as exc:
         logger.error("on-chain submission failed: %s", exc)

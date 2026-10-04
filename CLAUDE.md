@@ -141,6 +141,14 @@ Fiat-Shamir transcript: `c_tilde` → `merkle_root` → Tree0 → Tree1 → fing
 - `BatchResult` — wraps `Batch` + `proof`, `commitment`, `witness_bundle`, `witness_commitment`
 - `Batcher.try_batch(prove_witnesses=False)` — respects `min_batch_size`
 - `Batcher.force_batch(prove_witnesses=False)` — ignores `min_batch_size`
+- `Batcher.try_batch(prove_tree=True)` / `force_batch(prove_tree=True)` aggregates **every**
+  signature in the batch into `BatchResult.tree_bundles` (a `TreeRecursiveBundlesResult`:
+  two `RecursiveBundle`s plus the derived root **R**) for `BatchRegistryV7`. Cost grows with N.
+  `has_tree_proof`, `tree_leaf_count`, `tree_merkle_root` (= R) and `tx_list_root` read it;
+  `_prove_tree` discards a proof whose `leaf_count` is not the batch size rather than
+  overclaiming coverage.
+- `merkle_root_onchain` is the PRE-PROOF root. On the V7 path it is `txListRoot`, **not**
+  `merkleRoot` — use the `tx_list_root` alias there so the call site names which it means.
 - `prove_witnesses=True` generates cross-bound witness proofs for tx[0] under the protocols
   named in `Batcher.witness_protocols` (`vfri11` by default, `recursive` for the V7 path).
   `BatchResult.witness_proofs` is the live mapping; the `vfriN_*` / `has_vfriN` attributes
@@ -289,8 +297,11 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 > (`extract_mldsa_witness_py` refuses invalid signatures), so an honest aggregator
 > cannot prove a forgery — but that check is off-chain and the contract cannot see
 > it. Closing this requires SHAKE-256/Keccak-f[1600] as an AIR: **not started, not
-> scheduled**. Also: only `tx[0]` of a batch gets a witness proof, so "N signatures
-> in one proof" is not what the deployed contracts enforce.
+> scheduled**. Note that as of Ф2.3 (2026-10-04) the batch-wide path DOES exist
+> and is tested — `Batcher.force_batch(prove_tree=True)` proves every signature
+> via the aggregation tree — so "N signatures in one proof" is now true of the
+> product on the V7 path. The trust-model gap above is unaffected by that: the
+> hash step is outside the circuit for all N, not just for `tx[0]`.
 
 
 1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.

@@ -449,9 +449,10 @@ class OnchainSubmitterV7:
     def submit_batch_with_nonces(
         self,
         merkle_root: bytes,
-        bundles,  # stark.prover.V23RecursiveBundlesResult
+        bundles,  # V23RecursiveBundlesResult or TreeRecursiveBundlesResult
         senders: list[bytes],
         new_nonces: list[int],
+        tx_list_root: bytes | None = None,
     ) -> str:
         """Finalize a batch from two cross-bound recursive bundles, with nonces.
 
@@ -459,17 +460,59 @@ class OnchainSubmitterV7:
         ``CrossBindingMismatch`` if either bundle was not produced against the
         other group's trace root — so a mismatched pair fails before any proof is
         verified.
+
+        ``merkle_root`` and ``tx_list_root`` are both ``bytes32`` and adjacent in
+        the call, so they are the easiest pair in this system to transpose. They
+        are not interchangeable:
+
+        * ``merkle_root`` is **R**, derived from the proofs' own trace roots and
+          the Fiat-Shamir seed they ran under. It is the batch's on-chain
+          identity and it is PROVED.
+        * ``tx_list_root`` is the SHA3 root of the transaction list. The contract
+          holds no transactions, so it is ATTESTED, NOT PROVED — worth recording
+          because a third party holding the list can recompute it, and nothing
+          more.
+
+        ``tx_list_root`` defaults to None, which submits ``bytes32(0)``. Zero is
+        the contract's documented "not provided"; it is not a commitment to an
+        empty list, and the registry deliberately does not reject it (unlike
+        ``merkleRoot``) because an aggregator with no list has nothing honest to
+        put there. Pass ``BatchResult.tx_list_root`` whenever a list exists.
         """
         if len(senders) != len(new_nonces):
             raise ValueError("senders and new_nonces must have equal length")
         tx_hex = self._send(self.registry.functions.submitBatchWithNonces(
             _as_bytes32(merkle_root, "merkle_root"),
+            bytes(32) if tx_list_root is None
+            else _as_bytes32(tx_list_root, "tx_list_root"),
             self._bundle_tuple(bundles.log10),
             self._bundle_tuple(bundles.log8),
             _validate_senders(senders),
             new_nonces,
         ))
         logger.info("%s submitBatchWithNonces: %s", self._LOG_TAG, tx_hex)
+        return tx_hex
+
+    def submit_batch(
+        self,
+        merkle_root: bytes,
+        bundles,  # V23RecursiveBundlesResult or TreeRecursiveBundlesResult
+        tx_list_root: bytes | None = None,
+    ) -> str:
+        """Finalize a batch from two cross-bound bundles, without nonce updates.
+
+        The registry's ``submitBatch``; see
+        :meth:`submit_batch_with_nonces` for what the two roots mean and why
+        they must not be swapped.
+        """
+        tx_hex = self._send(self.registry.functions.submitBatch(
+            _as_bytes32(merkle_root, "merkle_root"),
+            bytes(32) if tx_list_root is None
+            else _as_bytes32(tx_list_root, "tx_list_root"),
+            self._bundle_tuple(bundles.log10),
+            self._bundle_tuple(bundles.log8),
+        ))
+        logger.info("%s submitBatch: %s", self._LOG_TAG, tx_hex)
         return tx_hex
 
     def wait_and_verify(self, tx_hash: str, merkle_root: bytes) -> bool:
