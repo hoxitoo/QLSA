@@ -92,6 +92,13 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
     /// same transactions yield a different root after a pipeline change, and it
     /// cannot be recomputed without running the prover. `txListRoot` has neither
     /// property.
+    ///
+    /// **Zero means "not provided."** Unlike `merkleRoot`, a zero here is
+    /// accepted: the field is attested rather than verified, so rejecting zero
+    /// would only force a submitter with no transaction list — a test fixture,
+    /// a synthetic batch — to invent a value, which is worse than an honest
+    /// absence. A reader seeing zero should treat the batch as carrying no
+    /// transaction-list commitment, not as committing to an empty list.
     mapping(bytes32 => bytes32) public batchTxListRoots;
     mapping(bytes32 => uint64) public senderNonces;
 

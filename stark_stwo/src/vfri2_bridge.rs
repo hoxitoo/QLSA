@@ -3908,6 +3908,53 @@ mod tests {
 #[cfg(test)]
 mod tests_vfri8 {
 
+    /// The premise `SEED_FOR_COLUMNS` rests on, turned into a checked invariant.
+    ///
+    /// `prove_mldsa_aggregation_tree` builds leaf columns BEFORE the Fiat-Shamir
+    /// seed exists — the seed IS the membership root, derived from those columns'
+    /// trace roots — and passes a zero placeholder, on the grounds that the
+    /// column builders only validate the seed's length. True today, and nothing
+    /// held it: a comment is not an invariant.
+    ///
+    /// If a builder started using the seed, the tree's columns would silently be
+    /// built under a zero while everything else ran under R. The proof would
+    /// still verify — the trace root comes from the same columns — but the
+    /// batch binding introduced in V22 would be weakened, and nothing would say
+    /// so. This fails loudly instead.
+    #[test]
+    fn column_builders_ignore_the_fiat_shamir_seed() {
+        let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
+        let hints = [[false; 256]; 6];
+        let seed_a = [0u8; 32];
+        let seed_b: [u8; 32] = std::array::from_fn(|i| ((i * 7 + 13) % 256) as u8);
+        assert_ne!(seed_a, seed_b, "the two seeds must actually differ");
+
+        let (c10a, d10a) = v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &seed_a, 1).unwrap();
+        let (c10b, d10b) = v23_vfri11_cols_log10(&z, &c, &t1, &a_hat, &seed_b, 1).unwrap();
+        assert_eq!(d10a, d10b);
+        assert_eq!(c10a, c10b, "LOG=10 columns must not depend on the seed");
+
+        let (c8a, d8a) = v23_vfri11_cols_log8(&z, &c, &t1, &a_hat, &hints, &seed_a, 1).unwrap();
+        let (c8b, d8b) = v23_vfri11_cols_log8(&z, &c, &t1, &a_hat, &hints, &seed_b, 1).unwrap();
+        assert_eq!(d8a, d8b);
+        assert_eq!(c8a, c8b, "LOG=8 columns must not depend on the seed");
+
+        // And therefore neither does a trace root — which is what makes the
+        // membership root usable AS the seed without circularity.
+        assert_eq!(trace_root_t8(&c10a, d10a).unwrap(), trace_root_t8(&c10b, d10b).unwrap());
+        assert_eq!(trace_root_t8(&c8a, d8a).unwrap(), trace_root_t8(&c8b, d8b).unwrap());
+
+        // The chain, by contrast, MUST depend on the seed — otherwise the seed
+        // would be doing nothing and the binding would be absent for a different
+        // reason. Asserted so the test above cannot pass vacuously.
+        let ch_a = vfri11_fri_chain(&c10a, d10a, &seed_a, 1, Some(6)).unwrap();
+        let ch_b = vfri11_fri_chain(&c10b, d10b, &seed_b, 1, Some(6)).unwrap();
+        assert_eq!(ch_a.trace_root, ch_b.trace_root, "same columns, same trace root");
+        assert_ne!(
+            ch_a.derived_indices, ch_b.derived_indices,
+            "the seed must still drive the query indices");
+    }
+
     /// One bundle as the `submitBatch` fixture shape.
     ///
     /// Shared by both bundle fixture generators: written twice they would drift,
