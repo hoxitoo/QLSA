@@ -375,6 +375,54 @@ pub fn prove_nonce_transitions(
     Ok((bytes, log_size))
 }
 
+/// The statement's main trace columns, for feeding the recursion.
+///
+/// A direct STARK over these columns costs VFRI11 money on-chain (millions of
+/// gas), which would defeat the point. The affordable route is the one the
+/// aggregation tree already takes: make this the INNER statement of a recursive
+/// proof, so the contract pays one `verifyRecursive` — measured at **2,290,000
+/// gas and CONSTANT in batch size**.
+///
+/// That constant is what removes the ceiling. Against the mapping's measured
+/// 28,777 gas per sender it pays for itself above ~80 senders, and unlike the
+/// mapping it does not grow, so there is no N at which it stops fitting.
+///
+/// `vfri2_bridge::build_recursive_bundle` takes COLUMNS rather than a proof, so
+/// the wrapping is mechanical — `probe_nonce_outer_shape` measures that the
+/// outer trace over a nonce statement has the same shape as over a V23 group,
+/// which is what makes the gas figure transferable. Returned as `Vec<Vec<u32>>`
+/// to match what that function expects.
+pub fn statement_trace_columns(
+    st: &NonceStatement,
+    transitions: &[NonceTransition],
+) -> Result<(Vec<Vec<u32>>, u32), String> {
+    if let Some(reason) = st.check_public() {
+        return Err(reason);
+    }
+    if transitions.len() != st.updates.len() {
+        return Err("transitions do not match the statement".into());
+    }
+    let log_size = statement_log_size(st)?;
+    let (leaves, _, _, _) = st.pinned_paths();
+
+    let mut sibs: Vec<Vec<[u64; 4]>> = Vec::with_capacity(2 * transitions.len());
+    let mut bits: Vec<Vec<bool>> = Vec::with_capacity(2 * transitions.len());
+    for t in transitions {
+        let path: Vec<[u64; 4]> = t.sibs.iter().map(p2t8_node_words).collect();
+        sibs.push(path.clone());
+        bits.push(t.bits.clone());
+        sibs.push(path);
+        bits.push(t.bits.clone());
+    }
+
+    let (main_cols, _) = merkle::build_trace_multi(&leaves, &sibs, &bits, log_size);
+    let cols: Vec<Vec<u32>> = main_cols
+        .iter()
+        .map(|c| c.values.iter().map(|v| v.0).collect())
+        .collect();
+    Ok((cols, log_size))
+}
+
 /// Verify a batch's nonce transition against its public statement.
 ///
 /// Two independent gates, and both must hold:
@@ -642,6 +690,41 @@ mod tests {
         let (st, ts) = batch(2);
         let (proof, log_size) = prove_nonce_transitions(&st, &ts).unwrap();
         assert!(!verify_nonce_transitions(&proof, log_size + 1, &st).unwrap());
+    }
+
+
+    #[test]
+    #[ignore = "measurement probe; the outer trace over a nonce statement"]
+    fn probe_nonce_outer_shape() {
+        // The figure that decides whether the contract step is affordable.
+        // `verifyRecursive` costs a MEASURED 2,290,000 gas and is constant in
+        // batch size, but that was measured on an outer trace of a particular
+        // shape. If a nonce statement's outer trace has the same shape, the
+        // figure transfers; if not, it has to be re-measured. Measuring beats
+        // assuming here — the last time I inferred a total from one component
+        // (a4742b5) the submission reverted.
+        use crate::recursive::composition_t8::outer_trace_columns_t8;
+        use crate::vfri2_bridge::gen_vfri11_recursion_inputs;
+
+        let bound_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+
+        for n in [1u8, 2, 4] {
+            let (st, ts) = batch(n);
+            let (cols, log_size) = statement_trace_columns(&st, &ts).expect("cols");
+            let rec = gen_vfri11_recursion_inputs(&cols, log_size, &bound_root, 1, Some(6))
+                .expect("recursion inputs over the nonce statement");
+            let (outer_cols, outer_log) =
+                outer_trace_columns_t8(&rec.queries, &rec.paths, &rec.comp_paths).expect("outer");
+            eprintln!(
+                "N={n}: inner {} cols log {log_size} -> outer {} cols log {outer_log}",
+                cols.len(),
+                outer_cols.len(),
+            );
+        }
+        eprintln!(
+            "compare: a V23 group's outer trace is 87 cols at log 14 \
+             (verifyRecursive = 2,290,000 gas, constant in batch size)"
+        );
     }
 
     #[test]
