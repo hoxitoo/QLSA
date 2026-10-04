@@ -1,5 +1,5 @@
 /**
- * QLSAVerifierVFRI11 — E2E test: VFRI10 protocol with the Poseidon2 t=8 backend.
+ * QLSAVerifierVFRI11 — E2E test: the VFRI9 protocol on the Poseidon2 t=8 backend.
  *
  * VFRI11 is byte-for-byte ABI-compatible with VFRI9/VFRI10 (same queryHints
  * layout, same last-layer FRI check).  The only change is the hash backend:
@@ -142,15 +142,20 @@ describe("QLSAVerifierVFRI11 — Poseidon2 t=8 backend E2E", function () {
     expect(ok).to.equal(false);
   });
 
-  it("rejects VFRI11 hints fed to the VFRI10 verifier (backend mismatch)", async function () {
+  it("rejects VFRI11 hints fed to the VFRI12 verifier (backend mismatch)", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
-    const V10 = await (await ethers.getContractFactory("QLSAVerifierVFRI10")).deploy();
-    await V10.waitForDeployment();
-    const ok = await V10.verify.staticCall(
+    // Was checked against VFRI10 (t=4) until the t=4 backend was retired. VFRI12
+    // is the better subject anyway: t=8 and t=16 are the two backends that still
+    // SHIP, so confusing them is the mismatch that can actually happen. The ABI
+    // is byte-identical across VFRI9..VFRI12, so nothing but the hash backend
+    // distinguishes these hints — which is exactly what must be enough.
+    const V12 = await (await ethers.getContractFactory("QLSAVerifierVFRI12")).deploy();
+    await V12.waitForDeployment();
+    const ok = await V12.verify.staticCall(
       fixture.proof, fixture.commitment, fixture.merkleRoot, fixture.queryHints,
       { gasLimit: 16_000_000n }
     );
-    expect(ok).to.equal(false, "t=8 hints must not verify under the t=4 backend");
+    expect(ok).to.equal(false, "t=8 hints must not verify under the t=16 backend");
   });
 
   it("rejects empty queryHints", async function () {

@@ -90,7 +90,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
   it("finalizes a batch from two recursive bundles in ONE transaction", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     this.timeout(600_000);
-    const tx = await registry.submitBatch(fx.merkleRoot, b10, b8, {
+    const tx = await registry.submitBatch(fx.merkleRoot, ethers.ZeroHash, b10, b8, {
       gasLimit: 16_777_215n,
     });
     const rc = await tx.wait();
@@ -107,14 +107,14 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     this.timeout(600_000);
     await expect(
-      registry.submitBatch(fx.merkleRoot, b10, b8, { gasLimit: 16_777_215n })
+      registry.submitBatch(fx.merkleRoot, ethers.ZeroHash, b10, b8, { gasLimit: 16_777_215n })
     ).to.be.revertedWithCustomError(registry, "BatchAlreadyFinalized");
   });
 
   it("rejects a zero merkle root", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     await expect(
-      registry.submitBatch(ethers.ZeroHash, b10, b8, { gasLimit: 16_777_215n })
+      registry.submitBatch(ethers.ZeroHash, ethers.ZeroHash, b10, b8, { gasLimit: 16_777_215n })
     ).to.be.revertedWithCustomError(registry, "InvalidMerkleRoot");
   });
 
@@ -130,7 +130,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     for (const dup of [b10, b8]) {
       const fresh = await F.deploy(owner.address, await recursive.getAddress());
       await expect(
-        fresh.submitBatch(fx.merkleRoot, dup, dup, { gasLimit: 16_777_215n })
+        fresh.submitBatch(fx.merkleRoot, ethers.ZeroHash, dup, dup, { gasLimit: 16_777_215n })
       ).to.be.revertedWithCustomError(fresh, "CrossBindingMismatch");
     }
   });
@@ -143,7 +143,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
       await ethers.getContractFactory("BatchRegistryV7")
     ).deploy(owner.address, await recursive.getAddress());
     await expect(
-      fresh.submitBatch("0x" + "5e".repeat(32), b10, b8, { gasLimit: 16_777_215n })
+      fresh.submitBatch("0x" + "5e".repeat(32), ethers.ZeroHash, b10, b8, { gasLimit: 16_777_215n })
     ).to.be.revertedWithCustomError(fresh, "CrossBindingMismatch");
   });
 
@@ -161,7 +161,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     const fresh = await (
       await ethers.getContractFactory("BatchRegistryV7")
     ).deploy(owner.address, await recursive.getAddress());
-    const tx = await fresh.submitBatch(fx.merkleRoot, b8, b10, { gasLimit: 16_777_215n });
+    const tx = await fresh.submitBatch(fx.merkleRoot, ethers.ZeroHash, b8, b10, { gasLimit: 16_777_215n });
     await tx.wait();
     expect(await fresh.isBatchFinalized(fx.merkleRoot)).to.equal(true);
     // …and the commitments land in the slots as submitted, hence "positional".
@@ -180,7 +180,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     const tampered = JSON.parse(JSON.stringify(fx.bundle10));
     tampered.lastLayerEvals[0] = (BigInt(tampered.lastLayerEvals[0]) ^ 1n).toString();
     await expect(
-      fresh.submitBatch(fx.merkleRoot, bundleTuple(tampered), b8, { gasLimit: 16_777_215n })
+      fresh.submitBatch(fx.merkleRoot, ethers.ZeroHash, bundleTuple(tampered), b8, { gasLimit: 16_777_215n })
     ).to.be.revertedWithCustomError(fresh, "Log10ProofInvalid");
   });
 
@@ -193,8 +193,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     ).deploy(owner.address, await recursive.getAddress());
 
     const senders = ["0x" + "11".repeat(32), "0x" + "22".repeat(32)];
-    const tx = await fresh.submitBatchWithNonces(
-      fx.merkleRoot, b10, b8, senders, [1, 2], { gasLimit: 16_777_215n }
+    const tx = await fresh.submitBatchWithNonces(fx.merkleRoot, ethers.ZeroHash, b10, b8, senders, [1, 2], { gasLimit: 16_777_215n }
     );
     await tx.wait();
     expect(await fresh.isBatchFinalized(fx.merkleRoot)).to.equal(true);
@@ -206,7 +205,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
       await ethers.getContractFactory("BatchRegistryV7")
     ).deploy(owner.address, await recursive.getAddress());
     await expect(
-      other.submitBatchWithNonces(fx.merkleRoot, b10, b8, [senders[0]], [0], {
+      other.submitBatchWithNonces(fx.merkleRoot, ethers.ZeroHash, b10, b8, [senders[0]], [0], {
         gasLimit: 16_777_215n,
       })
     ).to.be.revertedWithCustomError(other, "SenderNonceTooLow");
@@ -233,7 +232,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     ).deploy(owner.address, await recursive.getAddress());
 
     const tx = await fresh.submitBatch(
-      pf.merkleRoot, bundleTuple(pf.bundle10), bundleTuple(pf.bundle8),
+      pf.merkleRoot, ethers.ZeroHash, bundleTuple(pf.bundle10), bundleTuple(pf.bundle8),
       { gasLimit: 16_777_215n }
     );
     const rc = await tx.wait();
@@ -248,7 +247,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
   it("rejects mismatched sender/nonce arrays", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     await expect(
-      registry.submitBatchWithNonces(fx.merkleRoot, b10, b8, ["0x" + "11".repeat(32)], [], {
+      registry.submitBatchWithNonces(fx.merkleRoot, ethers.ZeroHash, b10, b8, ["0x" + "11".repeat(32)], [], {
         gasLimit: 16_777_215n,
       })
     ).to.be.revertedWithCustomError(registry, "NoncesLengthMismatch");

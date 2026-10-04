@@ -36,25 +36,27 @@ below before relying on any claim here.*
 > aggregator cannot prove a forgery. But that check is **off-chain and
 > unverifiable by the contract** — the on-chain verifier trusts the prover ran it.
 >
-> **What the deployed contracts enforce covers ONE signature per batch, not N.**
-> `testnet/e2e.py` and `aggregator/batcher.py` generate the ML-DSA witness proof
-> for `tx[0]` only. The remaining transactions are committed by the batch Merkle
-> root but their signatures are not proved. The separate `prove_mldsa_batch` path
-> verifies N signatures *in Rust* and proves only a hash chain over the results.
+> **`aggregator/batcher.py` still proves `tx[0]` only.** This is the gap between
+> what the protocol can now do and what the product does, and an audit on
+> 2026-10-04 found it after I had reported the phase complete.
 >
-> **N-signature aggregation now works off-chain** (2026-08-27):
-> `stark.prover.prove_mldsa_aggregation_tree` folds N ML-DSA-65 signatures into
-> ONE root proof — four real signatures verified end to end. Two things separate
-> that from the claim on the tin, and both are open:
-> **(a)** no contract accepts a tree root yet, so nothing on-chain consumes it;
-> **(b)** the root proves N signatures were verified *under* a batch root, not
-> that they are that root's *members* — the batch root is a Fiat-Shamir binding,
-> not a membership proof (`docs/TECH_DEBT.md` § A-5). Wiring the root on-chain
-> without (b) would ship a contract whose guarantee is weaker than its interface
-> reads.
+> What IS done, and verified: N ML-DSA-65 signatures fold into two aggregation
+> tree roots (one per V23 FRI group), each leaf binds its member to the trace
+> roots of the proofs verifying its signature (`docs/TECH_DEBT.md` § A-5), and
+> `BatchRegistryV7` finalizes the batch in ONE transaction at a measured
+> **14,663,950 gas** with the batch identifier DERIVED from the proofs. All of
+> that lives in Rust and in a Solidity end-to-end test.
 >
-> Until both gaps are closed, the headline above describes the **architecture**,
-> not a property the deployed contracts enforce.
+> What is NOT done: `Batcher` does not call it. It still generates the witness
+> proof for the first transaction of a batch; the rest are committed by the
+> transaction-list root and their signatures are not proved. So the deployed
+> product enforces one signature per batch, exactly as before.
+>
+> The step is specified in [`ROADMAP.md`](ROADMAP.md) § "Следующий шаг — Ф2.3",
+> down to the test that would make it checkable rather than observable: a batch
+> of N transactions finalizes and **all N** carry a proof. Until that test
+> exists, "N signatures in one proof" is a property of the Rust path, not of the
+> product.
 >
 > ### Other known limitations
 >
@@ -194,6 +196,11 @@ Post-quantum cryptography is inevitable — but it breaks blockchain scalability
 A direct migration causes **~30–40x overhead per block**, collapsing throughput.
 
 > The bottleneck is not cryptography — it is infrastructure.
+
+**Where this is going, and what could stop it: [`ROADMAP.md`](ROADMAP.md).** It
+carries the measured economics — including the finding that inside a transaction's
+gas limit the system does not currently break even at *any* N, because per-sender
+nonce writes, not the proof, both eat the saving and set the ceiling.
 
 ---
 

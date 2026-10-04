@@ -43,7 +43,7 @@
       "note": "was recorded as '>100M / unverifiable' before R4.8; that was Poseidon2 implementation overhead"
     },
     "v23_dual_submitBatch_t16": {
-      "value": 15436509,
+      "value": 15432163,
       "what": "BatchRegistryV5.submitBatch, both full-V23 groups, VFRI12 (t=16), n_queries=1",
       "note": "128-bit NODE collision. FRI soundness is separate and is 16-bit at n_queries=1"
     },
@@ -54,6 +54,18 @@
     "outer_recursion_verify_t16": {
       "value": 16044328,
       "what": "VFRI12 verify of the same outer trace — 96% of the cap, which is why a fully t=16 recursion does not fit"
+    },
+    "v7_tree_submitBatch": {
+      "value": 14663950,
+      "what": "BatchRegistryV7.submitBatch finalizing a BATCH of signatures from the aggregation tree's two roots, at production n_queries=20 (130-bit FRI).",
+      "how": "cargo test write_tree_recursive_bundles_fixture -- --ignored; then contracts/test/BatchRegistryV7TreeE2E.test.js sends the tx and reads gasUsed.",
+      "note": "merkleRoot here is R, the membership root DERIVED from the proofs and used as the Fiat-Shamir seed, with txListRoot carried alongside as the (attested, unproved) transaction-list commitment. Constant in N: the root node's shape is a fixed point, so two signatures measure the same as many. The fixture's fold count is derived from each root's DEPTH, not the leaves' — a tree root sits at depth 15/14 where a V23 group sits at 10/8, so inheriting the leaves' 6 folds put 512 last-layer evaluations on chain instead of 16 and the call reverted. Measuring the outer trace alone and inferring the total was the error."
+    },
+    "v7_sender_marginal": {
+      "value": 28777,
+      "what": "Marginal gas per additional sender in BatchRegistryV7.submitBatchWithNonces, measured 10 -> 25 senders.",
+      "how": "contracts/test/V7SenderCostProbe.test.js sends batches at 1/10/25 senders on fresh registries and differences the gasUsed, so the ~14.7M shared batch cost and the 21,000 tx base cancel.",
+      "note": "GROWS with n (26,065 at 1->10) because of the O(n^2) duplicate scan. This is the figure Ф3's economics turn on: with it the sender ceiling is ~72 while break-even needs N > 607. Previously the roadmap used 42k measured on BatchRegistryV5 — the wrong path, which proves tx[0] rather than aggregating N."
     }
   },
   "live_node_runs": {

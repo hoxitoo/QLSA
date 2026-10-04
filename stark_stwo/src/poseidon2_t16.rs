@@ -160,7 +160,13 @@ pub fn sponge_t16(values: &[u64]) -> [u64; 16] {
         for (k, &v) in rem.iter().enumerate() {
             state[k] = m31_add(state[k], v % M31_P);
         }
-        state[15] = m31_add(state[15], 1);
+        // The pad encodes the block LENGTH, not merely its presence. A constant
+        // flag makes trailing zeros invisible: with rate 8, remainders of
+        // different length inside the SAME partial block absorb to one state, so
+        // [1] and [1, 0] collide. (At rate 2 there is only one partial length, so
+        // this is the same value as before; the rule is written once for all
+        // widths rather than three times with an exception.)
+        state[15] = m31_add(state[15], (8 - rem.len()) as u64);
         permute_t16(&mut state);
     }
     state
@@ -433,4 +439,27 @@ mod tests {
         let nonzero = s.iter().filter(|&&v| v != 0).count();
         assert!(nonzero >= 12, "external layer must diffuse across blocks, got {nonzero} non-zero");
     }
+
+    #[test]
+    fn sponge_t16_separates_tail_lengths_inside_one_block() {
+        // The case the older padding tests missed. They checked the boundary
+        // where the pad appears or disappears (a full block vs a padded one);
+        // this checks two remainders of DIFFERENT length inside the SAME partial
+        // block. With a constant flag those absorb to one state, so [1] and
+        // [1, 0] collided (found 2026-08-28). At rate 2 only one partial length
+        // exists, so t=4 was immune — the test is written for every width anyway,
+        // because the rule is what must hold, not the accident that saved one.
+        for a in 1..8usize {
+            for b in (a + 1)..8 {
+                let mut va: Vec<u64> = (1..=a as u64).collect();
+                let mut vb: Vec<u64> = (1..=a as u64).collect();
+                vb.resize(b, 0);          // same words, zero-extended
+                va.truncate(a);
+                assert_ne!(
+                    sponge_t16(&va), sponge_t16(&vb),
+                    "tail lengths {a} and {b} must not absorb to one state");
+            }
+        }
+    }
+
 }

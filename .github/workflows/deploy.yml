@@ -39,7 +39,7 @@ jobs:
           PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
           RPC_URL: ${{ github.event.inputs.network == 'sepolia' && 'https://ethereum-sepolia-rpc.publicnode.com' || 'https://rpc.cardona.zkevm-rpc.com' }}
         run: |
-          npx hardhat run scripts/deploy.js --network ${{ github.event.inputs.network }} --no-compile \
+          npx hardhat run scripts/deploy_v7.js --network ${{ github.event.inputs.network }} --no-compile \
             | tee /tmp/deploy_output.txt
           echo "## Deployment output" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -48,13 +48,13 @@ jobs:
 
       - name: Extract contract addresses
         run: |
-          VERIFIER=$(grep "QLSAVerifierBound deployed to:" /tmp/deploy_output.txt | awk '{print $NF}')
-          REGISTRY=$(grep "BatchRegistryV2 deployed to:"  /tmp/deploy_output.txt | awk '{print $NF}')
+          VERIFIER=$(grep "QLSAVerifierVFRI11 deployed to:" /tmp/deploy_output.txt | awk '{print $NF}')
+          REGISTRY=$(grep "BatchRegistryV5 deployed to:"  /tmp/deploy_output.txt | awk '{print $NF}')
           echo "### Contract addresses" >> $GITHUB_STEP_SUMMARY
           echo "| Contract | Address |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| QLSAVerifierBound | \`$VERIFIER\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| BatchRegistryV2   | \`$REGISTRY\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| QLSAVerifierVFRI11 | \`$VERIFIER\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| BatchRegistryV5   | \`$REGISTRY\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Network: ${{ github.event.inputs.network }}"
           echo "VERIFIER_ADDRESS=$VERIFIER"

@@ -73,12 +73,40 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
     mapping(bytes32 => uint256) public batchTimestamps;
     mapping(bytes32 => bytes16) public batchCommitmentsLog10;
     mapping(bytes32 => bytes16) public batchCommitmentsLog8;
+
+    /// @notice Per batch, the submitter's commitment to the TRANSACTION LIST.
+    ///
+    /// **Attested, not proved.** This contract cannot check it — it has no
+    /// transactions — and proving `txListRoot == SHA3(tx hashes)` in-circuit
+    /// needs Keccak-f[1600] arithmetized, which is not done. Its value is that a
+    /// third party HOLDING the transaction list can recompute it; it carries no
+    /// soundness of its own.
+    ///
+    /// What IS proved lives in `merkleRoot`: the aggregation tree's membership
+    /// root, whose every leaf binds a member's `tx_id` (the first 124 bits of its
+    /// transaction hash) to the trace roots of the proofs verifying its
+    /// signature. So the transaction binding is proved at 124 bits per member;
+    /// `txListRoot` adds recomputability, not a new guarantee.
+    ///
+    /// It exists because `merkleRoot` depends on the prover's AIR layout — the
+    /// same transactions yield a different root after a pipeline change, and it
+    /// cannot be recomputed without running the prover. `txListRoot` has neither
+    /// property.
+    ///
+    /// **Zero means "not provided."** Unlike `merkleRoot`, a zero here is
+    /// accepted: the field is attested rather than verified, so rejecting zero
+    /// would only force a submitter with no transaction list — a test fixture,
+    /// a synthetic batch — to invent a value, which is worse than an honest
+    /// absence. A reader seeing zero should treat the batch as carrying no
+    /// transaction-list commitment, not as committing to an empty list.
+    mapping(bytes32 => bytes32) public batchTxListRoots;
     mapping(bytes32 => uint64) public senderNonces;
 
     event BatchFinalized(
         bytes32 indexed merkleRoot,
         bytes16 indexed commitmentLog10,
         bytes16 commitmentLog8,
+        bytes32 txListRoot,
         uint256 timestamp
     );
     event VerifierUpdated(address indexed oldVerifier, address indexed newVerifier);
@@ -119,10 +147,11 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
     /// @notice Finalize a batch from two recursive bundles.
     function submitBatch(
         bytes32 merkleRoot,
+        bytes32 txListRoot,
         RecursiveBundle calldata bundle10,
         RecursiveBundle calldata bundle8
     ) external nonReentrant {
-        _finalize(merkleRoot, bundle10, bundle8);
+        _finalize(merkleRoot, txListRoot, bundle10, bundle8);
     }
 
     /// @notice Finalize a batch and advance per-sender nonces (replay protection).
@@ -130,6 +159,7 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
     ///      must exceed it, so the smallest submittable value is 1.
     function submitBatchWithNonces(
         bytes32 merkleRoot,
+        bytes32 txListRoot,
         RecursiveBundle calldata bundle10,
         RecursiveBundle calldata bundle8,
         bytes32[] calldata senders,
@@ -152,7 +182,7 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
             }
         }
 
-        _finalize(merkleRoot, bundle10, bundle8);
+        _finalize(merkleRoot, txListRoot, bundle10, bundle8);
 
         for (uint256 i = 0; i < senders.length; ++i) {
             senderNonces[senders[i]] = newNonces[i];
@@ -168,6 +198,7 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
 
     function _finalize(
         bytes32 merkleRoot,
+        bytes32 txListRoot,
         RecursiveBundle calldata bundle10,
         RecursiveBundle calldata bundle8
     ) private {
@@ -205,11 +236,13 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
         batchTimestamps[merkleRoot] = block.timestamp;
         batchCommitmentsLog10[merkleRoot] = bundle10.outerCommitment;
         batchCommitmentsLog8[merkleRoot] = bundle8.outerCommitment;
+        batchTxListRoots[merkleRoot] = txListRoot;
 
         emit BatchFinalized(
             merkleRoot,
             bundle10.outerCommitment,
             bundle8.outerCommitment,
+            txListRoot,
             block.timestamp
         );
     }

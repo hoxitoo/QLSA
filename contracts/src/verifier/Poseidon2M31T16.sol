@@ -276,7 +276,12 @@ library Poseidon2M31T16 {
                 for (uint256 k = 0; full + k < n; k++) {
                     s[k] = _addM31(s[k], values[full + k] % P);
                 }
-                s[15] = _addM31(s[15], 1);
+                // The pad encodes the block LENGTH, not merely its presence. A
+                // constant flag makes trailing zeros invisible: two remainders of
+                // different length inside the SAME partial block absorb to one
+                // state, so [1] and [1,0] collide (found 2026-08-28). Matches the
+                // Rust reference, which is authoritative.
+                s[15] = _addM31(s[15], 8 - (n - full));
                 permute(s);
             }
 

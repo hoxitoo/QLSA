@@ -27,6 +27,7 @@ pub mod poseidon2_t16;
 pub mod recursive;
 pub mod trace;
 pub mod vfri2_bridge;
+pub mod batch_tree;
 
 use blake2::{Blake2s256, Digest};
 use stwo::core::air::Component;
@@ -5767,856 +5768,22 @@ fn gen_poseidon2_vfri2_hints_py(
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
-#[cfg(feature = "python")]
-#[pyfunction]
-fn gen_poseidon2_vfri3_real_py(
-    leaves: Vec<u64>,
-    batch_merkle_root: Vec<u8>,
-    n_queries: usize,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    vfri2_bridge::gen_poseidon2_vfri3_real(&leaves, &batch_merkle_root, n_queries)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-#[cfg(feature = "python")]
-#[pyfunction]
-fn gen_poseidon2_vfri4_real_py(
-    leaves: Vec<u64>,
-    batch_merkle_root: Vec<u8>,
-    n_queries: usize,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    vfri2_bridge::gen_poseidon2_vfri4_real(&leaves, &batch_merkle_root, n_queries)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-#[cfg(feature = "python")]
-#[pyfunction]
-fn gen_ntt_batch_vfri3_hints_py(
-    polys: Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries: usize,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let polys_arr: Vec<[i64; 256]> = polys
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-                format!("polys[{i}] must have exactly 256 coefficients")
-            ))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    vfri2_bridge::gen_ntt_batch_vfri3_hints(&polys_arr, &batch_merkle_root, n_queries)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-#[cfg(feature = "python")]
-#[pyfunction]
-fn gen_ntt_batch_vfri3_hints_nfolds_py(
-    polys: Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries: usize,
-    num_folds: usize,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let polys_arr: Vec<[i64; 256]> = polys
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-                format!("polys[{i}] must have exactly 256 coefficients")
-            ))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    vfri2_bridge::gen_ntt_batch_vfri3_hints_nfolds(
-        &polys_arr, &batch_merkle_root, n_queries, Some(num_folds)
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_mldsa_v23_vfri3_hints(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// Generates VFRI3-compatible hints from V23's NttBatch + InttBatch components
-/// (both LOG=10, 649 cols each → 1298 combined columns).
-///
-/// Proves on-chain via QLSAVerifierVFRI3 that NTT(z,c,t1) and INTT(az,ct1)
-/// were computed correctly, forming the first on-chain V23 proof segment.
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri3_hints_py(
-    z:                  Vec<Vec<i64>>,
-    c:                  Vec<i64>,
-    t1:                 Vec<Vec<i64>>,
-    a_hat:              Vec<Vec<i64>>,
-    batch_merkle_root:  Vec<u8>,
-    n_queries:          usize,
-    num_folds:          Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    // Convert z: Vec<Vec<i64>> → [[i64;256];5]
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
 
-    // Convert c: Vec<i64> → [i64;256]
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
 
-    // Convert t1: Vec<Vec<i64>> → [[i64;256];6]
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
 
-    // Convert a_hat: Vec<Vec<i64>> → Vec<[i64;256]>
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
 
-    vfri2_bridge::gen_mldsa_v23_vfri3_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_mldsa_v23_vfri4_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI4 variant of gen_mldsa_v23_vfri3_hints_py. Combines NttBatch (649 cols) +
-/// InttBatch (649 cols) = 1298 total trace columns, then generates VFRI4-compatible
-/// ABI-encoded hints (Poseidon2 sponge OODS transcript).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri4_hints_py(
-    z:                  Vec<Vec<i64>>,
-    c:                  Vec<i64>,
-    t1:                 Vec<Vec<i64>>,
-    a_hat:              Vec<Vec<i64>>,
-    batch_merkle_root:  Vec<u8>,
-    n_queries:          usize,
-    num_folds:          Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
 
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
 
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
 
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
 
-    vfri2_bridge::gen_mldsa_v23_vfri4_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_ntt_batch_vfri4_hints_nfolds_py(polys, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI4 variant of gen_ntt_batch_vfri3_hints_nfolds — uses Poseidon2 sponge for
-/// OODS eval channel commitment (4 M31 words per OODS set instead of n_cols*4 words).
-/// queryHints ABI format is identical to VFRI3; only the Fiat-Shamir transcript differs.
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (polys, batch_merkle_root, n_queries=1, num_folds=9))]
-fn gen_ntt_batch_vfri4_hints_nfolds_py(
-    polys:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         usize,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let polys_arr: Vec<[i64; 256]> = polys
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-                format!("polys[{i}] must have exactly 256 coefficients")
-            ))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    vfri2_bridge::gen_ntt_batch_vfri4_hints_nfolds(
-        &polys_arr, &batch_merkle_root, n_queries, Some(num_folds)
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_ntt_batch_vfri5_hints_nfolds_py(polys, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI5 variant of gen_ntt_batch_vfri4_hints_nfolds. Adds a composition polynomial
-/// Merkle tree (`compRoot`) so per-query hints carry only compValue + Merkle proof
-/// instead of all n_cols column values. For 649 cols (12-poly NttBatch), this reduces
-/// per-query calldata from ~41 KB to O(treeDepth × 32) bytes.
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (polys, batch_merkle_root, n_queries=1, num_folds=9))]
-fn gen_ntt_batch_vfri5_hints_nfolds_py(
-    polys:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         usize,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let polys_arr: Vec<[i64; 256]> = polys
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-                format!("polys[{i}] must have exactly 256 coefficients")
-            ))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    vfri2_bridge::gen_ntt_batch_vfri5_hints_nfolds(
-        &polys_arr, &batch_merkle_root, n_queries, Some(num_folds)
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_ntt_batch_vfri6_hints_nfolds_py(polys, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI6 variant — removes oodsEvalsPos/Neg arrays entirely. Prover precomputes
-/// oodsComboPos/Neg off-chain; only 2 uint128 values passed. Eliminates O(n_cols)
-/// on-chain work, enabling 649-col NttBatch verification within 15 M gas.
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (polys, batch_merkle_root, n_queries=1, num_folds=9))]
-fn gen_ntt_batch_vfri6_hints_nfolds_py(
-    polys:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         usize,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let polys_arr: Vec<[i64; 256]> = polys
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-                format!("polys[{i}] must have exactly 256 coefficients")
-            ))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    vfri2_bridge::gen_ntt_batch_vfri6_hints_nfolds(
-        &polys_arr, &batch_merkle_root, n_queries, Some(num_folds)
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri6_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI6 variant for V23's NttBatch+InttBatch combined trace (1298 columns, LOG=10).
-/// On-chain gas does NOT scale with n_cols: only 8 M31 words mixed per call.
-/// 1298-col trace fits within 15M gas — same as 649-col in VFRI6.
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri6_hints_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri6_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri6_hints_log8_py(z, c, t1, a_hat, hints, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI6 hint generator for V23's LOG=8 component group:
-/// AzFull (1523) + Ct1Full (295) + RangeQBatch (288) +
-/// WPrimeFull (24) + NormCheckBatch (15) + UseHintBatchV2 (61) = 2206 columns.
-/// Hint size is O(1) in n_cols: ~3.5 KB regardless of column count.
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri6_hints_log8_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    hints:             Vec<Vec<bool>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    if hints.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("hints must have 6 arrays (K=6), got {}", hints.len())
-        ));
-    }
-    let hints_arr: [[bool; 256]; 6] = hints.into_iter()
-        .enumerate()
-        .map(|(i, h)| h.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("hints[{i}] must have 256 entries")
-        )))
-        .collect::<PyResult<Vec<[bool; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("hints must have exactly 6 entries"))?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri6_hints_log8(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri7_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI7 = VFRI6 + mixRoot(batch_merkle_root) before drawQueries.
-/// Binds FRI query indices to the external batch context (MVP-5 Priority 2).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri7_hints_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri7_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri7_hints_log8_py(z, c, t1, a_hat, hints, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI7 hint generator for V23's LOG=8 component group (2206 columns).
-/// Adds mixRoot(batch_merkle_root) before drawQueries vs VFRI6.
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri7_hints_log8_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    hints:             Vec<Vec<bool>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    if hints.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("hints must have 6 arrays (K=6), got {}", hints.len())
-        ));
-    }
-    let hints_arr: [[bool; 256]; 6] = hints.into_iter()
-        .enumerate()
-        .map(|(i, h)| h.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("hints[{i}] must have 256 entries")
-        )))
-        .collect::<PyResult<Vec<[bool; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("hints must have exactly 6 entries"))?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri7_hints_log8(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri7_cross_bound_hints_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
-///   -> (proof10, commit10, hints10, proof8, commit8, hints8)
-///
-/// Two-pass cross-proof binding for MVP-5 Priority 2.
-/// Returns hints for both LOG=10 and LOG=8 groups, where each proof's FRI query
-/// indices depend on the other's trace commitment via cross-bound roots:
-///   bound_root_10 = keccak256(batch_root ‖ proof8[8:40])
-///   bound_root_8  = keccak256(batch_root ‖ proof10[8:40])
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri7_cross_bound_hints_py(
-    z:          Vec<Vec<i64>>,
-    c:          Vec<i64>,
-    t1:         Vec<Vec<i64>>,
-    a_hat:      Vec<Vec<i64>>,
-    hints:      Vec<Vec<bool>>,
-    batch_root: Vec<u8>,
-    n_queries:  usize,
-    num_folds:  Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    if hints.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("hints must have 6 arrays (K=6), got {}", hints.len())
-        ));
-    }
-    let hints_arr: [[bool; 256]; 6] = hints.into_iter()
-        .enumerate()
-        .map(|(i, h)| h.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("hints[{i}] must have 256 entries")
-        )))
-        .collect::<PyResult<Vec<[bool; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("hints must have exactly 6 entries"))?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri7_cross_bound_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri8_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI8 = VFRI7 with Poseidon2 replacing Blake2s for Merkle hashing and the
-/// Fiat-Shamir channel.  LOG=10 group (NttBatch + InttBatch, 1298 cols).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri8_hints_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri8_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri8_hints_log8_py(z, c, t1, a_hat, hints, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI8 hint generator for V23's LOG=8 component group (2206 columns).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri8_hints_log8_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    hints:             Vec<Vec<bool>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    if hints.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("hints must have 6 arrays (K=6), got {}", hints.len())
-        ));
-    }
-    let hints_arr: [[bool; 256]; 6] = hints.into_iter()
-        .enumerate()
-        .map(|(i, h)| h.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("hints[{i}] must have 256 entries")
-        )))
-        .collect::<PyResult<Vec<[bool; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("hints must have exactly 6 entries"))?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri8_hints_log8(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
-
-/// gen_mldsa_v23_vfri8_cross_bound_hints_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
-///   -> (proof10, commit10, hints10, proof8, commit8, hints8)
-///
-/// Two-pass cross-proof binding using VFRI8 (Poseidon2) backends:
-///   bound_root_10 = keccak256(batch_root ‖ proof8[8:40])
-///   bound_root_8  = keccak256(batch_root ‖ proof10[8:40])
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri8_cross_bound_hints_py(
-    z:          Vec<Vec<i64>>,
-    c:          Vec<i64>,
-    t1:         Vec<Vec<i64>>,
-    a_hat:      Vec<Vec<i64>>,
-    hints:      Vec<Vec<bool>>,
-    batch_root: Vec<u8>,
-    n_queries:  usize,
-    num_folds:  Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>)> {
-    if z.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("z must have 5 polynomials (L=5), got {}", z.len())
-        ));
-    }
-    let z_arr: [[i64; 256]; 5] = z.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("z[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("z must have exactly 5 entries"))?;
-
-    let c_arr: [i64; 256] = c.try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("c must have exactly 256 coefficients"))?;
-
-    if t1.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("t1 must have 6 polynomials (K=6), got {}", t1.len())
-        ));
-    }
-    let t1_arr: [[i64; 256]; 6] = t1.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("t1[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("t1 must have exactly 6 entries"))?;
-
-    let a_hat_arr: Vec<[i64; 256]> = a_hat.into_iter()
-        .enumerate()
-        .map(|(i, p)| p.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("a_hat[{i}] must have 256 coefficients")
-        )))
-        .collect::<PyResult<Vec<[i64; 256]>>>()?;
-
-    if hints.len() != 6 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("hints must have 6 arrays (K=6), got {}", hints.len())
-        ));
-    }
-    let hints_arr: [[bool; 256]; 6] = hints.into_iter()
-        .enumerate()
-        .map(|(i, h)| h.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err(
-            format!("hints[{i}] must have 256 entries")
-        )))
-        .collect::<PyResult<Vec<[bool; 256]>>>()?
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("hints must have exactly 6 entries"))?;
-
-    vfri2_bridge::gen_mldsa_v23_vfri8_cross_bound_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
 // ── VFRI9 PyO3 conversion helpers ─────────────────────────────────────────────
 
@@ -6687,176 +5854,11 @@ fn _conv_hints(hints: Vec<Vec<bool>>) -> PyResult<[[bool; 256]; 6]> {
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("hints must have exactly 6 entries"))
 }
 
-/// gen_mldsa_v23_vfri9_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI9 = VFRI8 with wide (62-bit) Poseidon2 Merkle nodes, full-root
-/// Fiat-Shamir absorption, and the last-layer FRI bounded-degree check.
-/// LOG=10 group (NttBatch + InttBatch, 1298 cols).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri9_hints_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let z_arr = _conv_z(z)?;
-    let c_arr = _conv_c(c)?;
-    let t1_arr = _conv_t1(t1)?;
-    let a_hat_arr = _conv_a_hat(a_hat)?;
-    vfri2_bridge::gen_mldsa_v23_vfri9_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_mldsa_v23_vfri9_hints_log8_py(z, c, t1, a_hat, hints, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI9 hint generator for V23's LOG=8 component group (2206 columns).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri9_hints_log8_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    hints:             Vec<Vec<bool>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let z_arr = _conv_z(z)?;
-    let c_arr = _conv_c(c)?;
-    let t1_arr = _conv_t1(t1)?;
-    let a_hat_arr = _conv_a_hat(a_hat)?;
-    let hints_arr = _conv_hints(hints)?;
-    vfri2_bridge::gen_mldsa_v23_vfri9_hints_log8(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_mldsa_v23_vfri9_cross_bound_hints_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
-///   -> (proof10, commit10, hints10, proof8, commit8, hints8)
-///
-/// Two-pass cross-proof binding using VFRI9 (wide Poseidon2) backends:
-///   bound_root_10 = keccak256(batch_root ‖ proof8[8:40])
-///   bound_root_8  = keccak256(batch_root ‖ proof10[8:40])
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri9_cross_bound_hints_py(
-    z:          Vec<Vec<i64>>,
-    c:          Vec<i64>,
-    t1:         Vec<Vec<i64>>,
-    a_hat:      Vec<Vec<i64>>,
-    hints:      Vec<Vec<bool>>,
-    batch_root: Vec<u8>,
-    n_queries:  usize,
-    num_folds:  Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>)> {
-    let z_arr = _conv_z(z)?;
-    let c_arr = _conv_c(c)?;
-    let t1_arr = _conv_t1(t1)?;
-    let a_hat_arr = _conv_a_hat(a_hat)?;
-    let hints_arr = _conv_hints(hints)?;
-    vfri2_bridge::gen_mldsa_v23_vfri9_cross_bound_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_mldsa_v23_vfri10_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI10 = VFRI9 protocol on the Poseidon2 t=4 hash backend (t=4 wide Merkle +
-/// t=4 Fiat-Shamir channel). LOG=10 group (NttBatch + InttBatch, 1298 cols).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri10_hints_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let z_arr = _conv_z(z)?;
-    let c_arr = _conv_c(c)?;
-    let t1_arr = _conv_t1(t1)?;
-    let a_hat_arr = _conv_a_hat(a_hat)?;
-    vfri2_bridge::gen_mldsa_v23_vfri10_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_mldsa_v23_vfri10_hints_log8_py(z, c, t1, a_hat, hints, batch_merkle_root, n_queries, num_folds)
-///   -> (proof: bytes, commitment: str, query_hints: bytes)
-///
-/// VFRI10 hint generator for V23's LOG=8 component group (2206 columns).
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_merkle_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri10_hints_log8_py(
-    z:                 Vec<Vec<i64>>,
-    c:                 Vec<i64>,
-    t1:                Vec<Vec<i64>>,
-    a_hat:             Vec<Vec<i64>>,
-    hints:             Vec<Vec<bool>>,
-    batch_merkle_root: Vec<u8>,
-    n_queries:         usize,
-    num_folds:         Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>)> {
-    let z_arr = _conv_z(z)?;
-    let c_arr = _conv_c(c)?;
-    let t1_arr = _conv_t1(t1)?;
-    let a_hat_arr = _conv_a_hat(a_hat)?;
-    let hints_arr = _conv_hints(hints)?;
-    vfri2_bridge::gen_mldsa_v23_vfri10_hints_log8(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_merkle_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
-/// gen_mldsa_v23_vfri10_cross_bound_hints_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
-///   -> (proof10, commit10, hints10, proof8, commit8, hints8)
-///
-/// Two-pass cross-proof binding using VFRI10 (t=4 Poseidon2) backends:
-///   bound_root_10 = keccak256(batch_root ‖ proof8[8:40])
-///   bound_root_8  = keccak256(batch_root ‖ proof10[8:40])
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (z, c, t1, a_hat, hints, batch_root, n_queries=1, num_folds=None))]
-fn gen_mldsa_v23_vfri10_cross_bound_hints_py(
-    z:          Vec<Vec<i64>>,
-    c:          Vec<i64>,
-    t1:         Vec<Vec<i64>>,
-    a_hat:      Vec<Vec<i64>>,
-    hints:      Vec<Vec<bool>>,
-    batch_root: Vec<u8>,
-    n_queries:  usize,
-    num_folds:  Option<usize>,
-) -> PyResult<(Vec<u8>, String, Vec<u8>, Vec<u8>, String, Vec<u8>)> {
-    let z_arr = _conv_z(z)?;
-    let c_arr = _conv_c(c)?;
-    let t1_arr = _conv_t1(t1)?;
-    let a_hat_arr = _conv_a_hat(a_hat)?;
-    let hints_arr = _conv_hints(hints)?;
-    vfri2_bridge::gen_mldsa_v23_vfri10_cross_bound_hints(
-        &z_arr, &c_arr, &t1_arr, &a_hat_arr, &hints_arr,
-        &batch_root, n_queries, num_folds,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
-}
 
 /// gen_mldsa_v23_vfri11_hints_py(z, c, t1, a_hat, batch_merkle_root, n_queries, num_folds)
 ///   -> (proof: bytes, commitment: str, query_hints: bytes)
@@ -6941,25 +5943,31 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
-/// prove_mldsa_aggregation_tree_py(entries, batch_root, n_queries, num_folds, fan_in) -> dict
+/// prove_mldsa_aggregation_tree_py(entries, tx_hashes, batch_root, n_queries, num_folds, fan_in) -> dict
 ///
 /// Aggregate N ML-DSA-65 witnesses into ONE root proof.
 ///
-/// `entries` is a list of `(z, c, t1, a_hat)` — one extracted witness per
-/// signature. Every entry becomes a leaf statement and the tree folds them to a
+/// `entries` is a list of `(z, c, t1, a_hat, hints)` — one extracted witness per
+/// signature; `tx_hashes` is the matching transaction hash for each, which goes
+/// into that member's batch leaf (A-5).
+///
+/// TWO roots come back, one per V23 FRI group: log10 carries the NTT/INTT, log8
+/// the multiplication, the norm bound and the hint bound. A root over log10
+/// alone attests neither, and `BatchRegistryV7` needs both bundles. Every entry becomes a leaf statement and the tree folds them to a
 /// single root, whose on-chain cost does not depend on N: the node shape is a
 /// fixed point at log 16, so depth is free.
 ///
-/// Returns `{"rootProof", "rootLogSize", "rootRoots", "leafCount", "depth",
+/// Returns `{"rootProof", "rootLogSize", "rootRoots", "rootProof8",
+/// "rootLogSize8", "rootRoots8", "batchRoot", "leafCount", "depth",
 /// "nodeCount", "fanIn"}`. `nodeCount` is the prover's cost (proofs produced),
 /// as distinct from the result, which is the root alone.
 #[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(signature = (entries, batch_root, n_queries=1, num_folds=None, fan_in=2))]
+#[pyo3(signature = (entries, tx_hashes, n_queries=1, num_folds=None, fan_in=2))]
 fn prove_mldsa_aggregation_tree_py(
     py:         Python<'_>,
-    entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>)>,
-    batch_root: Vec<u8>,
+    entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<bool>>)>,
+    tx_hashes:  Vec<Vec<u8>>,
     n_queries:  usize,
     num_folds:  Option<usize>,
     fan_in:     usize,
@@ -6967,9 +5975,9 @@ fn prove_mldsa_aggregation_tree_py(
     use pyo3::types::PyDict;
 
     let mut conv = Vec::with_capacity(entries.len());
-    for (i, (z, c, t1, a_hat)) in entries.into_iter().enumerate() {
+    for (i, (z, c, t1, a_hat, hints)) in entries.into_iter().enumerate() {
         let e = (|| -> PyResult<_> {
-            Ok((_conv_z(z)?, _conv_c(c)?, _conv_t1(t1)?, _conv_a_hat(a_hat)?))
+            Ok((_conv_z(z)?, _conv_c(c)?, _conv_t1(t1)?, _conv_a_hat(a_hat)?, _conv_hints(hints)?))
         })()
         .map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("signature {i}: {e}"))
@@ -6977,14 +5985,34 @@ fn prove_mldsa_aggregation_tree_py(
         conv.push(e);
     }
 
+    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(tx_hashes.len());
+    for (i, h) in tx_hashes.iter().enumerate() {
+        hashes.push(h.as_slice().try_into().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "tx_hashes[{i}] must be 32 bytes, got {}", h.len()))
+        })?);
+    }
+
     let summary = vfri2_bridge::prove_mldsa_aggregation_tree(
-        &conv, &batch_root, n_queries, num_folds, fan_in,
+        &conv, &hashes, n_queries, num_folds, fan_in,
     )
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     let d = PyDict::new(py);
     d.set_item("rootProof", pyo3::types::PyBytes::new(py, &summary.root_proof))?;
     d.set_item("rootLogSize", summary.root_log_size)?;
+    d.set_item("rootProof8", pyo3::types::PyBytes::new(py, &summary.root_proof8))?;
+    d.set_item("rootLogSize8", summary.root_log_size8)?;
+    d.set_item(
+        "rootRoots8",
+        summary.root_roots8.iter()
+            .map(|r| r.iter().map(|&w| w as u32).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "batchRoot",
+        summary.batch_root.iter().map(|&w| w as u32).collect::<Vec<_>>(),
+    )?;
     d.set_item(
         "rootRoots",
         summary
@@ -6998,6 +6026,86 @@ fn prove_mldsa_aggregation_tree_py(
     d.set_item("nodeCount", summary.node_count)?;
     d.set_item("fanIn", summary.fan_in)?;
     Ok(d.into())
+}
+
+/// gen_mldsa_tree_recursive_bundles_py(entries, tx_hashes, batch_root, n_queries, num_folds, fan_in)
+///   -> (bundle10, bundle8, merkleRoot)
+///
+/// `merkleRoot` comes BACK rather than going in: it is the membership root,
+/// derived from the trace roots, and it is simultaneously the Fiat-Shamir seed
+/// every proof ran under. That is what makes the registry's batch identifier
+/// derivable from the proofs.
+///
+/// The AGGREGATION TREE's two roots as `BatchRegistryV7.submitBatch` bundles —
+/// N signatures finalized in ONE transaction. Each dict has the same shape as
+/// `gen_mldsa_v23_recursive_bundles_py`'s, so a submitter written for one works
+/// for the other.
+///
+/// `entries` is `(z, c, t1, a_hat, hints)` per signature and `tx_hashes` the
+/// matching transaction hash, which goes into that member's batch leaf (A-5).
+///
+/// The bundles are bound at the ROOT, which is the level
+/// `BatchRegistryV7._finalize` inspects; the fold count of each root is derived
+/// from its own depth so the on-chain last-layer rebuild stays 16 evaluations
+/// whatever the tree's size.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (entries, tx_hashes, n_queries=1, num_folds=None, fan_in=2))]
+fn gen_mldsa_tree_recursive_bundles_py(
+    py:         Python<'_>,
+    entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<bool>>)>,
+    tx_hashes:  Vec<Vec<u8>>,
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+    fan_in:     usize,
+) -> PyResult<(pyo3::Py<pyo3::types::PyDict>, pyo3::Py<pyo3::types::PyDict>, String)> {
+    use pyo3::types::PyDict;
+
+    let mut conv = Vec::with_capacity(entries.len());
+    for (i, (z, c, t1, a_hat, hints)) in entries.into_iter().enumerate() {
+        let e = (|| -> PyResult<_> {
+            Ok((_conv_z(z)?, _conv_c(c)?, _conv_t1(t1)?, _conv_a_hat(a_hat)?, _conv_hints(hints)?))
+        })()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("signature {i}: {e}")))?;
+        conv.push(e);
+    }
+    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(tx_hashes.len());
+    for (i, h) in tx_hashes.iter().enumerate() {
+        hashes.push(h.as_slice().try_into().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "tx_hashes[{i}] must be 32 bytes, got {}", h.len()))
+        })?);
+    }
+
+    let (b10, b8, merkle_root) = vfri2_bridge::gen_mldsa_tree_recursive_bundles(
+        &conv, &hashes, n_queries, num_folds, fan_in,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    let to_dict = |b: &vfri2_bridge::RecursiveBundleData| -> PyResult<pyo3::Py<PyDict>> {
+        let hx = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
+        let d = PyDict::new(py);
+        d.set_item("traceRoot", hx(&b.trace_root))?;
+        d.set_item("oodsComboPos", b.oods_combo_pos.to_string())?;
+        d.set_item("oodsComboNeg", b.oods_combo_neg.to_string())?;
+        d.set_item("compRoot", hx(&b.comp_root))?;
+        d.set_item(
+            "friLayerRoots",
+            b.fri_layer_roots.iter().map(|r| hx(r)).collect::<Vec<_>>(),
+        )?;
+        d.set_item("batchRoot", hx(&b.bound_root))?;
+        d.set_item("treeDepth", b.tree_depth)?;
+        d.set_item("nQueries", b.n_queries)?;
+        d.set_item(
+            "lastLayerEvals",
+            b.last_layer_evals.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        )?;
+        d.set_item("outerProof", b.outer_proof.clone())?;
+        d.set_item("outerCommitment", b.outer_commitment.clone())?;
+        d.set_item("outerHints", b.outer_hints.clone())?;
+        Ok(d.into())
+    };
+    Ok((to_dict(&b10)?, to_dict(&b8)?, format!("0x{}", hex::encode(merkle_root))))
 }
 
 /// gen_mldsa_v23_recursive_bundles_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
@@ -7154,33 +6262,11 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_range_q_py, m)?)?;
     m.add_function(wrap_pyfunction!(wipe_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(gen_poseidon2_vfri2_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_poseidon2_vfri3_real_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri3_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri3_hints_nfolds_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri3_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri4_hints_nfolds_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_poseidon2_vfri4_real_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri4_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri5_hints_nfolds_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_ntt_batch_vfri6_hints_nfolds_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri6_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri6_hints_log8_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri7_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri7_hints_log8_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri7_cross_bound_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri8_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri8_hints_log8_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri8_cross_bound_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri9_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri9_hints_log8_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri9_cross_bound_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri10_hints_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri10_hints_log8_py, m)?)?;
-    m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri10_cross_bound_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_log8_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_cross_bound_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_recursive_bundles_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_tree_recursive_bundles_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_aggregation_tree_py, m)?)?;
     Ok(())
 }
