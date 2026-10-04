@@ -5963,12 +5963,11 @@ fn gen_mldsa_v23_vfri11_cross_bound_hints_py(
 /// as distinct from the result, which is the root alone.
 #[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(signature = (entries, tx_hashes, batch_root, n_queries=1, num_folds=None, fan_in=2))]
+#[pyo3(signature = (entries, tx_hashes, n_queries=1, num_folds=None, fan_in=2))]
 fn prove_mldsa_aggregation_tree_py(
     py:         Python<'_>,
     entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<bool>>)>,
     tx_hashes:  Vec<Vec<u8>>,
-    batch_root: Vec<u8>,
     n_queries:  usize,
     num_folds:  Option<usize>,
     fan_in:     usize,
@@ -5995,7 +5994,7 @@ fn prove_mldsa_aggregation_tree_py(
     }
 
     let summary = vfri2_bridge::prove_mldsa_aggregation_tree(
-        &conv, &hashes, &batch_root, n_queries, num_folds, fan_in,
+        &conv, &hashes, n_queries, num_folds, fan_in,
     )
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
@@ -6030,7 +6029,12 @@ fn prove_mldsa_aggregation_tree_py(
 }
 
 /// gen_mldsa_tree_recursive_bundles_py(entries, tx_hashes, batch_root, n_queries, num_folds, fan_in)
-///   -> (bundle10, bundle8)
+///   -> (bundle10, bundle8, merkleRoot)
+///
+/// `merkleRoot` comes BACK rather than going in: it is the membership root,
+/// derived from the trace roots, and it is simultaneously the Fiat-Shamir seed
+/// every proof ran under. That is what makes the registry's batch identifier
+/// derivable from the proofs.
 ///
 /// The AGGREGATION TREE's two roots as `BatchRegistryV7.submitBatch` bundles —
 /// N signatures finalized in ONE transaction. Each dict has the same shape as
@@ -6046,16 +6050,15 @@ fn prove_mldsa_aggregation_tree_py(
 /// whatever the tree's size.
 #[cfg(feature = "python")]
 #[pyfunction]
-#[pyo3(signature = (entries, tx_hashes, batch_root, n_queries=1, num_folds=None, fan_in=2))]
+#[pyo3(signature = (entries, tx_hashes, n_queries=1, num_folds=None, fan_in=2))]
 fn gen_mldsa_tree_recursive_bundles_py(
     py:         Python<'_>,
     entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<bool>>)>,
     tx_hashes:  Vec<Vec<u8>>,
-    batch_root: Vec<u8>,
     n_queries:  usize,
     num_folds:  Option<usize>,
     fan_in:     usize,
-) -> PyResult<(pyo3::Py<pyo3::types::PyDict>, pyo3::Py<pyo3::types::PyDict>)> {
+) -> PyResult<(pyo3::Py<pyo3::types::PyDict>, pyo3::Py<pyo3::types::PyDict>, String)> {
     use pyo3::types::PyDict;
 
     let mut conv = Vec::with_capacity(entries.len());
@@ -6074,8 +6077,8 @@ fn gen_mldsa_tree_recursive_bundles_py(
         })?);
     }
 
-    let (b10, b8) = vfri2_bridge::gen_mldsa_tree_recursive_bundles(
-        &conv, &hashes, &batch_root, n_queries, num_folds, fan_in,
+    let (b10, b8, merkle_root) = vfri2_bridge::gen_mldsa_tree_recursive_bundles(
+        &conv, &hashes, n_queries, num_folds, fan_in,
     )
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
@@ -6102,7 +6105,7 @@ fn gen_mldsa_tree_recursive_bundles_py(
         d.set_item("outerHints", b.outer_hints.clone())?;
         Ok(d.into())
     };
-    Ok((to_dict(&b10)?, to_dict(&b8)?))
+    Ok((to_dict(&b10)?, to_dict(&b8)?, format!("0x{}", hex::encode(merkle_root))))
 }
 
 /// gen_mldsa_v23_recursive_bundles_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)

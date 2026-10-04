@@ -102,7 +102,7 @@ describe("BatchRegistryV7 × real V23 @ production n_queries=20", function () {
   it("finalizes the full V23 batch at 130-bit security in ONE transaction", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     this.timeout(900_000);
-    const tx = await registry.submitBatch(fx.merkleRoot, b10, b8, {
+    const tx = await registry.submitBatch(fx.merkleRoot, ethers.ZeroHash, b10, b8, {
       gasLimit: 16_777_215n,
     });
     const rc = await tx.wait();
@@ -128,7 +128,7 @@ describe("BatchRegistryV7 × real V23 @ production n_queries=20", function () {
     const bad = JSON.parse(JSON.stringify(fx.bundle10));
     bad.lastLayerEvals[0] = (BigInt(bad.lastLayerEvals[0]) ^ 1n).toString();
     await expect(
-      fresh.submitBatch(fx.merkleRoot, bundleTuple(bad), b8, { gasLimit: 16_777_215n })
+      fresh.submitBatch(fx.merkleRoot, ethers.ZeroHash, bundleTuple(bad), b8, { gasLimit: 16_777_215n })
     ).to.be.revertedWithCustomError(fresh, "Log10ProofInvalid");
   });
 });

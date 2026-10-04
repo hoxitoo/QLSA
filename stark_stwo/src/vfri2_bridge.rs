@@ -1,5 +1,41 @@
 /// VFRI2-compatible hint generator for the Poseidon2 hash-chain circuit.
 
+
+/// The trace Merkle root of a column set — a function of the COLUMNS alone.
+///
+/// Deliberately takes no Fiat-Shamir seed: it does not depend on one. The chain
+/// computes this before the seed touches the channel, which is what lets the
+/// batch-membership root be derived from trace roots and then USED as the seed
+/// (`gen_mldsa_tree_recursive_bundles`) without circularity.
+///
+/// `vfri_fri_chain` calls this rather than repeating it, so the two cannot drift
+/// (the R4.1 discipline). Before it existed a caller needing just the root had to
+/// run the whole chain with a placeholder seed — which left the next reader a
+/// false signal that the seed mattered here.
+pub(crate) fn trace_root_of<B: P2Backend>(
+    cols: &[Vec<u32>],
+    tree_depth: u32,
+) -> Result<[u8; 32], String> {
+    let n = 1usize << (tree_depth as usize);
+    if cols.is_empty() {
+        return Err("cols must not be empty".into());
+    }
+    for (j, col) in cols.iter().enumerate() {
+        if col.len() != n {
+            return Err(format!("cols[{j}] has {} entries, expected {n}", col.len()));
+        }
+    }
+    let trace_leaves: Vec<[u8; 32]> = (0..n)
+        .map(|i| B::hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
+        .collect();
+    Ok(*B::build_tree(trace_leaves).last().unwrap().first().unwrap())
+}
+
+/// `trace_root_of` at the t=8 backend — the production width.
+pub(crate) fn trace_root_t8(cols: &[Vec<u32>], tree_depth: u32) -> Result<[u8; 32], String> {
+    trace_root_of::<T8Backend>(cols, tree_depth)
+}
+
 /// The batch tree over REAL V23 groups: one leaf per `(tx_hash, group)` pair.
 ///
 /// A-5's leaf binds a batch member to the trace root of the proof that verifies
@@ -1993,12 +2029,9 @@ fn vfri_fri_chain<B: P2Backend>(
         }
     }
 
-    // Trace Merkle tree (backend-width Poseidon2 nodes)
-    let trace_leaves: Vec<[u8; 32]> = (0..n)
-        .map(|i| B::hash_leaf_cols(&cols.iter().map(|c| c[i]).collect::<Vec<_>>()))
-        .collect();
-    let trace_levels = B::build_tree(trace_leaves);
-    let trace_root: [u8; 32] = trace_levels.last().unwrap()[0];
+    // Trace Merkle tree — one implementation, shared with `trace_root_of`, so a
+    // caller that needs only the root cannot drift from the chain's view of it.
+    let trace_root: [u8; 32] = trace_root_of::<B>(cols, tree_depth)?;
 
     // Fiat-Shamir (backend Poseidon2 channel, full-root absorption)
     let mut chan = B::Chan::init();
@@ -2599,7 +2632,6 @@ pub fn prove_mldsa_aggregation_tree(
         [[bool; 256]; 6],
     )],
     tx_hashes: &[[u8; 32]],
-    batch_merkle_root: &[u8],
     n_queries: usize,
     num_folds: Option<usize>,
     fan_in: usize,
@@ -2615,52 +2647,48 @@ pub fn prove_mldsa_aggregation_tree(
             "one transaction hash per signature: {} signatures, {} hashes",
             entries.len(), tx_hashes.len()));
     }
-    if batch_merkle_root.len() != 32 {
-        return Err(format!(
-            "batch_merkle_root must be 32 bytes, got {}", batch_merkle_root.len()));
-    }
-
+    // ── Order matters, and it is not circular ───────────────────────────────
+    //
+    // The membership root R is BOTH the batch identifier and the Fiat-Shamir
+    // seed. That is possible because neither the columns nor a trace root
+    // depends on the seed: the column builders only validate its length, and
+    // `trace_root_of` is a function of the columns alone. So:
+    //
+    //   witness → columns → trace roots → membership tree → R
+    //   R → seed for every proof below
+    //
+    // Before this, an external SHA3 root was the seed and R was computed
+    // separately and kept internal — leaving the on-chain identifier saying
+    // nothing about the proofs.
     let mut leaves = Vec::with_capacity(entries.len());
-    for (i, (z, c, t1, a_hat, _hints)) in entries.iter().enumerate() {
-        leaves.push(
-            v23_vfri11_cols_log10(z, c, t1, a_hat, batch_merkle_root, n_queries)
-                .map_err(|e| format!("signature {i}: {e}"))?,
-        );
-    }
-
-    // The LOG=8 group too: a tree over log10 alone attests the NTT/INTT and
-    // neither the multiplication, the norm bound nor the hint bound — those live
-    // in log8. BatchRegistryV7 needs both bundles for the same reason.
     let mut leaves8 = Vec::with_capacity(entries.len());
-    for (i, (z, c, t1, a_hat, hints)) in entries.iter().enumerate() {
-        leaves8.push(
-            v23_vfri11_cols_log8(z, c, t1, a_hat, hints, batch_merkle_root, n_queries)
-                .map_err(|e| format!("signature {i} (log8): {e}"))?,
-        );
-    }
-
-    // A-5: ONE batch tree whose leaf binds the member to BOTH halves of its
-    // proof. The trace roots come from the SAME chain runs the leaf columns were
-    // extracted from, so a root in a leaf cannot drift from the root its proof
-    // commits to.
     let mut triples = Vec::with_capacity(entries.len());
-    for (i, (((c10, d10), (c8, d8)), tx_hash)) in
-        leaves.iter().zip(&leaves8).zip(tx_hashes).enumerate()
-    {
-        let tr10 = vfri11_fri_chain(c10, *d10, batch_merkle_root, n_queries, num_folds)
-            .map_err(|e| format!("signature {i} (log10): {e}"))?
-            .trace_root;
-        let tr8 = vfri11_fri_chain(c8, *d8, batch_merkle_root, n_queries, num_folds)
-            .map_err(|e| format!("signature {i} (log8): {e}"))?
-            .trace_root;
+    for (i, ((z, c, t1, a_hat, hints), tx_hash)) in entries.iter().zip(tx_hashes).enumerate() {
+        // SEED_FOR_COLUMNS is not a Fiat-Shamir seed and never reaches a
+        // channel: the column builders validate its length and ignore it. Named
+        // so rather than passed as a bare `[0u8; 32]`, which would read like a
+        // seed that happens to be zero.
+        const SEED_FOR_COLUMNS: [u8; 32] = [0u8; 32];
+        let (c10, d10) = v23_vfri11_cols_log10(z, c, t1, a_hat, &SEED_FOR_COLUMNS, n_queries)
+            .map_err(|e| format!("signature {i} (log10): {e}"))?;
+        let (c8, d8) = v23_vfri11_cols_log8(z, c, t1, a_hat, hints, &SEED_FOR_COLUMNS, n_queries)
+            .map_err(|e| format!("signature {i} (log8): {e}"))?;
+        let t10 = trace_root_t8(&c10, d10).map_err(|e| format!("signature {i} (log10): {e}"))?;
+        let t8 = trace_root_t8(&c8, d8).map_err(|e| format!("signature {i} (log8): {e}"))?;
         triples.push((
             words_from_hash(tx_hash),
-            p2t8_node_words(&tr10),
-            p2t8_node_words(&tr8),
+            p2t8_node_words(&t10),
+            p2t8_node_words(&t8),
         ));
+        leaves.push((c10, d10));
+        leaves8.push((c8, d8));
     }
+
     let batch_tree = build_batch_tree_dual(&triples)?;
     let batch_root = node_words(&batch_tree.root());
+    // R as 32 bytes: the seed every proof below runs under.
+    let seed = crate::vfri2_bridge::p2t8_pack(batch_root);
+    let batch_merkle_root: &[u8] = &seed;
 
     let memberships_for_side = |side: Group| -> Result<Vec<BatchMembership>, String> {
         triples
@@ -3265,20 +3293,19 @@ pub fn gen_mldsa_tree_recursive_bundles(
         [[bool; 256]; 6],
     )],
     tx_hashes: &[[u8; 32]],
-    batch_root: &[u8],
     n_queries: usize,
     num_folds: Option<usize>,
     fan_in: usize,
-) -> Result<(RecursiveBundleData, RecursiveBundleData), String> {
+) -> Result<(RecursiveBundleData, RecursiveBundleData, [u8; 32]), String> {
     use sha3::{Digest as Sha3Digest, Keccak256};
 
-    if batch_root.len() != 32 {
-        return Err(format!("batch_root must be 32 bytes, got {}", batch_root.len()));
-    }
-
-    // Prove both trees once, on the plain batch root.
+    // Prove both trees once. R — the membership root — comes back with them and
+    // is what the registry takes as `merkleRoot`.
     let trees = prove_mldsa_aggregation_tree(
-        entries, tx_hashes, batch_root, n_queries, num_folds, fan_in)?;
+        entries, tx_hashes, n_queries, num_folds, fan_in)?;
+    let batch_root_words = trees.batch_root;
+    let seed = p2t8_pack(batch_root_words);
+    let batch_root: &[u8] = &seed;
     let (c10, l10) = &trees.root_columns10;
     let (c8, l8) = &trees.root_columns8;
 
@@ -3324,7 +3351,7 @@ pub fn gen_mldsa_tree_recursive_bundles(
         return Err("a tree root's trace root changed between passes — \
                     cross-binding would be unsound".into());
     }
-    Ok((b10, b8))
+    Ok((b10, b8, seed))
 }
 
 /// Generate cross-bound VFRI11 hints for V23's two trace groups.
@@ -3933,7 +3960,6 @@ mod tests_vfri8 {
     #[test]
     #[ignore]
     fn write_tree_recursive_bundles_fixture() {
-        let batch_root = [0xB2u8; 32];
         let n_queries = 20usize;
 
         let mut entries = Vec::new();
@@ -3944,14 +3970,24 @@ mod tests_vfri8 {
             tx_hashes.push(std::array::from_fn(|i| ((k * 37 + i * 11) % 256) as u8));
         }
 
-        let (b10, b8) = gen_mldsa_tree_recursive_bundles(
-            &entries, &tx_hashes, &batch_root, n_queries, Some(6), 2,
+        // The membership root R comes BACK from the prover — it is derived from
+        // the trace roots, not supplied — and it is what the registry takes as
+        // `merkleRoot`. `txListRoot` is the prover-independent commitment to the
+        // transaction list, attested rather than proved.
+        let (b10, b8, merkle_root) = gen_mldsa_tree_recursive_bundles(
+            &entries, &tx_hashes, n_queries, Some(6), 2,
         )
         .expect("tree bundles");
+        let mut tx_list = sha3::Sha3_256::new();
+        for h in &tx_hashes {
+            sha3::Digest::update(&mut tx_list, h);
+        }
+        let tx_list_root: [u8; 32] = sha3::Digest::finalize(tx_list).into();
 
         let json = format!(
-            "{{\n  \"merkleRoot\": \"0x{}\",\n  \"leafCount\": {},\n  \"bundle10\": {},\n  \"bundle8\": {}\n}}\n",
-            hex::encode(batch_root),
+            "{{\n  \"merkleRoot\": \"0x{}\",\n  \"txListRoot\": \"0x{}\",\n  \"leafCount\": {},\n  \"bundle10\": {},\n  \"bundle8\": {}\n}}\n",
+            hex::encode(merkle_root),
+            hex::encode(tx_list_root),
             entries.len(),
             bundle_fixture_json(&b10),
             bundle_fixture_json(&b8),

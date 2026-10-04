@@ -132,8 +132,11 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
       lastLayerEvals: b.lastLayerEvals,
     });
 
-    const tx = await reg.submitBatch(
-      fx.merkleRoot, bundle(fx.bundle10), bundle(fx.bundle8),
+    // The REAL txListRoot, not a zero: storing a nonzero value costs 20,000 gas
+    // (SSTORE from zero), so a zero here under-reports by that much — and
+    // production always has one. With ethers.ZeroHash this measured 14,643,678
+    // against the honest 14,663,950, and the 0.14% gap is exactly that write.
+    const tx = await reg.submitBatch(fx.merkleRoot, fx.txListRoot, bundle(fx.bundle10), bundle(fx.bundle8),
       { gasLimit: BigInt(M.cap) - 1n });
     const rc = await tx.wait();
     check("v7_tree_submitBatch", rc.gasUsed);

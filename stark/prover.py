@@ -2573,7 +2573,6 @@ class AggregationTree:
 
 def prove_mldsa_aggregation_tree(
     entries: list[tuple[bytes, bytes, bytes]],
-    batch_merkle_root: bytes,
     n_queries: int = 1,
     num_folds: int | None = 6,
     fan_in: int = 2,
@@ -2603,9 +2602,6 @@ def prove_mldsa_aggregation_tree(
         raise ValueError("need at least one signature to aggregate")
     if fan_in < 2:
         raise ValueError(f"fan_in must be >= 2, got {fan_in}")
-    if len(batch_merkle_root) != 32:
-        raise ValueError(
-            f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
 
     witnesses = []
     tx_hashes: list[bytes] = []
@@ -2632,7 +2628,7 @@ def prove_mldsa_aggregation_tree(
 
     try:
         d = _ext.prove_mldsa_aggregation_tree_py(
-            witnesses, tx_hashes, bytes(batch_merkle_root), n_queries, num_folds, fan_in)
+            witnesses, tx_hashes, n_queries, num_folds, fan_in)
     except Exception as exc:
         raise RuntimeError(f"aggregation tree proving failed: {exc}") from exc
 
@@ -2652,11 +2648,10 @@ def prove_mldsa_aggregation_tree(
 
 def gen_tree_recursive_bundles(
     entries: list[tuple[bytes, bytes, bytes]],
-    batch_merkle_root: bytes,
     n_queries: int = 1,
     num_folds: int | None = 6,
     fan_in: int = 2,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[dict[str, object], dict[str, object], str]:
     """The aggregation tree's two roots as `BatchRegistryV7.submitBatch` bundles.
 
     This is the on-chain end of the aggregation: N signatures become two tree
@@ -2668,6 +2663,12 @@ def gen_tree_recursive_bundles(
     Each entry is `(pk, msg, sig)`; every signature is verified in full before
     its witness is extracted, and a failure names WHICH signature.
 
+    Returns `(bundle10, bundle8, merkleRoot)`. The root comes BACK rather than
+    going in: it is the membership tree's root, derived from the trace roots, and
+    it is simultaneously the Fiat-Shamir seed every proof ran under. That is what
+    makes the registry's batch identifier derivable from the proofs instead of
+    being an unrelated SHA3 hash of the transaction list.
+
     The bundles are cross-bound at the ROOT — the level
     `BatchRegistryV7._finalize` inspects — and each root's fold count is derived
     from its own depth, so the on-chain last-layer rebuild stays small however
@@ -2678,9 +2679,6 @@ def gen_tree_recursive_bundles(
         raise ValueError("need at least one signature to aggregate")
     if fan_in < 2:
         raise ValueError(f"fan_in must be >= 2, got {fan_in}")
-    if len(batch_merkle_root) != 32:
-        raise ValueError(
-            f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
 
     witnesses = []
     tx_hashes: list[bytes] = []
@@ -2700,11 +2698,11 @@ def gen_tree_recursive_bundles(
         tx_hashes.append(hashlib.sha3_256(bytes(msg)).digest())
 
     try:
-        b10, b8 = _ext.gen_mldsa_tree_recursive_bundles_py(
-            witnesses, tx_hashes, bytes(batch_merkle_root), n_queries, num_folds, fan_in)
+        b10, b8, merkle_root = _ext.gen_mldsa_tree_recursive_bundles_py(
+            witnesses, tx_hashes, n_queries, num_folds, fan_in)
     except Exception as exc:
         raise RuntimeError(f"tree bundle generation failed: {exc}") from exc
-    return b10, b8
+    return b10, b8, merkle_root
 
 
 

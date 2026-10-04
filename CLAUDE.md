@@ -202,7 +202,7 @@ Always use `bincode::encode_to_vec` / `bincode::decode_from_slice` with these ty
 | `QLSAVerifierVFRI12.sol` | the **t=16** branch (8-word/248-bit nodes, ~2^124 ≈ 128-bit). Dual `submitBatch` **15,432,163 gas**; only 8% headroom and fixed at 16-bit FRI (q=2 exceeds the cap) |
 | `QLSAVerifierRecursive.sol` | outer verifier — a STARK proving "I verified a VFRI11 STARK". `verifyRecursive` **2,290,000 gas**, constant in batch size |
 | `BatchRegistryV5.sol` | direct path; both V23 trace groups in ONE transaction with cross-proof binding |
-| `BatchRegistryV7.sol` | recursive path; two cross-bound recursive bundles |
+| `BatchRegistryV7.sol` | recursive path; two cross-bound recursive bundles, plus `txListRoot` |
 
 `queryHints` ABI is **byte-identical across VFRI11 and VFRI12** (6 head slots:
 `abi.encode(uint128 oodsComboPos, uint128 oodsComboNeg, bytes32 compRoot,
@@ -213,6 +213,26 @@ regression test in `QLSAVerifierVFRI11E2E.test.js` pins exactly that.
 Cross-proof binding (both registries):
 `boundRoot10 = keccak256(merkleRoot ‖ traceRoot8)`,
 `boundRoot8 = keccak256(merkleRoot ‖ traceRoot10)`.
+
+### `merkleRoot` means different things in V5 and V7 — do not conflate them
+
+| registry | `merkleRoot` is | recomputable from transactions? |
+|---|---|---|
+| `BatchRegistryV5` (direct path) | the SHA3 root of `core/batch.py` — the transaction list | yes |
+| `BatchRegistryV7` (tree path) | **R**, the aggregation tree's MEMBERSHIP root, derived from the proofs' trace roots and simultaneously the Fiat-Shamir seed every proof ran under | no — needs the prover |
+
+V7 therefore also records `txListRoot`, the SHA3 transaction-list commitment.
+**It is attested, not proved**: the contract has no transactions and cannot check
+it, and proving `txListRoot == SHA3(tx hashes)` in-circuit needs Keccak
+arithmetized (limitation 0's gap). Its value is that a third party holding the
+list can recompute it. What IS proved sits in R, whose every leaf binds a
+member's `tx_id` — the first 124 bits of its transaction hash — to the trace
+roots of the proofs verifying its signature.
+
+So there are two identifiers in the system by design, and they are not rivals:
+`core/batch.py::merkle_root` is the PRE-PROOF identity (mempool, history,
+`Batcher._proof_retries`), computable without the prover; R is the on-chain
+identity, derivable only from the proofs.
 
 ### Supporting libraries (`contracts/src/verifier/`)
 

@@ -68,9 +68,13 @@ describe("BatchRegistryV7 × aggregation tree roots", function () {
     }
   });
 
-  it("the fixture is a TREE over more than one signature", function () {
+  it("the fixture is a TREE, and its merkleRoot is derived from the proofs", function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     expect(fx.leafCount).to.be.greaterThan(1, "a tree, not a single statement");
+    // merkleRoot is the membership root — derived from the trace roots and used
+    // as the Fiat-Shamir seed — so it is NOT the transaction-list hash. If the
+    // two were equal, the substitution never happened.
+    expect(fx.merkleRoot).to.not.equal(fx.txListRoot);
     expect(fx.bundle10.inner.nQueries).to.equal(20, "130-bit production security");
     expect(fx.bundle8.inner.nQueries).to.equal(20);
     // Cross-binding in both directions — bound at the root, which is the level
@@ -98,7 +102,7 @@ describe("BatchRegistryV7 × aggregation tree roots", function () {
   it("finalizes a BATCH of signatures from the tree roots in ONE transaction", async function () {
     if (!FIXTURE_EXISTS) { this.skip(); return; }
     this.timeout(900_000);
-    const tx = await registry.submitBatch(fx.merkleRoot, b10, b8, {
+    const tx = await registry.submitBatch(fx.merkleRoot, fx.txListRoot, b10, b8, {
       gasLimit: 16_777_215n,
     });
     const rc = await tx.wait();
@@ -107,6 +111,11 @@ describe("BatchRegistryV7 × aggregation tree roots", function () {
     );
     expect(rc.gasUsed).to.be.lessThan(16_777_216n);
     expect(await registry.isBatchFinalized(fx.merkleRoot)).to.equal(true);
+    // The transaction-list commitment is recorded — ATTESTED, not proved: the
+    // contract has no transactions and cannot check it. Its value is that a
+    // third party holding the list can recompute it. What IS proved is in
+    // merkleRoot, whose leaves bind each member's tx_id to its proofs.
+    expect(await registry.batchTxListRoots(fx.merkleRoot)).to.equal(fx.txListRoot);
   });
 
   // Without this the suite would only show that something verifies. The
@@ -121,7 +130,7 @@ describe("BatchRegistryV7 × aggregation tree roots", function () {
       ethers.concat([fx.merkleRoot, fx.bundle10.inner.traceRoot])  // bound to ITSELF
     );
     await expect(
-      registry.submitBatch(ethers.keccak256(fx.merkleRoot), tampered, b8, {
+      registry.submitBatch(ethers.keccak256(fx.merkleRoot), fx.txListRoot, tampered, b8, {
         gasLimit: 16_777_215n,
       })
     ).to.be.revertedWithCustomError(registry, "CrossBindingMismatch");
