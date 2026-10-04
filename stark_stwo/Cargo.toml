@@ -33,3 +33,26 @@ zeroize                   = "1"
 opt-level     = 3
 lto           = true
 codegen-units = 1
+
+# `cargo test` builds under `dev` (the `test` profile inherits from it), and an
+# unoptimised Circle STARK prover is ~20x slower. MEASURED on 4 cores, same
+# suite, 538 passed either way:
+#
+#   opt-level = 0 (the default)   445.84 s of tests, worst single test 326.1 s
+#   opt-level = 3                  21.45 s of tests, worst single test  15.9 s
+#   opt-level = 3, COLD compile   146 s for compile AND tests together
+#
+# That is why CI's 5-minute test step had been timing out since 2026-09-19: the
+# tests alone exceeded it, and one test exceeded it by itself.
+#
+# This changes SPEED ONLY, not what the tests check: `debug-assertions` and
+# `overflow-checks` are separate keys and still default to true under `dev`, so
+# the integer-overflow panics that catch field-arithmetic mistakes remain on.
+# Do not reach for `--release` instead — it disables exactly those checks, and
+# this crate's release profile (lto + codegen-units = 1) is slow to build.
+[profile.dev]
+opt-level = 3
+
+# Dependencies (stwo above all) do the bulk of the proving work.
+[profile.dev.package."*"]
+opt-level = 3

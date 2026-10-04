@@ -5,6 +5,15 @@ on:
     branches: ["main", "claude/**", "feature/**"]
   pull_request:
     branches: ["main"]
+  # `stark_stwo_slow` is gated on these two events. Until 2026-10-04 neither was
+  # declared here, so that job was UNREACHABLE — not even by manual dispatch,
+  # which requires `workflow_dispatch` in `on:`. Checked against the API rather
+  # than by reading: of the last 100 CI runs, 92 were push and 8 pull_request,
+  # so the ~111 `#[ignore]`d STARK integration tests had never run in CI at all.
+  workflow_dispatch:
+  # 03:17 UTC, not 03:00 — GitHub delays runs scheduled on the hour.
+  schedule:
+    - cron: "17 3 * * *"
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
@@ -105,6 +114,17 @@ jobs:
       - name: Type check (mypy)
         run: mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/api'
 
+      # Undefined names, over the WHOLE Python surface — mypy above covers only
+      # core/ and aggregator/, so testnet/ and benchmarks/ were unchecked. That
+      # gap hid `abi=_REGISTRY_V4_ABI` in testnet/submit.py, a name defined
+      # nowhere, which made the default --stack v7 submitter raise NameError.
+      # Only F821: F401 (unused imports) would flag the deliberate re-exports
+      # that aggregator/batcher.py and aggregator/node.py exist to provide.
+      - name: Undefined-name check (ruff F821)
+        run: |
+          ruff check --select F821 \
+            core/ aggregator/ stark/ testnet/ sdk/python/ tests/ benchmarks/
+
       - name: Security scan (bandit)
         run: bandit -r core/ stark/ aggregator/ -ll
 
@@ -191,9 +211,15 @@ jobs:
             echo "::warning::cargo-audit unavailable — dependency audit skipped this run"
           fi
 
+      # 5 minutes here is what went red on 2026-09-19 and stayed red for nine
+      # runs: `cargo test` builds under the `dev` profile, and unoptimised
+      # STARK proving took 445 s of test time with one test alone at 326 s.
+      # `[profile.dev] opt-level = 3` in stark_stwo/Cargo.toml cut that to
+      # 21 s (146 s including a cold compile). 15 matches the release-build
+      # step below — the margin is for a cargo cache miss, not for the tests.
       - name: Run unit tests
         working-directory: stark_stwo
-        timeout-minutes: 5
+        timeout-minutes: 15
         run: cargo +nightly-2025-07-01 test
 
       - name: Build release binary
@@ -309,6 +335,16 @@ jobs:
       - name: Compile contracts
         working-directory: contracts
         run: npx hardhat compile
+
+      # Runs HERE, not in the python job, because contracts/artifacts/ is
+      # gitignored and only this job compiles. The committed ABIs under
+      # testnet/abi/ are what testnet/submit.py loads; this fails the build if
+      # a contract's signature moves without them. It is the guard that was
+      # missing when txListRoot was added to BatchRegistryV7 and the Python ABI
+      # kept the old 3-parameter submitBatch, so every V7 submission computed a
+      # selector the contract does not have.
+      - name: Check testnet ABIs match the compiled contracts
+        run: python3 -m testnet.abi._sync --check
 
       - name: Run contract tests
         working-directory: contracts
