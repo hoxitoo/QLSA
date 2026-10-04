@@ -29,6 +29,14 @@ sha3                      = "0.10"
 pyo3                      = { version = "0.29", optional = true }
 zeroize                   = "1"
 
+[dev-dependencies]
+# Test-only: re-derives the frozen M31 constants (poseidon2_t8::K_RC,
+# batch_tree::LEAF_DOMAIN / NONCE_DOMAIN) from the SHA-256 rule their doc
+# comments claim, which nothing checked before 2026-10-04. Already in the
+# lockfile transitively (via starknet-crypto), so this adds no new dependency
+# to the graph, and nothing to the SHIPPED graph at all.
+sha2 = "0.10"
+
 [profile.release]
 opt-level     = 3
 lto           = true
