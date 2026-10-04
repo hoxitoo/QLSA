@@ -275,7 +275,7 @@ impl FrameworkEval for MerklePathT8Eval {
     }
 }
 
-fn new_component(log_n_rows: u32) -> MerklePathT8Component {
+pub(crate) fn new_component(log_n_rows: u32) -> MerklePathT8Component {
     MerklePathT8Component::new(
         &mut TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_column_ids()),
         MerklePathT8Eval { log_n_rows },
@@ -386,6 +386,42 @@ fn canonical_preproc_root(
     let mut throwaway = Blake2sM31Channel::default();
     let mut tree = scheme.tree_builder();
     tree.extend_evals(build_preproc(leaf, index, root, depth, log_size));
+    tree.commit(&mut throwaway);
+    scheme.roots()[0]
+}
+
+/// The C2 pin for a MULTI-path proof: the canonical commitment of the
+/// preprocessed tree holding every path's selectors and its pinned
+/// `(leaf, index, root)`.
+///
+/// The single-path [`canonical_preproc_root`] above with
+/// [`build_preproc_multi_var`] in place of [`build_preproc`]. Separate rather
+/// than generic because the single-path form is on a hot path in the recursion
+/// and takes scalars, not slices.
+///
+/// Added for the nonce accumulator, which needs 2N paths against N+1 chained
+/// roots in one proof. The AIR itself is UNCHANGED: `roots` has been per-path
+/// since R4.11, so two paths landing on two different roots was already
+/// expressible.
+pub(crate) fn canonical_preproc_root_multi(
+    leaves: &[[u64; 4]],
+    indices: &[u32],
+    roots: &[[u64; 4]],
+    depths: &[usize],
+    log_size: u32,
+) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
+    let config = make_config(log_size);
+    let twiddles = CpuBackend::precompute_twiddles(
+        CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+    );
+    let mut scheme =
+        CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+    scheme.set_store_polynomials_coefficients();
+    let mut throwaway = Blake2sM31Channel::default();
+    let mut tree = scheme.tree_builder();
+    tree.extend_evals(build_preproc_multi_var(
+        leaves, indices, roots, depths, log_size,
+    ));
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
