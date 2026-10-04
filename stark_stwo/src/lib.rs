@@ -6029,6 +6029,82 @@ fn prove_mldsa_aggregation_tree_py(
     Ok(d.into())
 }
 
+/// gen_mldsa_tree_recursive_bundles_py(entries, tx_hashes, batch_root, n_queries, num_folds, fan_in)
+///   -> (bundle10, bundle8)
+///
+/// The AGGREGATION TREE's two roots as `BatchRegistryV7.submitBatch` bundles —
+/// N signatures finalized in ONE transaction. Each dict has the same shape as
+/// `gen_mldsa_v23_recursive_bundles_py`'s, so a submitter written for one works
+/// for the other.
+///
+/// `entries` is `(z, c, t1, a_hat, hints)` per signature and `tx_hashes` the
+/// matching transaction hash, which goes into that member's batch leaf (A-5).
+///
+/// The bundles are bound at the ROOT, which is the level
+/// `BatchRegistryV7._finalize` inspects; the fold count of each root is derived
+/// from its own depth so the on-chain last-layer rebuild stays 16 evaluations
+/// whatever the tree's size.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (entries, tx_hashes, batch_root, n_queries=1, num_folds=None, fan_in=2))]
+fn gen_mldsa_tree_recursive_bundles_py(
+    py:         Python<'_>,
+    entries:    Vec<(Vec<Vec<i64>>, Vec<i64>, Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<Vec<bool>>)>,
+    tx_hashes:  Vec<Vec<u8>>,
+    batch_root: Vec<u8>,
+    n_queries:  usize,
+    num_folds:  Option<usize>,
+    fan_in:     usize,
+) -> PyResult<(pyo3::Py<pyo3::types::PyDict>, pyo3::Py<pyo3::types::PyDict>)> {
+    use pyo3::types::PyDict;
+
+    let mut conv = Vec::with_capacity(entries.len());
+    for (i, (z, c, t1, a_hat, hints)) in entries.into_iter().enumerate() {
+        let e = (|| -> PyResult<_> {
+            Ok((_conv_z(z)?, _conv_c(c)?, _conv_t1(t1)?, _conv_a_hat(a_hat)?, _conv_hints(hints)?))
+        })()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("signature {i}: {e}")))?;
+        conv.push(e);
+    }
+    let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(tx_hashes.len());
+    for (i, h) in tx_hashes.iter().enumerate() {
+        hashes.push(h.as_slice().try_into().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "tx_hashes[{i}] must be 32 bytes, got {}", h.len()))
+        })?);
+    }
+
+    let (b10, b8) = vfri2_bridge::gen_mldsa_tree_recursive_bundles(
+        &conv, &hashes, &batch_root, n_queries, num_folds, fan_in,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    let to_dict = |b: &vfri2_bridge::RecursiveBundleData| -> PyResult<pyo3::Py<PyDict>> {
+        let hx = |bytes: &[u8]| format!("0x{}", hex::encode(bytes));
+        let d = PyDict::new(py);
+        d.set_item("traceRoot", hx(&b.trace_root))?;
+        d.set_item("oodsComboPos", b.oods_combo_pos.to_string())?;
+        d.set_item("oodsComboNeg", b.oods_combo_neg.to_string())?;
+        d.set_item("compRoot", hx(&b.comp_root))?;
+        d.set_item(
+            "friLayerRoots",
+            b.fri_layer_roots.iter().map(|r| hx(r)).collect::<Vec<_>>(),
+        )?;
+        d.set_item("batchRoot", hx(&b.bound_root))?;
+        d.set_item("treeDepth", b.tree_depth)?;
+        d.set_item("nQueries", b.n_queries)?;
+        d.set_item(
+            "lastLayerEvals",
+            b.last_layer_evals.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+        )?;
+        d.set_item("outerProof", b.outer_proof.clone())?;
+        d.set_item("outerCommitment", b.outer_commitment.clone())?;
+        d.set_item("outerHints", b.outer_hints.clone())?;
+        Ok(d.into())
+    };
+    Ok((to_dict(&b10)?, to_dict(&b8)?))
+}
+
 /// gen_mldsa_v23_recursive_bundles_py(z, c, t1, a_hat, hints, batch_root, n_queries, num_folds)
 ///   -> (bundle10, bundle8)
 ///
@@ -6187,6 +6263,7 @@ fn qlsa_stark_stwo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_hints_log8_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_vfri11_cross_bound_hints_py, m)?)?;
     m.add_function(wrap_pyfunction!(gen_mldsa_v23_recursive_bundles_py, m)?)?;
+    m.add_function(wrap_pyfunction!(gen_mldsa_tree_recursive_bundles_py, m)?)?;
     m.add_function(wrap_pyfunction!(prove_mldsa_aggregation_tree_py, m)?)?;
     Ok(())
 }

@@ -110,6 +110,41 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
               "v23_dual_submitBatch_t16");
   });
 
+// The loop the project's headline describes, closed: N signatures -> an
+  // aggregation tree -> two roots -> ONE transaction at 130-bit FRI soundness.
+  // Re-measured here rather than quoted, like every other load-bearing figure.
+  it("a BATCH of signatures finalizes from the aggregation tree's roots", async function () {
+    const fx = FX("tree_recursive_bundles_e2e.json");
+    if (!fx) { console.log("        [v7_tree_submitBatch] fixture absent — skipped"); return; }
+    const [owner] = await ethers.getSigners();
+
+    const vfri11 = await (await ethers.getContractFactory("QLSAVerifierVFRI11")).deploy();
+    const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
+      .deploy(await vfri11.getAddress());
+    const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
+      .deploy(owner.address, await recursive.getAddress());
+
+    const bundle = (b) => ({
+      inner: b.inner,
+      outerProof: b.outerProof,
+      outerCommitment: b.outerCommitment,
+      outerHints: b.outerHints,
+      lastLayerEvals: b.lastLayerEvals,
+    });
+
+    const tx = await reg.submitBatch(
+      fx.merkleRoot, bundle(fx.bundle10), bundle(fx.bundle8),
+      { gasLimit: BigInt(M.cap) - 1n });
+    const rc = await tx.wait();
+    check("v7_tree_submitBatch", rc.gasUsed);
+    expect(rc.gasUsed).to.be.lessThan(BigInt(M.cap));
+
+    // The on-chain last-layer rebuild must stay small whatever the tree's depth.
+    // Inheriting the leaves' fold count put 512 evaluations here and reverted.
+    expect(fx.bundle10.lastLayerEvals.length).to.equal(16);
+    expect(fx.bundle8.lastLayerEvals.length).to.equal(16);
+  });
+
   it("outer recursion verify: why a fully t=16 recursion does not fit", async function () {
     const fx = FX("outer_width_probe.json");
     if (!fx) { this.skip(); return; }

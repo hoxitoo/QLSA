@@ -2427,10 +2427,9 @@ pub fn tree_statement_from_columns(
 pub struct TreeLevel {
     /// The nodes proved at this level, left to right.
     pub nodes: Vec<crate::recursive::composition_channel_t8::TreeNodeResult>,
-    /// Each node's own trace columns, which become the level above's statements.
-    ///
-    /// **Empty at the root level**, where nothing consumes them: building a
-    /// node's trace is not free, and the root has no parent to hand it to.
+    /// Each node's own trace columns. For a non-root level they become the
+    /// level above's statements; for the ROOT they are what the on-chain bundle
+    /// is built from, so every level keeps them.
     pub columns: Vec<(Vec<Vec<u32>>, u32)>,
 }
 
@@ -2510,18 +2509,19 @@ pub fn prove_aggregation_tree(
         let mut nodes = Vec::new();
         let mut columns = Vec::new();
         let groups: Vec<_> = statements.chunks(fan_in).collect();
-        // One group means this level IS the root: its columns feed nothing.
-        let root_level = groups.len() == 1;
+        // The ROOT's columns are kept too. They were skipped here with the
+        // reason "nothing above the root consumes them" — true when written,
+        // false now: the on-chain bundle is built FROM them
+        // (`gen_mldsa_tree_recursive_bundles`). Recorded as a reversal rather
+        // than silently changed, because the old comment argued the opposite.
         for (g, group) in groups.iter().enumerate() {
             let proved = node::prove_tree_node(group)
                 .map_err(|e| format!("level {} node {g}: {e}", levels.len()))?;
             nodes.push(proved);
-            if !root_level {
-                columns.push(
-                    node::tree_node_trace_columns(group)
-                        .map_err(|e| format!("level {} node {g} columns: {e}", levels.len()))?,
-                );
-            }
+            columns.push(
+                node::tree_node_trace_columns(group)
+                    .map_err(|e| format!("level {} node {g} columns: {e}", levels.len()))?,
+            );
         }
         // The ROOT's statement is never consumed — nothing sits above it — and
         // deriving one costs a full `gen_vfri11_recursion_inputs` extraction.
@@ -2566,6 +2566,11 @@ pub struct AggregationTreeSummary {
     pub root_roots8: Vec<[u64; 4]>,
     /// The batch root both trees' membership paths land on.
     pub batch_root: [u64; 4],
+    /// Each root node's own trace columns — what the on-chain bundle is built
+    /// from (`gen_mldsa_tree_recursive_bundles`). Not surfaced to Python: the
+    /// dict carries proofs, not traces.
+    pub root_columns10: (Vec<Vec<u32>>, u32),
+    pub root_columns8: (Vec<Vec<u32>>, u32),
     /// Statements the root attests, transitively.
     pub leaf_count: usize,
     pub depth: usize,
@@ -2693,6 +2698,8 @@ pub fn prove_mldsa_aggregation_tree(
         root_log_size8: root8.log_size,
         root_roots8: root8.roots.clone(),
         batch_root,
+        root_columns10: tree.levels.last().expect("≥1 level").columns[0].clone(),
+        root_columns8: tree8.levels.last().expect("≥1 level").columns[0].clone(),
         leaf_count: entries.len(),
         depth: tree.depth(),
         node_count: tree.node_count() + tree8.node_count(),
@@ -3222,6 +3229,102 @@ pub fn gen_mldsa_v23_recursion_inputs_log8(
     let (cols, tree_depth) =
         v23_vfri11_cols_log8(z, c, t1, a_hat, hints, batch_merkle_root, n_queries)?;
     gen_vfri11_recursion_inputs(&cols, tree_depth, batch_merkle_root, n_queries, num_folds)
+}
+
+/// The AGGREGATION TREE's two roots as cross-bound on-chain bundles.
+///
+/// This is what closes the loop: N signatures become two tree roots, each root
+/// becomes a `RecursiveBundle`, and `BatchRegistryV7.submitBatch` finalizes the
+/// batch. Before it, a tree existed but no contract consumed it.
+///
+/// # Why binding only at the ROOT is the right level, not a shortcut
+///
+/// `BatchRegistryV7._finalize` checks
+///
+/// ```solidity
+/// bundle10.inner.batchRoot == crossBoundRoot(merkleRoot, bundle8.inner.traceRoot)
+/// bundle8.inner.batchRoot  == crossBoundRoot(merkleRoot, bundle10.inner.traceRoot)
+/// ```
+///
+/// — i.e. at the `InnerPublics` level, which describes the ROOT. So binding the
+/// root is exactly what the contract inspects; carrying the bound root down into
+/// the leaves would pin a level the contract never looks at, and would cost a
+/// second proof of all N−1 nodes per tree at ~27 s each.
+///
+/// It is also cheap for a structural reason: a node's trace root depends only on
+/// its columns, while the bound root enters just the FRI chain and the hints. So
+/// the trees are proved ONCE and only the two outer bundles are built against the
+/// bound roots. The same invariant the single-proof path asserts is asserted
+/// here — if a trace root moved between passes, the binding would be unsound.
+pub fn gen_mldsa_tree_recursive_bundles(
+    entries: &[(
+        [[i64; 256]; 5],
+        [i64; 256],
+        [[i64; 256]; 6],
+        Vec<[i64; 256]>,
+        [[bool; 256]; 6],
+    )],
+    tx_hashes: &[[u8; 32]],
+    batch_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+    fan_in: usize,
+) -> Result<(RecursiveBundleData, RecursiveBundleData), String> {
+    use sha3::{Digest as Sha3Digest, Keccak256};
+
+    if batch_root.len() != 32 {
+        return Err(format!("batch_root must be 32 bytes, got {}", batch_root.len()));
+    }
+
+    // Prove both trees once, on the plain batch root.
+    let trees = prove_mldsa_aggregation_tree(
+        entries, tx_hashes, batch_root, n_queries, num_folds, fan_in)?;
+    let (c10, l10) = &trees.root_columns10;
+    let (c8, l8) = &trees.root_columns8;
+
+    // Pass 1: each root's trace root — the chain alone, no outer proof.
+    // The trace root is the Merkle root over the COLUMNS, independent of the
+    // fold count and of the bound root — which is why the trees are proved once.
+    let t10 = vfri11_fri_chain(c10, *l10, batch_root, n_queries, num_folds)?.trace_root;
+    let t8 = vfri11_fri_chain(c8, *l8, batch_root, n_queries, num_folds)?.trace_root;
+
+    let keccak2 = |a: &[u8], b: &[u8; 32]| -> [u8; 32] {
+        let mut h = Keccak256::new();
+        h.update(a);
+        h.update(b);
+        h.finalize().into()
+    };
+    let bound10 = keccak2(batch_root, &t8);
+    let bound8 = keccak2(batch_root, &t10);
+
+    // Pass 2: the outer bundles, against the cross-bound roots.
+    //
+    // The fold count is derived from each ROOT's depth, not inherited from the
+    // leaves'. `verifyRecursive` rebuilds the inner statement's last FRI layer
+    // ON-CHAIN, and that rebuild is 2^(depth − folds) evaluations — so a tree
+    // root at depth 15 with the leaves' 6 folds would put 512 evaluations on
+    // chain where a V23 group at depth 10 puts 16, and the transaction reverts.
+    //
+    // Measured, not inferred: the first version passed `num_folds` straight
+    // through and `verifyRecursive` reverted. The outer TRACE over a root really
+    // is the same shape as over a V23 group (probe_tree_root_outer_shape), but
+    // the on-chain cost is not the outer verify alone — the inner last-layer
+    // rebuild scales with the INNER depth, which differs. Inferring the total
+    // from the outer shape was the error.
+    //
+    // The rule mirrors the one `build_recursive_bundle` already uses for the
+    // outer trace (R4.16): leave a 16-evaluation last layer whatever the depth.
+    let folds_for = |depth: u32| -> Option<usize> {
+        Some((depth as usize).saturating_sub(4).max(1))
+    };
+    let b10 = build_recursive_bundle(c10, *l10, &bound10, n_queries, folds_for(*l10))?;
+    let b8 = build_recursive_bundle(c8, *l8, &bound8, n_queries, folds_for(*l8))?;
+
+    if b10.trace_root != t10 || b8.trace_root != t8 {
+        return Err("a tree root's trace root changed between passes — \
+                    cross-binding would be unsound".into());
+    }
+    Ok((b10, b8))
 }
 
 /// Generate cross-bound VFRI11 hints for V23's two trace groups.
@@ -3777,6 +3880,89 @@ mod tests {
 
 #[cfg(test)]
 mod tests_vfri8 {
+
+    /// One bundle as the `submitBatch` fixture shape.
+    ///
+    /// Shared by both bundle fixture generators: written twice they would drift,
+    /// and a fixture that disagrees with the ABI fails opaquely in JS.
+    fn bundle_fixture_json(b: &RecursiveBundleData) -> String {
+        let hx = |x: &[u8]| format!("0x{}", hex::encode(x));
+        let roots: Vec<String> =
+            b.fri_layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
+        let evals: Vec<String> =
+            b.last_layer_evals.iter().map(|v| format!("\"{v}\"")).collect();
+        format!(
+            concat!(
+                "{{\n",
+                "      \"inner\": {{\n",
+                "        \"traceRoot\": \"{}\",\n",
+                "        \"oodsComboPos\": \"{}\",\n",
+                "        \"oodsComboNeg\": \"{}\",\n",
+                "        \"compRoot\": \"{}\",\n",
+                "        \"friLayerRoots\": [{}],\n",
+                "        \"batchRoot\": \"{}\",\n",
+                "        \"treeDepth\": {},\n",
+                "        \"nQueries\": {}\n",
+                "      }},\n",
+                "      \"outerProof\": \"{}\",\n",
+                "      \"outerCommitment\": \"0x{}\",\n",
+                "      \"outerHints\": \"{}\",\n",
+                "      \"lastLayerEvals\": [{}]\n",
+                "    }}"
+            ),
+            hx(&b.trace_root), b.oods_combo_pos, b.oods_combo_neg, hx(&b.comp_root),
+            roots.join(", "), hx(&b.bound_root), b.tree_depth, b.n_queries,
+            hx(&b.outer_proof), b.outer_commitment, hx(&b.outer_hints), evals.join(", "),
+        )
+    }
+
+    /// Ф2 — the AGGREGATION TREE's roots as an on-chain batch.
+    ///
+    /// Run with:
+    ///   cargo test write_tree_recursive_bundles_fixture -- --ignored --nocapture
+    ///
+    /// Two signatures, not more, and that is reasoned rather than lazy: the
+    /// on-chain cost is CONSTANT in N — the root's shape is a fixed point
+    /// (`probe_tree_root_outer_shape`) — so the smallest honest tree yields the
+    /// same gas as a large one while staying cheap to regenerate. The tree's
+    /// shape at four leaves is already pinned by Rust tests.
+    ///
+    /// `n_queries = 20` / `num_folds = 6` matches
+    /// `write_v23_recursive_bundles_fixture`, or the two numbers would not be
+    /// comparable.
+    #[test]
+    #[ignore]
+    fn write_tree_recursive_bundles_fixture() {
+        let batch_root = [0xB2u8; 32];
+        let n_queries = 20usize;
+
+        let mut entries = Vec::new();
+        let mut tx_hashes = Vec::new();
+        for (k, seed) in [16600u64, 16601].into_iter().enumerate() {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            entries.push((z, c, t1, a_hat, [[false; 256]; 6]));
+            tx_hashes.push(std::array::from_fn(|i| ((k * 37 + i * 11) % 256) as u8));
+        }
+
+        let (b10, b8) = gen_mldsa_tree_recursive_bundles(
+            &entries, &tx_hashes, &batch_root, n_queries, Some(6), 2,
+        )
+        .expect("tree bundles");
+
+        let json = format!(
+            "{{\n  \"merkleRoot\": \"0x{}\",\n  \"leafCount\": {},\n  \"bundle10\": {},\n  \"bundle8\": {}\n}}\n",
+            hex::encode(batch_root),
+            entries.len(),
+            bundle_fixture_json(&b10),
+            bundle_fixture_json(&b8),
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/tree_recursive_bundles_e2e.json"
+        );
+        std::fs::write(path, json).unwrap();
+        println!("wrote {path}");
+    }
     /// **The gap a failing test exposed.** A membership proves "this LEAF is in
     /// the batch" — which on its own says nothing about WHICH proof the leaf
     /// describes. So signature A's columns could be paired with signature B's
@@ -5253,44 +5439,7 @@ mod tests_vfri8 {
         .unwrap();
 
         let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
-        let bundle_json = |b: &RecursiveBundleData| -> String {
-            let roots: Vec<String> =
-                b.fri_layer_roots.iter().map(|r| format!("\"{}\"", hx(r))).collect();
-            let evals: Vec<String> =
-                b.last_layer_evals.iter().map(|v| format!("\"{v}\"")).collect();
-            format!(
-                concat!(
-                    "{{\n",
-                    "      \"inner\": {{\n",
-                    "        \"traceRoot\": \"{}\",\n",
-                    "        \"oodsComboPos\": \"{}\",\n",
-                    "        \"oodsComboNeg\": \"{}\",\n",
-                    "        \"compRoot\": \"{}\",\n",
-                    "        \"friLayerRoots\": [{}],\n",
-                    "        \"batchRoot\": \"{}\",\n",
-                    "        \"treeDepth\": {},\n",
-                    "        \"nQueries\": {}\n",
-                    "      }},\n",
-                    "      \"outerProof\": \"{}\",\n",
-                    "      \"outerCommitment\": \"0x{}\",\n",
-                    "      \"outerHints\": \"{}\",\n",
-                    "      \"lastLayerEvals\": [{}]\n",
-                    "    }}"
-                ),
-                hx(&b.trace_root),
-                b.oods_combo_pos,
-                b.oods_combo_neg,
-                hx(&b.comp_root),
-                roots.join(", "),
-                hx(&b.bound_root),
-                b.tree_depth,
-                b.n_queries,
-                hx(&b.outer_proof),
-                b.outer_commitment,
-                hx(&b.outer_hints),
-                evals.join(", "),
-            )
-        };
+        let bundle_json = bundle_fixture_json;
         let json = format!(
             "{{\n  \"merkleRoot\": \"{}\",\n  \"bundle10\": {},\n  \"bundle8\": {}\n}}\n",
             hx(&batch_root),

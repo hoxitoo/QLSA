@@ -2650,6 +2650,63 @@ def prove_mldsa_aggregation_tree(
         fan_in=int(d["fanIn"]),
     )
 
+def gen_tree_recursive_bundles(
+    entries: list[tuple[bytes, bytes, bytes]],
+    batch_merkle_root: bytes,
+    n_queries: int = 1,
+    num_folds: int | None = 6,
+    fan_in: int = 2,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """The aggregation tree's two roots as `BatchRegistryV7.submitBatch` bundles.
+
+    This is the on-chain end of the aggregation: N signatures become two tree
+    roots (one per V23 FRI group) and ONE transaction finalizes the batch. Each
+    returned dict has the same shape as
+    :func:`gen_mldsa_v23_recursive_bundles`'s, so a submitter written for the
+    single-signature path accepts these unchanged.
+
+    Each entry is `(pk, msg, sig)`; every signature is verified in full before
+    its witness is extracted, and a failure names WHICH signature.
+
+    The bundles are cross-bound at the ROOT — the level
+    `BatchRegistryV7._finalize` inspects — and each root's fold count is derived
+    from its own depth, so the on-chain last-layer rebuild stays small however
+    large the tree is.
+    """
+    _require_ext("gen_mldsa_tree_recursive_bundles_py")
+    if not entries:
+        raise ValueError("need at least one signature to aggregate")
+    if fan_in < 2:
+        raise ValueError(f"fan_in must be >= 2, got {fan_in}")
+    if len(batch_merkle_root) != 32:
+        raise ValueError(
+            f"batch_merkle_root must be 32 bytes, got {len(batch_merkle_root)}")
+
+    witnesses = []
+    tx_hashes: list[bytes] = []
+    for i, (pk, msg, sig) in enumerate(entries):
+        try:
+            z, c, t1, a_hat, hints = _ext.extract_mldsa_witness_py(
+                bytes(pk), bytes(msg), bytes(sig))
+        except Exception as exc:
+            raise ValueError(f"signature {i}: {exc}") from exc
+        witnesses.append((
+            [list(p) for p in z],
+            list(c),
+            [list(p) for p in t1],
+            [list(p) for p in a_hat],
+            [list(h) for h in hints],
+        ))
+        tx_hashes.append(hashlib.sha3_256(bytes(msg)).digest())
+
+    try:
+        b10, b8 = _ext.gen_mldsa_tree_recursive_bundles_py(
+            witnesses, tx_hashes, bytes(batch_merkle_root), n_queries, num_folds, fan_in)
+    except Exception as exc:
+        raise RuntimeError(f"tree bundle generation failed: {exc}") from exc
+    return b10, b8
+
+
 
 def prove_mldsa_sig_recursive_stark(
     pk: bytes,

@@ -54,6 +54,12 @@
     "outer_recursion_verify_t16": {
       "value": 16044328,
       "what": "VFRI12 verify of the same outer trace — 96% of the cap, which is why a fully t=16 recursion does not fit"
+    },
+    "v7_tree_submitBatch": {
+      "value": 14651650,
+      "what": "BatchRegistryV7.submitBatch finalizing a BATCH of signatures from the aggregation tree's two roots, at production n_queries=20 (130-bit FRI).",
+      "how": "cargo test write_tree_recursive_bundles_fixture -- --ignored; then contracts/test/BatchRegistryV7TreeE2E.test.js sends the tx and reads gasUsed.",
+      "note": "Constant in N: the root node's shape is a fixed point, so two signatures measure the same as many. The fixture's fold count is derived from each root's DEPTH, not the leaves' — a tree root sits at depth 15/14 where a V23 group sits at 10/8, so inheriting the leaves' 6 folds put 512 last-layer evaluations on chain instead of 16 and the call reverted. Measuring the outer trace alone and inferring the total was the error."
     }
   },
   "live_node_runs": {
