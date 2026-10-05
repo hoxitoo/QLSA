@@ -102,6 +102,48 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
     mapping(bytes32 => bytes32) public batchTxListRoots;
     mapping(bytes32 => uint64) public senderNonces;
 
+    // ── The nonce accumulator (A-4), an ALTERNATIVE to the mapping above ──────
+    //
+    // `senderNonces` costs a MEASURED 28,777 gas for a first-time sender and
+    // 12,085 for a returning one (measurements.json), and the cost is per
+    // sender. Against the 2^24 per-transaction cap that bounds a batch at ~71
+    // new senders, while break-even needs N > 359. The accumulator replaces the
+    // whole mapping with ONE root plus a proof that the transition was legal, so
+    // the on-chain cost is one read and one write whatever N is.
+    //
+    // WHAT IT COSTS, stated here because the interface should not read stronger
+    // than the guarantee. Today `newNonce > stored` is checked ABSOLUTELY, in
+    // Solidity, with no proof involved. On the accumulator path the contract
+    // still checks absolutely: the strict increase, the chain linkage, the slot
+    // index, and that the chain starts at the stored root. What it CANNOT check
+    // is that a claimed `oldNonce` is the slot's true value — that rests on the
+    // transition proof, and `QLSAVerifierRecursive` is VFRI-partial (its own
+    // NatSpec): constraint satisfaction and C1/C2 pinning are enforced
+    // off-chain. So replay protection moves from an absolute check to a proved
+    // one, under the same limitation the ML-DSA arithmetic already lives under.
+    //
+    // WHICH PATH IS LIVE IS FIXED AT CONSTRUCTION and cannot be changed. Two
+    // live paths would be unsound: a transaction counted in the mapping is
+    // invisible to the tree and vice versa, so a replay could go through
+    // whichever path had not seen it. `accumulatorMode` therefore disables the
+    // other path outright rather than leaving an owner switch and a window.
+    //
+    // Migration note: a Solidity mapping cannot be enumerated, so an existing
+    // deployment's sender set is not recoverable on-chain. Moving to the
+    // accumulator means deploying afresh with an initial root computed off-chain
+    // from the known senders.
+    bool public immutable accumulatorMode;
+
+    /// @notice The nonce accumulator's state root — the whole replay-protection
+    ///         state, in one slot. Meaningful only when `accumulatorMode`.
+    bytes32 public nonceStateRoot;
+
+    /// @notice Tree depth the state root is built at; fixes the slot count at
+    ///         `2^nonceTreeDepth`. Capped at 28 by the AIR that proves the paths
+    ///         (`merkle_path_t8_air::MAX_DEPTH`); 28 gives 268 million slots and
+    ///         was measured to cost the same as 24.
+    uint8 public immutable nonceTreeDepth;
+
     event BatchFinalized(
         bytes32 indexed merkleRoot,
         bytes16 indexed commitmentLog10,
@@ -111,6 +153,8 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
     );
     event VerifierUpdated(address indexed oldVerifier, address indexed newVerifier);
     event NonceAdvanced(bytes32 indexed sender, uint64 newNonce);
+    /// @notice The accumulator moved. ONE event per batch, not one per sender.
+    event NonceStateAdvanced(bytes32 indexed oldRoot, bytes32 indexed newRoot, uint256 updates);
 
     error InvalidMerkleRoot();
     error BatchAlreadyFinalized(bytes32 merkleRoot);
@@ -123,9 +167,84 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
     /// @notice A bundle's `inner.batchRoot` is not the cross-bound root for this batch.
     error CrossBindingMismatch();
 
-    constructor(address initialOwner, address _verifier) Ownable(initialOwner) {
+    // ── Accumulator errors ────────────────────────────────────────────────────
+    /// @notice This deployment runs the other nonce path; the mode is immutable.
+    error WrongNoncePath();
+    /// @notice `oldRoot` is not the root this contract has stored.
+    error NonceRootMismatch(bytes32 provided, bytes32 stored);
+    /// @notice The transition proof does not attest THIS statement.
+    error NonceBindingMismatch();
+    /// @notice The transition proof failed verification.
+    error NonceProofInvalid();
+    /// @notice A slot index exceeds `2^nonceTreeDepth`.
+    error NonceIndexOutOfRange(uint256 index);
+    /// @notice A sender's slot is not the one its hash determines.
+    error NonceSlotMismatch(uint256 index, uint32 provided, uint32 expected);
+    /// @notice Depth outside [1, 28] — 28 is what the path AIR can prove.
+    error NonceDepthOutOfRange();
+
+    /// @notice Deploy, choosing the nonce path ONCE and for good.
+    ///
+    /// `nonceDepth == 0` selects the MAPPING path (per-sender `senderNonces`),
+    /// which is what every existing deployment runs; `initialRoot` must then be
+    /// zero. A non-zero depth selects the ACCUMULATOR path.
+    ///
+    /// Solidity has no constructor overloading, so this is one constructor with
+    /// a mode argument rather than two — which is also the honest shape, because
+    /// the choice must be visible at the deployment site. Read the
+    /// `accumulatorMode` comment above before passing a non-zero depth: it moves
+    /// replay protection from an absolute check to a proved one.
+    ///
+    /// `initialRoot` is the starting state's root and must be computed
+    /// off-chain — the empty tree's root for a fresh deployment, or a root over
+    /// the known sender set when migrating. The contract cannot derive it: a
+    /// mapping is not enumerable, so a migration's starting state is not
+    /// on-chain data at all.
+    constructor(
+        address initialOwner,
+        address _verifier,
+        bytes32 initialRoot,
+        uint8 nonceDepth
+    ) Ownable(initialOwner) {
         if (_verifier == address(0)) revert ZeroAddressVerifier();
         verifier = QLSAVerifierRecursive(_verifier);
+
+        if (nonceDepth == 0) {
+            // Mapping path. A root here would be ignored, and an ignored
+            // argument is how a deployment silently ends up on the wrong path.
+            if (initialRoot != bytes32(0)) revert NonceRootMismatch(initialRoot, bytes32(0));
+            accumulatorMode = false;
+            nonceTreeDepth = 0;
+        } else {
+            // 28 is what the path AIR can prove (merkle_path_t8_air::MAX_DEPTH);
+            // a deeper tree would be unprovable, so it is refused here rather
+            // than discovered when the first proof fails.
+            if (nonceDepth > 28) revert NonceDepthOutOfRange();
+            if (initialRoot == bytes32(0)) revert NonceRootMismatch(initialRoot, bytes32(0));
+            accumulatorMode = true;
+            nonceTreeDepth = nonceDepth;
+            nonceStateRoot = initialRoot;
+        }
+    }
+
+    /// @notice The slot a sender owns: the low `nonceTreeDepth` bits of the
+    ///         first four bytes of its hash, little-endian.
+    ///
+    /// No hashing happens here, and that is the point. `senders[i]` is ALREADY a
+    /// hash — `core/transaction.py` sets `tx.sender` to SHA3-256 of the public
+    /// key — so the slot is a bit extraction, costing a few gas rather than a
+    /// Keccak. Proving `index == prefix(H(sender))` inside the circuit would
+    /// need Keccak arithmetized, which is limitation 0 and not started; doing it
+    /// here instead is what avoids that, and it is why the indices can be
+    /// trusted as public inputs to the proof.
+    ///
+    /// Matches Rust `nonce_tree::slot_index` exactly, including the byte order.
+    function nonceSlot(bytes32 sender) public view returns (uint32) {
+        uint32 le = uint32(uint8(sender[0]))
+            | (uint32(uint8(sender[1])) << 8)
+            | (uint32(uint8(sender[2])) << 16)
+            | (uint32(uint8(sender[3])) << 24);
+        return le & uint32((uint256(1) << nonceTreeDepth) - 1);
     }
 
     function setVerifier(address newVerifier) external onlyOwner {
@@ -142,6 +261,152 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
         returns (bytes32)
     {
         return keccak256(abi.encodePacked(merkleRoot, otherTraceRoot));
+    }
+
+    /// @notice One nonce update, as the contract sees it. All public.
+    struct NonceUpdate {
+        uint32 index;
+        uint64 oldNonce;
+        uint64 newNonce;
+        /// @dev The state root after this update. The last must equal the new root.
+        bytes32 postRoot;
+    }
+
+    /// @notice The binding the transition proof must carry as `inner.batchRoot`.
+    ///
+    /// Mirrors Rust `vfri2_bridge::nonce_statement_binding` byte-for-byte:
+    ///
+    ///   nUpdates(4) ‖ depth(4) ‖ oldRoot(32) ‖ newRoot(32)
+    ///   ‖ per update: index(4) ‖ oldNonce(8) ‖ newNonce(8) ‖ postRoot(32)
+    ///
+    /// Count FIRST, so a statement cannot be reinterpreted at a different
+    /// length, and EVERY field hashed — the R4.7 lesson, where
+    /// `outerBindingRoot` bound 2 of 8 public fields and left six swappable
+    /// while still returning ok=true.
+    function nonceStatementBinding(
+        bytes32 oldRoot,
+        bytes32 newRoot,
+        uint32 depth,
+        NonceUpdate[] calldata updates
+    ) public pure returns (bytes32) {
+        bytes memory buf = abi.encodePacked(
+            uint32(updates.length), depth, oldRoot, newRoot);
+        for (uint256 i = 0; i < updates.length; ++i) {
+            buf = abi.encodePacked(
+                buf,
+                updates[i].index,
+                updates[i].oldNonce,
+                updates[i].newNonce,
+                updates[i].postRoot
+            );
+        }
+        return keccak256(buf);
+    }
+
+    /// @notice Advance the nonce STATE ROOT — O(1) storage, whatever N is.
+    ///
+    /// # Why this is its own transaction, and what that costs
+    ///
+    /// It was written to take the batch bundles too, so one call would finalize
+    /// a batch AND advance the nonces. MEASURED, that does not fit: the
+    /// transition proof's own `verifyRecursive` costs **6,940,263 gas** (1
+    /// update) to **7,331,135** (25), and the tree batch already costs
+    /// 14,663,950 — 21.6M against a 16,777,216 cap. The call reverted, which is
+    /// how the figure came to be measured rather than assumed.
+    ///
+    /// So the transition is separate. That has a consequence worth stating
+    /// plainly rather than burying: at ~6.94M constant against the mapping's
+    /// measured 12,085 gas per RETURNING sender, this path only becomes cheaper
+    /// above roughly **574 senders** — and one transaction admits about 172. So
+    /// **as a separate proof the accumulator does not reach break-even**, and
+    /// § A-4's claim that it is the lever that does is wrong in this form.
+    ///
+    /// What would make it pay is folding the nonce statement into the batch
+    /// proof as a further path group, so it rides the two `verifyRecursive`
+    /// calls already being paid for instead of adding a third. I had recorded
+    /// the separate proof as "simpler and cheaper"; the first half was right.
+    ///
+    /// # What is checked ABSOLUTELY here, with no reliance on the proof
+    ///
+    ///   * the chain starts at the root this contract has stored;
+    ///   * every nonce strictly increases;
+    ///   * every slot index is the one its sender's hash determines;
+    ///   * the chain ends at the root being written.
+    ///
+    /// What rests on the proof: that each claimed `oldNonce` really is its
+    /// slot's value in the preceding root. See the `accumulatorMode` comment.
+    function submitNonceTransition(
+        RecursiveBundle calldata nonceBundle,
+        bytes32[] calldata senders,
+        NonceUpdate[] calldata updates,
+        bytes32 newNonceRoot
+    ) external nonReentrant {
+        if (!accumulatorMode) revert WrongNoncePath();
+        if (senders.length != updates.length) revert NoncesLengthMismatch();
+        if (senders.length > MAX_SENDERS) revert SenderCountExceedsLimit();
+
+        bytes32 oldRoot = nonceStateRoot;
+        uint256 slots = uint256(1) << nonceTreeDepth;
+
+        for (uint256 i = 0; i < updates.length; ++i) {
+            NonceUpdate calldata u = updates[i];
+
+            // The slot must be the one this sender owns — otherwise a prover
+            // could advance someone else's counter, or park a transaction in an
+            // unused slot and replay it against the real one.
+            uint32 expected = nonceSlot(senders[i]);
+            if (u.index != expected) {
+                revert NonceSlotMismatch(i, u.index, expected);
+            }
+            if (uint256(u.index) >= slots) revert NonceIndexOutOfRange(i);
+
+            // The replay guarantee, still enforced absolutely.
+            if (u.newNonce <= u.oldNonce) {
+                revert SenderNonceTooLow(senders[i], u.newNonce, u.oldNonce + 1);
+            }
+        }
+
+        // NOTE: there is deliberately no "chain is linked" check here. An
+        // earlier version had one and it was VACUOUS — it compared
+        // `updates[i-1].postRoot` against a variable just assigned that same
+        // value, so it could never fire. A test asserting a broken chain was
+        // rejected caught it.
+        //
+        // The right conclusion was to remove it, not to repair it: the chain is
+        // DEFINITIONAL, not asserted. Update i starts at `updates[i-1].postRoot`
+        // by construction, on both sides — Rust's `NonceStatement::pre_roots`
+        // derives the pre-roots from the post-roots in exactly this way. There
+        // is no separate "starting root" a prover could disagree with. What the
+        // contract must pin is the two ENDPOINTS, which it does: `oldRoot` comes
+        // from storage and enters the binding, and the last `postRoot` must
+        // equal what is written.
+        if (updates.length == 0) {
+            // An empty transition must not move the root, or it would assert any
+            // pair of roots with nothing to verify.
+            if (newNonceRoot != oldRoot) revert NonceRootMismatch(newNonceRoot, oldRoot);
+        } else {
+            if (updates[updates.length - 1].postRoot != newNonceRoot) {
+                revert NonceRootMismatch(newNonceRoot, updates[updates.length - 1].postRoot);
+            }
+
+            // The proof must attest THIS statement, not merely be a valid proof.
+            bytes32 bound = nonceStatementBinding(
+                oldRoot, newNonceRoot, uint32(nonceTreeDepth), updates);
+            if (nonceBundle.inner.batchRoot != bound) revert NonceBindingMismatch();
+
+            (bool okNonce, ) = verifier.verifyRecursive(
+                nonceBundle.inner,
+                nonceBundle.outerProof,
+                nonceBundle.outerCommitment,
+                nonceBundle.outerHints,
+                nonceBundle.lastLayerEvals
+            );
+            if (!okNonce) revert NonceProofInvalid();
+        }
+
+        // ONE write, whatever N was.
+        nonceStateRoot = newNonceRoot;
+        emit NonceStateAdvanced(oldRoot, newNonceRoot, updates.length);
     }
 
     /// @notice Finalize a batch from two recursive bundles.
@@ -165,6 +430,12 @@ contract BatchRegistryV7 is Ownable, ReentrancyGuard {
         bytes32[] calldata senders,
         uint64[] calldata newNonces
     ) external nonReentrant {
+        // Two live nonce paths would be a replay hole: a transaction counted in
+        // the mapping is invisible to the accumulator's tree and vice versa, so
+        // a replay could go through whichever had not seen it. The mode is
+        // immutable, so this closes the other path outright rather than leaving
+        // a window.
+        if (accumulatorMode) revert WrongNoncePath();
         if (senders.length != newNonces.length) revert NoncesLengthMismatch();
         if (senders.length > MAX_SENDERS) revert SenderCountExceedsLimit();
 

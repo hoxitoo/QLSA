@@ -14,12 +14,13 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 
 from eth_abi.exceptions import DecodingError
 from web3 import Web3
 from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 from web3.middleware import ExtraDataToPOAMiddleware
+
+from testnet.abi import abi_for
 
 logger = logging.getLogger(__name__)
 
@@ -64,24 +65,13 @@ def _trace_root(proof: bytes, name: str = "proof") -> bytes:
     return proof[8:40]
 
 
-# Inline ABI — generated from contracts/artifacts/src/BatchRegistryV2.sol
-_REGISTRY_ABI = json.loads("""
-[
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"BatchAlreadyFinalized","type":"error"},
-  {"inputs":[],"name":"InvalidMerkleRoot","type":"error"},
-  {"inputs":[],"name":"InvalidProof","type":"error"},
-  {"inputs":[],"name":"ZeroAddressVerifier","type":"error"},
-  {"inputs":[{"internalType":"bytes32","name":"sender","type":"bytes32"},{"internalType":"uint64","name":"provided","type":"uint64"},{"internalType":"uint64","name":"expected","type":"uint64"}],"name":"SenderNonceTooLow","type":"error"},
-  {"inputs":[],"name":"NoncesLengthMismatch","type":"error"},
-  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":true,"internalType":"bytes16","name":"commitment","type":"bytes16"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BatchFinalized","type":"event"},
-  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"sender","type":"bytes32"},{"indexed":false,"internalType":"uint64","name":"newNonce","type":"uint64"}],"name":"NonceAdvanced","type":"event"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"isBatchFinalized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes16","name":"commitment","type":"bytes16"},{"internalType":"bytes","name":"starkProof","type":"bytes"}],"name":"submitBatch","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes16","name":"commitment","type":"bytes16"},{"internalType":"bytes","name":"starkProof","type":"bytes"},{"internalType":"bytes32[]","name":"senders","type":"bytes32[]"},{"internalType":"uint64[]","name":"newNonces","type":"uint64[]"}],"name":"submitBatchWithNonces","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"getCommitment","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"senderNonces","outputs":[{"internalType":"uint64","name":"","type":"uint64"}],"stateMutability":"view","type":"function"}
-]
-""")
+# ── Contract ABIs ─────────────────────────────────────────────────────────────
+#
+# Loaded from testnet/abi/*.json, which `testnet.abi._sync` generates from the
+# compiled artifacts and CI re-checks. They used to be inline json.loads("""...""")
+# blobs pasted by hand, and by 2026-10-04 every one of them had rotted far enough
+# that NEITHER submitter could place a transaction — see testnet/abi/_sync.py.
+_REGISTRY_V5_ABI = abi_for("BatchRegistryV5")
 
 
 # ── Registry-kind detection ───────────────────────────────────────────────────
@@ -221,7 +211,7 @@ class OnchainSubmitterV5:
         self.account = self.w3.eth.account.from_key(private_key)
         self.registry = self.w3.eth.contract(
             address=Web3.to_checksum_address(registry_address),
-            abi=_REGISTRY_V4_ABI,
+            abi=_REGISTRY_V5_ABI,
         )
         require_registry_kind(
             self.w3, registry_address, self._EXPECTED_KIND, self._EXPECTED_REGISTRY
@@ -361,35 +351,8 @@ class OnchainSubmitterV5:
         return int(self.registry.functions.senderNonces(_as_bytes32(sender_hash, "sender_hash")).call())
 
 
-# ── BatchRegistryV6 (per-group split, dual VFRI10 proofs) ─────────────────────
 
-# Inline ABI — generated from contracts/artifacts/src/BatchRegistryV6.sol
-_REGISTRY_V6_ABI = json.loads("""
-[
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"BatchAlreadyFinalized","type":"error"},
-  {"inputs":[],"name":"InvalidMerkleRoot","type":"error"},
-  {"inputs":[],"name":"Log10ProofInvalid","type":"error"},
-  {"inputs":[],"name":"Log8ProofInvalid","type":"error"},
-  {"inputs":[],"name":"NotReadyToFinalize","type":"error"},
-  {"inputs":[],"name":"ZeroAddressVerifier","type":"error"},
-  {"inputs":[{"internalType":"bytes32","name":"sender","type":"bytes32"},{"internalType":"uint64","name":"provided","type":"uint64"},{"internalType":"uint64","name":"expected","type":"uint64"}],"name":"SenderNonceTooLow","type":"error"},
-  {"inputs":[],"name":"NoncesLengthMismatch","type":"error"},
-  {"inputs":[],"name":"SenderCountExceedsLimit","type":"error"},
-  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":false,"internalType":"uint8","name":"log","type":"uint8"},{"indexed":false,"internalType":"bytes16","name":"commitment","type":"bytes16"}],"name":"GroupVerified","type":"event"},
-  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":true,"internalType":"bytes16","name":"commitmentLog10","type":"bytes16"},{"indexed":false,"internalType":"bytes16","name":"commitmentLog8","type":"bytes16"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BatchFinalized","type":"event"},
-  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"sender","type":"bytes32"},{"indexed":false,"internalType":"uint64","name":"newNonce","type":"uint64"}],"name":"NonceAdvanced","type":"event"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"isBatchFinalized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"pendingGroups","outputs":[{"internalType":"bool","name":"has10","type":"bool"},{"internalType":"bool","name":"has8","type":"bool"},{"internalType":"bool","name":"readyToFinalize","type":"bool"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes32","name":"crossTraceRoot8","type":"bytes32"},{"internalType":"bytes16","name":"commitmentLog10","type":"bytes16"},{"internalType":"bytes","name":"proofLog10","type":"bytes"},{"internalType":"bytes","name":"hintsLog10","type":"bytes"}],"name":"submitGroup10","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes32","name":"crossTraceRoot10","type":"bytes32"},{"internalType":"bytes16","name":"commitmentLog8","type":"bytes16"},{"internalType":"bytes","name":"proofLog8","type":"bytes"},{"internalType":"bytes","name":"hintsLog8","type":"bytes"}],"name":"submitGroup8","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes32","name":"crossTraceRoot10","type":"bytes32"},{"internalType":"bytes16","name":"commitmentLog8","type":"bytes16"},{"internalType":"bytes","name":"proofLog8","type":"bytes"},{"internalType":"bytes","name":"hintsLog8","type":"bytes"},{"internalType":"bytes32[]","name":"senders","type":"bytes32[]"},{"internalType":"uint64[]","name":"newNonces","type":"uint64[]"}],"name":"submitGroup8WithNonces","outputs":[],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"getCommitmentsLog10","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"senderNonces","outputs":[{"internalType":"uint64","name":"","type":"uint64"}],"stateMutability":"view","type":"function"}
-]
-""")
-
-
-_REGISTRY_V7_ABI = json.loads("""[{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"BatchAlreadyFinalized","type":"error"},{"inputs":[],"name":"CrossBindingMismatch","type":"error"},{"inputs":[],"name":"InvalidMerkleRoot","type":"error"},{"inputs":[],"name":"Log10ProofInvalid","type":"error"},{"inputs":[],"name":"Log8ProofInvalid","type":"error"},{"inputs":[],"name":"NoncesLengthMismatch","type":"error"},{"inputs":[],"name":"SenderCountExceedsLimit","type":"error"},{"inputs":[{"internalType":"bytes32","name":"sender","type":"bytes32"},{"internalType":"uint64","name":"provided","type":"uint64"},{"internalType":"uint64","name":"expected","type":"uint64"}],"name":"SenderNonceTooLow","type":"error"},{"inputs":[],"name":"ZeroAddressVerifier","type":"error"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"indexed":true,"internalType":"bytes16","name":"commitmentLog10","type":"bytes16"},{"indexed":false,"internalType":"bytes16","name":"commitmentLog8","type":"bytes16"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BatchFinalized","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"sender","type":"bytes32"},{"indexed":false,"internalType":"uint64","name":"newNonce","type":"uint64"}],"name":"NonceAdvanced","type":"event"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"batchCommitmentsLog10","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"batchCommitmentsLog8","outputs":[{"internalType":"bytes16","name":"","type":"bytes16"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"internalType":"bytes32","name":"otherTraceRoot","type":"bytes32"}],"name":"crossBoundRoot","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"pure","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"}],"name":"isBatchFinalized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"name":"senderNonces","outputs":[{"internalType":"uint64","name":"","type":"uint64"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle10","type":"tuple"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle8","type":"tuple"}],"name":"submitBatch","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"merkleRoot","type":"bytes32"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle10","type":"tuple"},{"components":[{"components":[{"internalType":"bytes32","name":"traceRoot","type":"bytes32"},{"internalType":"uint128","name":"oodsComboPos","type":"uint128"},{"internalType":"uint128","name":"oodsComboNeg","type":"uint128"},{"internalType":"bytes32","name":"compRoot","type":"bytes32"},{"internalType":"bytes32[]","name":"friLayerRoots","type":"bytes32[]"},{"internalType":"bytes32","name":"batchRoot","type":"bytes32"},{"internalType":"uint256","name":"treeDepth","type":"uint256"},{"internalType":"uint256","name":"nQueries","type":"uint256"}],"internalType":"struct QLSAVerifierRecursive.InnerPublics","name":"inner","type":"tuple"},{"internalType":"bytes","name":"outerProof","type":"bytes"},{"internalType":"bytes16","name":"outerCommitment","type":"bytes16"},{"internalType":"bytes","name":"outerHints","type":"bytes"},{"internalType":"uint128[]","name":"lastLayerEvals","type":"uint128[]"}],"internalType":"struct BatchRegistryV7.RecursiveBundle","name":"bundle8","type":"tuple"},{"internalType":"bytes32[]","name":"senders","type":"bytes32[]"},{"internalType":"uint64[]","name":"newNonces","type":"uint64[]"}],"name":"submitBatchWithNonces","outputs":[],"stateMutability":"nonpayable","type":"function"}]""")
+_REGISTRY_V7_ABI = abi_for("BatchRegistryV7")
 
 
 class OnchainSubmitterV7:
@@ -486,9 +449,10 @@ class OnchainSubmitterV7:
     def submit_batch_with_nonces(
         self,
         merkle_root: bytes,
-        bundles,  # stark.prover.V23RecursiveBundlesResult
+        bundles,  # V23RecursiveBundlesResult or TreeRecursiveBundlesResult
         senders: list[bytes],
         new_nonces: list[int],
+        tx_list_root: bytes | None = None,
     ) -> str:
         """Finalize a batch from two cross-bound recursive bundles, with nonces.
 
@@ -496,17 +460,59 @@ class OnchainSubmitterV7:
         ``CrossBindingMismatch`` if either bundle was not produced against the
         other group's trace root — so a mismatched pair fails before any proof is
         verified.
+
+        ``merkle_root`` and ``tx_list_root`` are both ``bytes32`` and adjacent in
+        the call, so they are the easiest pair in this system to transpose. They
+        are not interchangeable:
+
+        * ``merkle_root`` is **R**, derived from the proofs' own trace roots and
+          the Fiat-Shamir seed they ran under. It is the batch's on-chain
+          identity and it is PROVED.
+        * ``tx_list_root`` is the SHA3 root of the transaction list. The contract
+          holds no transactions, so it is ATTESTED, NOT PROVED — worth recording
+          because a third party holding the list can recompute it, and nothing
+          more.
+
+        ``tx_list_root`` defaults to None, which submits ``bytes32(0)``. Zero is
+        the contract's documented "not provided"; it is not a commitment to an
+        empty list, and the registry deliberately does not reject it (unlike
+        ``merkleRoot``) because an aggregator with no list has nothing honest to
+        put there. Pass ``BatchResult.tx_list_root`` whenever a list exists.
         """
         if len(senders) != len(new_nonces):
             raise ValueError("senders and new_nonces must have equal length")
         tx_hex = self._send(self.registry.functions.submitBatchWithNonces(
             _as_bytes32(merkle_root, "merkle_root"),
+            bytes(32) if tx_list_root is None
+            else _as_bytes32(tx_list_root, "tx_list_root"),
             self._bundle_tuple(bundles.log10),
             self._bundle_tuple(bundles.log8),
             _validate_senders(senders),
             new_nonces,
         ))
         logger.info("%s submitBatchWithNonces: %s", self._LOG_TAG, tx_hex)
+        return tx_hex
+
+    def submit_batch(
+        self,
+        merkle_root: bytes,
+        bundles,  # V23RecursiveBundlesResult or TreeRecursiveBundlesResult
+        tx_list_root: bytes | None = None,
+    ) -> str:
+        """Finalize a batch from two cross-bound bundles, without nonce updates.
+
+        The registry's ``submitBatch``; see
+        :meth:`submit_batch_with_nonces` for what the two roots mean and why
+        they must not be swapped.
+        """
+        tx_hex = self._send(self.registry.functions.submitBatch(
+            _as_bytes32(merkle_root, "merkle_root"),
+            bytes(32) if tx_list_root is None
+            else _as_bytes32(tx_list_root, "tx_list_root"),
+            self._bundle_tuple(bundles.log10),
+            self._bundle_tuple(bundles.log8),
+        ))
+        logger.info("%s submitBatch: %s", self._LOG_TAG, tx_hex)
         return tx_hex
 
     def wait_and_verify(self, tx_hash: str, merkle_root: bytes) -> bool:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
@@ -46,7 +47,7 @@ REPS = 5  # repetitions per benchmark; median is reported
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _lcg(seed: int) -> "generator":
+def _lcg(seed: int) -> Iterator[int]:
     state = seed
     while True:
         state = (state * 6364136223846793005 + 1442695040888963407) & 0xFFFF_FFFF_FFFF_FFFF

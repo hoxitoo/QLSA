@@ -3385,6 +3385,95 @@ pub struct RecursiveBundleData {
     pub outer_hints: Vec<u8>,
 }
 
+/// The keccak binding of a nonce-transition statement — `inner.batchRoot` for
+/// the accumulator's bundle, and the value the contract recomputes.
+///
+/// # Why a binding rather than a pinned preprocessed root
+///
+/// `inner.batchRoot` is the one public field of the inner statement that the
+/// bundle's Fiat-Shamir chain is generated against, so it is the hook by which a
+/// proof is tied to a statement: change any field and the channel diverges, the
+/// query indices move, and the outer proof stops verifying.
+///
+/// The alternative — pinning the statement in the preprocessed tree and having
+/// the contract recompute its root — is not available on-chain: that root is a
+/// Poseidon2 commitment over 22 columns, far past a transaction's budget. The
+/// in-circuit C1/C2 pinning still exists and is what the RUST verifier checks
+/// (`nonce_accumulator::verify_nonce_transitions`); on-chain the binding below
+/// is what carries the statement.
+///
+/// # Layout
+///
+/// Mirrored byte-for-byte by Solidity, in the spirit of `outer_binding_root`
+/// after the R4.7 audit — which bound 2 of 8 public fields and left six
+/// swappable while still returning ok. EVERY field is hashed, with the update
+/// count FIRST so a statement cannot be reinterpreted at a different length:
+///
+/// ```text
+///   nUpdates(4) ‖ depth(4) ‖ oldRoot(32) ‖ newRoot(32)
+///   ‖ for each update: index(4) ‖ oldNonce(8) ‖ newNonce(8) ‖ postRoot(32)
+/// ```
+///
+/// Roots are the 32-byte packed form (`p2t8_pack`), the same bytes Solidity
+/// holds in a `bytes32`, so neither side has to know the word layout.
+pub fn nonce_statement_binding(
+    old_root: &[u8; 32],
+    new_root: &[u8; 32],
+    depth: u32,
+    updates: &[(u32, u64, u64, [u8; 32])],
+) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let mut h = Keccak256::new();
+    h.update((updates.len() as u32).to_be_bytes());
+    h.update(depth.to_be_bytes());
+    h.update(old_root);
+    h.update(new_root);
+    for (index, old_nonce, new_nonce, post_root) in updates {
+        h.update(index.to_be_bytes());
+        h.update(old_nonce.to_be_bytes());
+        h.update(new_nonce.to_be_bytes());
+        h.update(post_root);
+    }
+    h.finalize().into()
+}
+
+/// The accumulator's recursive bundle — what `BatchRegistryV7` would consume to
+/// move `nonceStateRoot` in one transaction instead of N storage writes.
+///
+/// The nonce statement's trace becomes the INNER statement of an ordinary
+/// recursive bundle, exactly as a V23 group or a tree root does. Measured
+/// (`probe_nonce_outer_shape`): the outer trace is 87 columns, the same as over
+/// a V23 group, and the inner depth 8-10 sits in the cheap range for the
+/// on-chain last-layer rebuild — the thing that caused the revert in `a4742b5`
+/// when a tree root's depth 15 was given the leaves' fold count.
+///
+/// The fold rule is therefore the same one `gen_mldsa_tree_recursive_bundles`
+/// uses: derive it from THIS statement's depth and leave a 16-evaluation last
+/// layer, rather than inheriting a number from elsewhere.
+pub fn gen_nonce_recursive_bundle(
+    st: &crate::recursive::nonce_accumulator::NonceStatement,
+    transitions: &[crate::nonce_tree::NonceTransition],
+    n_queries: usize,
+) -> Result<([u8; 32], RecursiveBundleData), String> {
+    use crate::recursive::nonce_accumulator::statement_trace_columns;
+
+    let (cols, log_size) = statement_trace_columns(st, transitions)?;
+
+    // The statement as the contract will see it: packed roots, public nonces.
+    let old_root = p2t8_pack(st.old_root);
+    let new_root = p2t8_pack(st.new_root);
+    let updates: Vec<(u32, u64, u64, [u8; 32])> = st
+        .updates
+        .iter()
+        .map(|u| (u.index, u.old_nonce, u.new_nonce, p2t8_pack(u.post_root)))
+        .collect();
+    let bound = nonce_statement_binding(&old_root, &new_root, st.depth as u32, &updates);
+
+    let folds = Some((log_size as usize).saturating_sub(4).max(1));
+    let bundle = build_recursive_bundle(&cols, log_size, &bound, n_queries, folds)?;
+    Ok((bound, bundle))
+}
+
 /// Build one group's recursive bundle from its trace columns and bound root.
 fn build_recursive_bundle(
     cols:       &[Vec<u32>],
@@ -4046,6 +4135,197 @@ mod tests_vfri8 {
         std::fs::write(path, json).unwrap();
         println!("wrote {path}");
     }
+
+    /// Ф3.2 — the nonce accumulator's transition as an on-chain batch.
+    ///
+    /// Run with:
+    ///   cargo test write_nonce_accumulator_fixture -- --ignored --nocapture
+    ///
+    /// Emits one fixture serving three purposes, because they must agree:
+    ///   * the Rust REFERENCE VALUES for `nonceSlot` and
+    ///     `nonceStatementBinding`, so Solidity is pinned to Rust rather than to
+    ///     its own re-derivation (the pattern behind the 47 Poseidon2
+    ///     cross-checks);
+    ///   * the transition bundle, so the gas can be measured;
+    ///   * two statements of DIFFERENT size (1 and 25 updates), because the
+    ///     completion condition for A-4 is that they cost the SAME.
+    #[test]
+    #[ignore]
+    fn write_nonce_accumulator_fixture() {
+        use crate::nonce_tree::{apply_updates, slot_index, NonceTree};
+        use crate::recursive::nonce_accumulator::NonceStatement;
+
+        // Depth 8 keeps the fixture quick to regenerate. The production depth is
+        // 28 (measured free against 24), and the on-chain cost does not depend
+        // on it — only the trace size does.
+        const D: usize = 8;
+        let n_queries = 20usize;
+
+        let sender = |i: usize| -> [u8; 32] {
+            let mut h = [0u8; 32];
+            // Spread across the low bytes so the slot indices differ.
+            h[0] = (i * 7 + 1) as u8;
+            h[1] = (i * 13 + 3) as u8;
+            h[2] = (i * 29 + 5) as u8;
+            h
+        };
+
+        let build = |n: usize| {
+            let mut tree = NonceTree::new(D).unwrap();
+            let updates: Vec<([u8; 32], u64)> =
+                (0..n).map(|i| (sender(i), (i as u64) + 1)).collect();
+            let (old_root, new_root, ts) = apply_updates(&mut tree, &updates).unwrap();
+            let st = NonceStatement::from_transitions(&ts, &old_root, &new_root, D).unwrap();
+            let (bound, b) = gen_nonce_recursive_bundle(&st, &ts, n_queries)
+                .expect("nonce bundle");
+            (st, bound, b)
+        };
+
+        let statement_json = |st: &NonceStatement, bound: &[u8; 32]| -> String {
+            let ups: Vec<String> = st
+                .updates
+                .iter()
+                .map(|u| {
+                    format!(
+                        "{{ \"index\": {}, \"oldNonce\": \"{}\", \"newNonce\": \"{}\", \"postRoot\": \"0x{}\" }}",
+                        u.index, u.old_nonce, u.new_nonce,
+                        hex::encode(p2t8_pack(u.post_root))
+                    )
+                })
+                .collect();
+            format!(
+                "{{\n    \"depth\": {},\n    \"oldRoot\": \"0x{}\",\n    \"newRoot\": \"0x{}\",\n    \"binding\": \"0x{}\",\n    \"updates\": [\n      {}\n    ]\n  }}",
+                st.depth,
+                hex::encode(p2t8_pack(st.old_root)),
+                hex::encode(p2t8_pack(st.new_root)),
+                hex::encode(bound),
+                ups.join(",\n      "),
+            )
+        };
+
+        let (st1, bound1, b1) = build(1);
+        let (st25, bound25, b25) = build(25);
+
+        // The senders, in the SAME order as the statements' updates, so Solidity
+        // can check that each slot is the one its sender's hash determines.
+        // apply_updates sorts by (index, nonce), so the order is not the input
+        // order and must be emitted explicitly rather than reconstructed.
+        let senders_for = |st: &NonceStatement, n: usize| -> String {
+            let mut by_slot: Vec<([u8; 32], u32)> = (0..n)
+                .map(|i| (sender(i), slot_index(&sender(i), D).unwrap()))
+                .collect();
+            let order: Vec<String> = st
+                .updates
+                .iter()
+                .map(|u| {
+                    let k = by_slot
+                        .iter()
+                        .position(|(_, s)| *s == u.index)
+                        .expect("every update's slot belongs to a sender");
+                    let (h, _) = by_slot.remove(k);
+                    format!("\"0x{}\"", hex::encode(h))
+                })
+                .collect();
+            order.join(", ")
+        };
+
+        let json = format!(
+            "{{\n  \"_note\": \"Rust reference values; Solidity is pinned to these. Regenerate with: cargo test write_nonce_accumulator_fixture -- --ignored\",\n  \"nQueries\": {},\n  \"one\": {{\n    \"statement\": {},\n    \"senders\": [{}],\n    \"bundle\": {}\n  }},\n  \"many\": {{\n    \"statement\": {},\n    \"senders\": [{}],\n    \"bundle\": {}\n  }}\n}}\n",
+            n_queries,
+            statement_json(&st1, &bound1),
+            senders_for(&st1, 1),
+            bundle_fixture_json(&b1),
+            statement_json(&st25, &bound25),
+            senders_for(&st25, 25),
+            bundle_fixture_json(&b25),
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/nonce_accumulator_e2e.json"
+        );
+        std::fs::write(path, json).unwrap();
+        println!("wrote {path}");
+        println!("  1 update  : {} updates, binding 0x{}", st1.updates.len(), hex::encode(bound1));
+        println!("  25 updates: {} updates, binding 0x{}", st25.updates.len(), hex::encode(bound25));
+    }
+
+    /// The accumulator's bundle verifies, and its binding covers every field.
+    #[test]
+    #[ignore = "STARK proving; the accumulator's recursive bundle"]
+    fn a_nonce_statement_becomes_a_recursive_bundle() {
+        use crate::nonce_tree::{apply_updates, NonceTree};
+        use crate::recursive::nonce_accumulator::NonceStatement;
+
+        const D: usize = 4;
+        let sender = |i: u8| -> [u8; 32] {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            h[1] = i.wrapping_mul(7);
+            h
+        };
+
+        let mut tree = NonceTree::new(D).unwrap();
+        let (old_root, new_root, ts) =
+            apply_updates(&mut tree, &[(sender(1), 1), (sender(2), 3)]).unwrap();
+        let st = NonceStatement::from_transitions(&ts, &old_root, &new_root, D).unwrap();
+
+        let (bound, b) = gen_nonce_recursive_bundle(&st, &ts, 1).expect("bundle");
+
+        // `inner.batchRoot` IS the statement binding — that is the hook the
+        // contract checks, so it must come back unchanged.
+        assert_eq!(b.bound_root, bound, "inner.batchRoot must be the binding");
+        assert!(!b.outer_proof.is_empty());
+        assert!(!b.outer_hints.is_empty());
+        assert_eq!(b.n_queries, 1);
+        // The fold rule must leave a small last layer — the condition whose
+        // absence made the tree-root submission revert in a4742b5.
+        assert!(
+            b.last_layer_evals.len() <= 16,
+            "last layer is {} evaluations; the on-chain rebuild scales with it",
+            b.last_layer_evals.len()
+        );
+    }
+
+    /// Every public field must move the binding. The R4.7 audit found
+    /// `outerBindingRoot` hashing 2 of 8 fields and leaving six swappable while
+    /// still returning ok; this is the same test for the accumulator.
+    #[test]
+    fn the_nonce_binding_covers_every_public_field() {
+        let old_root = [1u8; 32];
+        let new_root = [2u8; 32];
+        let base_updates = vec![(7u32, 0u64, 5u64, [3u8; 32])];
+        let base = nonce_statement_binding(&old_root, &new_root, 4, &base_updates);
+
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(base);
+
+        // depth
+        assert!(seen.insert(nonce_statement_binding(&old_root, &new_root, 5, &base_updates)));
+        // oldRoot
+        assert!(seen.insert(nonce_statement_binding(&[9u8; 32], &new_root, 4, &base_updates)));
+        // newRoot
+        assert!(seen.insert(nonce_statement_binding(&old_root, &[9u8; 32], 4, &base_updates)));
+        // index
+        assert!(seen.insert(nonce_statement_binding(
+            &old_root, &new_root, 4, &[(8, 0, 5, [3u8; 32])])));
+        // oldNonce
+        assert!(seen.insert(nonce_statement_binding(
+            &old_root, &new_root, 4, &[(7, 1, 5, [3u8; 32])])));
+        // newNonce
+        assert!(seen.insert(nonce_statement_binding(
+            &old_root, &new_root, 4, &[(7, 0, 6, [3u8; 32])])));
+        // postRoot
+        assert!(seen.insert(nonce_statement_binding(
+            &old_root, &new_root, 4, &[(7, 0, 5, [4u8; 32])])));
+        // update COUNT — hashed first so a statement cannot be reinterpreted at
+        // a different length.
+        assert!(seen.insert(nonce_statement_binding(
+            &old_root, &new_root, 4,
+            &[(7, 0, 5, [3u8; 32]), (7, 5, 9, [3u8; 32])])));
+
+        assert_eq!(seen.len(), 9, "two field changes produced the same binding");
+    }
+
     /// **The gap a failing test exposed.** A membership proves "this LEAF is in
     /// the batch" — which on its own says nothing about WHICH proof the leaf
     /// describes. So signature A's columns could be paired with signature B's

@@ -58,7 +58,7 @@ describe("BatchRegistryV7 × aggregation tree roots", function () {
     await recursive.waitForDeployment();
     registry = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
     await registry.waitForDeployment();
 
     if (FIXTURE_EXISTS) {

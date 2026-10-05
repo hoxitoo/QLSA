@@ -37,8 +37,20 @@ async function main() {
   console.log("QLSAVerifierRecursive deployed to:", recursiveAddr);
 
   // 3. The registry that finalizes a batch from two cross-bound recursive bundles.
+  //
+  // The last two arguments choose the nonce path, once and immutably. Zero/zero
+  // is the MAPPING path — per-sender `senderNonces`, replay protection checked
+  // absolutely in Solidity — which is what every deployment has run so far.
+  //
+  // The accumulator path (a non-zero depth and the starting state's root) is
+  // deliberately NOT the default: it makes the per-sender cost O(1) instead of
+  // 12,085-28,777 gas each, but replay protection becomes a PROVED property
+  // behind a VFRI-partial verifier rather than an absolute check. That is an
+  // owner's decision, taken with the environment choice — see
+  // `accumulatorMode` in BatchRegistryV7.sol and ROADMAP § 1.5/1.6.
   const RegistryV7 = await hre.ethers.getContractFactory("BatchRegistryV7");
-  const registry = await RegistryV7.deploy(deployer.address, recursiveAddr);
+  const registry = await RegistryV7.deploy(
+    deployer.address, recursiveAddr, hre.ethers.ZeroHash, 0);
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
   console.log("BatchRegistryV7 deployed to:", registryAddr);

@@ -121,24 +121,37 @@ class AggregatorNode:
             self._stats.transactions_received += 1
         logger.debug("tx accepted: %s (mempool=%d)", tx_hash_hex[:16], self.mempool.size())
 
-    def run_cycle(self, prove_witnesses: bool = False) -> BatchResult | None:
+    def run_cycle(
+        self, prove_witnesses: bool = False, prove_tree: bool = False
+    ) -> BatchResult | None:
         """Attempt to create and prove a batch from pending transactions.
 
         Returns a BatchResult when a batch is created, None when the mempool
         has fewer transactions than min_batch_size.
+
+        ``prove_witnesses`` proves ``tx[0]`` (the direct `BatchRegistryV5`
+        path); ``prove_tree`` proves EVERY signature in the batch (the
+        `BatchRegistryV7` path) and costs proving time proportional to N.
         """
-        result = self.batcher.try_batch(prove_witnesses=prove_witnesses)
+        result = self.batcher.try_batch(
+            prove_witnesses=prove_witnesses, prove_tree=prove_tree
+        )
         if result is not None:
             self._record(result)
         return result
 
-    def force_cycle(self, prove_witnesses: bool = False) -> BatchResult | None:
+    def force_cycle(
+        self, prove_witnesses: bool = False, prove_tree: bool = False
+    ) -> BatchResult | None:
         """Force a batch from whatever is in the mempool (≥ 1 tx).
 
         Useful for flushing at shutdown or when a deadline is reached.
         Returns None only if the mempool is completely empty.
+        See :meth:`run_cycle` for what the two proving options differ in.
         """
-        result = self.batcher.force_batch(prove_witnesses=prove_witnesses)
+        result = self.batcher.force_batch(
+            prove_witnesses=prove_witnesses, prove_tree=prove_tree
+        )
         if result is not None:
             self._record(result)
         return result

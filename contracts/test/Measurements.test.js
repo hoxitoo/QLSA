@@ -122,7 +122,7 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
     const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
       .deploy(await vfri11.getAddress());
     const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
-      .deploy(owner.address, await recursive.getAddress());
+      .deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
 
     const bundle = (b) => ({
       inner: b.inner,
@@ -148,13 +148,29 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
     expect(fx.bundle8.lastLayerEvals.length).to.equal(16);
   });
 
-// Ф3's economics turn on this one figure, so it is re-measured like the rest.
-  // Marginally: the difference between 10 and 25 senders, so the ~14.7M shared
-  // batch cost and the 21,000 tx base cancel. Measuring one call and dividing
-  // would charge the whole batch to a single sender.
-  it("marginal cost of a sender in BatchRegistryV7", async function () {
+// Ф3's economics turn on what a sender costs, and it is TWO figures, not one.
+  //
+  // A fresh registry makes every sender write a ZERO slot — SSTORE_SET (20,000)
+  // plus the cold-slot surcharge — so that is the FIRST-TIME cost. A sender seen
+  // in an earlier batch writes a non-zero slot: SSTORE_RESET (2,900) + 2,100.
+  // The gap is 17,100 gas and it decides different things:
+  //
+  //   the CEILING (senders per transaction) must use the COLD figure, because a
+  //     safety limit has to hold in the worst case — a batch of all-new senders;
+  //   BREAK-EVEN must use the WARM one, because that is what a running system
+  //     pays for almost every sender.
+  //
+  // Until 2026-10-05 one entry served both, which made the mapping look dearer
+  // than it is and overstated the case for the accumulator. The comment right
+  // here already said a warm slot is cheaper; the consequence never reached
+  // ROADMAP § 1.5.
+  //
+  // Marginally in both cases: the difference between 10 and 25 senders, so the
+  // ~14.7M shared batch cost and the 21,000 tx base cancel. Measuring one call
+  // and dividing would charge the whole batch to a single sender.
+  it("marginal cost of a FIRST-TIME sender in BatchRegistryV7", async function () {
     const fx = FX("tree_recursive_bundles_e2e.json");
-    if (!fx) { console.log("        [v7_sender_marginal] fixture absent — skipped"); return; }
+    if (!fx) { console.log("        [v7_sender_marginal_cold] fixture absent — skipped"); return; }
     this.timeout(1_800_000);
     const [owner] = await ethers.getSigners();
 
@@ -163,14 +179,12 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
       outerHints: b.outerHints, lastLayerEvals: b.lastLayerEvals,
     });
 
-    // A fresh registry per call: finalizedBatches rejects a repeat root, and a
-    // warm senderNonces slot costs less than a cold one.
     const run = async (n) => {
       const vfri11 = await (await ethers.getContractFactory("QLSAVerifierVFRI11")).deploy();
       const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
         .deploy(await vfri11.getAddress());
       const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
-        .deploy(owner.address, await recursive.getAddress());
+        .deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
       const senders = Array.from({ length: n }, (_, i) =>
         ethers.zeroPadValue(ethers.toBeHex(i + 1), 32));
       const tx = await reg.submitBatchWithNonces(
@@ -182,7 +196,76 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
 
     const g10 = await run(10);
     const g25 = await run(25);
-    check("v7_sender_marginal", (g25 - g10) / 15n);
+    check("v7_sender_marginal_cold", (g25 - g10) / 15n);
+  });
+
+  // The steady-state figure, on NonceLoopHarness — V7's nonce block verbatim.
+  // The real contract cannot produce it: a second batch into the same registry
+  // needs a second merkleRoot, finalizedBatches rejects a repeat, and a
+  // different root needs different cross-bound proofs.
+  //
+  // The harness is cross-checked against the real contract in
+  // V7SenderCostProbe.test.js on the two points the real contract CAN produce,
+  // so it is not measuring itself.
+  it("marginal cost of a RETURNING sender", async function () {
+    this.timeout(1_800_000);
+    const harness = async () =>
+      (await (await ethers.getContractFactory("NonceLoopHarness")).deploy());
+    const senders = (n) =>
+      Array.from({ length: n }, (_, i) => ethers.zeroPadValue(ethers.toBeHex(i + 1), 32));
+
+    const run = async (n) => {
+      const h = await harness();
+      const s = senders(n);
+      await (await h.applyNonces(s, Array.from({ length: n }, () => 1n))).wait();
+      const tx = await h.applyNonces(s, Array.from({ length: n }, () => 2n));
+      return (await tx.wait()).gasUsed;
+    };
+
+    const g10 = await run(10);
+    const g25 = await run(25);
+    check("v7_sender_marginal_warm", (g25 - g10) / 15n);
+  });
+
+  // The figure that refutes § A-4 in its separate-proof form, so it is
+  // re-measured like everything else rather than left in prose.
+  it("the nonce accumulator's transition cost, and its marginal", async function () {
+    const nfx = FX("nonce_accumulator_e2e.json");
+    const tfx = FX("tree_recursive_bundles_e2e.json");
+    if (!nfx || !tfx) {
+      console.log("        [nonce_transition_*] fixture absent — skipped");
+      return;
+    }
+    this.timeout(1_800_000);
+    const [owner] = await ethers.getSigners();
+
+    const run = async (which) => {
+      const st = nfx[which].statement;
+      const vfri11 = await (await ethers.getContractFactory("QLSAVerifierVFRI11")).deploy();
+      const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
+        .deploy(await vfri11.getAddress());
+      const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
+        .deploy(owner.address, await recursive.getAddress(), st.oldRoot, st.depth);
+      const b = nfx[which].bundle;
+      const tx = await reg.submitNonceTransition(
+        {
+          inner: b.inner, outerProof: b.outerProof, outerCommitment: b.outerCommitment,
+          outerHints: b.outerHints, lastLayerEvals: b.lastLayerEvals,
+        },
+        nfx[which].senders,
+        st.updates.map((u) => ({
+          index: u.index, oldNonce: BigInt(u.oldNonce),
+          newNonce: BigInt(u.newNonce), postRoot: u.postRoot,
+        })),
+        st.newRoot,
+        { gasLimit: BigInt(M.cap) - 1n });
+      return (await tx.wait()).gasUsed;
+    };
+
+    const g1 = await run("one");
+    const g25 = await run("many");
+    check("nonce_transition_verify", g1);
+    check("nonce_transition_marginal", (g25 - g1) / 24n);
   });
 
   it("outer recursion verify: why a fully t=16 recursion does not fit", async function () {

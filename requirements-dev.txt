@@ -2,6 +2,12 @@ pytest==9.0.3
 bandit==1.9.4
 mypy==1.20.2
 black==24.10.0
+# ruff, for the undefined-name check (F821). mypy's CI scope is core/ and
+# aggregator/, so testnet/ and benchmarks/ had NO static checking at all — which
+# is how `abi=_REGISTRY_V4_ABI` (a name that exists nowhere) sat in
+# testnet/submit.py until 2026-10-04, making the DEFAULT --stack v7 submitter
+# raise NameError on construction. One ruff invocation finds it.
+ruff==0.15.8
 pip-audit==2.10.0
 maturin==1.13.3
 # API testing (FastAPI TestClient) — actual versions pinned in requirements-api.txt

@@ -28,6 +28,11 @@ pub mod recursive;
 pub mod trace;
 pub mod vfri2_bridge;
 pub mod batch_tree;
+pub mod nonce_tree;
+// Test-only: the one implementation of the SHA-256 rule that generates this
+// project's frozen M31 constants. Not compiled into the shipped library.
+#[cfg(test)]
+pub mod domain_derivation;
 
 use blake2::{Blake2s256, Digest};
 use stwo::core::air::Component;
