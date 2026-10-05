@@ -406,13 +406,17 @@ def _submit_v7(result, batch_merkle_root: bytes, sender_nonces: dict[bytes, int]
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="QLSA E2E testnet demo")
     p.add_argument(
-        "--stack", choices=["v8", "v7", "v6", "v4"], default="v7",
+        "--stack", choices=["v8", "v7"], default="v7",
         help=(
-            "Contract stack: v7 = QLSAVerifierVFRI11 + BatchRegistryV5 (default; "
-            "Poseidon2 t=8, atomic dual verify in one tx, node collision ~2^62 — "
-            "strongest on-chain soundness); v6 = QLSAVerifierVFRI10 + "
-            "BatchRegistryV6 (Poseidon2 t=4, per-group split, node ~2^31, lower "
-            "peak gas per tx); v4 = QLSAVerifierVFRI7 + BatchRegistryV4 (MVP-5)."
+            "Contract stack. "
+            "v7 (default) = QLSAVerifierVFRI11 + BatchRegistryV5: direct dual "
+            "verify in one tx, Poseidon2 t=8, node collision ~2^62 — but proves "
+            "tx[0] ONLY, the rest are committed by the transaction-list root. "
+            "v8 = QLSAVerifierRecursive + BatchRegistryV7: proves EVERY signature "
+            "in the batch via the aggregation tree, one tx, 130-bit FRI "
+            "(n_queries is raised to 20 automatically). "
+            "The retired v6/v4 stacks were removed in the Ф1 narrowing; they used "
+            "to be listed here and were rejected at runtime."
         ),
     )
     p.add_argument("--txs", type=int, default=8, help="Number of transactions (default: 8)")

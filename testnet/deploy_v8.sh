@@ -17,7 +17,10 @@
 # mechanism, not a gas optimisation — see docs/conclusions.md.
 #
 # Prerequisites:
-#   cp .env.example .env       # fill in RPC_URL and DEPLOYER_PRIVATE_KEY
+#   cp .env.example .env       # fill in RPC_URL and PRIVATE_KEY
+#                              # hardhat reads PRIVATE_KEY; with only
+#                              # DEPLOYER_PRIVATE_KEY set there is no signer
+#                              # and the deploy fails with an empty accounts list
 #   cd contracts && npm install
 #   cd stark_stwo && maturin develop --features python --release
 #
@@ -97,7 +100,6 @@ echo "Next steps:"
 echo "  # Copy addresses to .env:"
 echo "  cat .env.deployed >> .env"
 echo "  # Run E2E demo (recursive, n_queries=20 -> 130-bit soundness):"
-echo "  # v7 is the DEFAULT stack, so --stack may be omitted:"
 echo "  python -m testnet.e2e --stack v8 --txs 8 --dry-run"
 echo "  python -m testnet.e2e --stack v8 --txs 8"
 echo "  # Monitor BatchFinalized events:"

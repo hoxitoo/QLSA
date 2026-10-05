@@ -93,13 +93,16 @@ Everything below is ready to run; it has not been exercised on a public network
 because outbound RPC is blocked in the development environment. It HAS been run
 end to end against a standalone JSON-RPC node: real ML-DSA-65 signatures through
 V23 → VFRI11 at 20 queries → recursion → `BatchRegistryV7`, finalized in one
-transaction at **13,168,471 gas**.
+transaction at **14,724,702 gas** (2026-10-05, proving ALL N signatures via the
+aggregation tree). An earlier run of the same command measured 13,168,471 — that
+was before Ф2.3, when `--stack v8` proved `tx[0]` only; both figures are in
+`contracts/test/fixtures/measurements.json`.
 
 ### 0. What you need
 
 - An RPC endpoint. The public node in `.env.example` works but rate-limits, and a
   13M-gas submission is not a small request — use Infura/Alchemy/self-hosted.
-- An account with Sepolia ETH. One submission is ~13.2M gas; **0.5 ETH** is ample
+- An account with Sepolia ETH. One submission is ~14.7M gas; **0.5 ETH** is ample
   for deployment plus several runs. Any Sepolia faucet will do.
 - Rust nightly `2025-07-01`, Python 3.11+, Node 18+.
 
@@ -168,7 +171,8 @@ soundness, so it refuses to run pointlessly.
 
 ### 6. What to check
 
-- `gasUsed` around **13.2M**. Materially higher means something is off — compare
+- `gasUsed` around **14.7M** for a small batch (it grows ~28,777 per first-time
+  sender, ~12,085 per returning one). Materially higher means something is off — compare
   against `contracts/test/fixtures/measurements.json`, which the test suite
   re-measures.
 - `finalized=True` and a `BatchFinalized` event. `python -m testnet.monitor`

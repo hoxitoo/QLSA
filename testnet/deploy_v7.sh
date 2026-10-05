@@ -14,7 +14,10 @@
 # gas per transaction: ~2.15M + ~1.70M, at the weaker ~2^31 node bound).
 #
 # Prerequisites:
-#   cp .env.example .env       # fill in RPC_URL and DEPLOYER_PRIVATE_KEY
+#   cp .env.example .env       # fill in RPC_URL and PRIVATE_KEY
+#                              # hardhat reads PRIVATE_KEY; with only
+#                              # DEPLOYER_PRIVATE_KEY set there is no signer
+#                              # and the deploy fails with an empty accounts list
 #   cd contracts && npm install
 #   cd stark_stwo && maturin develop --features python --release
 #

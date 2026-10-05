@@ -97,11 +97,20 @@
       "in-process test EVM and NOT a public testnet — outbound RPC is blocked in",
       "this environment. A public-testnet run remains OUTSTANDING before mainnet."
     ],
-    "v8_stack_full_e2e": {
+    "v8_stack_tx0_path": {
       "gasUsed": 13168471,
-      "what": "real ML-DSA-65 signatures -> V23 -> VFRI11 (20 queries) -> recursion -> BatchRegistryV7.submitBatchWithNonces, ONE transaction",
+      "what": "SUPERSEDED. real ML-DSA-65 signatures -> V23 -> VFRI11 (20 queries) -> recursion -> BatchRegistryV7.submitBatchWithNonces, ONE transaction",
       "soundness": "130-bit FRI, ~2^62 Merkle nodes",
-      "date": "2026-07-31"
+      "date": "2026-07-31",
+      "superseded": "This measured the path that proved tx[0] only. Ф2.3 (2026-10-04) moved --stack v8 onto the aggregation tree, so the same command now proves ALL N signatures and costs more. Kept because README quoted this figure as the one to expect."
+    },
+    "v8_stack_full_e2e": {
+      "gasUsed": 14724702,
+      "what": "real ML-DSA-65 signatures -> V23 -> aggregation tree over ALL N -> recursion -> BatchRegistryV7.submitBatchWithNonces, ONE transaction. 2 transactions, 2 first-time senders.",
+      "soundness": "130-bit FRI, ~2^62 Merkle nodes",
+      "date": "2026-10-05",
+      "reconciles": "14,663,950 (v7_tree_submitBatch, no senders) + 2 first-time sender writes at ~28,777 = ~14,721,504. The 3,198 difference is calldata for the two senders and their nonces.",
+      "note": "Run against a standalone `npx hardhat node` after the Ф2.3 wiring and the three ABI fixes of 2026-10-04 — the first end-to-end confirmation that the submission path works at all, since those ABIs had made it impossible."
     }
   }
 }
