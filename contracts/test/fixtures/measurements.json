@@ -61,11 +61,20 @@
       "how": "cargo test write_tree_recursive_bundles_fixture -- --ignored; then contracts/test/BatchRegistryV7TreeE2E.test.js sends the tx and reads gasUsed.",
       "note": "merkleRoot here is R, the membership root DERIVED from the proofs and used as the Fiat-Shamir seed, with txListRoot carried alongside as the (attested, unproved) transaction-list commitment. Constant in N: the root node's shape is a fixed point, so two signatures measure the same as many. The fixture's fold count is derived from each root's DEPTH, not the leaves' — a tree root sits at depth 15/14 where a V23 group sits at 10/8, so inheriting the leaves' 6 folds put 512 last-layer evaluations on chain instead of 16 and the call reverted. Measuring the outer trace alone and inferring the total was the error."
     },
-    "v7_sender_marginal": {
+    "v7_sender_marginal_cold": {
       "value": 28777,
-      "what": "Marginal gas per additional sender in BatchRegistryV7.submitBatchWithNonces, measured 10 -> 25 senders.",
+      "what": "Marginal gas per additional FIRST-TIME sender in BatchRegistryV7.submitBatchWithNonces, measured 10 -> 25 senders.",
       "how": "contracts/test/V7SenderCostProbe.test.js sends batches at 1/10/25 senders on fresh registries and differences the gasUsed, so the ~14.7M shared batch cost and the 21,000 tx base cancel.",
-      "note": "GROWS with n (26,065 at 1->10) because of the O(n^2) duplicate scan. This is the figure Ф3's economics turn on: with it the sender ceiling is ~72 while break-even needs N > 607. Previously the roadmap used 42k measured on BatchRegistryV5 — the wrong path, which proves tx[0] rather than aggregating N."
+      "note": "FIRST-TIME: a fresh registry means every sender writes a ZERO slot, so this carries SSTORE_SET (20,000) + the cold-slot surcharge (2,100). USE THIS FOR THE CEILING — how many senders fit one transaction must hold in the worst case, a batch of all-new senders. Do NOT use it for break-even; see v7_sender_marginal_warm. GROWS with n (26,065 at 1->10) because of the O(n^2) duplicate scan.",
+      "corrected": "Was named `v7_sender_marginal` and used for BOTH the ceiling and break-even. The harness comment beside it already said 'a warm senderNonces slot costs less than a cold one', but the consequence never reached ROADMAP § 1.5 — so prose drifted from a number inside the file that exists to prevent exactly that. Renamed so the name states which case it measures."
+    },
+    "v7_sender_marginal_warm": {
+      "value": 12085,
+      "what": "Marginal gas per additional RETURNING sender — one that appeared in an earlier batch, so its senderNonces slot is already non-zero.",
+      "how": "contracts/test/V7SenderCostProbe.test.js on NonceLoopHarness (contracts/src/test/), which carries BatchRegistryV7's nonce block verbatim. Two calls into ONE harness: the first warms the slots, the second is measured. The real contract cannot produce this — a second batch needs a second merkleRoot, finalizedBatches rejects a repeat, and a different root needs different cross-bound proofs.",
+      "note": "USE THIS FOR BREAK-EVEN — it is what a running system pays for almost every sender; the first-time cost is paid once per sender ever. The difference from the cold figure is 17,100 gas, which is EXACTLY SSTORE_SET (20,000) - SSTORE_RESET (2,900).",
+      "harness_validated": "A harness measured only against itself measures nothing. The same test cross-checks it against the real contract on the TWO points the real contract CAN produce before using its third: cold 29,185 vs 28,777 (1.4%) and warm-within-one-transaction 12,946 vs 12,538 (3.3%), both inside a 5% bound. If V7's loop changes and the harness's does not, that check fails.",
+      "consequence": "The correction moves the numbers a lot and does NOT overturn the conclusion. Compared consistently at the steady-state marginal: break-even needs N > 359 and one transaction holds ~172 senders, so break-even stays OUTSIDE the ceiling and the nonce accumulator (§ A-4) is still the lever that reaches profitability. What changes is the margin — the gap narrows from ~8.4x (607 needed against 72 reachable, both on the cold figure) to ~2.1x. The worst-case ceiling, which is what a safety limit must use, stays at ~71."
     }
   },
   "live_node_runs": {
