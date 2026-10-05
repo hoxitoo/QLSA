@@ -122,7 +122,7 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
     const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
       .deploy(await vfri11.getAddress());
     const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
-      .deploy(owner.address, await recursive.getAddress());
+      .deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
 
     const bundle = (b) => ({
       inner: b.inner,
@@ -184,7 +184,7 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
       const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
         .deploy(await vfri11.getAddress());
       const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
-        .deploy(owner.address, await recursive.getAddress());
+        .deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
       const senders = Array.from({ length: n }, (_, i) =>
         ethers.zeroPadValue(ethers.toBeHex(i + 1), 32));
       const tx = await reg.submitBatchWithNonces(
@@ -225,6 +225,47 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
     const g10 = await run(10);
     const g25 = await run(25);
     check("v7_sender_marginal_warm", (g25 - g10) / 15n);
+  });
+
+  // The figure that refutes § A-4 in its separate-proof form, so it is
+  // re-measured like everything else rather than left in prose.
+  it("the nonce accumulator's transition cost, and its marginal", async function () {
+    const nfx = FX("nonce_accumulator_e2e.json");
+    const tfx = FX("tree_recursive_bundles_e2e.json");
+    if (!nfx || !tfx) {
+      console.log("        [nonce_transition_*] fixture absent — skipped");
+      return;
+    }
+    this.timeout(1_800_000);
+    const [owner] = await ethers.getSigners();
+
+    const run = async (which) => {
+      const st = nfx[which].statement;
+      const vfri11 = await (await ethers.getContractFactory("QLSAVerifierVFRI11")).deploy();
+      const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
+        .deploy(await vfri11.getAddress());
+      const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
+        .deploy(owner.address, await recursive.getAddress(), st.oldRoot, st.depth);
+      const b = nfx[which].bundle;
+      const tx = await reg.submitNonceTransition(
+        {
+          inner: b.inner, outerProof: b.outerProof, outerCommitment: b.outerCommitment,
+          outerHints: b.outerHints, lastLayerEvals: b.lastLayerEvals,
+        },
+        nfx[which].senders,
+        st.updates.map((u) => ({
+          index: u.index, oldNonce: BigInt(u.oldNonce),
+          newNonce: BigInt(u.newNonce), postRoot: u.postRoot,
+        })),
+        st.newRoot,
+        { gasLimit: BigInt(M.cap) - 1n });
+      return (await tx.wait()).gasUsed;
+    };
+
+    const g1 = await run("one");
+    const g25 = await run("many");
+    check("nonce_transition_verify", g1);
+    check("nonce_transition_marginal", (g25 - g1) / 24n);
   });
 
   it("outer recursion verify: why a fully t=16 recursion does not fit", async function () {

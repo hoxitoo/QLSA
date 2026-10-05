@@ -47,6 +47,20 @@
       "what": "BatchRegistryV5.submitBatch, both full-V23 groups, VFRI12 (t=16), n_queries=1",
       "note": "128-bit NODE collision. FRI soundness is separate and is 16-bit at n_queries=1"
     },
+    "nonce_transition_verify": {
+      "value": 6882057,
+      "what": "BatchRegistryV7.submitNonceTransition with ONE update — the nonce accumulator's whole on-chain cost, dominated by its own verifyRecursive. Constant in N.",
+      "how": "contracts/test/BatchRegistryV7Accumulator.test.js sends the transaction and reads gasUsed. Fixture: nonce_accumulator_e2e.json (cargo test write_nonce_accumulator_fixture -- --ignored).",
+      "note": "THIS NUMBER REFUTES § A-4's CENTRAL CLAIM in the separate-proof form. Against the mapping's measured 12,085 gas per RETURNING sender it only pays above ~569 senders, and one transaction admits ~172. So the accumulator as a SEPARATE proof does not reach break-even — it is dearer than the mapping at every N the cap allows.",
+      "and_it_does_not_fit_with_a_batch": "14,663,950 (v7_tree_submitBatch) + 6,882,057 = 21,546,007 against a 16,777,216 cap. The first design took the batch bundles in the same call and reverted; that is how this was measured rather than assumed. Hence submitNonceTransition is its own transaction.",
+      "what_would_fix_it": "Fold the nonce statement into the batch proof as a further path group in composition_channel_t8::node_shape, so it rides the two verifyRecursive calls already being paid for instead of adding a third. The separate proof was recorded as 'simpler and cheaper'; only the first half was true."
+    },
+    "nonce_transition_marginal": {
+      "value": 21083,
+      "what": "Marginal gas per additional update in submitNonceTransition, measured 1 -> 25 updates.",
+      "how": "Same test. Marginally, so the ~6.9M constant cancels.",
+      "note": "STORAGE is O(1) — one slot holds the whole replay state whatever N is — but this is still HIGHER than the mapping's 12,085 per returning sender, so the accumulator loses on the marginal as well as on the constant. Two contributors, both addressable: nonceStatementBinding concatenates with abi.encodePacked in a loop, which is O(n^2) in memory, and a 25-update statement has a larger inner trace (log 10 vs 9) than a 1-update one."
+    },
     "outer_recursion_verify_t8": {
       "value": 5441919,
       "what": "VFRI11 verify of the OUTER recursion trace (87 cols, log=14, inner n_queries=20)"

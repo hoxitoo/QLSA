@@ -10,6 +10,16 @@
         "internalType": "address",
         "name": "_verifier",
         "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "initialRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "nonceDepth",
+        "type": "uint8"
       }
     ],
     "stateMutability": "nonpayable",
@@ -44,6 +54,69 @@
   {
     "inputs": [],
     "name": "Log8ProofInvalid",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NonceBindingMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NonceDepthOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "NonceIndexOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NonceProofInvalid",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "provided",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "stored",
+        "type": "bytes32"
+      }
+    ],
+    "name": "NonceRootMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint32",
+        "name": "provided",
+        "type": "uint32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "expected",
+        "type": "uint32"
+      }
+    ],
+    "name": "NonceSlotMismatch",
     "type": "error"
   },
   {
@@ -102,6 +175,11 @@
       }
     ],
     "name": "SenderNonceTooLow",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "WrongNoncePath",
     "type": "error"
   },
   {
@@ -170,6 +248,31 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "bytes32",
+        "name": "oldRoot",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "newRoot",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "updates",
+        "type": "uint256"
+      }
+    ],
+    "name": "NonceStateAdvanced",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "address",
         "name": "previousOwner",
         "type": "address"
@@ -211,6 +314,19 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "accumulatorMode",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -349,6 +465,107 @@
         "internalType": "bool",
         "name": "",
         "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "sender",
+        "type": "bytes32"
+      }
+    ],
+    "name": "nonceSlot",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nonceStateRoot",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "oldRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "newRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "depth",
+        "type": "uint32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint32",
+            "name": "index",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "oldNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "newNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "postRoot",
+            "type": "bytes32"
+          }
+        ],
+        "internalType": "struct BatchRegistryV7.NonceUpdate[]",
+        "name": "updates",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "nonceStatementBinding",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nonceTreeDepth",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
       }
     ],
     "stateMutability": "view",
@@ -744,6 +961,125 @@
       }
     ],
     "name": "submitBatchWithNonces",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "components": [
+              {
+                "internalType": "bytes32",
+                "name": "traceRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint128",
+                "name": "oodsComboPos",
+                "type": "uint128"
+              },
+              {
+                "internalType": "uint128",
+                "name": "oodsComboNeg",
+                "type": "uint128"
+              },
+              {
+                "internalType": "bytes32",
+                "name": "compRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "bytes32[]",
+                "name": "friLayerRoots",
+                "type": "bytes32[]"
+              },
+              {
+                "internalType": "bytes32",
+                "name": "batchRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint256",
+                "name": "treeDepth",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "nQueries",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct QLSAVerifierRecursive.InnerPublics",
+            "name": "inner",
+            "type": "tuple"
+          },
+          {
+            "internalType": "bytes",
+            "name": "outerProof",
+            "type": "bytes"
+          },
+          {
+            "internalType": "bytes16",
+            "name": "outerCommitment",
+            "type": "bytes16"
+          },
+          {
+            "internalType": "bytes",
+            "name": "outerHints",
+            "type": "bytes"
+          },
+          {
+            "internalType": "uint128[]",
+            "name": "lastLayerEvals",
+            "type": "uint128[]"
+          }
+        ],
+        "internalType": "struct BatchRegistryV7.RecursiveBundle",
+        "name": "nonceBundle",
+        "type": "tuple"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "senders",
+        "type": "bytes32[]"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint32",
+            "name": "index",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "oldNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "newNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "postRoot",
+            "type": "bytes32"
+          }
+        ],
+        "internalType": "struct BatchRegistryV7.NonceUpdate[]",
+        "name": "updates",
+        "type": "tuple[]"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "newNonceRoot",
+        "type": "bytes32"
+      }
+    ],
+    "name": "submitNonceTransition",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

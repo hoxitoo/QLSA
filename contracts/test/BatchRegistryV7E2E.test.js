@@ -56,7 +56,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     await recursive.waitForDeployment();
     registry = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
     await registry.waitForDeployment();
 
     if (FIXTURE_EXISTS) {
@@ -128,7 +128,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     // This is the case that matters: one group cannot be passed off as both,
     // because its batchRoot commits to the OTHER group's trace root.
     for (const dup of [b10, b8]) {
-      const fresh = await F.deploy(owner.address, await recursive.getAddress());
+      const fresh = await F.deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
       await expect(
         fresh.submitBatch(fx.merkleRoot, ethers.ZeroHash, dup, dup, { gasLimit: 16_777_215n })
       ).to.be.revertedWithCustomError(fresh, "CrossBindingMismatch");
@@ -141,7 +141,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     const [owner] = await ethers.getSigners();
     const fresh = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
     await expect(
       fresh.submitBatch("0x" + "5e".repeat(32), ethers.ZeroHash, b10, b8, { gasLimit: 16_777_215n })
     ).to.be.revertedWithCustomError(fresh, "CrossBindingMismatch");
@@ -160,7 +160,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     const [owner] = await ethers.getSigners();
     const fresh = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
     const tx = await fresh.submitBatch(fx.merkleRoot, ethers.ZeroHash, b8, b10, { gasLimit: 16_777_215n });
     await tx.wait();
     expect(await fresh.isBatchFinalized(fx.merkleRoot)).to.equal(true);
@@ -175,7 +175,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     const [owner] = await ethers.getSigners();
     const fresh = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
 
     const tampered = JSON.parse(JSON.stringify(fx.bundle10));
     tampered.lastLayerEvals[0] = (BigInt(tampered.lastLayerEvals[0]) ^ 1n).toString();
@@ -190,7 +190,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     const [owner] = await ethers.getSigners();
     const fresh = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
 
     const senders = ["0x" + "11".repeat(32), "0x" + "22".repeat(32)];
     const tx = await fresh.submitBatchWithNonces(fx.merkleRoot, ethers.ZeroHash, b10, b8, senders, [1, 2], { gasLimit: 16_777_215n }
@@ -203,7 +203,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     // Nonce 0 is unsubmittable: an unseen sender reads 0 and newNonce must exceed it.
     const other = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
     await expect(
       other.submitBatchWithNonces(fx.merkleRoot, ethers.ZeroHash, b10, b8, [senders[0]], [0], {
         gasLimit: 16_777_215n,
@@ -229,7 +229,7 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     const [owner] = await ethers.getSigners();
     const fresh = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
 
     const tx = await fresh.submitBatch(
       pf.merkleRoot, ethers.ZeroHash, bundleTuple(pf.bundle10), bundleTuple(pf.bundle8),

@@ -4136,6 +4136,119 @@ mod tests_vfri8 {
         println!("wrote {path}");
     }
 
+    /// Ф3.2 — the nonce accumulator's transition as an on-chain batch.
+    ///
+    /// Run with:
+    ///   cargo test write_nonce_accumulator_fixture -- --ignored --nocapture
+    ///
+    /// Emits one fixture serving three purposes, because they must agree:
+    ///   * the Rust REFERENCE VALUES for `nonceSlot` and
+    ///     `nonceStatementBinding`, so Solidity is pinned to Rust rather than to
+    ///     its own re-derivation (the pattern behind the 47 Poseidon2
+    ///     cross-checks);
+    ///   * the transition bundle, so the gas can be measured;
+    ///   * two statements of DIFFERENT size (1 and 25 updates), because the
+    ///     completion condition for A-4 is that they cost the SAME.
+    #[test]
+    #[ignore]
+    fn write_nonce_accumulator_fixture() {
+        use crate::nonce_tree::{apply_updates, slot_index, NonceTree};
+        use crate::recursive::nonce_accumulator::NonceStatement;
+
+        // Depth 8 keeps the fixture quick to regenerate. The production depth is
+        // 28 (measured free against 24), and the on-chain cost does not depend
+        // on it — only the trace size does.
+        const D: usize = 8;
+        let n_queries = 20usize;
+
+        let sender = |i: usize| -> [u8; 32] {
+            let mut h = [0u8; 32];
+            // Spread across the low bytes so the slot indices differ.
+            h[0] = (i * 7 + 1) as u8;
+            h[1] = (i * 13 + 3) as u8;
+            h[2] = (i * 29 + 5) as u8;
+            h
+        };
+
+        let build = |n: usize| {
+            let mut tree = NonceTree::new(D).unwrap();
+            let updates: Vec<([u8; 32], u64)> =
+                (0..n).map(|i| (sender(i), (i as u64) + 1)).collect();
+            let (old_root, new_root, ts) = apply_updates(&mut tree, &updates).unwrap();
+            let st = NonceStatement::from_transitions(&ts, &old_root, &new_root, D).unwrap();
+            let (bound, b) = gen_nonce_recursive_bundle(&st, &ts, n_queries)
+                .expect("nonce bundle");
+            (st, bound, b)
+        };
+
+        let statement_json = |st: &NonceStatement, bound: &[u8; 32]| -> String {
+            let ups: Vec<String> = st
+                .updates
+                .iter()
+                .map(|u| {
+                    format!(
+                        "{{ \"index\": {}, \"oldNonce\": \"{}\", \"newNonce\": \"{}\", \"postRoot\": \"0x{}\" }}",
+                        u.index, u.old_nonce, u.new_nonce,
+                        hex::encode(p2t8_pack(u.post_root))
+                    )
+                })
+                .collect();
+            format!(
+                "{{\n    \"depth\": {},\n    \"oldRoot\": \"0x{}\",\n    \"newRoot\": \"0x{}\",\n    \"binding\": \"0x{}\",\n    \"updates\": [\n      {}\n    ]\n  }}",
+                st.depth,
+                hex::encode(p2t8_pack(st.old_root)),
+                hex::encode(p2t8_pack(st.new_root)),
+                hex::encode(bound),
+                ups.join(",\n      "),
+            )
+        };
+
+        let (st1, bound1, b1) = build(1);
+        let (st25, bound25, b25) = build(25);
+
+        // The senders, in the SAME order as the statements' updates, so Solidity
+        // can check that each slot is the one its sender's hash determines.
+        // apply_updates sorts by (index, nonce), so the order is not the input
+        // order and must be emitted explicitly rather than reconstructed.
+        let senders_for = |st: &NonceStatement, n: usize| -> String {
+            let mut by_slot: Vec<([u8; 32], u32)> = (0..n)
+                .map(|i| (sender(i), slot_index(&sender(i), D).unwrap()))
+                .collect();
+            let order: Vec<String> = st
+                .updates
+                .iter()
+                .map(|u| {
+                    let k = by_slot
+                        .iter()
+                        .position(|(_, s)| *s == u.index)
+                        .expect("every update's slot belongs to a sender");
+                    let (h, _) = by_slot.remove(k);
+                    format!("\"0x{}\"", hex::encode(h))
+                })
+                .collect();
+            order.join(", ")
+        };
+
+        let json = format!(
+            "{{\n  \"_note\": \"Rust reference values; Solidity is pinned to these. Regenerate with: cargo test write_nonce_accumulator_fixture -- --ignored\",\n  \"nQueries\": {},\n  \"one\": {{\n    \"statement\": {},\n    \"senders\": [{}],\n    \"bundle\": {}\n  }},\n  \"many\": {{\n    \"statement\": {},\n    \"senders\": [{}],\n    \"bundle\": {}\n  }}\n}}\n",
+            n_queries,
+            statement_json(&st1, &bound1),
+            senders_for(&st1, 1),
+            bundle_fixture_json(&b1),
+            statement_json(&st25, &bound25),
+            senders_for(&st25, 25),
+            bundle_fixture_json(&b25),
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/nonce_accumulator_e2e.json"
+        );
+        std::fs::write(path, json).unwrap();
+        println!("wrote {path}");
+        println!("  1 update  : {} updates, binding 0x{}", st1.updates.len(), hex::encode(bound1));
+        println!("  25 updates: {} updates, binding 0x{}", st25.updates.len(), hex::encode(bound25));
+    }
+
     /// The accumulator's bundle verifies, and its binding covers every field.
     #[test]
     #[ignore = "STARK proving; the accumulator's recursive bundle"]

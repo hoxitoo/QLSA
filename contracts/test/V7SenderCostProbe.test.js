@@ -60,7 +60,7 @@ describe("[probe] per-sender cost in BatchRegistryV7", function () {
     ).deploy(await vfri11.getAddress());
     const reg = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
 
     // Two shapes, to separate the storage cost from everything else:
     //

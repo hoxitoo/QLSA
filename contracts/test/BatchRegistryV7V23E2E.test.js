@@ -54,7 +54,7 @@ describe("BatchRegistryV7 × real V23 @ production n_queries=20", function () {
     await recursive.waitForDeployment();
     registry = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
     await registry.waitForDeployment();
 
     if (FIXTURE_EXISTS) {
@@ -124,7 +124,7 @@ describe("BatchRegistryV7 × real V23 @ production n_queries=20", function () {
     const [owner] = await ethers.getSigners();
     const fresh = await (
       await ethers.getContractFactory("BatchRegistryV7")
-    ).deploy(owner.address, await recursive.getAddress());
+    ).deploy(owner.address, await recursive.getAddress(), ethers.ZeroHash, 0);
     const bad = JSON.parse(JSON.stringify(fx.bundle10));
     bad.lastLayerEvals[0] = (BigInt(bad.lastLayerEvals[0]) ^ 1n).toString();
     await expect(
