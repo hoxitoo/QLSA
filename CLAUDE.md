@@ -210,7 +210,25 @@ Always use `bincode::encode_to_vec` / `bincode::decode_from_slice` with these ty
 | `QLSAVerifierVFRI12.sol` | the **t=16** branch (8-word/248-bit nodes, ~2^124 ≈ 128-bit). Dual `submitBatch` **15,432,163 gas**; only 8% headroom and fixed at 16-bit FRI (q=2 exceeds the cap) |
 | `QLSAVerifierRecursive.sol` | outer verifier — a STARK proving "I verified a VFRI11 STARK". `verifyRecursive` **2,290,000 gas**, constant in batch size |
 | `BatchRegistryV5.sol` | direct path; both V23 trace groups in ONE transaction with cross-proof binding |
-| `BatchRegistryV7.sol` | recursive path; two cross-bound recursive bundles, plus `txListRoot` |
+| `BatchRegistryV7.sol` | recursive path; two cross-bound recursive bundles, plus `txListRoot`. Also carries the **nonce accumulator** (below) |
+
+**`BatchRegistryV7`'s nonce path is chosen IMMUTABLY at construction** —
+`constructor(owner, verifier, initialRoot, nonceDepth)`. `nonceDepth == 0` is the
+mapping path (`senderNonces`, `submitBatchWithNonces`), which is what every
+deployment runs; a non-zero depth is the accumulator (`nonceStateRoot`,
+`submitNonceTransition`). Each mode refuses the other's entry point: two live
+paths would be a replay hole, since a transaction counted in the mapping is
+invisible to the tree and vice versa.
+
+**The accumulator is implemented and MEASURED NOT TO PAY in this form** — it is
+not the production path. Storage is O(1), but the transition costs **6,882,057
+gas** constant plus **21,083** per update, against the mapping's measured 12,085
+per returning sender and 28,777 per first-time one, so it only wins above ~569
+senders where a transaction admits ~172. It also does not fit alongside a batch
+(14.66M + 6.88M > the 16.78M cap), because a separate proof adds a THIRD
+`verifyRecursive`. Fixing that means folding the nonce statement into the batch
+proof as a further path group in `composition_channel_t8::node_shape`; see
+`docs/TECH_DEBT.md` § A-4 and `ROADMAP.md` § 1.5.
 
 `queryHints` ABI is **byte-identical across VFRI11 and VFRI12** (6 head slots:
 `abi.encode(uint128 oodsComboPos, uint128 oodsComboNeg, bytes32 compRoot,
