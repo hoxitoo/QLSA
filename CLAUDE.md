@@ -27,7 +27,8 @@ benchmarks/     bench_core.py, bench_stark.py, bench_poly_circuits.py, bench_wit
 ## Key Commands
 
 ```bash
-# Run all Python tests (~552 passing when PyO3 ext installed; ~350 without PyO3)
+# Run all Python tests (530 passing + 1 skipped with PyO3 ext, 2026-10-08; use `python3 -m pytest`
+# if a bare `pytest` resolves to an interpreter without liboqs)
 pytest tests/ -v
 
 # Run only tests that do NOT need the PyO3 extension
@@ -39,7 +40,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (518 passing, 108 ignored slow STARK integration tests)
+# Run Rust tests (579 passing, 123 ignored slow STARK integration tests — 2026-10-08)
 #
 # ALWAYS use `cargo test`, never `cargo build`, to decide whether code is dead.
 # `cargo build` does not compile `#[cfg(test)]`, so its "never used" warning is
@@ -225,7 +226,7 @@ not the production path. Storage is O(1), but the transition costs **6,813,715
 gas** constant plus **20,479** per update, against the mapping's measured 12,085
 per returning sender and 28,777 per first-time one, so it only wins above ~563
 senders where a transaction admits ~172. It also does not fit alongside a batch
-(14.66M + 6.88M > the 16.78M cap), because a separate proof adds a THIRD
+(14.66M + 6.81M > the 16.78M cap), because a separate proof adds a THIRD
 `verifyRecursive`. Fixing that means folding the nonce statement into the batch
 proof as a further component of the tree's root node (`nonce_update_t8_air`,
 not a path group of `merkle_path_t8_air`, which would reopen the A-4 hole); see
@@ -322,6 +323,18 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 > product on the V7 path. The trust-model gap above is unaffected by that: the
 > hash step is outside the circuit for all N, not just for `tx[0]`.
 
+
+> **Ф3.2 status (2026-10-08).** Two soundness holes found before folding the
+> nonce accumulator into the batch proof, each demonstrated by a test and each
+> closed and re-checked in both directions: **A-6** — `verify_tree_node` now
+> derives every pinned root from the children's channel inputs (it used to pin
+> roots the caller passed, i.e. the prover's own); **A-4** — a nonce update is
+> proved by `recursive/nonce_update_t8_air.rs`, two Poseidon2 lanes on ONE
+> sibling path (two independent `merkle_path_t8_air` paths allowed a replay).
+> Sizing probe `probe_root_node_with_nonce_updates`: the root node with the nonce
+> component stays ≤ log 18 for N ≤ 360 (cap 20) — folding is a go, not yet built.
+> The public-testnet run is 2026-10-10 on the MAPPING path; `contracts/src` is
+> frozen until then. See `docs/TECH_DEBT.md` § A-4, § A-6 and `ROADMAP.md` § 0, § 5.
 
 1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only
