@@ -40,7 +40,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (579 passing, 123 ignored slow STARK integration tests — 2026-10-08)
+# Run Rust tests (582 passing, 125 ignored slow STARK integration tests — 2026-10-08)
 #
 # ALWAYS use `cargo test`, never `cargo build`, to decide whether code is dead.
 # `cargo build` does not compile `#[cfg(test)]`, so its "never used" warning is
@@ -332,7 +332,13 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 > proved by `recursive/nonce_update_t8_air.rs`, two Poseidon2 lanes on ONE
 > sibling path (two independent `merkle_path_t8_air` paths allowed a replay).
 > Sizing probe `probe_root_node_with_nonce_updates`: the root node with the nonce
-> component stays ≤ log 18 for N ≤ 360 (cap 20) — folding is a go, not yet built.
+> component stays ≤ log 18 for N ≤ 360 (cap 20) — folding is a go. The Rust half
+> is BUILT: `prove_tree_node_with_nonce` / `verify_tree_node_with_nonce`,
+> `prove_aggregation_tree_with_nonce` (root only, log10 tree),
+> `gen_mldsa_tree_recursive_bundles_with_nonce` binding the bundles under
+> `seedEff = keccak256("QLSA/nonce-fold/v1" ‖ R ‖ nonceBinding)`, and
+> `verify_tree_root_bundles_with_nonce`. The no-nonce path is byte-identical
+> (tree fixture regenerated, empty diff). The contract half waits for 2026-10-10.
 > The public-testnet run is 2026-10-10 on the MAPPING path; `contracts/src` is
 > frozen until then. See `docs/TECH_DEBT.md` § A-4, § A-6 and `ROADMAP.md` § 0, § 5.
 

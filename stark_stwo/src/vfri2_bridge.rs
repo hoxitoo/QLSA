@@ -2504,6 +2504,23 @@ pub fn prove_aggregation_tree(
     num_folds: Option<usize>,
     fan_in: usize,
 ) -> Result<AggregationTree, String> {
+    prove_aggregation_tree_with_nonce(
+        leaf_columns, memberships, batch_merkle_root, n_queries, num_folds, fan_in, None)
+}
+
+/// [`prove_aggregation_tree`] whose ROOT node also proves a nonce transition
+/// (Ф3.2). Only the root carries it — the level whose statements fit one node —
+/// so every other node, and the whole tree when `nonce` is `None`, is proved
+/// exactly as before.
+pub fn prove_aggregation_tree_with_nonce(
+    leaf_columns: &[(Vec<Vec<u32>>, u32)],
+    memberships: &[crate::recursive::composition_channel_t8::BatchMembership],
+    batch_merkle_root: &[u8],
+    n_queries: usize,
+    num_folds: Option<usize>,
+    fan_in: usize,
+    nonce: Option<crate::recursive::composition_channel_t8::NonceWitness<'_>>,
+) -> Result<AggregationTree, String> {
     use crate::recursive::composition_channel_t8 as node;
 
     if leaf_columns.is_empty() {
@@ -2543,17 +2560,20 @@ pub fn prove_aggregation_tree(
         let mut nodes = Vec::new();
         let mut columns = Vec::new();
         let groups: Vec<_> = statements.chunks(fan_in).collect();
+        // The root is the level that fits in one node; only it carries the
+        // transition.
+        let at_root = if groups.len() == 1 { nonce } else { None };
         // The ROOT's columns are kept too. They were skipped here with the
         // reason "nothing above the root consumes them" — true when written,
         // false now: the on-chain bundle is built FROM them
         // (`gen_mldsa_tree_recursive_bundles`). Recorded as a reversal rather
         // than silently changed, because the old comment argued the opposite.
         for (g, group) in groups.iter().enumerate() {
-            let proved = node::prove_tree_node(group)
+            let proved = node::prove_tree_node_with_nonce(group, at_root)
                 .map_err(|e| format!("level {} node {g}: {e}", levels.len()))?;
             nodes.push(proved);
             columns.push(
-                node::tree_node_trace_columns(group)
+                node::tree_node_trace_columns_with_nonce(group, at_root)
                     .map_err(|e| format!("level {} node {g} columns: {e}", levels.len()))?,
             );
         }
@@ -2637,6 +2657,27 @@ pub fn prove_mldsa_aggregation_tree(
     num_folds: Option<usize>,
     fan_in: usize,
 ) -> Result<AggregationTreeSummary, String> {
+    prove_mldsa_aggregation_tree_with_nonce(entries, tx_hashes, n_queries, num_folds, fan_in, None)
+}
+
+/// [`prove_mldsa_aggregation_tree`] with a nonce transition carried by the
+/// LOG=10 tree's root. Either root would do — both sit at the log-16 fixed
+/// point for any batch above two signatures (`probe_root_node_with_nonce_updates`)
+/// — and log10 is the first bundle, so it is the one named.
+pub fn prove_mldsa_aggregation_tree_with_nonce(
+    entries: &[(
+        [[i64; 256]; 5],
+        [i64; 256],
+        [[i64; 256]; 6],
+        Vec<[i64; 256]>,
+        [[bool; 256]; 6],
+    )],
+    tx_hashes: &[[u8; 32]],
+    n_queries: usize,
+    num_folds: Option<usize>,
+    fan_in: usize,
+    nonce: Option<crate::recursive::composition_channel_t8::NonceWitness<'_>>,
+) -> Result<AggregationTreeSummary, String> {
     use crate::batch_tree::{build_batch_tree_dual, node_words, words_from_hash};
     use crate::recursive::composition_channel_t8::{BatchMembership, Group};
 
@@ -2710,9 +2751,9 @@ pub fn prove_mldsa_aggregation_tree(
             .collect()
     };
 
-    let tree = prove_aggregation_tree(
+    let tree = prove_aggregation_tree_with_nonce(
         &leaves, &memberships_for_side(Group::Log10)?,
-        batch_merkle_root, n_queries, num_folds, fan_in)?;
+        batch_merkle_root, n_queries, num_folds, fan_in, nonce)?;
     let tree8 = prove_aggregation_tree(
         &leaves8, &memberships_for_side(Group::Log8)?,
         batch_merkle_root, n_queries, num_folds, fan_in)?;
@@ -3298,12 +3339,145 @@ pub fn gen_mldsa_tree_recursive_bundles(
     num_folds: Option<usize>,
     fan_in: usize,
 ) -> Result<(RecursiveBundleData, RecursiveBundleData, [u8; 32]), String> {
-    use sha3::{Digest as Sha3Digest, Keccak256};
+    let (b10, b8, r, _) =
+        tree_recursive_bundles(entries, tx_hashes, n_queries, num_folds, fan_in, None)?;
+    Ok((b10, b8, r))
+}
 
+/// The tree bundles of a batch that ALSO moves the nonce accumulator (Ф3.2).
+///
+/// The log10 root proves the transition as a fourth component, and the outer
+/// bundles are cross-bound under
+///
+/// ```text
+///   seedEff = keccak256(NONCE_FOLD_TAG ‖ R ‖ nonceBinding)
+///   bound10 = keccak256(seedEff ‖ traceRoot8),  bound8 = keccak256(seedEff ‖ traceRoot10)
+/// ```
+///
+/// in place of `R`, so the statement rides the two `verifyRecursive` calls the
+/// batch already pays for. `nonceBinding` is [`nonce_statement_binding`] — the
+/// value `BatchRegistryV7` already recomputes for `submitNonceTransition`.
+///
+/// What this binds and what it does not, stated plainly: on-chain verification
+/// is VFRI-partial (FRI, Fiat-Shamir and Merkle binding, not AIR constraints),
+/// so the binding says "these bundles were generated for this statement"; that
+/// the transition is VALID — one shared sibling path, pinned leaves and roots —
+/// is established by the Rust verifier (`verify_tree_node_with_nonce`), exactly
+/// as batch membership is today. It makes the accumulator cheaper, not
+/// stronger.
+pub fn gen_mldsa_tree_recursive_bundles_with_nonce(
+    entries: &[(
+        [[i64; 256]; 5],
+        [i64; 256],
+        [[i64; 256]; 6],
+        Vec<[i64; 256]>,
+        [[bool; 256]; 6],
+    )],
+    tx_hashes: &[[u8; 32]],
+    n_queries: usize,
+    num_folds: Option<usize>,
+    fan_in: usize,
+    st: &crate::recursive::nonce_accumulator::NonceStatement,
+    transitions: &[crate::nonce_tree::NonceTransition],
+) -> Result<TreeNonceBundles, String> {
+    let (bundle10, bundle8, merkle_root, seed_eff) = tree_recursive_bundles(
+        entries, tx_hashes, n_queries, num_folds, fan_in, Some((st, transitions)))?;
+    Ok(TreeNonceBundles {
+        bundle10,
+        bundle8,
+        merkle_root,
+        nonce_binding: nonce_binding_of(st),
+        seed_eff,
+    })
+}
+
+/// What [`gen_mldsa_tree_recursive_bundles_with_nonce`] hands back.
+pub struct TreeNonceBundles {
+    pub bundle10: RecursiveBundleData,
+    pub bundle8: RecursiveBundleData,
+    /// R, the membership root — still the batch's on-chain `merkleRoot`.
+    pub merkle_root: [u8; 32],
+    /// `nonce_statement_binding` of the transition.
+    pub nonce_binding: [u8; 32],
+    /// The seed both bundles are cross-bound under, in place of R.
+    pub seed_eff: [u8; 32],
+}
+
+/// Domain tag for the folded seed, so `keccak256(R ‖ nonceBinding)` can never be
+/// mistaken for any other keccak of two roots in the system.
+pub const NONCE_FOLD_TAG: &[u8] = b"QLSA/nonce-fold/v1";
+
+/// `seedEff = keccak256(NONCE_FOLD_TAG ‖ R ‖ nonceBinding)`.
+pub fn nonce_fold_seed(merkle_root: &[u8; 32], nonce_binding: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let mut h = Keccak256::new();
+    h.update(NONCE_FOLD_TAG);
+    h.update(merkle_root);
+    h.update(nonce_binding);
+    h.finalize().into()
+}
+
+/// The statement's binding, in the packed form the contract holds.
+fn nonce_binding_of(st: &crate::recursive::nonce_accumulator::NonceStatement) -> [u8; 32] {
+    let updates: Vec<(u32, u64, u64, [u8; 32])> = st
+        .updates
+        .iter()
+        .map(|u| (u.index, u.old_nonce, u.new_nonce, p2t8_pack(u.post_root)))
+        .collect();
+    nonce_statement_binding(
+        &p2t8_pack(st.old_root), &p2t8_pack(st.new_root), st.depth as u32, &updates)
+}
+
+/// Off-chain linkage check for a folded batch — what the contract will check
+/// once it takes nonce updates (after the 2026-10-10 run): both bundles are
+/// cross-bound under `seedEff` derived from R and THIS statement.
+///
+/// The statement's public relations are checked too. This does not verify the
+/// root node's proof — `verify_tree_node_with_nonce` does — nor the outer
+/// proofs, which `verifyRecursive` checks on-chain.
+pub fn verify_tree_root_bundles_with_nonce(
+    bundle10: &RecursiveBundleData,
+    bundle8: &RecursiveBundleData,
+    merkle_root: &[u8; 32],
+    st: &crate::recursive::nonce_accumulator::NonceStatement,
+) -> Result<bool, String> {
+    if let Some(reason) = st.check_public() {
+        return Err(format!("nonce statement: {reason}"));
+    }
+    let seed_eff = nonce_fold_seed(merkle_root, &nonce_binding_of(st));
+    Ok(bundle10.bound_root == keccak_pair(&seed_eff, &bundle8.trace_root)
+        && bundle8.bound_root == keccak_pair(&seed_eff, &bundle10.trace_root))
+}
+
+fn keccak_pair(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let mut h = Keccak256::new();
+    h.update(a);
+    h.update(b);
+    h.finalize().into()
+}
+
+/// Both tree roots' bundles, cross-bound under R — or, with a nonce transition,
+/// under `seedEff`. Returns `(bundle10, bundle8, R, seed the bundles are bound
+/// under)`. With `None` the seed is R and every byte is as before.
+fn tree_recursive_bundles(
+    entries: &[(
+        [[i64; 256]; 5],
+        [i64; 256],
+        [[i64; 256]; 6],
+        Vec<[i64; 256]>,
+        [[bool; 256]; 6],
+    )],
+    tx_hashes: &[[u8; 32]],
+    n_queries: usize,
+    num_folds: Option<usize>,
+    fan_in: usize,
+    nonce: Option<crate::recursive::composition_channel_t8::NonceWitness<'_>>,
+) -> Result<(RecursiveBundleData, RecursiveBundleData, [u8; 32], [u8; 32]), String> {
     // Prove both trees once. R — the membership root — comes back with them and
     // is what the registry takes as `merkleRoot`.
-    let trees = prove_mldsa_aggregation_tree(
-        entries, tx_hashes, n_queries, num_folds, fan_in)?;
+    let trees = prove_mldsa_aggregation_tree_with_nonce(
+        entries, tx_hashes, n_queries, num_folds, fan_in, nonce)?;
     let batch_root_words = trees.batch_root;
     let seed = p2t8_pack(batch_root_words);
     let batch_root: &[u8] = &seed;
@@ -3316,14 +3490,14 @@ pub fn gen_mldsa_tree_recursive_bundles(
     let t10 = vfri11_fri_chain(c10, *l10, batch_root, n_queries, num_folds)?.trace_root;
     let t8 = vfri11_fri_chain(c8, *l8, batch_root, n_queries, num_folds)?.trace_root;
 
-    let keccak2 = |a: &[u8], b: &[u8; 32]| -> [u8; 32] {
-        let mut h = Keccak256::new();
-        h.update(a);
-        h.update(b);
-        h.finalize().into()
+    // Without a transition the bundles bind to R itself — unchanged. With one,
+    // to seedEff, which commits to R AND the statement.
+    let bind_seed: [u8; 32] = match nonce {
+        None => seed,
+        Some((st, _)) => nonce_fold_seed(&seed, &nonce_binding_of(st)),
     };
-    let bound10 = keccak2(batch_root, &t8);
-    let bound8 = keccak2(batch_root, &t10);
+    let bound10 = keccak_pair(&bind_seed, &t8);
+    let bound8 = keccak_pair(&bind_seed, &t10);
 
     // Pass 2: the outer bundles, against the cross-bound roots.
     //
@@ -3352,7 +3526,7 @@ pub fn gen_mldsa_tree_recursive_bundles(
         return Err("a tree root's trace root changed between passes — \
                     cross-binding would be unsound".into());
     }
-    Ok((b10, b8, seed))
+    Ok((b10, b8, seed, bind_seed))
 }
 
 /// Generate cross-bound VFRI11 hints for V23's two trace groups.
@@ -3461,14 +3635,7 @@ pub fn gen_nonce_recursive_bundle(
     let (cols, log_size) = statement_trace_columns(st, transitions)?;
 
     // The statement as the contract will see it: packed roots, public nonces.
-    let old_root = p2t8_pack(st.old_root);
-    let new_root = p2t8_pack(st.new_root);
-    let updates: Vec<(u32, u64, u64, [u8; 32])> = st
-        .updates
-        .iter()
-        .map(|u| (u.index, u.old_nonce, u.new_nonce, p2t8_pack(u.post_root)))
-        .collect();
-    let bound = nonce_statement_binding(&old_root, &new_root, st.depth as u32, &updates);
+    let bound = nonce_binding_of(st);
 
     let folds = Some((log_size as usize).saturating_sub(4).max(1));
     let bundle = build_recursive_bundle(&cols, log_size, &bound, n_queries, folds)?;
@@ -6647,6 +6814,109 @@ mod tests_vfri8 {
             (ps, pb, ns, nb)
         }).collect();
         out
+    }
+
+    /// A nonce transition of `n` senders at depth 8, statement and witness.
+    fn nonce_transition(
+        n: usize,
+    ) -> (crate::recursive::nonce_accumulator::NonceStatement, Vec<crate::nonce_tree::NonceTransition>) {
+        use crate::nonce_tree::{apply_updates, NonceTree};
+        use crate::recursive::nonce_accumulator::NonceStatement;
+        const D: usize = 8;
+        let mut tree = NonceTree::new(D).unwrap();
+        let ups: Vec<([u8; 32], u64)> = (0..n)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[0] = (i * 7 + 1) as u8;
+                h[1] = (i * 13 + 3) as u8;
+                (h, (i as u64) + 1)
+            })
+            .collect();
+        let (old_root, new_root, ts) = apply_updates(&mut tree, &ups).unwrap();
+        (NonceStatement::from_transitions(&ts, &old_root, &new_root, D).unwrap(), ts)
+    }
+
+    /// Ф3.2 Ш3 — a REAL tree's root carries the transition, and the Rust
+    /// verifier holds it to exactly that statement.
+    #[test]
+    #[ignore = "proves a real tree"]
+    fn a_real_tree_root_carries_the_nonce_transition() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (leaves, l8) = dual_leaves(&[16600, 16601], &merkle_root, 1);
+        let ms = memberships_for(&leaves, &l8, node::Group::Log10, &merkle_root, 1, Some(6));
+        let (st, ts) = nonce_transition(3);
+
+        let tree = prove_aggregation_tree_with_nonce(
+            &leaves, &ms, &merkle_root, 1, Some(6), 2, Some((&st, &ts)))
+            .expect("tree with the transition at its root");
+        let root = tree.root();
+        let stmts: Vec<_> = leaves.iter().zip(&ms)
+            .map(|((c, d), m)| tree_statement_from_columns(
+                c, *d, &merkle_root, 1, Some(6), Some(m.clone())).expect("stmt"))
+            .collect();
+        assert!(node::verify_tree_node_with_nonce(&root.proof, root.log_size, &stmts, &st).unwrap(),
+                "the root must verify with its transition");
+
+        let mut other = st.clone();
+        other.updates[1].new_nonce += 7;
+        assert!(!node::verify_tree_node_with_nonce(&root.proof, root.log_size, &stmts, &other).unwrap(),
+                "nor with another one");
+        assert!(!matches!(node::verify_tree_node(&root.proof, root.log_size, &stmts), Ok(true)),
+                "nor as a root without one");
+
+        // Its columns — what the on-chain bundle is built from — carry the 85
+        // two-lane columns; the plain tree's root does not.
+        let plain = prove_aggregation_tree(&leaves, &ms, &merkle_root, 1, Some(6), 2).unwrap();
+        assert_eq!(
+            tree.levels.last().unwrap().columns[0].0.len(),
+            plain.levels.last().unwrap().columns[0].0.len()
+                + crate::recursive::nonce_update_t8_air::N_MAIN_COLS);
+    }
+
+    /// Ф3.2 Ш3 — the bundles of a folded batch are bound to R AND the statement
+    /// through `seedEff`; the linkage check is what the contract will do.
+    #[test]
+    #[ignore = "proves both trees and their outer bundles, twice"]
+    fn tree_bundles_with_nonce_are_bound_to_the_statement() {
+        let n_queries = 1usize;
+        let mut entries = Vec::new();
+        let mut tx_hashes = Vec::new();
+        for (k, seed) in [16600u64, 16601].into_iter().enumerate() {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            entries.push((z, c, t1, a_hat, [[false; 256]; 6]));
+            tx_hashes.push(std::array::from_fn(|i| ((k * 37 + i * 11) % 256) as u8));
+        }
+        let (st, ts) = nonce_transition(3);
+
+        let f = gen_mldsa_tree_recursive_bundles_with_nonce(
+            &entries, &tx_hashes, n_queries, Some(6), 2, &st, &ts)
+            .expect("folded bundles");
+        assert_eq!(f.seed_eff, nonce_fold_seed(&f.merkle_root, &f.nonce_binding));
+        assert!(verify_tree_root_bundles_with_nonce(&f.bundle10, &f.bundle8, &f.merkle_root, &st)
+            .unwrap(), "the folded bundles link to R and the statement");
+
+        // Another statement, or another R: the linkage fails.
+        let mut other = st.clone();
+        other.updates[0].new_nonce += 1;
+        assert!(!verify_tree_root_bundles_with_nonce(&f.bundle10, &f.bundle8, &f.merkle_root, &other)
+            .unwrap());
+        let mut other_r = f.merkle_root;
+        other_r[31] ^= 1;
+        assert!(!verify_tree_root_bundles_with_nonce(&f.bundle10, &f.bundle8, &other_r, &st)
+            .unwrap());
+
+        // The plain batch over the SAME signatures has the same R — the
+        // membership root does not see the nonce — but its bundles are bound to
+        // R alone, so they do not pass for a folded batch.
+        let (p10, p8, r) =
+            gen_mldsa_tree_recursive_bundles(&entries, &tx_hashes, n_queries, Some(6), 2)
+                .expect("plain bundles");
+        assert_eq!(r, f.merkle_root);
+        assert_ne!(p10.trace_root, f.bundle10.trace_root, "the log10 root's columns differ");
+        assert_eq!(p8.trace_root, f.bundle8.trace_root, "the log8 tree is untouched");
+        assert!(!verify_tree_root_bundles_with_nonce(&p10, &p8, &r, &st).unwrap());
     }
 
     /// Ф3.2 Ш1 — does the ROOT node still fit once it carries the nonce
