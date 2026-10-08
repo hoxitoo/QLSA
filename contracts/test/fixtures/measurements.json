@@ -113,6 +113,13 @@
       "date": "2026-10-05",
       "reconciles": "14,663,950 (v7_tree_submitBatch, no senders) + 2 first-time sender writes at ~28,777 = ~14,721,504. The 3,198 difference is calldata for the two senders and their nonces.",
       "note": "Run against a standalone `npx hardhat node` after the Ф2.3 wiring and the three ABI fixes of 2026-10-04 — the first end-to-end confirmation that the submission path works at all, since those ABIs had made it impossible."
+    },
+    "v8_stack_pre_run_check_2026_10_08": {
+      "gasUsed": 14726046,
+      "deployGas": 8318209,
+      "what": "The 2026-10-10 public-testnet path, re-run end to end against a standalone `npx hardhat node` after the 2026-10-08 Rust changes (A-6 fix, A-4 two-lane component, Ш2/Ш3 nonce folding behind *_with_nonce wrappers). deploy_v8.sh --network localnode, then python3 -m testnet.e2e --stack v8 --txs 2, with the PyO3 extension rebuilt from the current tree.",
+      "result": "finalized=True. Deploy 8,318,209 gas — identical to the figure recorded for 2026-10-05. Submission 14,726,046 against v8_stack_full_e2e's 14,724,702: +1,344 (0.009%), from calldata — each run generates fresh keypairs, so the sender bytes differ. testnet.abi._sync --check: both ABIs in sync.",
+      "date": "2026-10-08"
     }
   }
 }
