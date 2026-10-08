@@ -1704,6 +1704,51 @@ mod tests {
                 "the error should locate the query: {err}");
     }
 
+    /// KNOWN HOLE (2026-10-08) — asserts CURRENT, VULNERABLE behaviour.
+    ///
+    /// `verify_tree_node` pins whatever `roots` its caller passes, and every
+    /// caller in the repository passes the prover's own `r.roots`. Nothing ties
+    /// the final-fold / comp path roots (groups 1-3) to the roots the child
+    /// actually committed to, which sit in its transcript (`steps`, as the
+    /// absorbed `fri_layer_roots` / `comp_root`).
+    ///
+    /// Shown directly: two statements with the SAME transcript — the same
+    /// committed roots, the same challenges — but one final-fold sibling
+    /// changed. Their paths reach DIFFERENT roots, and BOTH nodes prove and
+    /// verify. A verifier that cannot tell them apart is not checking that the
+    /// child's FRI decommitment lands on what the child committed.
+    ///
+    /// `a_tampered_root_is_rejected` below did not catch this: it alters the
+    /// root AFTER an honest proof, which the pinned preprocessed tree rejects.
+    /// A prover who pins the forged root at proving time is the case that
+    /// matters, and the R3.12 audit already named this class for the t=2 path.
+    ///
+    /// When the verifier derives roots from the statements instead of taking
+    /// them from the caller, the second assertion flips.
+    #[test]
+    fn known_hole_a_path_into_a_root_the_child_never_committed_verifies() {
+        let mut s = 0x7A1_u64;
+        let honest = vec![statement(2, 2, 2, 2, 0xE1, &mut s)];
+        let mut forged = honest.clone();
+        forged[0].paths[0].0[0][0] = (forged[0].paths[0].0[0][0] + 1) % M31;
+        assert_eq!(honest[0].steps, forged[0].steps, "same transcript, same commitments");
+
+        let r_honest = prove_tree_node(&honest).expect("honest node proves");
+        let r_forged = prove_tree_node(&forged).expect("forged node also proves");
+        assert_ne!(
+            r_honest.roots[0], r_forged.roots[0],
+            "setup: the forged path must reach a different final-fold root"
+        );
+
+        assert!(verify_tree_node(&r_honest.proof, r_honest.log_size, &honest, &r_honest.roots).unwrap());
+        // CURRENT behaviour: the forged node verifies too. This is the hole.
+        assert!(
+            verify_tree_node(&r_forged.proof, r_forged.log_size, &forged, &r_forged.roots).unwrap(),
+            "if this fails, roots are now derived from the statement — the hole \
+             is closed: invert this assertion and drop the KNOWN_HOLE prefix"
+        );
+    }
+
     /// Membership is real: a tampered root must not verify.
     #[test]
     fn a_tampered_root_is_rejected() {

