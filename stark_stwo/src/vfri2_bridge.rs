@@ -6508,19 +6508,10 @@ mod tests_vfri8 {
         assert!(prove_aggregation_tree(&one, &memberships_for(&one, &one8_, crate::recursive::composition_channel_t8::Group::Log10, &root, 1, Some(6)), &root, 1, Some(6), 1).is_err(), "fan_in 1 never ends");
     }
 
-    /// Does the TREE NODE's shape reach a fixed point, as the 2-component one did?
-    ///
-    /// `probe_recursion_self_composition` measured the 87-column shape converging
-    /// at log 14. A tree node is three components — 120 columns — because the
-    /// channel rides along, so its trace is bigger, so the next level's Merkle
-    /// paths are deeper, so ITS trace is bigger. Whether that settles or runs
-    /// away is the question a tree builder is built on, and it is not answerable
-    /// by looking at the 2-component number.
-    ///
-    /// Run with: cargo test probe_tree_node_self_composition -- --ignored --nocapture
-    #[test]
-    #[ignore = "measurement probe; prints tree-node sizes across levels"]
-    fn probe_tree_node_self_composition() {
+    /// A tree statement with a real V23 group's production shape (20 queries),
+    /// its queries re-derived under a VFRI11 transcript. A SHAPE for sizing —
+    /// the transcript's roots are placeholders, so nobody verifies it.
+    fn real_v23_statement_20q() -> crate::recursive::composition_channel_t8::TreeStatement {
         use crate::recursive::composition_channel_t8 as node;
 
         let (z, c, t1, a_hat) = super::tests::make_v23_inputs(16600);
@@ -6553,10 +6544,7 @@ mod tests_vfri8 {
 
         // The statement's queries must run under the transcript's challenges, so
         // rebuild them from the derived values rather than reusing rec0's.
-        let derived = match node::derive_challenges(&steps, &layout) {
-            Ok(d) => d,
-            Err(e) => { eprintln!("challenge derivation failed: {e}"); return; }
-        };
+        let derived = node::derive_challenges(&steps, &layout).expect("challenge derivation");
         let queries: Vec<_> = rec0.queries.iter().map(|(st, rounds)| {
             let mut st2 = *st;
             st2.3 = derived.z_x;
@@ -6567,7 +6555,7 @@ mod tests_vfri8 {
             (st2, rounds2)
         }).collect();
 
-        let statement = node::TreeStatement {
+        node::TreeStatement {
             steps,
             layout,
             queries,
@@ -6577,7 +6565,25 @@ mod tests_vfri8 {
             // Sizing only: the queries are re-derived above, so this is a shape,
             // not a statement anyone verifies.
             inputs: None,
-        };
+        }
+    }
+
+    /// Does the TREE NODE's shape reach a fixed point, as the 2-component one did?
+    ///
+    /// `probe_recursion_self_composition` measured the 87-column shape converging
+    /// at log 14. A tree node is three components — 120 columns — because the
+    /// channel rides along, so its trace is bigger, so the next level's Merkle
+    /// paths are deeper, so ITS trace is bigger. Whether that settles or runs
+    /// away is the question a tree builder is built on, and it is not answerable
+    /// by looking at the 2-component number.
+    ///
+    /// Run with: cargo test probe_tree_node_self_composition -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement probe; prints tree-node sizes across levels"]
+    fn probe_tree_node_self_composition() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let statement = real_v23_statement_20q();
 
         match node::tree_node_trace_columns(std::slice::from_ref(&statement)) {
             Ok((cols, log)) => eprintln!(
@@ -6641,6 +6647,75 @@ mod tests_vfri8 {
             (ps, pb, ns, nb)
         }).collect();
         out
+    }
+
+    /// Ф3.2 Ш1 — does the ROOT node still fit once it carries the nonce
+    /// transition? Measured BEFORE building the fold, because the answer decides
+    /// whether to build it.
+    ///
+    /// A node proves all its components at ONE `log_size`, the maximum of
+    /// theirs. Folding the transition into the root adds `nonce_update_t8_air`
+    /// with `N·D·22` rows, so the root's log becomes `max(L_root, L_nonce)` —
+    /// analytic, no proving needed. `L_root` is measured for the three roots a
+    /// real batch can have: over two V23 leaves of each tree (a 2-signature
+    /// batch, with membership) and over fixed-point children (any larger batch).
+    /// Cap: `rv::MAX_LOG_SIZE` = 20. Time: log 16 ≈ 27 s, ×2 per level.
+    ///
+    /// Run with: cargo test probe_root_node_with_nonce_updates -- --ignored --nocapture
+    #[test]
+    #[ignore = "measurement probe; root-node size with the nonce component"]
+    fn probe_root_node_with_nonce_updates() {
+        use crate::recursive::composition_channel_t8 as node;
+        use crate::recursive::nonce_update_t8_air as nut;
+        use crate::recursive::recursive_verifier as rv;
+
+        let q = 20;
+        let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (l10, l8) = dual_leaves(&[16600, 16601], &merkle_root, q);
+        let mut roots: Vec<(&str, u32)> = Vec::new();
+        for (name, side) in [("2 leaves, log10 tree", node::Group::Log10),
+                             ("2 leaves, log8 tree ", node::Group::Log8)] {
+            let ms = memberships_for(&l10, &l8, side, &merkle_root, q, Some(6));
+            let leaves = if side == node::Group::Log10 { &l10 } else { &l8 };
+            let stmts: Vec<_> = leaves.iter().zip(&ms)
+                .map(|((c, d), m)| tree_statement_from_columns(
+                    c, *d, &merkle_root, q, Some(6), Some(m.clone())).expect("stmt"))
+                .collect();
+            roots.push((name, node::tree_node_log_size(&stmts).expect("root log")));
+        }
+        // Fixed point: iterate child depth -> node log until it settles.
+        let st = real_v23_statement_20q();
+        let mut d = 14u32;
+        for _ in 0..8 {
+            let next = node::tree_node_log_size(&[shape_at_depth(&st, d), shape_at_depth(&st, d)])
+                .expect("fixed-point node");
+            if next == d { break; }
+            d = next;
+        }
+        roots.push(("fixed-point children ", d));
+
+        let cap = rv::MAX_LOG_SIZE;
+        eprintln!("root log today: {}", roots.iter()
+            .map(|(n, l)| format!("{n} = {l}")).collect::<Vec<_>>().join(" | "));
+        eprintln!("nonce component alone, log(N·D·22):");
+        for depth in [16usize, 20, 28] {
+            let row: Vec<String> = [1usize, 25, 100, 172, 300, 360]
+                .iter().map(|&n| format!("N={n}->{}", nut::compute_log_size(n, depth))).collect();
+            eprintln!("  D={depth}: {}", row.join("  "));
+        }
+        eprintln!("root log WITH the transition (cap {cap}; time vs log 16 ≈ 27 s):");
+        for (name, l_root) in &roots {
+            for depth in [16usize, 20, 28] {
+                let row: Vec<String> = [1usize, 25, 100, 172, 300, 360].iter().map(|&n| {
+                    let l = (*l_root).max(nut::compute_log_size(n, depth));
+                    let mark = if l > cap { " OVER" } else { "" };
+                    format!("N={n}->{l}{mark}")
+                }).collect();
+                eprintln!("  {name} D={depth}: {}", row.join("  "));
+            }
+        }
+        eprintln!("break-even vs the mapping needs N > ~563 SEPARATELY; folded, the fixed \
+                   cost vanishes and only the marginal matters — re-measure in Ш5");
     }
 
     /// How long does one aggregation node take, and what does that make N?
