@@ -4573,6 +4573,7 @@ mod tests_vfri8 {
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
         let (leaves, l8) = dual_leaves(&[16600, 16601], &merkle_root, 1);
         let ms = memberships_for(&leaves, &l8, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6));
+        let merkle_root = seed_of(&ms);
         let stmts: Vec<_> = leaves
             .iter()
             .zip(&ms)
@@ -4590,6 +4591,51 @@ mod tests_vfri8 {
         for (k, m) in ms.iter().enumerate() {
             assert_eq!(proved.roots[n_query_paths + k], m.batch_root);
         }
+    }
+
+    /// A-6, second half: a leaf's membership must name the batch its proof
+    /// was generated for. The leaf runs under R as its Fiat-Shamir seed, so a
+    /// membership in R attached to a leaf proved under another seed claims a
+    /// batch the proof never saw. Until 2026-10-08 nothing compared the two —
+    /// and four of this file's own tests proved leaves under a random seed with
+    /// memberships in R, and passed.
+    #[test]
+    fn a_membership_must_name_the_seed_its_leaf_was_proved_under() {
+        use crate::recursive::composition_channel_t8 as node;
+
+        let other_seed: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
+        let (leaves, l8) = dual_leaves(&[16600, 16601], &other_seed, 1);
+        let ms = memberships_for(&leaves, &l8, node::Group::Log10, &other_seed, 1, Some(6));
+        let r = seed_of(&ms);
+        assert_ne!(r, other_seed, "setup: R is not the other seed");
+
+        let under = |seed: &[u8]| -> Vec<node::TreeStatement> {
+            leaves.iter().zip(&ms)
+                .map(|((c, d), m)| tree_statement_from_columns(
+                    c, *d, seed, 1, Some(6), Some(m.clone())).expect("stmt"))
+                .collect()
+        };
+
+        // Under R: the roots it must reach are derivable, and it proves.
+        let honest = under(&r);
+        assert!(node::tree_node_expected_roots(&honest).is_ok());
+
+        // Under another seed: refused, naming the statement...
+        let wrong = under(&other_seed);
+        let err = node::tree_node_expected_roots(&wrong).unwrap_err();
+        assert!(err.contains("statement 0") && err.contains("different seed"), "{err}");
+        assert!(node::prove_tree_node(&wrong).is_err(), "the prover refuses it too");
+
+        // ...where the check that used to be all there was accepts it: proved
+        // without the inputs, against the prover's own roots, it verifies.
+        let blind: Vec<_> = wrong.iter().cloned()
+            .map(|mut st| { st.inputs = None; st })
+            .collect();
+        let p = node::prove_tree_node(&blind).expect("proves without the inputs");
+        assert!(node::verify_tree_node_with_roots(&p.proof, p.log_size, &blind, &p.roots).unwrap(),
+                "the caller-roots check accepts a member proved under another seed");
+        assert!(node::verify_tree_node(&p.proof, p.log_size, &wrong).is_err(),
+                "the derived-roots check does not");
     }
 
     /// A signature cannot be carried in under someone else's trace root.
@@ -4695,6 +4741,15 @@ mod tests_vfri8 {
                 .expect("log8 cols"));
         }
         (l10, l8)
+    }
+
+    /// The seed a member's leaf must be proved under: the batch root R its
+    /// membership lands on, packed. R depends only on the trace roots, which do
+    /// not depend on the seed, so it is known before any leaf is proved — the
+    /// order `prove_mldsa_aggregation_tree` follows. A leaf proved under any other
+    /// seed is refused (`tree_node_expected_roots`, A-6).
+    fn seed_of(ms: &[crate::recursive::composition_channel_t8::BatchMembership]) -> Vec<u8> {
+        p2t8_pack(ms[0].batch_root).to_vec()
     }
 
     /// Dual batch memberships for one side, over the SAME chain runs the leaf
@@ -6623,8 +6678,10 @@ mod tests_vfri8 {
 
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
         let (leaves, leaves8_) = dual_leaves(&[16600, 16601, 16602, 16603], &merkle_root, 1);
+        let ms = memberships_for(&leaves, &leaves8_, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6));
+        let merkle_root = seed_of(&ms);
 
-        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &leaves8_, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
+        let tree = match prove_aggregation_tree(&leaves, &ms, &merkle_root, 1, Some(6), 2) {
             Ok(t) => t,
             Err(e) => panic!("tree proving failed: {e}"),
         };
@@ -6658,7 +6715,9 @@ mod tests_vfri8 {
     fn a_tree_over_three_statements_is_not_padded() {
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
         let (leaves, leaves8_) = dual_leaves(&[16700, 16701, 16702], &merkle_root, 1);
-        let tree = match prove_aggregation_tree(&leaves, &memberships_for(&leaves, &leaves8_, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6)), &merkle_root, 1, Some(6), 2) {
+        let ms = memberships_for(&leaves, &leaves8_, crate::recursive::composition_channel_t8::Group::Log10, &merkle_root, 1, Some(6));
+        let merkle_root = seed_of(&ms);
+        let tree = match prove_aggregation_tree(&leaves, &ms, &merkle_root, 1, Some(6), 2) {
             Ok(t) => t, Err(e) => panic!("tree proving failed: {e}"),
         };
         // Three leaves at fan-in 2: a full pair and a lone one, then the root.
@@ -6846,6 +6905,7 @@ mod tests_vfri8 {
         let merkle_root: Vec<u8> = (0..32).map(|i| ((11 + 7 * i) % 256) as u8).collect();
         let (leaves, l8) = dual_leaves(&[16600, 16601], &merkle_root, 1);
         let ms = memberships_for(&leaves, &l8, node::Group::Log10, &merkle_root, 1, Some(6));
+        let merkle_root = seed_of(&ms);
         let (st, ts) = nonce_transition(3);
 
         let tree = prove_aggregation_tree_with_nonce(

@@ -40,7 +40,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (582 passing, 125 ignored slow STARK integration tests — 2026-10-08)
+# Run Rust tests (583 passing, 125 ignored slow STARK integration tests — 2026-10-08)
 #
 # ALWAYS use `cargo test`, never `cargo build`, to decide whether code is dead.
 # `cargo build` does not compile `#[cfg(test)]`, so its "never used" warning is
@@ -339,6 +339,9 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 > `seedEff = keccak256("QLSA/nonce-fold/v1" ‖ R ‖ nonceBinding)`, and
 > `verify_tree_root_bundles_with_nonce`. The no-nonce path is byte-identical
 > (tree fixture regenerated, empty diff). The contract half waits for 2026-10-10.
+> A-6 follow-up: a leaf's membership root must equal the seed it was proved under
+> (`tree_node_expected_roots`). The run's path was re-checked end to end against a
+> standalone node: deploy 8,318,209, submission 14,726,046, `finalized=True`.
 > The public-testnet run is 2026-10-10 on the MAPPING path; `contracts/src` is
 > frozen until then. See `docs/TECH_DEBT.md` § A-4, § A-6 and `ROADMAP.md` § 0, § 5.
 

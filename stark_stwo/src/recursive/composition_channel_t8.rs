@@ -1344,7 +1344,9 @@ pub fn prove_tree_node_with_nonce(
 /// `steps` must be exactly the transcript of its `inputs`, so the roots pinned
 /// here are the roots the challenges were drawn from.
 pub fn tree_node_expected_roots(statements: &[TreeStatement]) -> Result<Vec<[u64; 4]>, String> {
-    use crate::vfri2_bridge::{p2t8_node_words, vfri11_challenge_layout, vfri11_transcript_steps};
+    use crate::vfri2_bridge::{
+        p2t8_node_words, p2t8_pack, vfri11_challenge_layout, vfri11_transcript_steps,
+    };
 
     let mut last = Vec::new();
     let mut comp = Vec::new();
@@ -1370,6 +1372,16 @@ pub fn tree_node_expected_roots(statements: &[TreeStatement]) -> Result<Vec<[u64
         last.extend(std::iter::repeat(l).take(st.queries.len()));
         comp.extend(std::iter::repeat(c).take(st.queries.len()));
         if let Some(m) = &st.membership {
+            // A leaf runs under the batch root as its Fiat-Shamir seed (R is
+            // derived from the trace roots, which do not depend on the seed). A
+            // membership naming any OTHER root claims a batch the proof was not
+            // generated for. All 32 bytes: the packed root, not just its words.
+            if p2t8_pack(m.batch_root) != inp.batch_root {
+                return Err(format!(
+                    "statement {i}: its membership claims batch root {:?}, but the leaf \
+                     was proved under a different seed — not a member of that batch",
+                    m.batch_root));
+            }
             batch.push(m.batch_root);
         }
     }
