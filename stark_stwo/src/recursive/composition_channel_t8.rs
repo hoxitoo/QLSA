@@ -831,6 +831,15 @@ pub struct TreeStatement {
     /// A-5: for a LEAF statement, its membership in the batch. `None` for the
     /// statements of internal tree levels, which have no transaction.
     pub membership: Option<BatchMembership>,
+    /// A-6: the child's public channel inputs — the roots it COMMITTED to.
+    ///
+    /// [`verify_tree_node`] derives every pinned path root from these, and
+    /// requires `steps` to be exactly their transcript; a statement without them
+    /// cannot be verified. Before A-6 the verifier pinned whatever roots its
+    /// caller passed, and every caller passed the prover's own, so a path into a
+    /// root the child never committed verified. `None` is for synthetic shapes
+    /// only (unit tests and sizing probes), which have no committed roots.
+    pub inputs: Option<crate::vfri2_bridge::Vfri11ChannelInputs>,
 }
 
 pub struct TreeNodeResult {
@@ -1164,6 +1173,16 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
                 m.batch_root));
         }
     }
+    // A-6: where the child's committed roots are known, the paths must reach
+    // them. The verifier refuses otherwise; checked here it names the path.
+    if statements.iter().all(|st| st.inputs.is_some()) {
+        let expected = tree_node_expected_roots(statements)?;
+        if let Some(i) = (0..roots.len()).find(|&i| roots[i] != expected[i]) {
+            return Err(format!(
+                "path {i} reaches {:?}, not the root the child committed to {:?}",
+                roots[i], expected[i]));
+        }
+    }
     let merkle_preproc = merkle::build_preproc_multi_var(
         &sh.leaves, &sh.indices, &roots, &sh.depths, sh.log_size);
     let (chan_main, runs) = channel::build_trace_multi(&sh.transcripts, sh.log_size);
@@ -1214,11 +1233,81 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
     })
 }
 
+/// Every path root a node over `statements` must reach, in `path_depths`
+/// order, derived from the children's COMMITTED roots alone (A-6).
+///
+/// Group 1 (final fold) is the child's last FRI-layer root, groups 2 and 3
+/// (compValue, compValueNeg) its `comp_root`, group 4 the batch root its
+/// membership claims. None of it comes from the prover: each statement's
+/// `steps` must be exactly the transcript of its `inputs`, so the roots pinned
+/// here are the roots the challenges were drawn from.
+pub fn tree_node_expected_roots(statements: &[TreeStatement]) -> Result<Vec<[u64; 4]>, String> {
+    use crate::vfri2_bridge::{p2t8_node_words, vfri11_challenge_layout, vfri11_transcript_steps};
+
+    let mut last = Vec::new();
+    let mut comp = Vec::new();
+    let mut batch = Vec::new();
+    for (i, st) in statements.iter().enumerate() {
+        let inp = st.inputs.as_ref().ok_or_else(|| format!(
+            "statement {i} carries no channel inputs — its committed roots are unknown, \
+             so it cannot be verified"))?;
+        if vfri11_transcript_steps(inp)? != st.steps {
+            return Err(format!("statement {i}: steps are not the transcript of its inputs"));
+        }
+        let num_folds = inp.fri_layer_roots.len() - 1;
+        if st.layout != vfri11_challenge_layout(num_folds) {
+            return Err(format!("statement {i}: layout is not VFRI11's for {num_folds} folds"));
+        }
+        if st.queries.len() != inp.n_queries {
+            return Err(format!(
+                "statement {i}: {} queries, but its transcript draws {}",
+                st.queries.len(), inp.n_queries));
+        }
+        let l = p2t8_node_words(inp.fri_layer_roots.last().expect("checked non-empty"));
+        let c = p2t8_node_words(&inp.comp_root);
+        last.extend(std::iter::repeat(l).take(st.queries.len()));
+        comp.extend(std::iter::repeat(c).take(st.queries.len()));
+        if let Some(m) = &st.membership {
+            batch.push(m.batch_root);
+        }
+    }
+    let mut roots = last;
+    roots.extend(comp.iter().copied());
+    roots.extend(comp);
+    roots.extend(batch);
+    Ok(roots)
+}
+
 /// Verify a tree node against the children it claims.
 ///
-/// The verifier re-derives every challenge and re-hashes every leaf, so a proof
-/// verifies only against the children it was built from.
+/// The verifier re-derives every challenge, re-hashes every leaf, and — since
+/// A-6 — derives every path root from the children's committed roots, so a
+/// proof verifies only against the children it was built from AND only if
+/// their FRI decommitments land on what they committed to.
 pub fn verify_tree_node(
+    proof_bytes: &[u8],
+    log_size: u32,
+    statements: &[TreeStatement],
+) -> Result<bool, String> {
+    let roots = tree_node_expected_roots(statements)?;
+    verify_tree_node_pinned(proof_bytes, log_size, statements, &roots)
+}
+
+/// [`verify_tree_node`] against roots the CALLER chooses. Not a soundness
+/// check: a prover pins its own roots, so passing them back accepts a path into
+/// a root the child never committed (A-6). Kept for synthetic shapes, which
+/// have no committed roots, and to demonstrate exactly that.
+#[cfg(test)]
+pub(crate) fn verify_tree_node_with_roots(
+    proof_bytes: &[u8],
+    log_size: u32,
+    statements: &[TreeStatement],
+    roots: &[[u64; 4]],
+) -> Result<bool, String> {
+    verify_tree_node_pinned(proof_bytes, log_size, statements, roots)
+}
+
+fn verify_tree_node_pinned(
     proof_bytes: &[u8],
     log_size: u32,
     statements: &[TreeStatement],
@@ -1631,7 +1720,7 @@ mod tests {
             let (ns, nb) = mk(comp_depth, seed);
             comp_paths.push((ps, pb, ns, nb));
         }
-        TreeStatement { steps, layout, queries, paths, comp_paths, membership: None }
+        TreeStatement { steps, layout, queries, paths, comp_paths, membership: None, inputs: None }
     }
 
     /// The tree's node: two child PROOFS, each with several queries.
@@ -1657,7 +1746,7 @@ mod tests {
         assert_eq!(r.challenges[0].z_x, r.challenges[1].z_x);
         assert_ne!(r.challenges[0].z_x, r.challenges[3].z_x);
 
-        assert!(verify_tree_node(&r.proof, r.log_size, &statements, &r.roots).unwrap(),
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &statements, &r.roots).unwrap(),
                 "an honest tree node must verify");
     }
 
@@ -1684,7 +1773,7 @@ mod tests {
             assert_eq!(c.z_x, r.challenges[0].z_x);
             assert_eq!(c.alphas, r.challenges[0].alphas);
         }
-        assert!(verify_tree_node(&r.proof, r.log_size, &many, &r.roots).unwrap());
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &many, &r.roots).unwrap());
     }
 
     /// The channel binding still holds with the membership components present.
@@ -1704,49 +1793,177 @@ mod tests {
                 "the error should locate the query: {err}");
     }
 
-    /// KNOWN HOLE (2026-10-08) — asserts CURRENT, VULNERABLE behaviour.
+    /// A depth-`d` Merkle tree with `placed[k]` at `idx[k]` and random leaves
+    /// elsewhere; its root and each placed leaf's path. Small `d` only — it
+    /// builds every node.
+    fn tree_with(
+        d: usize,
+        placed: &[[u64; 4]],
+        idx: &[usize],
+        seed: &mut u64,
+    ) -> ([u64; 4], Vec<(Vec<[u64; 4]>, Vec<bool>)>) {
+        use crate::poseidon2_t8::compress_t8;
+        let mut level: Vec<[u64; 4]> = (0..1usize << d).map(|_| rand_node(seed)).collect();
+        for (leaf, &i) in placed.iter().zip(idx) {
+            level[i] = *leaf;
+        }
+        let mut levels = vec![level];
+        for _ in 0..d {
+            let l = levels.last().expect("non-empty");
+            levels.push(l.chunks(2).map(|p| compress_t8(p[0], p[1])).collect());
+        }
+        let paths = idx.iter().map(|&i0| {
+            let mut i = i0;
+            let mut sibs = Vec::with_capacity(d);
+            let mut bits = Vec::with_capacity(d);
+            for l in &levels[..d] {
+                sibs.push(l[i ^ 1]);
+                bits.push(i & 1 == 1);
+                i >>= 1;
+            }
+            (sibs, bits)
+        }).collect();
+        (levels[d][0], paths)
+    }
+
+    /// An HONEST VFRI11-shaped statement: its paths reach the roots its
+    /// transcript absorbed, so the production [`verify_tree_node`] accepts it.
     ///
-    /// `verify_tree_node` pins whatever `roots` its caller passes, and every
-    /// caller in the repository passes the prover's own `r.roots`. Nothing ties
-    /// the final-fold / comp path roots (groups 1-3) to the roots the child
-    /// actually committed to, which sit in its transcript (`steps`, as the
-    /// absorbed `fri_layer_roots` / `comp_root`).
+    /// Built in the order Fiat-Shamir allows. `z_x` is drawn before `comp_root`
+    /// is absorbed and the composition values depend only on it, so the comp
+    /// tree comes first; the fold challenges depend on `comp_root`, the finals on
+    /// them, and the LAST layer root is absorbed after the last of them — so it
+    /// can be the root of the finals without changing what they ran under.
+    fn vfri11_statement(
+        num_folds: usize,
+        n_queries: usize,
+        depth: usize,
+        comp_depth: usize,
+        seed: &mut u64,
+    ) -> TreeStatement {
+        use crate::vfri2_bridge::{
+            p2t8_pack, vfri11_challenge_layout, vfri11_transcript_steps, Vfri11ChannelInputs,
+        };
+        assert!(n_queries <= 1 << depth && 2 * n_queries <= 1 << comp_depth);
+        let mut inp = Vfri11ChannelInputs {
+            trace_root: p2t8_pack(rand_node(seed)),
+            oods_combo_pos: rand_qm31(seed),
+            oods_combo_neg: rand_qm31(seed),
+            comp_root: [0u8; 32],
+            fri_layer_roots: (0..=num_folds).map(|_| p2t8_pack(rand_node(seed))).collect(),
+            batch_root: p2t8_pack(rand_node(seed)),
+            tree_depth: depth as u32,
+            n_queries,
+        };
+        let layout = vfri11_challenge_layout(num_folds);
+        let derive = |inp: &Vfri11ChannelInputs| {
+            derive_challenges(&vfri11_transcript_steps(inp).unwrap(), &layout).unwrap()
+        };
+
+        let d0 = derive(&inp);
+        let mut queries: Vec<_> =
+            (0..n_queries).map(|_| query_under(&d0, num_folds, seed)).collect();
+        let ch: Vec<_> = queries.iter().map(|(st, r)| rv::query_challenges(st, r)).collect();
+        let comp_leaves: Vec<[u64; 4]> = ch.iter()
+            .flat_map(|c| [qm31_leaf_hash_t8(c.comp_pos), qm31_leaf_hash_t8(c.comp_neg)])
+            .collect();
+        let comp_idx: Vec<usize> = (0..2 * n_queries).collect();
+        let (comp_root, cp) = tree_with(comp_depth, &comp_leaves, &comp_idx, seed);
+        inp.comp_root = p2t8_pack(comp_root);
+
+        let d1 = derive(&inp);
+        assert_eq!(d1.z_x, d0.z_x, "z_x is drawn before comp_root");
+        for (step, rounds) in &mut queries {
+            step.6 = d1.alphas[0];
+            for (k, r) in rounds.iter_mut().enumerate() {
+                r.1 = d1.alphas[k + 1];
+            }
+        }
+        let finals = rv::recursive_queries_final(&queries);
+        let leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+        let idx: Vec<usize> = (0..n_queries).collect();
+        let (last_root, paths) = tree_with(depth, &leaves, &idx, seed);
+        *inp.fri_layer_roots.last_mut().expect("≥ 1") = p2t8_pack(last_root);
+
+        let steps = vfri11_transcript_steps(&inp).unwrap();
+        assert_eq!(derive(&inp).alphas, d1.alphas, "the last root is absorbed after the last alpha");
+        let comp_paths = cp.chunks(2)
+            .map(|p| (p[0].0.clone(), p[0].1.clone(), p[1].0.clone(), p[1].1.clone()))
+            .collect();
+        TreeStatement {
+            steps, layout, queries, paths, comp_paths, membership: None, inputs: Some(inp),
+        }
+    }
+
+    /// A-6, closed. A path into a root the child never committed must not
+    /// verify — the case `a_tampered_root_is_rejected` cannot reach, because
+    /// there the honest prover pinned the honest root and the TEST changed it.
+    /// Here the PROVER pins the forged root at proving time.
     ///
-    /// Shown directly: two statements with the SAME transcript — the same
-    /// committed roots, the same challenges — but one final-fold sibling
-    /// changed. Their paths reach DIFFERENT roots, and BOTH nodes prove and
-    /// verify. A verifier that cannot tell them apart is not checking that the
-    /// child's FRI decommitment lands on what the child committed.
-    ///
-    /// `a_tampered_root_is_rejected` below did not catch this: it alters the
-    /// root AFTER an honest proof, which the pinned preprocessed tree rejects.
-    /// A prover who pins the forged root at proving time is the case that
-    /// matters, and the R3.12 audit already named this class for the t=2 path.
-    ///
-    /// When the verifier derives roots from the statements instead of taking
-    /// them from the caller, the second assertion flips.
+    /// Until 2026-10-08 the verifier pinned whatever roots its caller passed,
+    /// every caller passed the prover's own, and this forged node verified —
+    /// shown by the caller-roots variant below, which still behaves that way.
     #[test]
-    fn known_hole_a_path_into_a_root_the_child_never_committed_verifies() {
+    fn a_path_into_a_root_the_child_never_committed_is_rejected() {
         let mut s = 0x7A1_u64;
-        let honest = vec![statement(2, 2, 2, 2, 0xE1, &mut s)];
+        let honest = vec![vfri11_statement(2, 2, 2, 2, &mut s)];
+        let r_honest = prove_tree_node(&honest).expect("honest node proves");
+        assert_eq!(r_honest.roots, tree_node_expected_roots(&honest).unwrap(),
+                   "an honest node's paths reach exactly the committed roots");
+        assert!(verify_tree_node(&r_honest.proof, r_honest.log_size, &honest).unwrap(),
+                "an honest node must verify against its children's committed roots");
+
+        // One final-fold sibling changed: same transcript, same commitments,
+        // a path that lands somewhere else.
         let mut forged = honest.clone();
         forged[0].paths[0].0[0][0] = (forged[0].paths[0].0[0][0] + 1) % M31;
         assert_eq!(honest[0].steps, forged[0].steps, "same transcript, same commitments");
 
-        let r_honest = prove_tree_node(&honest).expect("honest node proves");
-        let r_forged = prove_tree_node(&forged).expect("forged node also proves");
-        assert_ne!(
-            r_honest.roots[0], r_forged.roots[0],
-            "setup: the forged path must reach a different final-fold root"
-        );
+        // The prover refuses it when it knows the commitments...
+        let err = match prove_tree_node(&forged) {
+            Ok(_) => panic!("a path into a foreign root must not be provable"),
+            Err(e) => e,
+        };
+        assert!(err.contains("path 0") && err.contains("committed"), "{err}");
 
-        assert!(verify_tree_node(&r_honest.proof, r_honest.log_size, &honest, &r_honest.roots).unwrap());
-        // CURRENT behaviour: the forged node verifies too. This is the hole.
-        assert!(
-            verify_tree_node(&r_forged.proof, r_forged.log_size, &forged, &r_forged.roots).unwrap(),
-            "if this fails, roots are now derived from the statement — the hole \
-             is closed: invert this assertion and drop the KNOWN_HOLE prefix"
-        );
+        // ...so a malicious one proves it WITHOUT them, pinning its own root.
+        let mut blind = forged.clone();
+        blind[0].inputs = None;
+        let r_forged = prove_tree_node(&blind).expect("a prover can always pin its own root");
+        assert_ne!(r_forged.roots[0], r_honest.roots[0], "setup: a different final-fold root");
+
+        // The hole, as it was: handed the prover's roots, the proof verifies.
+        assert!(verify_tree_node_with_roots(
+            &r_forged.proof, r_forged.log_size, &blind, &r_forged.roots).unwrap(),
+            "the caller-roots variant is what the verifier used to be");
+        // Closed: against the committed roots it does not.
+        assert!(!verify_tree_node(&r_forged.proof, r_forged.log_size, &forged).unwrap(),
+                "a path into a root the child never committed must not verify");
+        assert!(!verify_tree_node(&r_forged.proof, r_forged.log_size, &honest).unwrap());
+        // And without committed roots there is nothing to verify against.
+        assert!(verify_tree_node(&r_forged.proof, r_forged.log_size, &blind).is_err());
+    }
+
+    /// Every group is derived, not just the final fold: a forged COMPOSITION
+    /// path is refused the same way, and a statement whose steps are not its
+    /// inputs' transcript is refused outright.
+    #[test]
+    fn composition_roots_and_transcripts_are_derived_too() {
+        let mut s = 0x7B2_u64;
+        let honest = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let mut forged = honest.clone();
+        forged[0].comp_paths[1].2[1][3] = (forged[0].comp_paths[1].2[1][3] + 1) % M31;
+        let mut blind = forged.clone();
+        blind[0].inputs = None;
+        let r = prove_tree_node(&blind).expect("proves with its own roots");
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &blind, &r.roots).unwrap());
+        assert!(!verify_tree_node(&r.proof, r.log_size, &forged).unwrap(),
+                "a compValueNeg path into a foreign comp root must not verify");
+
+        let mut drifted = honest.clone();
+        drifted[0].inputs.as_mut().unwrap().comp_root[31] ^= 1;
+        let err = tree_node_expected_roots(&drifted).unwrap_err();
+        assert!(err.contains("not the transcript"), "{err}");
     }
 
     /// Membership is real: a tampered root must not verify.
@@ -1759,7 +1976,7 @@ mod tests {
         };
         let mut bad = r.roots.clone();
         bad[0][0] = (bad[0][0] + 1) % M31;
-        assert!(!verify_tree_node(&r.proof, r.log_size, &statements, &bad).unwrap(),
+        assert!(!verify_tree_node_with_roots(&r.proof, r.log_size, &statements, &bad).unwrap(),
                 "a tampered final-fold root must not verify");
     }
 
@@ -1776,7 +1993,7 @@ mod tests {
             Ok(r) => r,
             Err(e) => panic!("mixed depths must compose: {e}"),
         };
-        assert!(verify_tree_node(&r.proof, r.log_size, &[shallow, deep], &r.roots).unwrap());
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &[shallow, deep], &r.roots).unwrap());
     }
 
     #[test]

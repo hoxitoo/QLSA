@@ -2453,6 +2453,7 @@ pub fn tree_statement_from_columns(
         paths: rec.paths,
         comp_paths: rec.comp_paths,
         membership,
+        inputs: Some(rec.channel_inputs),
     })
 }
 
@@ -4413,7 +4414,7 @@ mod tests_vfri8 {
             .collect();
 
         let proved = node::prove_tree_node(&stmts).expect("node with membership");
-        assert!(node::verify_tree_node(&proved.proof, proved.log_size, &stmts, &proved.roots)
+        assert!(node::verify_tree_node(&proved.proof, proved.log_size, &stmts)
             .expect("verify"));
 
         // The last roots are the batch roots, one per statement — and they are
@@ -6481,7 +6482,7 @@ mod tests_vfri8 {
         let (cols, depth) = &tree.levels[0].columns[1];
         let b = tree_statement_from_columns(cols, *depth, &merkle_root, 1, Some(6), None).unwrap();
         assert!(
-            node::verify_tree_node(&root.proof, root.log_size, &[a, b], &root.roots).unwrap(),
+            node::verify_tree_node(&root.proof, root.log_size, &[a, b]).unwrap(),
             "the root must verify against its two children");
     }
 
@@ -6573,6 +6574,9 @@ mod tests_vfri8 {
             paths: rec0.paths.clone(),
             comp_paths: rec0.comp_paths.clone(),
             membership: None,
+            // Sizing only: the queries are re-derived above, so this is a shape,
+            // not a statement anyone verifies.
+            inputs: None,
         };
 
         match node::tree_node_trace_columns(std::slice::from_ref(&statement)) {
