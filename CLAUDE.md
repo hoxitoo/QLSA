@@ -221,13 +221,14 @@ paths would be a replay hole, since a transaction counted in the mapping is
 invisible to the tree and vice versa.
 
 **The accumulator is implemented and MEASURED NOT TO PAY in this form** — it is
-not the production path. Storage is O(1), but the transition costs **6,882,057
-gas** constant plus **21,083** per update, against the mapping's measured 12,085
-per returning sender and 28,777 per first-time one, so it only wins above ~569
+not the production path. Storage is O(1), but the transition costs **6,813,715
+gas** constant plus **20,479** per update, against the mapping's measured 12,085
+per returning sender and 28,777 per first-time one, so it only wins above ~563
 senders where a transaction admits ~172. It also does not fit alongside a batch
 (14.66M + 6.88M > the 16.78M cap), because a separate proof adds a THIRD
 `verifyRecursive`. Fixing that means folding the nonce statement into the batch
-proof as a further path group in `composition_channel_t8::node_shape`; see
+proof as a further component of the tree's root node (`nonce_update_t8_air`,
+not a path group of `merkle_path_t8_air`, which would reopen the A-4 hole); see
 `docs/TECH_DEBT.md` § A-4 and `ROADMAP.md` § 1.5.
 
 `queryHints` ABI is **byte-identical across VFRI11 and VFRI12** (6 head slots:

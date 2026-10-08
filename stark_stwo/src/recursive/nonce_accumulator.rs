@@ -7,17 +7,30 @@
 //!
 //! | what | where it is checked | why |
 //! |---|---|---|
-//! | the sibling paths reach their roots | **in circuit** | the siblings are witness — the contract cannot see 2N·D hashes |
+//! | the sibling paths reach their roots | **in circuit** | the siblings are witness — the contract cannot see N·D hashes |
+//! | a link's old and new leaf hang off ONE sibling path | **in circuit, by layout** | see "The shared path" below |
 //! | `new_nonce > old_nonce` | verifier / contract | the nonces are PUBLIC inputs; comparing two public u64s needs no AIR |
 //! | both of a link's paths share one index | verifier / contract | the indices are pinned preprocessed values, i.e. public |
 //! | `post_root[i] == pre_root[i+1]` | verifier / contract | the roots are pinned, so the chain is a public-input check |
 //! | `leaf == nonce_leaf(nonce)` | verifier / contract | a deterministic public function of a public nonce |
 //! | `index == prefix(H(sender))` | **contract only** | H is Keccak; arithmetizing it is limitation 0, not started |
 //!
-//! So this module adds **no new AIR**. `merkle_path_t8_air` has taken a root
-//! PER PATH since R4.11, so 2N paths against N+1 chained roots was already
-//! expressible; what was missing was a prove/verify pair that assembles them
-//! and a verifier that checks the public-input relations.
+//! # The shared path (A-4, closed 2026-10-08)
+//!
+//! This module first added no AIR: it proved each link as TWO independent
+//! `merkle_path_t8_air` paths, old leaf → pre-root and new leaf → post-root.
+//! That was a hole. The table above listed every relation except the one that
+//! makes it an UPDATE — that both paths use the same siblings — and the Merkle
+//! AIR leaves every row's sibling free. A prover could authenticate the new leaf
+//! with siblings from a different tree, one in which another sender's slot is
+//! reset to 0, and declare that tree's root as `post_root`; every pinned leaf,
+//! index and root checked out, and the reset sender could replay.
+//!
+//! [`nonce_update_t8_air`](super::nonce_update_t8_air) carries both lanes in
+//! one row with ONE `sib` and ONE `bit` column, so the two lanes cannot be fed
+//! different siblings: there is nothing to tell them apart with. The test
+//! `a_post_root_that_resets_another_slot_is_rejected` shows the forgery in both
+//! directions — accepted by the old two-path construction, rejected by this.
 //!
 //! `docs/TECH_DEBT.md` § A-4 anticipated needing cross-path constraints for the
 //! index equality and the strict increase. It does not, and the reason is worth
@@ -45,7 +58,7 @@
 //! the public `new > old`.
 
 use crate::nonce_tree::{nonce_leaf, NonceTransition, MAX_DEPTH};
-use crate::recursive::merkle_path_t8_air as merkle;
+use crate::recursive::nonce_update_t8_air::{self as nut, PinnedUpdate};
 use crate::vfri2_bridge::p2t8_node_words;
 
 use stwo::core::air::Component;
@@ -63,8 +76,8 @@ use crate::{make_config, LOG_BLOWUP, MAX_PROOF_BYTES, N_FRI_QUERIES, POW_BITS};
 
 /// Most updates one proof will carry.
 ///
-/// Not a cryptographic bound — a trace-size and hostile-input one. 2N paths of
-/// depth D occupy `2·N·D·22` rows, and the AIR caps `log_size` at 24, so N is
+/// Not a cryptographic bound — a trace-size and hostile-input one. N updates of
+/// depth D occupy `N·D·22` rows, and the AIR caps `log_size` at 24, so N is
 /// bounded anyway; this makes the refusal explicit instead of an allocation
 /// failure. (R3.12's lesson: every multi-input entry point gets its caps from
 /// the start.)
@@ -186,33 +199,38 @@ impl NonceStatement {
         None
     }
 
-    /// The 2N `(leaf, index, root)` triples the circuit must pin, in path order.
+    /// Per update, what both lanes are pinned to: the OLD leaf against its
+    /// pre-root and the NEW leaf against its post-root, at ONE index.
     ///
-    /// Path `2i` is link `i`'s OLD leaf against its pre-root; path `2i+1` is its
-    /// NEW leaf against its post-root. The leaves are computed HERE, from the
-    /// public nonces — a prover never supplies them, which is what makes
-    /// `old_nonce` unprofitable to lie about.
-    fn pinned_paths(&self) -> (Vec<[u64; 4]>, Vec<u32>, Vec<[u64; 4]>, Vec<usize>) {
-        let pre = self.pre_roots();
-        let n = self.updates.len();
-        let mut leaves = Vec::with_capacity(2 * n);
-        let mut indices = Vec::with_capacity(2 * n);
-        let mut roots = Vec::with_capacity(2 * n);
-        for (i, u) in self.updates.iter().enumerate() {
-            leaves.push(p2t8_node_words(&nonce_leaf(u.old_nonce)));
-            indices.push(u.index);
-            roots.push(pre[i]);
-
-            leaves.push(p2t8_node_words(&nonce_leaf(u.new_nonce)));
-            // The SAME index for both paths — § A-4 expected a cross-path
-            // constraint for this; pinning both from one public value is
-            // stronger and free.
-            indices.push(u.index);
-            roots.push(u.post_root);
-        }
-        let depths = vec![self.depth; 2 * n];
-        (leaves, indices, roots, depths)
+    /// The leaves are computed HERE, from the public nonces — a prover never
+    /// supplies them, which is what makes `old_nonce` unprofitable to lie about.
+    fn pinned_updates(&self) -> Vec<PinnedUpdate> {
+        self.updates
+            .iter()
+            .zip(self.pre_roots())
+            .map(|(u, pre_root)| PinnedUpdate {
+                old_leaf: p2t8_node_words(&nonce_leaf(u.old_nonce)),
+                new_leaf: p2t8_node_words(&nonce_leaf(u.new_nonce)),
+                index: u.index,
+                pre_root,
+                post_root: u.post_root,
+            })
+            .collect()
     }
+}
+
+/// Each update's ONE sibling path, which both lanes hang off.
+type Witness = (Vec<Vec<[u64; 4]>>, Vec<Vec<bool>>);
+
+fn witness(transitions: &[NonceTransition]) -> Witness {
+    transitions
+        .iter()
+        .map(|t| (t.sibs.iter().map(p2t8_node_words).collect(), t.bits.clone()))
+        .unzip()
+}
+
+fn leaves(pins: &[PinnedUpdate]) -> (Vec<[u64; 4]>, Vec<[u64; 4]>) {
+    pins.iter().map(|p| (p.old_leaf, p.new_leaf)).unzip()
 }
 
 fn validate_count(n: usize) -> Result<(), String> {
@@ -226,10 +244,10 @@ fn validate_depth(depth: usize) -> Result<(), String> {
     if depth == 0 || depth > MAX_DEPTH {
         return Err(format!("depth {depth} out of range [1, {MAX_DEPTH}]"));
     }
-    if depth > merkle::MAX_DEPTH {
+    if depth > nut::MAX_DEPTH {
         return Err(format!(
-            "depth {depth} exceeds what the path AIR can prove ({})",
-            merkle::MAX_DEPTH
+            "depth {depth} exceeds what the update AIR can prove ({})",
+            nut::MAX_DEPTH
         ));
     }
     Ok(())
@@ -269,12 +287,11 @@ pub fn statement_log_size(st: &NonceStatement) -> Result<u32, String> {
     if st.updates.is_empty() {
         return Err("an empty batch needs no proof".into());
     }
-    let (_, _, _, depths) = st.pinned_paths();
-    let log_size = merkle::compute_log_size_multi_var(&depths);
-    if log_size > merkle::MAX_LOG_SIZE {
+    let log_size = nut::compute_log_size(st.updates.len(), st.depth);
+    if log_size > nut::MAX_LOG_SIZE {
         return Err(format!(
             "log_size {log_size} exceeds MAX_LOG_SIZE {} — too many updates for one proof",
-            merkle::MAX_LOG_SIZE
+            nut::MAX_LOG_SIZE
         ));
     }
     Ok(log_size)
@@ -316,32 +333,22 @@ pub fn prove_nonce_transitions(
     }
 
     let log_size = statement_log_size(st)?;
-    let (leaves, indices, roots, depths) = st.pinned_paths();
+    let pins = st.pinned_updates();
+    let (old_leaves, new_leaves) = leaves(&pins);
+    let (sibs, bits) = witness(transitions);
 
-    // Both of a link's paths use the SAME siblings: they hang off the path, and
-    // only the leaf and the nodes above it change. See nonce_tree's
-    // `the_sibling_path_is_unchanged_by_an_update`.
-    let mut sibs: Vec<Vec<[u64; 4]>> = Vec::with_capacity(2 * transitions.len());
-    let mut bits: Vec<Vec<bool>> = Vec::with_capacity(2 * transitions.len());
-    for t in transitions {
-        let path: Vec<[u64; 4]> = t.sibs.iter().map(p2t8_node_words).collect();
-        sibs.push(path.clone());
-        bits.push(t.bits.clone());
-        sibs.push(path);
-        bits.push(t.bits.clone());
-    }
-
-    let (main_cols, reached) = merkle::build_trace_multi(&leaves, &sibs, &bits, log_size);
-    // The paths must actually land on the roots the statement claims. Checked
-    // at PROVING time so an inconsistent witness names itself.
-    for (i, (got, want)) in reached.iter().zip(&roots).enumerate() {
-        if got != want {
-            return Err(format!(
-                "path {i} reaches a different root than the statement claims"
-            ));
+    let (main_cols, reached) = nut::build_trace(&old_leaves, &new_leaves, &sibs, &bits, log_size);
+    // Both lanes must land on the roots the statement claims. Checked at
+    // PROVING time so an inconsistent witness names its link.
+    for (i, ((pre, post), p)) in reached.iter().zip(&pins).enumerate() {
+        if *pre != p.pre_root {
+            return Err(format!("update {i}: the old leaf does not reach the pre-root"));
+        }
+        if *post != p.post_root {
+            return Err(format!("update {i}: the new leaf does not reach the post-root"));
         }
     }
-    let preproc = merkle::build_preproc_multi_var(&leaves, &indices, &roots, &depths, log_size);
+    let preproc = nut::build_preproc(&pins, st.depth, log_size);
 
     let config = make_config(log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -363,7 +370,7 @@ pub fn prove_nonce_transitions(
 
     mix_statement(channel, st);
 
-    let component = merkle::new_component(log_size);
+    let component = nut::new_component(log_size);
     let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
         &[&component],
         channel,
@@ -403,23 +410,10 @@ pub fn statement_trace_columns(
         return Err("transitions do not match the statement".into());
     }
     let log_size = statement_log_size(st)?;
-    let (leaves, _, _, _) = st.pinned_paths();
-
-    let mut sibs: Vec<Vec<[u64; 4]>> = Vec::with_capacity(2 * transitions.len());
-    let mut bits: Vec<Vec<bool>> = Vec::with_capacity(2 * transitions.len());
-    for t in transitions {
-        let path: Vec<[u64; 4]> = t.sibs.iter().map(p2t8_node_words).collect();
-        sibs.push(path.clone());
-        bits.push(t.bits.clone());
-        sibs.push(path);
-        bits.push(t.bits.clone());
-    }
-
-    let (main_cols, _) = merkle::build_trace_multi(&leaves, &sibs, &bits, log_size);
-    let cols: Vec<Vec<u32>> = main_cols
-        .iter()
-        .map(|c| c.values.iter().map(|v| v.0).collect())
-        .collect();
+    let (old_leaves, new_leaves) = leaves(&st.pinned_updates());
+    let (sibs, bits) = witness(transitions);
+    let (raw, _) = nut::build_trace_raw(&old_leaves, &new_leaves, &sibs, &bits, log_size);
+    let cols: Vec<Vec<u32>> = raw.iter().map(|c| c.iter().map(|v| v.0).collect()).collect();
     Ok((cols, log_size))
 }
 
@@ -430,7 +424,8 @@ pub fn statement_trace_columns(
 /// 1. `st.check_public()` — strict increase, index ranges, the chain ending at
 ///    `new_root`. No proof involved.
 /// 2. the STARK, with the C2 pin over the preprocessed tree, which fixes every
-///    path's leaf, index and root to values recomputed HERE from `st`. A forged
+///    update's two leaves, index and two roots to values recomputed HERE from
+///    `st`; the two lanes share one sibling path by construction. A forged
 ///    selector or a swapped root changes that commitment and is rejected.
 pub fn verify_nonce_transitions(
     proof_bytes: &[u8],
@@ -450,7 +445,7 @@ pub fn verify_nonce_transitions(
         return Ok(false);
     }
 
-    let (leaves, indices, roots, depths) = st.pinned_paths();
+    let pins = st.pinned_updates();
 
     let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
         bincode::serde::decode_from_slice(
@@ -464,7 +459,7 @@ pub fn verify_nonce_transitions(
     config.fri_config.n_queries = N_FRI_QUERIES;
     config.pow_bits = POW_BITS;
 
-    let component = merkle::new_component(log_size);
+    let component = nut::new_component(log_size);
     let verifier_channel = &mut Blake2sM31Channel::default();
     let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
 
@@ -475,9 +470,7 @@ pub fn verify_nonce_transitions(
             proof.commitments.len()
         ));
     }
-    if proof.commitments[0]
-        != merkle::canonical_preproc_root_multi(&leaves, &indices, &roots, &depths, log_size)
-    {
+    if proof.commitments[0] != nut::canonical_preproc_root(&pins, st.depth, log_size) {
         return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
@@ -517,32 +510,54 @@ mod tests {
         (st, ts)
     }
 
-    // ── A malicious prover: per-path siblings chosen freely ───────────────────
+    // ── The construction this module USED to prove with (A-4) ────────────────
     //
-    // `prove_nonce_transitions` gives a link's old and new paths the SAME
-    // siblings because it builds the witness that way. The question is whether
-    // the VERIFIER requires it. This prover is identical except that it takes
-    // the siblings per path, which is what an adversary writing their own prover
-    // controls.
-    fn prove_with_free_siblings(
+    // Each link as two independent `merkle_path_t8_air` paths: 2i = old leaf
+    // against its pre-root, 2i+1 = new leaf against its post-root. Kept only to
+    // show, executably, what the two-lane component closes.
+    use crate::recursive::merkle_path_t8_air as merkle;
+
+    fn one_lane_pins(st: &NonceStatement) -> (Vec<[u64; 4]>, Vec<u32>, Vec<[u64; 4]>, Vec<usize>) {
+        let mut leaves = Vec::new();
+        let mut indices = Vec::new();
+        let mut roots = Vec::new();
+        for p in st.pinned_updates() {
+            leaves.extend([p.old_leaf, p.new_leaf]);
+            indices.extend([p.index, p.index]);
+            roots.extend([p.pre_root, p.post_root]);
+        }
+        let depths = vec![st.depth; leaves.len()];
+        (leaves, indices, roots, depths)
+    }
+
+    fn pcs() -> PcsConfig {
+        let mut config = PcsConfig::default();
+        config.fri_config.log_blowup_factor = LOG_BLOWUP;
+        config.fri_config.n_queries = N_FRI_QUERIES;
+        config.pow_bits = POW_BITS;
+        config
+    }
+
+    /// The old prover with siblings chosen PER PATH — what an adversary writing
+    /// their own prover controls.
+    fn prove_one_lane_free_siblings(
         st: &NonceStatement,
         sibs: &[Vec<[u64; 4]>],
         bits: &[Vec<bool>],
     ) -> (Vec<u8>, u32) {
-        let log_size = statement_log_size(st).unwrap();
-        let (leaves, indices, roots, depths) = st.pinned_paths();
+        let (leaves, indices, roots, depths) = one_lane_pins(st);
+        let log_size = merkle::compute_log_size_multi_var(&depths);
         let (main_cols, reached) = merkle::build_trace_multi(&leaves, sibs, bits, log_size);
         assert_eq!(reached, roots, "test setup: each path must reach its pinned root");
         let preproc =
             merkle::build_preproc_multi_var(&leaves, &indices, &roots, &depths, log_size);
 
-        let config = make_config(log_size);
         let twiddles = CpuBackend::precompute_twiddles(
             CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
         );
         let channel = &mut Blake2sM31Channel::default();
-        let mut scheme =
-            CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+        let mut scheme = CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(
+            make_config(log_size), &twiddles);
         scheme.set_store_polynomials_coefficients();
         let mut tree = scheme.tree_builder();
         tree.extend_evals(preproc);
@@ -557,26 +572,80 @@ mod tests {
         (bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap(), log_size)
     }
 
-    /// KNOWN HOLE (2026-10-08) — this test asserts the CURRENT, VULNERABLE
-    /// behaviour so the defect is executable rather than prose. When the fix
-    /// lands (a component that ties a link's two paths to ONE sibling set), the
-    /// final assertion flips and the name loses its prefix.
+    /// The old verifier: every path's leaf, index and root pinned — and nothing
+    /// relating a link's two paths' siblings.
+    fn verify_one_lane(proof_bytes: &[u8], log_size: u32, st: &NonceStatement) -> bool {
+        assert_eq!(st.check_public(), None);
+        let (leaves, indices, roots, depths) = one_lane_pins(st);
+        let (proof, _): (StarkProof<Blake2sM31MerkleHasher>, usize) =
+            bincode::serde::decode_from_slice(proof_bytes, bincode::config::standard()).unwrap();
+        let component = merkle::new_component(log_size);
+        let channel = &mut Blake2sM31Channel::default();
+        let scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(pcs());
+        let sizes = component.trace_log_degree_bounds();
+        if proof.commitments[0]
+            != merkle::canonical_preproc_root_multi(&leaves, &indices, &roots, &depths, log_size)
+        {
+            return false;
+        }
+        scheme.commit(proof.commitments[0], &sizes[0], channel);
+        scheme.commit(proof.commitments[1], &sizes[1], channel);
+        mix_statement(channel, st);
+        verify::<Blake2sM31MerkleChannel>(&[&component], channel, scheme, proof).is_ok()
+    }
+
+    /// The two-lane prover with its root check removed, as an adversary would
+    /// run it. `None` if the prover itself refuses the unsatisfied trace.
+    fn prove_two_lane_unchecked(
+        st: &NonceStatement,
+        sibs: &[Vec<[u64; 4]>],
+        bits: &[Vec<bool>],
+    ) -> Option<(Vec<u8>, u32)> {
+        let log_size = statement_log_size(st).unwrap();
+        let pins = st.pinned_updates();
+        let (old_leaves, new_leaves) = leaves(&pins);
+        let (main_cols, _) = nut::build_trace(&old_leaves, &new_leaves, sibs, bits, log_size);
+        let twiddles = CpuBackend::precompute_twiddles(
+            CanonicCoset::new(log_size + LOG_BLOWUP + 1).circle_domain().half_coset,
+        );
+        let channel = &mut Blake2sM31Channel::default();
+        let mut scheme = CommitmentSchemeProver::<CpuBackend, Blake2sM31MerkleChannel>::new(
+            make_config(log_size), &twiddles);
+        scheme.set_store_polynomials_coefficients();
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(nut::build_preproc(&pins, st.depth, log_size));
+        tree.commit(channel);
+        let mut tree = scheme.tree_builder();
+        tree.extend_evals(main_cols);
+        tree.commit(channel);
+        mix_statement(channel, st);
+        let component = nut::new_component(log_size);
+        let proof =
+            prove::<CpuBackend, Blake2sM31MerkleChannel>(&[&component], channel, scheme).ok()?;
+        Some((bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap(), log_size))
+    }
+
+    /// A-4, closed — and shown in both directions.
     ///
     /// The attack: victim V has already used nonces up to 5. Sender A advances
     /// 0 -> 1, and the update declares as its post-root a tree in which A's slot
-    /// is honestly 1 — but V's slot is RESET to 0. The old path authenticates
-    /// against the real pre-root with real siblings; the new path authenticates
-    /// against the forged post-root with DIFFERENT siblings. Every public check
-    /// holds: the nonce increases, the slot is A's, the chain ends at new_root.
-    /// In the next batch V's already-used nonces are valid again: replay.
+    /// is honestly 1 — but V's slot is RESET to 0. With two independent paths
+    /// the old path authenticates against the real pre-root with real siblings
+    /// and the new path against the forged post-root with DIFFERENT siblings;
+    /// every public check holds, and in the next batch V's spent nonces are
+    /// valid again: replay.
     ///
-    /// The off-circuit reference `nonce_tree::verify_transition` is NOT fooled —
-    /// `NonceTransition` has one `sibs` field for both paths. The circuit has
-    /// two independent paths. Agreement between the prover and the circuit
-    /// showed nothing about whether either enforced the property.
+    /// The off-circuit reference `nonce_tree::verify_transition` was never
+    /// fooled — `NonceTransition` has one `sibs` field for both paths. The
+    /// circuit had two. Agreement between the prover and the circuit showed
+    /// nothing about whether either enforced the property.
+    ///
+    /// With one shared sibling path there is no witness at all: the real tree's
+    /// siblings miss the forged post-root, the forged tree's miss the real
+    /// pre-root, and any proof built from either does not verify.
     #[test]
-    #[ignore = "STARK proving; documents an open soundness hole (TECH_DEBT A-4)"]
-    fn known_hole_verifier_accepts_a_post_root_that_resets_another_slot() {
+    #[ignore = "STARK proving; ~seconds"]
+    fn a_post_root_that_resets_another_slot_is_rejected() {
         let a = sender(1);
         let v = sender(2);
         let slot_a = crate::nonce_tree::slot_index(&a, D).unwrap();
@@ -608,20 +677,53 @@ mod tests {
             depth: D,
         };
         assert_eq!(st.check_public(), None, "every public check passes");
-
         let w = |s: &[[u8; 32]]| -> Vec<[u64; 4]> { s.iter().map(p2t8_node_words).collect() };
-        let (proof, log_size) = prove_with_free_siblings(
-            &st,
-            &[w(&old_sibs), w(&new_sibs)],
-            &[bits.clone(), bits],
-        );
 
-        // CURRENT behaviour: accepted. This is the hole.
-        assert!(
-            verify_nonce_transitions(&proof, log_size, &st).unwrap(),
-            "if this fails, the verifier now rejects the forgery — the hole is \
-             closed: invert this assertion and drop the KNOWN_HOLE prefix"
-        );
+        // As it was: two paths, two sibling sets — accepted.
+        let (proof, log_size) =
+            prove_one_lane_free_siblings(&st, &[w(&old_sibs), w(&new_sibs)], &[bits.clone(), bits.clone()]);
+        assert!(verify_one_lane(&proof, log_size, &st),
+                "the two-path construction accepted the forgery — the hole as it was");
+
+        // Now: one path for both lanes. The honest prover refuses either choice,
+        // naming which lane misses...
+        for (sibs, lane) in [(&old_sibs, "post-root"), (&new_sibs, "pre-root")] {
+            let t = NonceTransition {
+                index: slot_a, old_nonce: 0, new_nonce: 1,
+                pre_root: real.root(), post_root: forged.root(),
+                sibs: sibs.clone(), bits: bits.clone(),
+            };
+            let err = prove_nonce_transitions(&st, &[t]).unwrap_err();
+            assert!(err.contains(lane), "{err}");
+        }
+        // ...a prover that skips that check cannot even produce a proof — the
+        // trace does not satisfy the AIR, and stwo refuses it...
+        for sibs in [&old_sibs, &new_sibs] {
+            assert!(prove_two_lane_unchecked(&st, &[w(sibs)], &[bits.clone()]).is_none(),
+                    "an unsatisfied two-lane trace must not yield a proof");
+        }
+        // ...and the strongest thing it CAN do — pin the roots its one path
+        // really reaches, which is a valid proof of SOME statement — does not
+        // verify as this one. Run against the real verifier, so the rejection is
+        // the verifier's, not the prover's.
+        for sibs in [&old_sibs, &new_sibs] {
+            let p = &st.pinned_updates()[0];
+            let (_, reached) = nut::build_trace_raw(
+                &[p.old_leaf], &[p.new_leaf], &[w(sibs)], &[bits.clone()], nut::compute_log_size(1, D));
+            let (pre, post) = reached[0];
+            let mut own = st.clone();
+            own.old_root = pre;
+            own.new_root = post;
+            own.updates[0].post_root = post;
+            assert!(pre != st.old_root || post != st.new_root,
+                    "one shared path cannot reach both the real pre-root and the forged post-root");
+            let (proof, log_size) = prove_two_lane_unchecked(&own, &[w(sibs)], &[bits.clone()])
+                .expect("a satisfied trace proves");
+            assert!(verify_nonce_transitions(&proof, log_size, &own).unwrap(),
+                    "setup: the proof is valid for what it really shows");
+            assert!(!verify_nonce_transitions(&proof, log_size, &st).unwrap(),
+                    "a post-root that resets another slot must not verify");
+        }
     }
 
     // ── The public gate, which needs no proof ────────────────────────────────
@@ -691,32 +793,20 @@ mod tests {
     }
 
     #[test]
-    fn both_paths_of_a_link_are_pinned_to_the_same_index() {
-        // What § A-4 expected a cross-path CONSTRAINT for. Pinning both from
-        // one public value is stronger and costs nothing.
-        let (st, _) = batch(3);
-        let (_, indices, _, _) = st.pinned_paths();
-        assert_eq!(indices.len(), 6);
-        for (i, u) in st.updates.iter().enumerate() {
-            assert_eq!(indices[2 * i], u.index);
-            assert_eq!(indices[2 * i + 1], u.index);
-        }
-    }
-
-    #[test]
     fn the_pinned_roots_follow_the_chain() {
         let (st, _) = batch(3);
-        let (_, _, roots, _) = st.pinned_paths();
+        let pins = st.pinned_updates();
         // Link 0 starts at old_root; each later link starts where the previous
         // one ended; the last ends at new_root.
-        assert_eq!(roots[0], st.old_root);
-        for i in 0..st.updates.len() {
-            assert_eq!(roots[2 * i + 1], st.updates[i].post_root);
-            if i + 1 < st.updates.len() {
-                assert_eq!(roots[2 * (i + 1)], st.updates[i].post_root);
+        assert_eq!(pins[0].pre_root, st.old_root);
+        for i in 0..pins.len() {
+            assert_eq!(pins[i].post_root, st.updates[i].post_root);
+            assert_eq!(pins[i].index, st.updates[i].index);
+            if i + 1 < pins.len() {
+                assert_eq!(pins[i + 1].pre_root, pins[i].post_root);
             }
         }
-        assert_eq!(roots[roots.len() - 1], st.new_root);
+        assert_eq!(pins[pins.len() - 1].post_root, st.new_root);
     }
 
     #[test]
@@ -724,10 +814,9 @@ mod tests {
         // The prover never supplies a leaf, which is what makes lying about
         // old_nonce unprofitable.
         let (st, _) = batch(2);
-        let (leaves, _, _, _) = st.pinned_paths();
-        for (i, u) in st.updates.iter().enumerate() {
-            assert_eq!(leaves[2 * i], p2t8_node_words(&nonce_leaf(u.old_nonce)));
-            assert_eq!(leaves[2 * i + 1], p2t8_node_words(&nonce_leaf(u.new_nonce)));
+        for (p, u) in st.pinned_updates().iter().zip(&st.updates) {
+            assert_eq!(p.old_leaf, p2t8_node_words(&nonce_leaf(u.old_nonce)));
+            assert_eq!(p.new_leaf, p2t8_node_words(&nonce_leaf(u.new_nonce)));
         }
     }
 
@@ -839,21 +928,24 @@ mod tests {
     fn probe_trace_growth_per_update() {
         // § A-4 pitfall 2 asks for this rather than an estimate: log_size is
         // what sets proving time, and it must be MEASURED against both the
-        // update count and the depth.
-        println!("updates x depth -> log_size (2N paths of D steps, 22 rows each)");
+        // update count and the depth. Two lanes per row: N·D·22 rows, where the
+        // old two-path form took 2N·D·22 (one log more, same cell count).
+        println!("updates x depth -> log_size (two-lane: N·D·22 rows; old two-path in brackets)");
         for d in [4usize, 8, 16, 24, 28] {
             let mut row = format!("  D={d:2}: ");
             for n in [1usize, 2, 4, 8, 16, 32] {
-                let depths = vec![d; 2 * n];
-                let ls = merkle::compute_log_size_multi_var(&depths);
-                row += &format!("N={n:<3}->{ls:<3} ");
+                let ls = nut::compute_log_size(n, d);
+                let old = merkle::compute_log_size_multi_var(&vec![d; 2 * n]);
+                row += &format!("N={n:<3}->{ls:<2}({old:<2}) ");
             }
             println!("{row}");
         }
         println!(
-            "  AIR cap MAX_LOG_SIZE={}, MAX_DEPTH={}",
-            merkle::MAX_LOG_SIZE,
-            merkle::MAX_DEPTH
+            "  AIR cap MAX_LOG_SIZE={}, MAX_DEPTH={}; {} main cols (old {})",
+            nut::MAX_LOG_SIZE,
+            nut::MAX_DEPTH,
+            nut::N_MAIN_COLS,
+            merkle::N_MAIN_COLS,
         );
     }
 }

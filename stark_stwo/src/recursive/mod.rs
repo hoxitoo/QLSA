@@ -218,6 +218,7 @@ pub mod merkle_path_air;
 pub mod merkle_path_t16_air;
 pub mod merkle_path_t8_air;
 pub mod nonce_accumulator;
+pub mod nonce_update_t8_air;
 pub mod oods_air;
 pub mod poseidon2_t16_air;
 pub mod poseidon2_t8_air;
