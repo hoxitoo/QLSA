@@ -806,6 +806,22 @@ pub fn verify_aggregation_node(
 use crate::recursive::composition_t8::CompMembership;
 use crate::recursive::integration::qm31_leaf_hash_t8;
 use crate::recursive::merkle_path_t8_air as merkle;
+use crate::nonce_tree::NonceTransition;
+use crate::recursive::nonce_accumulator::{self as nacc, NonceStatement};
+use crate::recursive::nonce_update_t8_air as nut;
+
+/// A nonce transition to carry in a node: the public statement and its witness.
+///
+/// Only the tree's ROOT node carries one (Ф3.2): the transition then rides the
+/// two `verifyRecursive` calls the batch already pays for, instead of a third.
+/// It goes in as `nonce_update_t8_air` — a fourth COMPONENT — and not as more
+/// `merkle_path_t8_air` paths, which leave each path's siblings free and would
+/// reopen the A-4 replay hole.
+pub type NonceWitness<'a> = (&'a NonceStatement, &'a [NonceTransition]);
+
+/// Separates the nonce statement's words from the node's in the transcript, so
+/// no node without a transition absorbs the same sequence as one with.
+const NONCE_COMPONENT_TAG: u32 = 0x4e4f_4e43; // "NONC"
 
 /// One child STATEMENT of a tree node.
 ///
@@ -1057,11 +1073,45 @@ pub fn tree_node_log_size(statements: &[TreeStatement]) -> Result<u32, String> {
     Ok(node_shape(statements)?.log_size)
 }
 
+/// `log_size` of a node that also carries `nonce`: every component is proved at
+/// one size, the largest any of them needs.
+pub fn tree_node_log_size_with_nonce(
+    statements: &[TreeStatement],
+    nonce: Option<&NonceStatement>,
+) -> Result<u32, String> {
+    Ok(node_shape_with(statements, nonce)?.log_size)
+}
+
+/// [`node_shape`], widened to fit the nonce component when there is one. With
+/// `None` it IS `node_shape` — the path every node but a nonce-carrying root
+/// takes, and the one the 2026-10-10 run uses, must not move.
+fn node_shape_with(
+    statements: &[TreeStatement],
+    nonce: Option<&NonceStatement>,
+) -> Result<NodeShape, String> {
+    let mut sh = node_shape(statements)?;
+    if let Some(st) = nonce {
+        if let Some(reason) = st.check_public() {
+            return Err(format!("nonce statement: {reason}"));
+        }
+        if st.updates.is_empty() {
+            return Err("an empty nonce statement moves nothing; pass None".into());
+        }
+        sh.log_size = sh.log_size.max(nut::compute_log_size(st.updates.len(), st.depth));
+    }
+    let cap = rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE);
+    if nonce.is_some() && sh.log_size > cap {
+        return Err(format!("tree node log_size {} too large", sh.log_size));
+    }
+    Ok(sh)
+}
+
 fn mix_public_tree(
     ch: &mut Blake2sM31Channel,
     sh: &NodeShape,
     runs: &[channel::ChannelRun],
     roots: &[[u64; 4]],
+    nonce: Option<&NonceStatement>,
 ) {
     let w = |v: u64| (v % M31_P) as u32;
     let mut v = vec![sh.queries.len() as u32, sh.depth as u32, sh.comp_depth as u32];
@@ -1089,12 +1139,21 @@ fn mix_public_tree(
         v.extend(r.digest.iter().map(|&d| w(d)));
     }
     ch.mix_u32s(&v);
+    // Appended AFTER the node's own words, so a node without a transition
+    // absorbs exactly what it always did.
+    if let Some(st) = nonce {
+        ch.mix_u32s(&[NONCE_COMPONENT_TAG]);
+        nacc::mix_statement(ch, st);
+    }
 }
 
-fn tree_preproc_ids() -> Vec<PreProcessedColumnId> {
+fn tree_preproc_ids(with_nonce: bool) -> Vec<PreProcessedColumnId> {
     let mut ids = rv::preprocessed_column_ids();
     ids.extend(merkle::preprocessed_column_ids());
     ids.extend(channel::preprocessed_column_ids());
+    if with_nonce {
+        ids.extend(nut::preprocessed_column_ids());
+    }
     ids
 }
 
@@ -1102,6 +1161,7 @@ fn canonical_tree_root(
     sh: &NodeShape,
     runs: &[channel::ChannelRun],
     roots: &[[u64; 4]],
+    nonce: Option<&NonceStatement>,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
     let config = make_config(sh.log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -1115,16 +1175,27 @@ fn canonical_tree_root(
     cols.extend(merkle::build_preproc_multi_var(
         &sh.leaves, &sh.indices, roots, &sh.depths, sh.log_size));
     cols.extend(channel::build_preproc_multi(&sh.transcripts, runs, sh.log_size));
+    if let Some(st) = nonce {
+        // Pinned from the PUBLIC statement alone: leaves from the nonces,
+        // roots from the chain, one index per update.
+        cols.extend(nut::build_preproc(&st.pinned_updates(), st.depth, sh.log_size));
+    }
     let mut tree = scheme.tree_builder();
     tree.extend_evals(cols);
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
 
-fn tree_components(
-    log_size: u32,
-) -> (rv::RecursiveVerifierComponent, merkle::MerklePathT8Component, channel::ChannelT8Component) {
-    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&tree_preproc_ids());
+type TreeComponents = (
+    rv::RecursiveVerifierComponent,
+    merkle::MerklePathT8Component,
+    channel::ChannelT8Component,
+    Option<nut::NonceUpdateT8Component>,
+);
+
+fn tree_components(log_size: u32, with_nonce: bool) -> TreeComponents {
+    let mut alloc =
+        TraceLocationAllocator::new_with_preprocessed_columns(&tree_preproc_ids(with_nonce));
     let rv_comp = rv::RecursiveVerifierComponent::new(
         &mut alloc,
         rv::RecursiveVerifierEval { log_n_rows: log_size },
@@ -1140,7 +1211,14 @@ fn tree_components(
         channel::ChannelT8Eval { log_n_rows: log_size },
         SecureField::from(0u32),
     );
-    (rv_comp, merkle_comp, chan_comp)
+    let nonce_comp = with_nonce.then(|| {
+        nut::NonceUpdateT8Component::new(
+            &mut alloc,
+            nut::NonceUpdateT8Eval { log_n_rows: log_size },
+            SecureField::from(0u32),
+        )
+    });
+    (rv_comp, merkle_comp, chan_comp, nonce_comp)
 }
 
 /// Prove a complete tree node.
@@ -1150,7 +1228,16 @@ fn tree_components(
 /// it committed to, and its composition values are members of its compRoot (the
 /// Merkle component). Value-bound end to end, in one proof.
 pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, String> {
-    let sh = node_shape(statements)?;
+    prove_tree_node_with_nonce(statements, None)
+}
+
+/// [`prove_tree_node`] for a node that also proves a nonce transition — the
+/// tree's root, when the batch moves the nonce accumulator (Ф3.2).
+pub fn prove_tree_node_with_nonce(
+    statements: &[TreeStatement],
+    nonce: Option<NonceWitness<'_>>,
+) -> Result<TreeNodeResult, String> {
+    let sh = node_shape_with(statements, nonce.map(|(st, _)| st))?;
     if sh.log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE) {
         return Err(format!("tree node log_size {} too large", sh.log_size));
     }
@@ -1187,6 +1274,11 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
         &sh.leaves, &sh.indices, &roots, &sh.depths, sh.log_size);
     let (chan_main, runs) = channel::build_trace_multi(&sh.transcripts, sh.log_size);
     let chan_preproc = channel::build_preproc_multi(&sh.transcripts, &runs, sh.log_size);
+    // The transition, through the same checked builder as its standalone proof.
+    let nonce_traces = nonce
+        .map(|(st, ts)| nacc::checked_trace(st, ts, sh.log_size))
+        .transpose()
+        .map_err(|e| format!("nonce transition: {e}"))?;
 
     let config = make_config(sh.log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -1200,22 +1292,32 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
     let mut preproc = rv_preproc;
     preproc.extend(merkle_preproc);
     preproc.extend(chan_preproc);
+    let mut main = rv_main;
+    main.extend(merkle_main);
+    main.extend(chan_main);
+    if let Some((n_main, n_preproc)) = nonce_traces {
+        preproc.extend(n_preproc);
+        main.extend(n_main);
+    }
     let mut tree = scheme.tree_builder();
     tree.extend_evals(preproc);
     tree.commit(fs);
 
-    let mut main = rv_main;
-    main.extend(merkle_main);
-    main.extend(chan_main);
     let mut tree = scheme.tree_builder();
     tree.extend_evals(main);
     tree.commit(fs);
 
-    mix_public_tree(fs, &sh, &runs, &roots);
+    let nonce_st = nonce.map(|(st, _)| st);
+    mix_public_tree(fs, &sh, &runs, &roots, nonce_st);
 
-    let (rv_comp, merkle_comp, chan_comp) = tree_components(sh.log_size);
-    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
-        &[&rv_comp, &merkle_comp, &chan_comp], fs, scheme)
+    let (rv_comp, merkle_comp, chan_comp, nonce_comp) =
+        tree_components(sh.log_size, nonce.is_some());
+    let mut comps: Vec<&dyn stwo::prover::ComponentProver<CpuBackend>> =
+        vec![&rv_comp, &merkle_comp, &chan_comp];
+    if let Some(n) = &nonce_comp {
+        comps.push(n);
+    }
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&comps, fs, scheme)
         .map_err(|e| format!("tree node prove error: {e:?}"))?;
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("tree node serialize error: {e:?}"))?;
@@ -1290,7 +1392,22 @@ pub fn verify_tree_node(
     statements: &[TreeStatement],
 ) -> Result<bool, String> {
     let roots = tree_node_expected_roots(statements)?;
-    verify_tree_node_pinned(proof_bytes, log_size, statements, &roots)
+    verify_tree_node_pinned(proof_bytes, log_size, statements, &roots, None)
+}
+
+/// [`verify_tree_node`] for a node that carries a nonce transition. The
+/// transition's leaves, index and chained roots are pinned from `nonce` — the
+/// public statement — and its `check_public` relations must hold; a node proved
+/// without a transition does not verify here, nor one proved with a different
+/// statement.
+pub fn verify_tree_node_with_nonce(
+    proof_bytes: &[u8],
+    log_size: u32,
+    statements: &[TreeStatement],
+    nonce: &NonceStatement,
+) -> Result<bool, String> {
+    let roots = tree_node_expected_roots(statements)?;
+    verify_tree_node_pinned(proof_bytes, log_size, statements, &roots, Some(nonce))
 }
 
 /// [`verify_tree_node`] against roots the CALLER chooses. Not a soundness
@@ -1304,7 +1421,7 @@ pub(crate) fn verify_tree_node_with_roots(
     statements: &[TreeStatement],
     roots: &[[u64; 4]],
 ) -> Result<bool, String> {
-    verify_tree_node_pinned(proof_bytes, log_size, statements, roots)
+    verify_tree_node_pinned(proof_bytes, log_size, statements, roots, None)
 }
 
 fn verify_tree_node_pinned(
@@ -1312,8 +1429,9 @@ fn verify_tree_node_pinned(
     log_size: u32,
     statements: &[TreeStatement],
     roots: &[[u64; 4]],
+    nonce: Option<&NonceStatement>,
 ) -> Result<bool, String> {
-    let sh = node_shape(statements)?;
+    let sh = node_shape_with(statements, nonce)?;
     if log_size != sh.log_size {
         return Err(format!("log_size {log_size} is not canonical for this node"));
     }
@@ -1334,8 +1452,11 @@ fn verify_tree_node_pinned(
     config.fri_config.n_queries = N_FRI_QUERIES;
     config.pow_bits = POW_BITS;
 
-    let (rv_comp, merkle_comp, chan_comp) = tree_components(log_size);
-    let components: [&dyn Component; 3] = [&rv_comp, &merkle_comp, &chan_comp];
+    let (rv_comp, merkle_comp, chan_comp, nonce_comp) = tree_components(log_size, nonce.is_some());
+    let mut components: Vec<&dyn Component> = vec![&rv_comp, &merkle_comp, &chan_comp];
+    if let Some(n) = &nonce_comp {
+        components.push(n);
+    }
 
     let fs = &mut Blake2sM31Channel::default();
     let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
@@ -1347,17 +1468,22 @@ fn verify_tree_node_pinned(
     for (i, b) in chan_comp.trace_log_degree_bounds().iter().enumerate() {
         sizes[i].extend(b.iter().copied());
     }
+    if let Some(n) = &nonce_comp {
+        for (i, b) in n.trace_log_degree_bounds().iter().enumerate() {
+            sizes[i].extend(b.iter().copied());
+        }
+    }
     if proof.commitments.len() < 2 {
         return Err(format!(
             "malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
-    if proof.commitments[0] != canonical_tree_root(&sh, &runs, roots) {
+    if proof.commitments[0] != canonical_tree_root(&sh, &runs, roots, nonce) {
         return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], fs);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], fs);
 
-    mix_public_tree(fs, &sh, &runs, roots);
+    mix_public_tree(fs, &sh, &runs, roots, nonce);
 
     let result = verify::<Blake2sM31MerkleChannel>(&components, fs, commitment_scheme, proof);
     Ok(result.is_ok())
@@ -1373,7 +1499,16 @@ fn verify_tree_node_pinned(
 pub fn tree_node_trace_columns(
     statements: &[TreeStatement],
 ) -> Result<(Vec<Vec<u32>>, u32), String> {
-    let sh = node_shape(statements)?;
+    tree_node_trace_columns_with_nonce(statements, None)
+}
+
+/// [`tree_node_trace_columns`] for a node that carries a nonce transition: its
+/// 85 two-lane columns follow the channel's, in the order the proof commits.
+pub fn tree_node_trace_columns_with_nonce(
+    statements: &[TreeStatement],
+    nonce: Option<NonceWitness<'_>>,
+) -> Result<(Vec<Vec<u32>>, u32), String> {
+    let sh = node_shape_with(statements, nonce.map(|(st, _)| st))?;
     if sh.log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE) {
         return Err(format!("tree node log_size {} too large", sh.log_size));
     }
@@ -1391,6 +1526,11 @@ pub fn tree_node_trace_columns(
         .chain(chan_cols.into_iter())
     {
         cols.push(c.into_iter().map(|v| v.0).collect());
+    }
+    if let Some((st, ts)) = nonce {
+        // Checked first, so exported columns are never of an invalid witness.
+        nacc::checked_trace(st, ts, sh.log_size).map_err(|e| format!("nonce transition: {e}"))?;
+        cols.extend(nacc::raw_columns(st, ts, sh.log_size));
     }
     Ok((cols, sh.log_size))
 }
@@ -1964,6 +2104,123 @@ mod tests {
         drifted[0].inputs.as_mut().unwrap().comp_root[31] ^= 1;
         let err = tree_node_expected_roots(&drifted).unwrap_err();
         assert!(err.contains("not the transcript"), "{err}");
+    }
+
+    // ── Ф3.2: the nonce transition as a fourth component of the node ─────────
+
+    const ND: usize = 4;
+
+    fn nonce_sender(i: u8) -> [u8; 32] {
+        let mut h = [0u8; 32];
+        h[0] = i;
+        h[1] = i.wrapping_mul(7);
+        h
+    }
+
+    /// `n` distinct senders advancing to nonce `i`, with statement and witness.
+    fn nonce_batch(n: u8) -> (NonceStatement, Vec<NonceTransition>) {
+        use crate::nonce_tree::{apply_updates, NonceTree};
+        let mut tree = NonceTree::new(ND).unwrap();
+        let ups: Vec<_> = (1..=n).map(|i| (nonce_sender(i), u64::from(i))).collect();
+        let (old_root, new_root, ts) = apply_updates(&mut tree, &ups).unwrap();
+        (NonceStatement::from_transitions(&ts, &old_root, &new_root, ND).unwrap(), ts)
+    }
+
+    #[test]
+    fn a_node_carrying_a_nonce_transition_proves_and_verifies() {
+        let mut s = 0x9A1_u64;
+        let stmts = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let (st, ts) = nonce_batch(3);
+        let r = prove_tree_node_with_nonce(&stmts, Some((&st, &ts))).expect("proves");
+        assert!(verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &st).unwrap(),
+                "an honest node with its transition must verify");
+
+        // The columns a parent (or the on-chain bundle) takes carry the 85
+        // two-lane columns after the node's own.
+        let (with, l1) = tree_node_trace_columns_with_nonce(&stmts, Some((&st, &ts))).unwrap();
+        let (without, _) = tree_node_trace_columns(&stmts).unwrap();
+        assert_eq!(l1, r.log_size);
+        assert_eq!(with.len(), without.len() + nut::N_MAIN_COLS);
+    }
+
+    /// The transition is part of what the node claims: the same proof does not
+    /// verify for another statement, nor as a node without one, and a node
+    /// without one does not verify as carrying it.
+    #[test]
+    fn a_nonce_node_verifies_only_its_own_statement() {
+        let mut s = 0x9B2_u64;
+        let stmts = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let (st, ts) = nonce_batch(3);
+        let r = prove_tree_node_with_nonce(&stmts, Some((&st, &ts))).expect("proves");
+
+        let mut other_nonce = st.clone();
+        other_nonce.updates[0].new_nonce += 100; // still increasing
+        assert_eq!(other_nonce.check_public(), None);
+        assert!(!verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &other_nonce).unwrap());
+
+        let mut other_root = st.clone();
+        other_root.updates[0].post_root = [7, 7, 7, 7]; // an intermediate root
+        assert_eq!(other_root.check_public(), None);
+        assert!(!verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &other_root).unwrap());
+
+        // As a node without a transition: a different claim, so not this proof.
+        assert!(!matches!(verify_tree_node(&r.proof, r.log_size, &stmts), Ok(true)));
+
+        // And a plain node does not pass as one carrying the transition.
+        let plain = prove_tree_node(&stmts).expect("plain node proves");
+        assert!(!matches!(
+            verify_tree_node_with_nonce(&plain.proof, plain.log_size, &stmts, &st), Ok(true)));
+    }
+
+    /// A-4's forgery, in the node: a post-root in which another sender's slot is
+    /// reset. The prover refuses it; and the proof of what the shared path
+    /// really reaches is valid for ITS statement and rejected for the forged one.
+    #[test]
+    fn a_node_refuses_a_post_root_that_resets_another_slot() {
+        use crate::nonce_tree::{slot_index, NonceTree};
+        use crate::vfri2_bridge::p2t8_node_words;
+        use crate::recursive::nonce_accumulator::NonceUpdate;
+
+        let mut s = 0x9C3_u64;
+        let stmts = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let (a, v) = (nonce_sender(1), nonce_sender(2));
+        let (slot_a, slot_v) = (slot_index(&a, ND).unwrap(), slot_index(&v, ND).unwrap());
+        assert_ne!(slot_a, slot_v);
+
+        let mut real = NonceTree::new(ND).unwrap();
+        real.set(slot_v, 5).unwrap();
+        let (sibs, bits) = real.membership_proof(slot_a).unwrap();
+        let mut forged = NonceTree::new(ND).unwrap();
+        forged.set(slot_a, 1).unwrap(); // V silently back at 0
+
+        let statement_to = |post: [u8; 32]| NonceStatement {
+            old_root: p2t8_node_words(&real.root()),
+            new_root: p2t8_node_words(&post),
+            updates: vec![NonceUpdate {
+                index: slot_a, old_nonce: 0, new_nonce: 1, post_root: p2t8_node_words(&post),
+            }],
+            depth: ND,
+        };
+        let forged_st = statement_to(forged.root());
+        assert_eq!(forged_st.check_public(), None, "every public check passes");
+
+        let t = |post: [u8; 32]| NonceTransition {
+            index: slot_a, old_nonce: 0, new_nonce: 1,
+            pre_root: real.root(), post_root: post, sibs: sibs.clone(), bits: bits.clone(),
+        };
+        let err = prove_tree_node_with_nonce(&stmts, Some((&forged_st, &[t(forged.root())])))
+            .err().expect("the forged post-root must not be provable");
+        assert!(err.contains("post-root"), "{err}");
+
+        // What the real path honestly reaches: A at 1, V still at 5.
+        let mut honest = real.clone();
+        honest.set(slot_a, 1).unwrap();
+        let own = statement_to(honest.root());
+        let r = prove_tree_node_with_nonce(&stmts, Some((&own, &[t(honest.root())])))
+            .expect("the honest transition proves");
+        assert!(verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &own).unwrap());
+        assert!(!verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &forged_st).unwrap(),
+                "a post-root that resets another slot must not verify");
     }
 
     /// Membership is real: a tampered root must not verify.

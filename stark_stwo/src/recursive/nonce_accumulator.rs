@@ -204,7 +204,7 @@ impl NonceStatement {
     ///
     /// The leaves are computed HERE, from the public nonces — a prover never
     /// supplies them, which is what makes `old_nonce` unprofitable to lie about.
-    fn pinned_updates(&self) -> Vec<PinnedUpdate> {
+    pub(crate) fn pinned_updates(&self) -> Vec<PinnedUpdate> {
         self.updates
             .iter()
             .zip(self.pre_roots())
@@ -259,7 +259,7 @@ fn validate_depth(depth: usize) -> Result<(), String> {
 /// cannot be reinterpreted at a different length — the R4.7 lesson, where
 /// `outerBindingRoot` hashed 2 of 8 public fields and left six swappable while
 /// still returning ok.
-fn mix_statement(channel: &mut Blake2sM31Channel, st: &NonceStatement) {
+pub(crate) fn mix_statement(channel: &mut Blake2sM31Channel, st: &NonceStatement) {
     let mut words: Vec<u32> = Vec::with_capacity(9 + st.updates.len() * 9);
     words.push(st.updates.len() as u32);
     words.push(st.depth as u32);
@@ -297,17 +297,22 @@ pub fn statement_log_size(st: &NonceStatement) -> Result<u32, String> {
     Ok(log_size)
 }
 
-/// Prove that `st`'s transitions are authentic against their chained roots.
+/// The two-lane trace and its pinned preprocessed columns for `st`, at
+/// `log_size`, after checking that the witness describes the statement.
 ///
-/// `transitions` supplies the WITNESS (the sibling paths); `st` is the public
-/// statement. The two must describe the same batch, which is checked rather
-/// than assumed.
-pub fn prove_nonce_transitions(
+/// The one place that does it: the standalone proof and the tree's root node
+/// (which carries the transition as a fourth component) both come through here,
+/// so they cannot disagree about what a valid witness is.
+pub(crate) fn checked_trace(
     st: &NonceStatement,
     transitions: &[NonceTransition],
-) -> Result<(Vec<u8>, u32), String> {
+    log_size: u32,
+) -> Result<(nut::TraceColumns, nut::TraceColumns), String> {
     if let Some(reason) = st.check_public() {
         return Err(reason);
+    }
+    if st.updates.is_empty() {
+        return Err("an empty batch needs no proof".into());
     }
     if transitions.len() != st.updates.len() {
         return Err(format!(
@@ -332,7 +337,6 @@ pub fn prove_nonce_transitions(
         }
     }
 
-    let log_size = statement_log_size(st)?;
     let pins = st.pinned_updates();
     let (old_leaves, new_leaves) = leaves(&pins);
     let (sibs, bits) = witness(transitions);
@@ -348,7 +352,33 @@ pub fn prove_nonce_transitions(
             return Err(format!("update {i}: the new leaf does not reach the post-root"));
         }
     }
-    let preproc = nut::build_preproc(&pins, st.depth, log_size);
+    Ok((main_cols, nut::build_preproc(&pins, st.depth, log_size)))
+}
+
+/// The two-lane main columns in natural order, as `u32`s — what a node's
+/// trace export and the recursion consume.
+pub(crate) fn raw_columns(
+    st: &NonceStatement,
+    transitions: &[NonceTransition],
+    log_size: u32,
+) -> Vec<Vec<u32>> {
+    let (old_leaves, new_leaves) = leaves(&st.pinned_updates());
+    let (sibs, bits) = witness(transitions);
+    let (raw, _) = nut::build_trace_raw(&old_leaves, &new_leaves, &sibs, &bits, log_size);
+    raw.iter().map(|c| c.iter().map(|v| v.0).collect()).collect()
+}
+
+/// Prove that `st`'s transitions are authentic against their chained roots.
+///
+/// `transitions` supplies the WITNESS (the sibling paths); `st` is the public
+/// statement. The two must describe the same batch, which is checked rather
+/// than assumed.
+pub fn prove_nonce_transitions(
+    st: &NonceStatement,
+    transitions: &[NonceTransition],
+) -> Result<(Vec<u8>, u32), String> {
+    let log_size = statement_log_size(st)?;
+    let (main_cols, preproc) = checked_trace(st, transitions, log_size)?;
 
     let config = make_config(log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -410,11 +440,7 @@ pub fn statement_trace_columns(
         return Err("transitions do not match the statement".into());
     }
     let log_size = statement_log_size(st)?;
-    let (old_leaves, new_leaves) = leaves(&st.pinned_updates());
-    let (sibs, bits) = witness(transitions);
-    let (raw, _) = nut::build_trace_raw(&old_leaves, &new_leaves, &sibs, &bits, log_size);
-    let cols: Vec<Vec<u32>> = raw.iter().map(|c| c.iter().map(|v| v.0).collect()).collect();
-    Ok((cols, log_size))
+    Ok((raw_columns(st, transitions, log_size), log_size))
 }
 
 /// Verify a batch's nonce transition against its public statement.
