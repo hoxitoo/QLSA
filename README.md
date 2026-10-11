@@ -192,10 +192,14 @@ secrets (Settings → Secrets and variables → Actions):
 | `SEPOLIA_RPC_URL` | optional, recommended — an Alchemy/Infura Sepolia endpoint |
 
 1. Actions → **Deploy contracts** → Run workflow (pick the branch). The job first
-   prints the paying account and its balance and stops below 0.05 ETH or on a
-   chain other than Sepolia. The summary lists the three addresses.
+   prints the paying account, its balance, the current gas price and what the
+   deploy and the batch will need up front at that price (deploy: 8.4M ×
+   maxFeePerGas; batch: 16.7M × gasPrice — the submitter's gas limit, though
+   ~14.7M is charged). It stops if the deploy is not covered or the chain is not
+   Sepolia, and warns if the batch is not. The summary lists the three addresses.
 2. Actions → **E2E testnet** → Run workflow with `registry_address` = the
-   `BatchRegistryV7` address, `dry_run=true` first, then `dry_run=false`. The
+   `BatchRegistryV7` address, `dry_run=true` first, then `dry_run=false`. A real
+   run checks the balance against the current gas price before the build. The
    summary shows `gasUsed`, `finalized=` and an Etherscan link.
 
 ### If it fails

@@ -68,6 +68,34 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      # Before the ~20-minute build: does the account cover the submission at
+      # TODAY's gas price? testnet/submit.py sends a legacy tx with
+      # gas=16,700,000 at eth_gasPrice, and the node wants all of it up front
+      # (~14.7M is what gets charged). Skipped on a dry run, which sends nothing.
+      - name: Check balance against the current gas price
+        if: github.event.inputs.dry_run == 'false'
+        shell: bash
+        env:
+          RPC_URL: ${{ secrets.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
+          KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+        run: |
+          pip install -q -r requirements-testnet.txt
+          python - <<'PY'
+          import os, sys
+          from web3 import Web3
+          w3 = Web3(Web3.HTTPProvider(os.environ["RPC_URL"]))
+          if w3.eth.chain_id != 11155111:
+              sys.exit(f"::error::RPC is chain {w3.eth.chain_id}, not Sepolia")
+          addr = w3.eth.account.from_key(os.environ["KEY"]).address
+          bal, gp = w3.eth.get_balance(addr), w3.eth.gas_price
+          need = 16_700_000 * gp
+          print(f"submitter: {addr}")
+          print(f"balance  : {Web3.from_wei(bal, 'ether')} ETH")
+          print(f"gasPrice : {Web3.from_wei(gp, 'gwei')} gwei -> submit needs {Web3.from_wei(need, 'ether')} ETH up front")
+          if bal < need:
+              sys.exit("::error::balance does not cover the submission at the current gas price — top up, or retry when gas is cheaper")
+          PY
+
       # Same liboqs build as the CI python job, so the two cannot drift.
       - name: Cache liboqs build
         id: cache-liboqs
