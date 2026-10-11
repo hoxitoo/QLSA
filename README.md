@@ -180,6 +180,24 @@ soundness, so it refuses to run pointlessly.
 - On a registry-shape mismatch you get a clear error from `require_registry_kind`
   before the transaction, not an opaque revert inside it.
 
+### Alternative: run it from GitHub Actions (no local toolchain)
+
+Both steps exist as manual workflows (`.github/workflows/deploy.yml`,
+`.github/workflows/e2e.yml`); neither runs on push. They read two repository
+secrets (Settings → Secrets and variables → Actions):
+
+| secret | |
+|---|---|
+| `DEPLOYER_PRIVATE_KEY` | `0x`-prefixed key of a funded, testnet-only account |
+| `SEPOLIA_RPC_URL` | optional, recommended — an Alchemy/Infura Sepolia endpoint |
+
+1. Actions → **Deploy contracts** → Run workflow (pick the branch). The job first
+   prints the paying account and its balance and stops below 0.05 ETH or on a
+   chain other than Sepolia. The summary lists the three addresses.
+2. Actions → **E2E testnet** → Run workflow with `registry_address` = the
+   `BatchRegistryV7` address, `dry_run=true` first, then `dry_run=false`. The
+   summary shows `gasUsed`, `finalized=` and an Etherscan link.
+
 ### If it fails
 
 - **`SenderNonceTooLow`** — the registry stores 0 for an unseen sender and
