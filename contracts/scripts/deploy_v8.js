@@ -17,21 +17,44 @@ const hre = require("hardhat");
 // Below roughly 2 queries the direct v7 stack is CHEAPER. This stack is a
 // soundness mechanism, not a gas optimisation — deploy it when you want 130-bit,
 // not to save gas on a demo config.
+// The gas price every deploy transaction uses: the node's eth_gasPrice, raised
+// to $QLSA_MIN_GAS_PRICE_WEI when that is set and higher — the same rule as
+// testnet/submit.py's gas_price_for, so the testnet workflows' balance check
+// prices the run exactly as it is sent.
+//
+// Without an explicit price Hardhat's signer chooses its own EIP-1559 fees. On
+// 2026-10-11 Sepolia's suggested price was ~15 wei, the signer still asked the
+// node for ~7 gwei per gas up front, and an account the check had passed was
+// refused: "insufficient funds … want 34489759103469277".
+async function gasPrice() {
+  const suggested = BigInt(await hre.network.provider.send("eth_gasPrice", []));
+  const raw = (process.env.QLSA_MIN_GAS_PRICE_WEI || "").trim();
+  if (!raw) return suggested;
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(`QLSA_MIN_GAS_PRICE_WEI must be an integer number of wei, got ${raw}`);
+  }
+  const floor = BigInt(raw);
+  return suggested > floor ? suggested : floor;
+}
+
 async function main() {
   const [deployer] = await hre.ethers.getSigners();
   console.log("Deploying with account:", deployer.address);
   console.log("Network:", hre.network.name);
+  const price = await gasPrice();
+  console.log("Gas price:", hre.ethers.formatUnits(price, "gwei"), "gwei (legacy transactions)");
+  const tx = { gasPrice: price };
 
   // 1. The OUTER proof verifier — a plain VFRI11, used on the recursive trace.
   const VFRI11 = await hre.ethers.getContractFactory("QLSAVerifierVFRI11");
-  const vfri11 = await VFRI11.deploy();
+  const vfri11 = await VFRI11.deploy(tx);
   await vfri11.waitForDeployment();
   const vfri11Addr = await vfri11.getAddress();
   console.log("QLSAVerifierVFRI11 deployed to:", vfri11Addr);
 
   // 2. The recursive entry point: channel replay + last-layer check + outer proof.
   const Recursive = await hre.ethers.getContractFactory("QLSAVerifierRecursive");
-  const recursive = await Recursive.deploy(vfri11Addr);
+  const recursive = await Recursive.deploy(vfri11Addr, tx);
   await recursive.waitForDeployment();
   const recursiveAddr = await recursive.getAddress();
   console.log("QLSAVerifierRecursive deployed to:", recursiveAddr);
@@ -50,7 +73,7 @@ async function main() {
   // `accumulatorMode` in BatchRegistryV7.sol and ROADMAP § 1.5/1.6.
   const RegistryV7 = await hre.ethers.getContractFactory("BatchRegistryV7");
   const registry = await RegistryV7.deploy(
-    deployer.address, recursiveAddr, hre.ethers.ZeroHash, 0);
+    deployer.address, recursiveAddr, hre.ethers.ZeroHash, 0, tx);
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
   console.log("BatchRegistryV7 deployed to:", registryAddr);

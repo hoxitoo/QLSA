@@ -191,12 +191,15 @@ secrets (Settings → Secrets and variables → Actions):
 | `DEPLOYER_PRIVATE_KEY` | `0x`-prefixed key of a funded, testnet-only account |
 | `SEPOLIA_RPC_URL` | optional, recommended — an Alchemy/Infura Sepolia endpoint |
 
-1. Actions → **Deploy contracts** → Run workflow (pick the branch). The job first
-   prints the paying account, its balance, the current gas price and what the
-   deploy and the batch will need up front at that price (deploy: 8.4M ×
-   maxFeePerGas; batch: 16.7M × gasPrice — the submitter's gas limit, though
-   ~14.7M is charged). It stops if the deploy is not covered or the chain is not
-   Sepolia, and warns if the batch is not. The summary lists the three addresses.
+1. Actions → **Deploy contracts** → Run workflow (pick the branch). Both
+   workflows take `min_gas_price_gwei` (default `0.1`): every transaction is a
+   legacy one at the node's `eth_gasPrice` raised to that floor — one rule,
+   shared by `deploy_v8.js`, `testnet/submit.py` (`gas_price_for`) and the
+   balance checks, so a check cannot pass a run the node then refuses. The job
+   prints the paying account, its balance, the price and what the deploy (8.4M
+   gas) and the batch (16.7M gas limit, ~14.7M charged) need up front. It stops
+   if the deploy is not covered or the chain is not Sepolia, and warns if the
+   batch is not. The summary lists the three addresses.
 2. Actions → **E2E testnet** → Run workflow with `registry_address` = the
    `BatchRegistryV7` address, `dry_run=true` first, then `dry_run=false`. A real
    run checks the balance against the current gas price before the build. The
