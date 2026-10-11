@@ -403,6 +403,9 @@ fn canonical_preproc_root(
 /// roots in one proof. The AIR itself is UNCHANGED: `roots` has been per-path
 /// since R4.11, so two paths landing on two different roots was already
 /// expressible.
+// Test-only since A-4 moved the nonce accumulator to `nonce_update_t8_air`;
+// kept for the test that shows what the two-path construction accepted.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn canonical_preproc_root_multi(
     leaves: &[[u64; 4]],
     indices: &[u32],

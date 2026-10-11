@@ -2,7 +2,8 @@
   "network": "sepolia",
   "chainId": 11155111,
   "deployedAt": "2026-05-05",
-  "deployer": "0x8Fb32E28c22505c34520e3B0830E6789F1943e3f",
+  "deployer": "0xBFb32E28c22505c34520e3B0830E6789F1943e3f",
+  "deployerCorrected": "2026-10-11: was recorded as 0x8Fb3... — a hand-copy typo (B -> 8). The original casing fails the EIP-55 checksum; 0xBFb3... passes it as written and is the account that holds the key.",
   "contracts": {
     "QLSAVerifierBound": "0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd",
     "BatchRegistryV2":   "0xF44A51CF1d7620e070ecaf611685418DE4679879"

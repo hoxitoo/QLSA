@@ -1,5 +1,24 @@
 name: Deploy contracts
 
+# Deploys the v8 stack — QLSAVerifierVFRI11 + QLSAVerifierRecursive +
+# BatchRegistryV7 in MAPPING mode (`deploy_v8.js` passes ZeroHash, 0) — to
+# Sepolia. This is the stack `testnet/e2e.py --stack v8` submits to, measured
+# end to end against a standalone node at 8,318,209 gas for the deploy and
+# ~14.7M for a batch (contracts/test/fixtures/measurements.json).
+#
+# Until 2026-10-11 this workflow deployed the v7 stack (deploy_v7.js), so the
+# registry it produced could not take a `--stack v8` batch.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   DEPLOYER_PRIVATE_KEY  required — 0x-prefixed key of a funded, testnet-only
+#                         account. Hardhat reads it as PRIVATE_KEY.
+#   SEPOLIA_RPC_URL       optional but recommended — an Alchemy/Infura endpoint.
+#                         Without it the public node is used, which rate-limits.
+#
+# Run it from the Actions tab: "Deploy contracts" → Run workflow → pick the
+# branch. Copy the BatchRegistryV7 address from the job summary into the E2E
+# workflow's `registry_address` input.
+
 on:
   workflow_dispatch:
     inputs:
@@ -8,12 +27,13 @@ on:
         required: true
         default: "sepolia"
         type: choice
-        options: [sepolia, cardona]
+        options: [sepolia]
 
 jobs:
   deploy:
-    name: Deploy to ${{ github.event.inputs.network }}
+    name: Deploy v8 stack to ${{ github.event.inputs.network }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -33,13 +53,67 @@ jobs:
         working-directory: contracts
         run: npx hardhat compile
 
-      - name: Deploy to ${{ github.event.inputs.network }}
+      # Fail BEFORE spending anything if the key is missing, and show which
+      # account will pay, how much it holds and what the run costs at the
+      # current gas price — a wrong or short account is the most likely failure
+      # and should name itself.
+      - name: Check deployer account
         working-directory: contracts
+        shell: bash
         env:
           PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
-          RPC_URL: ${{ github.event.inputs.network == 'sepolia' && 'https://ethereum-sepolia-rpc.publicnode.com' || 'https://rpc.cardona.zkevm-rpc.com' }}
+          RPC: ${{ secrets.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
         run: |
-          npx hardhat run scripts/deploy_v7.js --network ${{ github.event.inputs.network }} --no-compile \
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::secret DEPLOYER_PRIVATE_KEY is not set"; exit 1
+          fi
+          node -e '
+            const { ethers } = require("ethers");
+            (async () => {
+              const p = new ethers.JsonRpcProvider(process.env.RPC);
+              const net = await p.getNetwork();
+              const w = new ethers.Wallet(process.env.PRIVATE_KEY, p);
+              const bal = await p.getBalance(w.address);
+              console.log("chainId :", net.chainId.toString());
+              console.log("deployer:", w.address);
+              console.log("balance :", ethers.formatEther(bal), "ETH");
+              if (net.chainId !== 11155111n) { console.error("not Sepolia"); process.exit(1); }
+
+              // What the run costs at the CURRENT gas price, not a fixed guess —
+              // the Sepolia price moves by orders of magnitude, and a fixed floor
+              // either blocks a run that fits or waves through one that does not.
+              //   deploy: 8,318,209 gas measured; EIP-1559, so the node wants
+              //           gasLimit x maxFeePerGas up front (8.4M allows margin).
+              //   submit: testnet/submit.py sends a legacy tx with gas=16,700,000
+              //           at eth_gasPrice; the node wants all of it up front even
+              //           though ~14.7M is charged.
+              const fee = await p.getFeeData();
+              const gp = fee.gasPrice;
+              const deployUpfront = 8_400_000n * (fee.maxFeePerGas ?? gp);
+              const submitUpfront = 16_700_000n * gp;
+              const g = (x) => ethers.formatUnits(x, "gwei");
+              console.log("gasPrice:", g(gp), "gwei (maxFeePerGas", g(fee.maxFeePerGas ?? gp), "gwei)");
+              console.log("needed  : deploy", ethers.formatEther(deployUpfront),
+                          "ETH + submit", ethers.formatEther(submitUpfront),
+                          "ETH =", ethers.formatEther(deployUpfront + submitUpfront), "ETH at this price");
+              if (bal < deployUpfront) {
+                console.error("balance does not cover the deploy at the current gas price — fund the account first");
+                process.exit(1);
+              }
+              if (bal < deployUpfront + submitUpfront) {
+                console.log("::warning::enough to deploy, NOT enough to submit a batch at the current gas price — top up before the E2E run");
+              }
+            })().catch(e => { console.error(e); process.exit(1); });
+          '
+
+      - name: Deploy to ${{ github.event.inputs.network }}
+        working-directory: contracts
+        shell: bash
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+        run: |
+          npx hardhat run scripts/deploy_v8.js --network ${{ github.event.inputs.network }} --no-compile \
             | tee /tmp/deploy_output.txt
           echo "## Deployment output" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -47,15 +121,27 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Extract contract addresses
+        shell: bash
         run: |
-          VERIFIER=$(grep "QLSAVerifierVFRI11 deployed to:" /tmp/deploy_output.txt | awk '{print $NF}')
-          REGISTRY=$(grep "BatchRegistryV5 deployed to:"  /tmp/deploy_output.txt | awk '{print $NF}')
-          echo "### Contract addresses" >> $GITHUB_STEP_SUMMARY
-          echo "| Contract | Address |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| QLSAVerifierVFRI11 | \`$VERIFIER\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| BatchRegistryV5   | \`$REGISTRY\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Network: ${{ github.event.inputs.network }}"
-          echo "VERIFIER_ADDRESS=$VERIFIER"
+          # `|| true`: under pipefail a missing line would abort here, silently,
+          # before the explicit check below can say what is missing.
+          addr() { grep "$1 deployed to:" /tmp/deploy_output.txt | awk '{print $NF}' || true; }
+          VFRI11=$(addr QLSAVerifierVFRI11)
+          RECURSIVE=$(addr QLSAVerifierRecursive)
+          REGISTRY=$(addr BatchRegistryV7)
+          if [ -z "$REGISTRY" ]; then
+            echo "::error::no BatchRegistryV7 address in the deploy output"; exit 1
+          fi
+          {
+            echo "### Contract addresses"
+            echo "| Contract | Address |"
+            echo "|---|---|"
+            echo "| QLSAVerifierVFRI11 | \`$VFRI11\` |"
+            echo "| QLSAVerifierRecursive | \`$RECURSIVE\` |"
+            echo "| **BatchRegistryV7** | \`$REGISTRY\` |"
+            echo ""
+            echo "Next: Actions → **E2E testnet** → Run workflow, \`registry_address\` = \`$REGISTRY\`."
+            echo "Explorer: https://sepolia.etherscan.io/address/$REGISTRY"
+          } >> $GITHUB_STEP_SUMMARY
+          echo "VERIFIER_ADDRESS=$RECURSIVE"
           echo "REGISTRY_ADDRESS=$REGISTRY"

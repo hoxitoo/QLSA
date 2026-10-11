@@ -806,6 +806,22 @@ pub fn verify_aggregation_node(
 use crate::recursive::composition_t8::CompMembership;
 use crate::recursive::integration::qm31_leaf_hash_t8;
 use crate::recursive::merkle_path_t8_air as merkle;
+use crate::nonce_tree::NonceTransition;
+use crate::recursive::nonce_accumulator::{self as nacc, NonceStatement};
+use crate::recursive::nonce_update_t8_air as nut;
+
+/// A nonce transition to carry in a node: the public statement and its witness.
+///
+/// Only the tree's ROOT node carries one (Ф3.2): the transition then rides the
+/// two `verifyRecursive` calls the batch already pays for, instead of a third.
+/// It goes in as `nonce_update_t8_air` — a fourth COMPONENT — and not as more
+/// `merkle_path_t8_air` paths, which leave each path's siblings free and would
+/// reopen the A-4 replay hole.
+pub type NonceWitness<'a> = (&'a NonceStatement, &'a [NonceTransition]);
+
+/// Separates the nonce statement's words from the node's in the transcript, so
+/// no node without a transition absorbs the same sequence as one with.
+const NONCE_COMPONENT_TAG: u32 = 0x4e4f_4e43; // "NONC"
 
 /// One child STATEMENT of a tree node.
 ///
@@ -831,6 +847,15 @@ pub struct TreeStatement {
     /// A-5: for a LEAF statement, its membership in the batch. `None` for the
     /// statements of internal tree levels, which have no transaction.
     pub membership: Option<BatchMembership>,
+    /// A-6: the child's public channel inputs — the roots it COMMITTED to.
+    ///
+    /// [`verify_tree_node`] derives every pinned path root from these, and
+    /// requires `steps` to be exactly their transcript; a statement without them
+    /// cannot be verified. Before A-6 the verifier pinned whatever roots its
+    /// caller passed, and every caller passed the prover's own, so a path into a
+    /// root the child never committed verified. `None` is for synthetic shapes
+    /// only (unit tests and sizing probes), which have no committed roots.
+    pub inputs: Option<crate::vfri2_bridge::Vfri11ChannelInputs>,
 }
 
 pub struct TreeNodeResult {
@@ -1048,11 +1073,45 @@ pub fn tree_node_log_size(statements: &[TreeStatement]) -> Result<u32, String> {
     Ok(node_shape(statements)?.log_size)
 }
 
+/// `log_size` of a node that also carries `nonce`: every component is proved at
+/// one size, the largest any of them needs.
+pub fn tree_node_log_size_with_nonce(
+    statements: &[TreeStatement],
+    nonce: Option<&NonceStatement>,
+) -> Result<u32, String> {
+    Ok(node_shape_with(statements, nonce)?.log_size)
+}
+
+/// [`node_shape`], widened to fit the nonce component when there is one. With
+/// `None` it IS `node_shape` — the path every node but a nonce-carrying root
+/// takes, and the one the 2026-10-10 run uses, must not move.
+fn node_shape_with(
+    statements: &[TreeStatement],
+    nonce: Option<&NonceStatement>,
+) -> Result<NodeShape, String> {
+    let mut sh = node_shape(statements)?;
+    if let Some(st) = nonce {
+        if let Some(reason) = st.check_public() {
+            return Err(format!("nonce statement: {reason}"));
+        }
+        if st.updates.is_empty() {
+            return Err("an empty nonce statement moves nothing; pass None".into());
+        }
+        sh.log_size = sh.log_size.max(nut::compute_log_size(st.updates.len(), st.depth));
+    }
+    let cap = rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE);
+    if nonce.is_some() && sh.log_size > cap {
+        return Err(format!("tree node log_size {} too large", sh.log_size));
+    }
+    Ok(sh)
+}
+
 fn mix_public_tree(
     ch: &mut Blake2sM31Channel,
     sh: &NodeShape,
     runs: &[channel::ChannelRun],
     roots: &[[u64; 4]],
+    nonce: Option<&NonceStatement>,
 ) {
     let w = |v: u64| (v % M31_P) as u32;
     let mut v = vec![sh.queries.len() as u32, sh.depth as u32, sh.comp_depth as u32];
@@ -1080,12 +1139,21 @@ fn mix_public_tree(
         v.extend(r.digest.iter().map(|&d| w(d)));
     }
     ch.mix_u32s(&v);
+    // Appended AFTER the node's own words, so a node without a transition
+    // absorbs exactly what it always did.
+    if let Some(st) = nonce {
+        ch.mix_u32s(&[NONCE_COMPONENT_TAG]);
+        nacc::mix_statement(ch, st);
+    }
 }
 
-fn tree_preproc_ids() -> Vec<PreProcessedColumnId> {
+fn tree_preproc_ids(with_nonce: bool) -> Vec<PreProcessedColumnId> {
     let mut ids = rv::preprocessed_column_ids();
     ids.extend(merkle::preprocessed_column_ids());
     ids.extend(channel::preprocessed_column_ids());
+    if with_nonce {
+        ids.extend(nut::preprocessed_column_ids());
+    }
     ids
 }
 
@@ -1093,6 +1161,7 @@ fn canonical_tree_root(
     sh: &NodeShape,
     runs: &[channel::ChannelRun],
     roots: &[[u64; 4]],
+    nonce: Option<&NonceStatement>,
 ) -> <Blake2sM31MerkleHasher as stwo::core::vcs_lifted::MerkleHasherLifted>::Hash {
     let config = make_config(sh.log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -1106,16 +1175,27 @@ fn canonical_tree_root(
     cols.extend(merkle::build_preproc_multi_var(
         &sh.leaves, &sh.indices, roots, &sh.depths, sh.log_size));
     cols.extend(channel::build_preproc_multi(&sh.transcripts, runs, sh.log_size));
+    if let Some(st) = nonce {
+        // Pinned from the PUBLIC statement alone: leaves from the nonces,
+        // roots from the chain, one index per update.
+        cols.extend(nut::build_preproc(&st.pinned_updates(), st.depth, sh.log_size));
+    }
     let mut tree = scheme.tree_builder();
     tree.extend_evals(cols);
     tree.commit(&mut throwaway);
     scheme.roots()[0]
 }
 
-fn tree_components(
-    log_size: u32,
-) -> (rv::RecursiveVerifierComponent, merkle::MerklePathT8Component, channel::ChannelT8Component) {
-    let mut alloc = TraceLocationAllocator::new_with_preprocessed_columns(&tree_preproc_ids());
+type TreeComponents = (
+    rv::RecursiveVerifierComponent,
+    merkle::MerklePathT8Component,
+    channel::ChannelT8Component,
+    Option<nut::NonceUpdateT8Component>,
+);
+
+fn tree_components(log_size: u32, with_nonce: bool) -> TreeComponents {
+    let mut alloc =
+        TraceLocationAllocator::new_with_preprocessed_columns(&tree_preproc_ids(with_nonce));
     let rv_comp = rv::RecursiveVerifierComponent::new(
         &mut alloc,
         rv::RecursiveVerifierEval { log_n_rows: log_size },
@@ -1131,7 +1211,14 @@ fn tree_components(
         channel::ChannelT8Eval { log_n_rows: log_size },
         SecureField::from(0u32),
     );
-    (rv_comp, merkle_comp, chan_comp)
+    let nonce_comp = with_nonce.then(|| {
+        nut::NonceUpdateT8Component::new(
+            &mut alloc,
+            nut::NonceUpdateT8Eval { log_n_rows: log_size },
+            SecureField::from(0u32),
+        )
+    });
+    (rv_comp, merkle_comp, chan_comp, nonce_comp)
 }
 
 /// Prove a complete tree node.
@@ -1141,7 +1228,16 @@ fn tree_components(
 /// it committed to, and its composition values are members of its compRoot (the
 /// Merkle component). Value-bound end to end, in one proof.
 pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, String> {
-    let sh = node_shape(statements)?;
+    prove_tree_node_with_nonce(statements, None)
+}
+
+/// [`prove_tree_node`] for a node that also proves a nonce transition — the
+/// tree's root, when the batch moves the nonce accumulator (Ф3.2).
+pub fn prove_tree_node_with_nonce(
+    statements: &[TreeStatement],
+    nonce: Option<NonceWitness<'_>>,
+) -> Result<TreeNodeResult, String> {
+    let sh = node_shape_with(statements, nonce.map(|(st, _)| st))?;
     if sh.log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE) {
         return Err(format!("tree node log_size {} too large", sh.log_size));
     }
@@ -1164,10 +1260,25 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
                 m.batch_root));
         }
     }
+    // A-6: where the child's committed roots are known, the paths must reach
+    // them. The verifier refuses otherwise; checked here it names the path.
+    if statements.iter().all(|st| st.inputs.is_some()) {
+        let expected = tree_node_expected_roots(statements)?;
+        if let Some(i) = (0..roots.len()).find(|&i| roots[i] != expected[i]) {
+            return Err(format!(
+                "path {i} reaches {:?}, not the root the child committed to {:?}",
+                roots[i], expected[i]));
+        }
+    }
     let merkle_preproc = merkle::build_preproc_multi_var(
         &sh.leaves, &sh.indices, &roots, &sh.depths, sh.log_size);
     let (chan_main, runs) = channel::build_trace_multi(&sh.transcripts, sh.log_size);
     let chan_preproc = channel::build_preproc_multi(&sh.transcripts, &runs, sh.log_size);
+    // The transition, through the same checked builder as its standalone proof.
+    let nonce_traces = nonce
+        .map(|(st, ts)| nacc::checked_trace(st, ts, sh.log_size))
+        .transpose()
+        .map_err(|e| format!("nonce transition: {e}"))?;
 
     let config = make_config(sh.log_size);
     let twiddles = CpuBackend::precompute_twiddles(
@@ -1181,22 +1292,32 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
     let mut preproc = rv_preproc;
     preproc.extend(merkle_preproc);
     preproc.extend(chan_preproc);
+    let mut main = rv_main;
+    main.extend(merkle_main);
+    main.extend(chan_main);
+    if let Some((n_main, n_preproc)) = nonce_traces {
+        preproc.extend(n_preproc);
+        main.extend(n_main);
+    }
     let mut tree = scheme.tree_builder();
     tree.extend_evals(preproc);
     tree.commit(fs);
 
-    let mut main = rv_main;
-    main.extend(merkle_main);
-    main.extend(chan_main);
     let mut tree = scheme.tree_builder();
     tree.extend_evals(main);
     tree.commit(fs);
 
-    mix_public_tree(fs, &sh, &runs, &roots);
+    let nonce_st = nonce.map(|(st, _)| st);
+    mix_public_tree(fs, &sh, &runs, &roots, nonce_st);
 
-    let (rv_comp, merkle_comp, chan_comp) = tree_components(sh.log_size);
-    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(
-        &[&rv_comp, &merkle_comp, &chan_comp], fs, scheme)
+    let (rv_comp, merkle_comp, chan_comp, nonce_comp) =
+        tree_components(sh.log_size, nonce.is_some());
+    let mut comps: Vec<&dyn stwo::prover::ComponentProver<CpuBackend>> =
+        vec![&rv_comp, &merkle_comp, &chan_comp];
+    if let Some(n) = &nonce_comp {
+        comps.push(n);
+    }
+    let proof = prove::<CpuBackend, Blake2sM31MerkleChannel>(&comps, fs, scheme)
         .map_err(|e| format!("tree node prove error: {e:?}"))?;
     let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard())
         .map_err(|e| format!("tree node serialize error: {e:?}"))?;
@@ -1214,17 +1335,115 @@ pub fn prove_tree_node(statements: &[TreeStatement]) -> Result<TreeNodeResult, S
     })
 }
 
+/// Every path root a node over `statements` must reach, in `path_depths`
+/// order, derived from the children's COMMITTED roots alone (A-6).
+///
+/// Group 1 (final fold) is the child's last FRI-layer root, groups 2 and 3
+/// (compValue, compValueNeg) its `comp_root`, group 4 the batch root its
+/// membership claims. None of it comes from the prover: each statement's
+/// `steps` must be exactly the transcript of its `inputs`, so the roots pinned
+/// here are the roots the challenges were drawn from.
+pub fn tree_node_expected_roots(statements: &[TreeStatement]) -> Result<Vec<[u64; 4]>, String> {
+    use crate::vfri2_bridge::{
+        p2t8_node_words, p2t8_pack, vfri11_challenge_layout, vfri11_transcript_steps,
+    };
+
+    let mut last = Vec::new();
+    let mut comp = Vec::new();
+    let mut batch = Vec::new();
+    for (i, st) in statements.iter().enumerate() {
+        let inp = st.inputs.as_ref().ok_or_else(|| format!(
+            "statement {i} carries no channel inputs — its committed roots are unknown, \
+             so it cannot be verified"))?;
+        if vfri11_transcript_steps(inp)? != st.steps {
+            return Err(format!("statement {i}: steps are not the transcript of its inputs"));
+        }
+        let num_folds = inp.fri_layer_roots.len() - 1;
+        if st.layout != vfri11_challenge_layout(num_folds) {
+            return Err(format!("statement {i}: layout is not VFRI11's for {num_folds} folds"));
+        }
+        if st.queries.len() != inp.n_queries {
+            return Err(format!(
+                "statement {i}: {} queries, but its transcript draws {}",
+                st.queries.len(), inp.n_queries));
+        }
+        let l = p2t8_node_words(inp.fri_layer_roots.last().expect("checked non-empty"));
+        let c = p2t8_node_words(&inp.comp_root);
+        last.extend(std::iter::repeat(l).take(st.queries.len()));
+        comp.extend(std::iter::repeat(c).take(st.queries.len()));
+        if let Some(m) = &st.membership {
+            // A leaf runs under the batch root as its Fiat-Shamir seed (R is
+            // derived from the trace roots, which do not depend on the seed). A
+            // membership naming any OTHER root claims a batch the proof was not
+            // generated for. All 32 bytes: the packed root, not just its words.
+            if p2t8_pack(m.batch_root) != inp.batch_root {
+                return Err(format!(
+                    "statement {i}: its membership claims batch root {:?}, but the leaf \
+                     was proved under a different seed — not a member of that batch",
+                    m.batch_root));
+            }
+            batch.push(m.batch_root);
+        }
+    }
+    let mut roots = last;
+    roots.extend(comp.iter().copied());
+    roots.extend(comp);
+    roots.extend(batch);
+    Ok(roots)
+}
+
 /// Verify a tree node against the children it claims.
 ///
-/// The verifier re-derives every challenge and re-hashes every leaf, so a proof
-/// verifies only against the children it was built from.
+/// The verifier re-derives every challenge, re-hashes every leaf, and — since
+/// A-6 — derives every path root from the children's committed roots, so a
+/// proof verifies only against the children it was built from AND only if
+/// their FRI decommitments land on what they committed to.
 pub fn verify_tree_node(
+    proof_bytes: &[u8],
+    log_size: u32,
+    statements: &[TreeStatement],
+) -> Result<bool, String> {
+    let roots = tree_node_expected_roots(statements)?;
+    verify_tree_node_pinned(proof_bytes, log_size, statements, &roots, None)
+}
+
+/// [`verify_tree_node`] for a node that carries a nonce transition. The
+/// transition's leaves, index and chained roots are pinned from `nonce` — the
+/// public statement — and its `check_public` relations must hold; a node proved
+/// without a transition does not verify here, nor one proved with a different
+/// statement.
+pub fn verify_tree_node_with_nonce(
+    proof_bytes: &[u8],
+    log_size: u32,
+    statements: &[TreeStatement],
+    nonce: &NonceStatement,
+) -> Result<bool, String> {
+    let roots = tree_node_expected_roots(statements)?;
+    verify_tree_node_pinned(proof_bytes, log_size, statements, &roots, Some(nonce))
+}
+
+/// [`verify_tree_node`] against roots the CALLER chooses. Not a soundness
+/// check: a prover pins its own roots, so passing them back accepts a path into
+/// a root the child never committed (A-6). Kept for synthetic shapes, which
+/// have no committed roots, and to demonstrate exactly that.
+#[cfg(test)]
+pub(crate) fn verify_tree_node_with_roots(
     proof_bytes: &[u8],
     log_size: u32,
     statements: &[TreeStatement],
     roots: &[[u64; 4]],
 ) -> Result<bool, String> {
-    let sh = node_shape(statements)?;
+    verify_tree_node_pinned(proof_bytes, log_size, statements, roots, None)
+}
+
+fn verify_tree_node_pinned(
+    proof_bytes: &[u8],
+    log_size: u32,
+    statements: &[TreeStatement],
+    roots: &[[u64; 4]],
+    nonce: Option<&NonceStatement>,
+) -> Result<bool, String> {
+    let sh = node_shape_with(statements, nonce)?;
     if log_size != sh.log_size {
         return Err(format!("log_size {log_size} is not canonical for this node"));
     }
@@ -1245,8 +1464,11 @@ pub fn verify_tree_node(
     config.fri_config.n_queries = N_FRI_QUERIES;
     config.pow_bits = POW_BITS;
 
-    let (rv_comp, merkle_comp, chan_comp) = tree_components(log_size);
-    let components: [&dyn Component; 3] = [&rv_comp, &merkle_comp, &chan_comp];
+    let (rv_comp, merkle_comp, chan_comp, nonce_comp) = tree_components(log_size, nonce.is_some());
+    let mut components: Vec<&dyn Component> = vec![&rv_comp, &merkle_comp, &chan_comp];
+    if let Some(n) = &nonce_comp {
+        components.push(n);
+    }
 
     let fs = &mut Blake2sM31Channel::default();
     let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
@@ -1258,17 +1480,22 @@ pub fn verify_tree_node(
     for (i, b) in chan_comp.trace_log_degree_bounds().iter().enumerate() {
         sizes[i].extend(b.iter().copied());
     }
+    if let Some(n) = &nonce_comp {
+        for (i, b) in n.trace_log_degree_bounds().iter().enumerate() {
+            sizes[i].extend(b.iter().copied());
+        }
+    }
     if proof.commitments.len() < 2 {
         return Err(format!(
             "malformed proof: expected ≥ 2 commitments, got {}", proof.commitments.len()));
     }
-    if proof.commitments[0] != canonical_tree_root(&sh, &runs, roots) {
+    if proof.commitments[0] != canonical_tree_root(&sh, &runs, roots, nonce) {
         return Ok(false);
     }
     commitment_scheme.commit(proof.commitments[0], &sizes[0], fs);
     commitment_scheme.commit(proof.commitments[1], &sizes[1], fs);
 
-    mix_public_tree(fs, &sh, &runs, roots);
+    mix_public_tree(fs, &sh, &runs, roots, nonce);
 
     let result = verify::<Blake2sM31MerkleChannel>(&components, fs, commitment_scheme, proof);
     Ok(result.is_ok())
@@ -1284,7 +1511,16 @@ pub fn verify_tree_node(
 pub fn tree_node_trace_columns(
     statements: &[TreeStatement],
 ) -> Result<(Vec<Vec<u32>>, u32), String> {
-    let sh = node_shape(statements)?;
+    tree_node_trace_columns_with_nonce(statements, None)
+}
+
+/// [`tree_node_trace_columns`] for a node that carries a nonce transition: its
+/// 85 two-lane columns follow the channel's, in the order the proof commits.
+pub fn tree_node_trace_columns_with_nonce(
+    statements: &[TreeStatement],
+    nonce: Option<NonceWitness<'_>>,
+) -> Result<(Vec<Vec<u32>>, u32), String> {
+    let sh = node_shape_with(statements, nonce.map(|(st, _)| st))?;
     if sh.log_size > rv::MAX_LOG_SIZE.min(merkle::MAX_LOG_SIZE).min(channel::MAX_LOG_SIZE) {
         return Err(format!("tree node log_size {} too large", sh.log_size));
     }
@@ -1302,6 +1538,11 @@ pub fn tree_node_trace_columns(
         .chain(chan_cols.into_iter())
     {
         cols.push(c.into_iter().map(|v| v.0).collect());
+    }
+    if let Some((st, ts)) = nonce {
+        // Checked first, so exported columns are never of an invalid witness.
+        nacc::checked_trace(st, ts, sh.log_size).map_err(|e| format!("nonce transition: {e}"))?;
+        cols.extend(nacc::raw_columns(st, ts, sh.log_size));
     }
     Ok((cols, sh.log_size))
 }
@@ -1631,7 +1872,7 @@ mod tests {
             let (ns, nb) = mk(comp_depth, seed);
             comp_paths.push((ps, pb, ns, nb));
         }
-        TreeStatement { steps, layout, queries, paths, comp_paths, membership: None }
+        TreeStatement { steps, layout, queries, paths, comp_paths, membership: None, inputs: None }
     }
 
     /// The tree's node: two child PROOFS, each with several queries.
@@ -1657,7 +1898,7 @@ mod tests {
         assert_eq!(r.challenges[0].z_x, r.challenges[1].z_x);
         assert_ne!(r.challenges[0].z_x, r.challenges[3].z_x);
 
-        assert!(verify_tree_node(&r.proof, r.log_size, &statements, &r.roots).unwrap(),
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &statements, &r.roots).unwrap(),
                 "an honest tree node must verify");
     }
 
@@ -1684,7 +1925,7 @@ mod tests {
             assert_eq!(c.z_x, r.challenges[0].z_x);
             assert_eq!(c.alphas, r.challenges[0].alphas);
         }
-        assert!(verify_tree_node(&r.proof, r.log_size, &many, &r.roots).unwrap());
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &many, &r.roots).unwrap());
     }
 
     /// The channel binding still holds with the membership components present.
@@ -1704,6 +1945,296 @@ mod tests {
                 "the error should locate the query: {err}");
     }
 
+    /// A depth-`d` Merkle tree with `placed[k]` at `idx[k]` and random leaves
+    /// elsewhere; its root and each placed leaf's path. Small `d` only — it
+    /// builds every node.
+    fn tree_with(
+        d: usize,
+        placed: &[[u64; 4]],
+        idx: &[usize],
+        seed: &mut u64,
+    ) -> ([u64; 4], Vec<(Vec<[u64; 4]>, Vec<bool>)>) {
+        use crate::poseidon2_t8::compress_t8;
+        let mut level: Vec<[u64; 4]> = (0..1usize << d).map(|_| rand_node(seed)).collect();
+        for (leaf, &i) in placed.iter().zip(idx) {
+            level[i] = *leaf;
+        }
+        let mut levels = vec![level];
+        for _ in 0..d {
+            let l = levels.last().expect("non-empty");
+            levels.push(l.chunks(2).map(|p| compress_t8(p[0], p[1])).collect());
+        }
+        let paths = idx.iter().map(|&i0| {
+            let mut i = i0;
+            let mut sibs = Vec::with_capacity(d);
+            let mut bits = Vec::with_capacity(d);
+            for l in &levels[..d] {
+                sibs.push(l[i ^ 1]);
+                bits.push(i & 1 == 1);
+                i >>= 1;
+            }
+            (sibs, bits)
+        }).collect();
+        (levels[d][0], paths)
+    }
+
+    /// An HONEST VFRI11-shaped statement: its paths reach the roots its
+    /// transcript absorbed, so the production [`verify_tree_node`] accepts it.
+    ///
+    /// Built in the order Fiat-Shamir allows. `z_x` is drawn before `comp_root`
+    /// is absorbed and the composition values depend only on it, so the comp
+    /// tree comes first; the fold challenges depend on `comp_root`, the finals on
+    /// them, and the LAST layer root is absorbed after the last of them — so it
+    /// can be the root of the finals without changing what they ran under.
+    fn vfri11_statement(
+        num_folds: usize,
+        n_queries: usize,
+        depth: usize,
+        comp_depth: usize,
+        seed: &mut u64,
+    ) -> TreeStatement {
+        use crate::vfri2_bridge::{
+            p2t8_pack, vfri11_challenge_layout, vfri11_transcript_steps, Vfri11ChannelInputs,
+        };
+        assert!(n_queries <= 1 << depth && 2 * n_queries <= 1 << comp_depth);
+        let mut inp = Vfri11ChannelInputs {
+            trace_root: p2t8_pack(rand_node(seed)),
+            oods_combo_pos: rand_qm31(seed),
+            oods_combo_neg: rand_qm31(seed),
+            comp_root: [0u8; 32],
+            fri_layer_roots: (0..=num_folds).map(|_| p2t8_pack(rand_node(seed))).collect(),
+            batch_root: p2t8_pack(rand_node(seed)),
+            tree_depth: depth as u32,
+            n_queries,
+        };
+        let layout = vfri11_challenge_layout(num_folds);
+        let derive = |inp: &Vfri11ChannelInputs| {
+            derive_challenges(&vfri11_transcript_steps(inp).unwrap(), &layout).unwrap()
+        };
+
+        let d0 = derive(&inp);
+        let mut queries: Vec<_> =
+            (0..n_queries).map(|_| query_under(&d0, num_folds, seed)).collect();
+        let ch: Vec<_> = queries.iter().map(|(st, r)| rv::query_challenges(st, r)).collect();
+        let comp_leaves: Vec<[u64; 4]> = ch.iter()
+            .flat_map(|c| [qm31_leaf_hash_t8(c.comp_pos), qm31_leaf_hash_t8(c.comp_neg)])
+            .collect();
+        let comp_idx: Vec<usize> = (0..2 * n_queries).collect();
+        let (comp_root, cp) = tree_with(comp_depth, &comp_leaves, &comp_idx, seed);
+        inp.comp_root = p2t8_pack(comp_root);
+
+        let d1 = derive(&inp);
+        assert_eq!(d1.z_x, d0.z_x, "z_x is drawn before comp_root");
+        for (step, rounds) in &mut queries {
+            step.6 = d1.alphas[0];
+            for (k, r) in rounds.iter_mut().enumerate() {
+                r.1 = d1.alphas[k + 1];
+            }
+        }
+        let finals = rv::recursive_queries_final(&queries);
+        let leaves: Vec<[u64; 4]> = finals.iter().map(|&f| qm31_leaf_hash_t8(f)).collect();
+        let idx: Vec<usize> = (0..n_queries).collect();
+        let (last_root, paths) = tree_with(depth, &leaves, &idx, seed);
+        *inp.fri_layer_roots.last_mut().expect("≥ 1") = p2t8_pack(last_root);
+
+        let steps = vfri11_transcript_steps(&inp).unwrap();
+        assert_eq!(derive(&inp).alphas, d1.alphas, "the last root is absorbed after the last alpha");
+        let comp_paths = cp.chunks(2)
+            .map(|p| (p[0].0.clone(), p[0].1.clone(), p[1].0.clone(), p[1].1.clone()))
+            .collect();
+        TreeStatement {
+            steps, layout, queries, paths, comp_paths, membership: None, inputs: Some(inp),
+        }
+    }
+
+    /// A-6, closed. A path into a root the child never committed must not
+    /// verify — the case `a_tampered_root_is_rejected` cannot reach, because
+    /// there the honest prover pinned the honest root and the TEST changed it.
+    /// Here the PROVER pins the forged root at proving time.
+    ///
+    /// Until 2026-10-08 the verifier pinned whatever roots its caller passed,
+    /// every caller passed the prover's own, and this forged node verified —
+    /// shown by the caller-roots variant below, which still behaves that way.
+    #[test]
+    fn a_path_into_a_root_the_child_never_committed_is_rejected() {
+        let mut s = 0x7A1_u64;
+        let honest = vec![vfri11_statement(2, 2, 2, 2, &mut s)];
+        let r_honest = prove_tree_node(&honest).expect("honest node proves");
+        assert_eq!(r_honest.roots, tree_node_expected_roots(&honest).unwrap(),
+                   "an honest node's paths reach exactly the committed roots");
+        assert!(verify_tree_node(&r_honest.proof, r_honest.log_size, &honest).unwrap(),
+                "an honest node must verify against its children's committed roots");
+
+        // One final-fold sibling changed: same transcript, same commitments,
+        // a path that lands somewhere else.
+        let mut forged = honest.clone();
+        forged[0].paths[0].0[0][0] = (forged[0].paths[0].0[0][0] + 1) % M31;
+        assert_eq!(honest[0].steps, forged[0].steps, "same transcript, same commitments");
+
+        // The prover refuses it when it knows the commitments...
+        let err = match prove_tree_node(&forged) {
+            Ok(_) => panic!("a path into a foreign root must not be provable"),
+            Err(e) => e,
+        };
+        assert!(err.contains("path 0") && err.contains("committed"), "{err}");
+
+        // ...so a malicious one proves it WITHOUT them, pinning its own root.
+        let mut blind = forged.clone();
+        blind[0].inputs = None;
+        let r_forged = prove_tree_node(&blind).expect("a prover can always pin its own root");
+        assert_ne!(r_forged.roots[0], r_honest.roots[0], "setup: a different final-fold root");
+
+        // The hole, as it was: handed the prover's roots, the proof verifies.
+        assert!(verify_tree_node_with_roots(
+            &r_forged.proof, r_forged.log_size, &blind, &r_forged.roots).unwrap(),
+            "the caller-roots variant is what the verifier used to be");
+        // Closed: against the committed roots it does not.
+        assert!(!verify_tree_node(&r_forged.proof, r_forged.log_size, &forged).unwrap(),
+                "a path into a root the child never committed must not verify");
+        assert!(!verify_tree_node(&r_forged.proof, r_forged.log_size, &honest).unwrap());
+        // And without committed roots there is nothing to verify against.
+        assert!(verify_tree_node(&r_forged.proof, r_forged.log_size, &blind).is_err());
+    }
+
+    /// Every group is derived, not just the final fold: a forged COMPOSITION
+    /// path is refused the same way, and a statement whose steps are not its
+    /// inputs' transcript is refused outright.
+    #[test]
+    fn composition_roots_and_transcripts_are_derived_too() {
+        let mut s = 0x7B2_u64;
+        let honest = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let mut forged = honest.clone();
+        forged[0].comp_paths[1].2[1][3] = (forged[0].comp_paths[1].2[1][3] + 1) % M31;
+        let mut blind = forged.clone();
+        blind[0].inputs = None;
+        let r = prove_tree_node(&blind).expect("proves with its own roots");
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &blind, &r.roots).unwrap());
+        assert!(!verify_tree_node(&r.proof, r.log_size, &forged).unwrap(),
+                "a compValueNeg path into a foreign comp root must not verify");
+
+        let mut drifted = honest.clone();
+        drifted[0].inputs.as_mut().unwrap().comp_root[31] ^= 1;
+        let err = tree_node_expected_roots(&drifted).unwrap_err();
+        assert!(err.contains("not the transcript"), "{err}");
+    }
+
+    // ── Ф3.2: the nonce transition as a fourth component of the node ─────────
+
+    const ND: usize = 4;
+
+    fn nonce_sender(i: u8) -> [u8; 32] {
+        let mut h = [0u8; 32];
+        h[0] = i;
+        h[1] = i.wrapping_mul(7);
+        h
+    }
+
+    /// `n` distinct senders advancing to nonce `i`, with statement and witness.
+    fn nonce_batch(n: u8) -> (NonceStatement, Vec<NonceTransition>) {
+        use crate::nonce_tree::{apply_updates, NonceTree};
+        let mut tree = NonceTree::new(ND).unwrap();
+        let ups: Vec<_> = (1..=n).map(|i| (nonce_sender(i), u64::from(i))).collect();
+        let (old_root, new_root, ts) = apply_updates(&mut tree, &ups).unwrap();
+        (NonceStatement::from_transitions(&ts, &old_root, &new_root, ND).unwrap(), ts)
+    }
+
+    #[test]
+    fn a_node_carrying_a_nonce_transition_proves_and_verifies() {
+        let mut s = 0x9A1_u64;
+        let stmts = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let (st, ts) = nonce_batch(3);
+        let r = prove_tree_node_with_nonce(&stmts, Some((&st, &ts))).expect("proves");
+        assert!(verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &st).unwrap(),
+                "an honest node with its transition must verify");
+
+        // The columns a parent (or the on-chain bundle) takes carry the 85
+        // two-lane columns after the node's own.
+        let (with, l1) = tree_node_trace_columns_with_nonce(&stmts, Some((&st, &ts))).unwrap();
+        let (without, _) = tree_node_trace_columns(&stmts).unwrap();
+        assert_eq!(l1, r.log_size);
+        assert_eq!(with.len(), without.len() + nut::N_MAIN_COLS);
+    }
+
+    /// The transition is part of what the node claims: the same proof does not
+    /// verify for another statement, nor as a node without one, and a node
+    /// without one does not verify as carrying it.
+    #[test]
+    fn a_nonce_node_verifies_only_its_own_statement() {
+        let mut s = 0x9B2_u64;
+        let stmts = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let (st, ts) = nonce_batch(3);
+        let r = prove_tree_node_with_nonce(&stmts, Some((&st, &ts))).expect("proves");
+
+        let mut other_nonce = st.clone();
+        other_nonce.updates[0].new_nonce += 100; // still increasing
+        assert_eq!(other_nonce.check_public(), None);
+        assert!(!verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &other_nonce).unwrap());
+
+        let mut other_root = st.clone();
+        other_root.updates[0].post_root = [7, 7, 7, 7]; // an intermediate root
+        assert_eq!(other_root.check_public(), None);
+        assert!(!verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &other_root).unwrap());
+
+        // As a node without a transition: a different claim, so not this proof.
+        assert!(!matches!(verify_tree_node(&r.proof, r.log_size, &stmts), Ok(true)));
+
+        // And a plain node does not pass as one carrying the transition.
+        let plain = prove_tree_node(&stmts).expect("plain node proves");
+        assert!(!matches!(
+            verify_tree_node_with_nonce(&plain.proof, plain.log_size, &stmts, &st), Ok(true)));
+    }
+
+    /// A-4's forgery, in the node: a post-root in which another sender's slot is
+    /// reset. The prover refuses it; and the proof of what the shared path
+    /// really reaches is valid for ITS statement and rejected for the forged one.
+    #[test]
+    fn a_node_refuses_a_post_root_that_resets_another_slot() {
+        use crate::nonce_tree::{slot_index, NonceTree};
+        use crate::vfri2_bridge::p2t8_node_words;
+        use crate::recursive::nonce_accumulator::NonceUpdate;
+
+        let mut s = 0x9C3_u64;
+        let stmts = vec![vfri11_statement(2, 2, 2, 3, &mut s)];
+        let (a, v) = (nonce_sender(1), nonce_sender(2));
+        let (slot_a, slot_v) = (slot_index(&a, ND).unwrap(), slot_index(&v, ND).unwrap());
+        assert_ne!(slot_a, slot_v);
+
+        let mut real = NonceTree::new(ND).unwrap();
+        real.set(slot_v, 5).unwrap();
+        let (sibs, bits) = real.membership_proof(slot_a).unwrap();
+        let mut forged = NonceTree::new(ND).unwrap();
+        forged.set(slot_a, 1).unwrap(); // V silently back at 0
+
+        let statement_to = |post: [u8; 32]| NonceStatement {
+            old_root: p2t8_node_words(&real.root()),
+            new_root: p2t8_node_words(&post),
+            updates: vec![NonceUpdate {
+                index: slot_a, old_nonce: 0, new_nonce: 1, post_root: p2t8_node_words(&post),
+            }],
+            depth: ND,
+        };
+        let forged_st = statement_to(forged.root());
+        assert_eq!(forged_st.check_public(), None, "every public check passes");
+
+        let t = |post: [u8; 32]| NonceTransition {
+            index: slot_a, old_nonce: 0, new_nonce: 1,
+            pre_root: real.root(), post_root: post, sibs: sibs.clone(), bits: bits.clone(),
+        };
+        let err = prove_tree_node_with_nonce(&stmts, Some((&forged_st, &[t(forged.root())])))
+            .err().expect("the forged post-root must not be provable");
+        assert!(err.contains("post-root"), "{err}");
+
+        // What the real path honestly reaches: A at 1, V still at 5.
+        let mut honest = real.clone();
+        honest.set(slot_a, 1).unwrap();
+        let own = statement_to(honest.root());
+        let r = prove_tree_node_with_nonce(&stmts, Some((&own, &[t(honest.root())])))
+            .expect("the honest transition proves");
+        assert!(verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &own).unwrap());
+        assert!(!verify_tree_node_with_nonce(&r.proof, r.log_size, &stmts, &forged_st).unwrap(),
+                "a post-root that resets another slot must not verify");
+    }
+
     /// Membership is real: a tampered root must not verify.
     #[test]
     fn a_tampered_root_is_rejected() {
@@ -1714,7 +2245,7 @@ mod tests {
         };
         let mut bad = r.roots.clone();
         bad[0][0] = (bad[0][0] + 1) % M31;
-        assert!(!verify_tree_node(&r.proof, r.log_size, &statements, &bad).unwrap(),
+        assert!(!verify_tree_node_with_roots(&r.proof, r.log_size, &statements, &bad).unwrap(),
                 "a tampered final-fold root must not verify");
     }
 
@@ -1731,7 +2262,7 @@ mod tests {
             Ok(r) => r,
             Err(e) => panic!("mixed depths must compose: {e}"),
         };
-        assert!(verify_tree_node(&r.proof, r.log_size, &[shallow, deep], &r.roots).unwrap());
+        assert!(verify_tree_node_with_roots(&r.proof, r.log_size, &[shallow, deep], &r.roots).unwrap());
     }
 
     #[test]

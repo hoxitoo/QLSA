@@ -180,6 +180,28 @@ soundness, so it refuses to run pointlessly.
 - On a registry-shape mismatch you get a clear error from `require_registry_kind`
   before the transaction, not an opaque revert inside it.
 
+### Alternative: run it from GitHub Actions (no local toolchain)
+
+Both steps exist as manual workflows (`.github/workflows/deploy.yml`,
+`.github/workflows/e2e.yml`); neither runs on push. They read two repository
+secrets (Settings → Secrets and variables → Actions):
+
+| secret | |
+|---|---|
+| `DEPLOYER_PRIVATE_KEY` | `0x`-prefixed key of a funded, testnet-only account |
+| `SEPOLIA_RPC_URL` | optional, recommended — an Alchemy/Infura Sepolia endpoint |
+
+1. Actions → **Deploy contracts** → Run workflow (pick the branch). The job first
+   prints the paying account, its balance, the current gas price and what the
+   deploy and the batch will need up front at that price (deploy: 8.4M ×
+   maxFeePerGas; batch: 16.7M × gasPrice — the submitter's gas limit, though
+   ~14.7M is charged). It stops if the deploy is not covered or the chain is not
+   Sepolia, and warns if the batch is not. The summary lists the three addresses.
+2. Actions → **E2E testnet** → Run workflow with `registry_address` = the
+   `BatchRegistryV7` address, `dry_run=true` first, then `dry_run=false`. A real
+   run checks the balance against the current gas price before the build. The
+   summary shows `gasUsed`, `finalized=` and an Etherscan link.
+
 ### If it fails
 
 - **`SenderNonceTooLow`** — the registry stores 0 for an unseen sender and
