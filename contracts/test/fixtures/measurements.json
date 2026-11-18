@@ -129,8 +129,20 @@
       "registry": "0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC",
       "date": "2026-11-17",
       "vs_local": "+585,977 (+4.0%) over v8_stack_pre_run_check_2026_10_08 (14,726,046, standalone hardhat node). Local runs of the same command vary by ~10k (fresh keys), so this is not calldata.",
-      "cause": "NOT ESTABLISHED. Ruled out locally: the EVM ruleset of the local node — the fixture submission (v7_tree_submitBatch) measures exactly 14,664,038 under Hardhat's cancun, prague and osaka alike; the contracts call no modexp precompile (Osaka's EIP-7883 repricing). Open candidates: Sepolia running a fork beyond what Hardhat 2.28.6 models (opcode repricing would hit the mulmod/addmod-heavy Poseidon2), or a proof-dependent path. Deciding test: replay the fixture's exact calldata on Sepolia and compare with 14,664,038.",
+      "cause": "PARTLY ESTABLISHED by sepolia_fixture_replay (2026-11-18): the same fixture calldata costs +2.96% on Sepolia, so ~434.7k of the gap is the network's gas schedule. The remaining ~151k sits in the nonce/storage path (2 first-time senders cost 213,285 there vs 62,008 locally) — see that entry.",
       "consequence": "Headroom under the 16,777,216 per-tx cap is 1,465,193 on Sepolia against ~2.05M locally, so the worst-case sender ceiling (first-time senders at 28,777 each) drops from ~71 to ~50 there. The local figures in `entries` are NOT changed: they are what the test suite re-measures."
+    },
+    "sepolia_fixture_replay": {
+      "gasUsed": 15098738,
+      "network": "Ethereum Sepolia (chainId 11155111)",
+      "what": "The FIXTURE's tree batch (tree_recursive_bundles_e2e.json) — byte-for-byte the calldata `entries.v7_tree_submitBatch` re-measures locally — sent with BatchRegistryV7.submitBatch to the same registry. No senders.",
+      "tx": "0xcb03fe75f31289b6d90f404814b812fba5c5c7cccac03bc7d37d108be75b0576",
+      "run": "GitHub Actions 'Replay reference batch' run 44255604919",
+      "date": "2026-11-18",
+      "vs_local": "+434,700 (+2.96%) over 14,664,038, the same calldata on Hardhat today (cancun, prague and osaka give the identical figure). Same bytes, same contract: this part of the gap is the NETWORK's gas schedule, not a proof.",
+      "and_the_rest": "It does not explain all of the first run's +585,977. Subtracting the two Sepolia transactions isolates the nonce part (2 first-time senders, submitBatchWithNonces vs submitBatch): 213,285 on Sepolia against 62,008 locally — +151,277, ~3.4x, where a uniform ~3% would give ~64k. Fresh-proof variance is ~10k locally, so nearly all of it sits in the sender/storage path. Likely reading: Sepolia's schedule prices new storage writes far above the local one. That is an inference from two numbers, NOT a direct measurement.",
+      "why_it_matters": "If storage writes cost ~3-4x more, a first-time sender on the mapping path costs ~100k instead of 28,777 — the per-tx sender ceiling falls from ~70 to ~16, and the nonce accumulator (Ф3.2), which removes those writes, gains correspondingly. ROADMAP § 1.5's economics would need re-deriving on that schedule.",
+      "next": "Measure it directly: marginal sender cost on Sepolia (batches with different numbers of first-time senders, differenced), as V7SenderCostProbe does locally."
     }
   }
 }

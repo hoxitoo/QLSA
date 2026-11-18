@@ -29,6 +29,12 @@
       "finalized": true,
       "soundness": "130-bit FRI (20 queries), ~2^62 Merkle nodes (t=8)",
       "run": "GitHub Actions 'E2E testnet' run 44052005249 (dry run 44043551313 before it)"
+    },
+    "fixtureReplay": {
+      "date": "2026-11-18",
+      "txHash": "0xcb03fe75f31289b6d90f404814b812fba5c5c7cccac03bc7d37d108be75b0576",
+      "gasUsed": 15098738,
+      "what": "the test fixture's batch, replayed to separate network pricing from proof effects (+2.96% vs local)"
     }
   }
 }
