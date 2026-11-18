@@ -209,6 +209,15 @@ secrets (Settings → Secrets and variables → Actions):
    run checks the balance against the current gas price before the build. The
    summary shows `gasUsed`, `finalized=` and an Etherscan link.
 
+### Replaying the reference batch
+
+`Replay reference batch` (`.github/workflows/replay.yml`, Node only, ~1 minute)
+sends the fixture's tree batch — the calldata whose gas the test suite re-measures
+as `v7_tree_submitBatch` — to a deployed `BatchRegistryV7` and prints `gasUsed`
+against that reference. Same bytes and same contract, so a difference is the
+network's gas pricing, not a proof. Locally it reproduces the reference exactly
+(14,664,038). One replay per registry; a second run reports the earlier one.
+
 ### If it fails
 
 - **`SenderNonceTooLow`** — the registry stores 0 for an unseen sender and
