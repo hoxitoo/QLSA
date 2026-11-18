@@ -1,0 +1,116 @@
+{
+  "network": "localnode",
+  "chainId": "31337",
+  "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "verifier": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "gasPriceWei": "1875000000",
+  "date": "2026-11-18",
+  "real": {
+    "0": "14664038",
+    "1": "14689969",
+    "5": "14791969",
+    "10": "14924554"
+  },
+  "harnessCold": {
+    "5": "149464",
+    "10": "282901",
+    "25": "720676"
+  },
+  "harnessReturning": {
+    "10": "111901",
+    "25": "293176"
+  },
+  "derived": {
+    "batchNoSenders": "14664038",
+    "firstSenderIncludingWithNoncesOverhead": "25931",
+    "realColdMarginal_1to5": "25500",
+    "realColdMarginal_5to10": "26517",
+    "harnessColdMarginal_5to10": "26687",
+    "harnessColdMarginal_10to25": "29185",
+    "harnessReturningMarginal_10to25": "12085",
+    "storageDelta_coldMinusReturning": "17100"
+  },
+  "harnessDeviationPct": 0.64,
+  "headroom": "2087247",
+  "ceilingFirstTime": "71",
+  "ceilingReturning": "172",
+  "breakEvenFirstTime": "618",
+  "breakEvenReturning": "359",
+  "transactions": [
+    {
+      "label": "deploy registry (0 senders)",
+      "hash": "0x8774b90aa7fc2a156698a53783865a3f02fe07bc0d4b89d72334c50ce9325ffc",
+      "gasUsed": "1406706"
+    },
+    {
+      "label": "submitBatch, 0 senders",
+      "hash": "0xb33666382fec9e144fccb6e089b5fe532d013a51862ea6cb7ebab5c8fdfa63f7",
+      "gasUsed": "14664038"
+    },
+    {
+      "label": "deploy registry (1 senders)",
+      "hash": "0x5fb91f686aca33510bed385d3b75e85272ba9caa57a1ef70fe26d7c28f34ab3e",
+      "gasUsed": "1406706"
+    },
+    {
+      "label": "submitBatchWithNonces, 1 new",
+      "hash": "0xab1acd5c1b0511ce86b54bf645a769720ea3c7f406e10cb32769077ab3dc5f98",
+      "gasUsed": "14689969"
+    },
+    {
+      "label": "deploy registry (5 senders)",
+      "hash": "0xd6652e4158c2c1e3eb956926f2bb64126e00611b9ed9cd8e83bb9bff7c1277cd",
+      "gasUsed": "1406706"
+    },
+    {
+      "label": "submitBatchWithNonces, 5 new",
+      "hash": "0x8ba41d6107acacc527c0ff9c0673706929948c778b9c0a262e626eac157b70a5",
+      "gasUsed": "14791969"
+    },
+    {
+      "label": "deploy registry (10 senders)",
+      "hash": "0x48056bf2f6f9bee093a5ff610dcfa7206bbd89956bdeb34d8b0541dbbe523eaf",
+      "gasUsed": "1406706"
+    },
+    {
+      "label": "submitBatchWithNonces, 10 new",
+      "hash": "0xbaba2bedc4f3aa9321961cd47e923f69a2dd033de09b2d842998e0fc1d77c599",
+      "gasUsed": "14924554"
+    },
+    {
+      "label": "harness, 5 new senders",
+      "hash": "0x317de68244ba5faba62c1deb544b58d2a542ca01311be62bf6c3dfb87233398e",
+      "gasUsed": "149464"
+    },
+    {
+      "label": "harness, 10 new senders",
+      "hash": "0x3aa6904a10b839ecf2d8c2d95011e29ef1e608fbaaee0ebc15f0c7b37a651ba8",
+      "gasUsed": "282901"
+    },
+    {
+      "label": "harness, 25 new senders",
+      "hash": "0x7f01e6abaf38e9e2fdbe2f602c9edce669b4cf0bb655b57d9e13e52848777b75",
+      "gasUsed": "720676"
+    },
+    {
+      "label": "harness, 10 senders (warm-up)",
+      "hash": "0xd0d717c284f7339356dfb8f2336b76b74c9e1dab5b6207560164861d256d37e9",
+      "gasUsed": "282901"
+    },
+    {
+      "label": "harness, 10 RETURNING senders",
+      "hash": "0x44d22628a0b0f6ce109772e3a4a0f032488f71d51a3c8c1bba937b9c7f875531",
+      "gasUsed": "111901"
+    },
+    {
+      "label": "harness, 25 senders (warm-up)",
+      "hash": "0x9bd589ef73dcbdf8709183dd68d96a5670a7b4714c0ddb1ec2ed1139e0adec49",
+      "gasUsed": "720676"
+    },
+    {
+      "label": "harness, 25 RETURNING senders",
+      "hash": "0x8b1a72aaee160ea98651a05fb6fb2a7c7b0be9ced1aa752df63e3666936e826a",
+      "gasUsed": "293176"
+    }
+  ]
+}

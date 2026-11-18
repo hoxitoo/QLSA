@@ -1,0 +1,122 @@
+name: Measure sender cost
+
+# Measures what a SENDER costs on Sepolia — first-time and returning — with the
+# method of contracts/test/V7SenderCostProbe (marginal gasUsed of sent
+# transactions), via contracts/scripts/probe_sender_cost.js.
+#
+# Why: on Sepolia the first public run's two first-time senders cost 213,285
+# gas against 62,008 locally (~3.4x), while the batch without senders cost only
+# +2.96%. The economics (ROADMAP § 1.5) depend on that figure.
+#
+# Sends ~22 transactions: 4 fresh registries (reusing the deployed verifier),
+# the fixture batch with 0/1/5/10 senders, and NonceLoopHarness runs. About
+# 67M gas in total — ~0.007 ETH at 0.1 gwei. Raw figures are uploaded as the
+# `sender-cost` artifact and printed in the summary.
+#
+# Secrets: DEPLOYER_PRIVATE_KEY (required), SEPOLIA_RPC_URL (optional).
+
+on:
+  workflow_dispatch:
+    inputs:
+      verifier_address:
+        description: "QLSAVerifierRecursive to reuse (deployments/sepolia.json -> v8)"
+        required: true
+        default: "0x78dcad37c260F39DEE07b08856BC57DC8EC64a66"
+      min_gas_price_gwei:
+        description: "Gas price floor in gwei (the node's suggestion is used when higher)"
+        required: true
+        default: "0.1"
+
+jobs:
+  probe:
+    name: Sender cost on Sepolia
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: contracts/package-lock.json
+
+      - name: Install dependencies
+        working-directory: contracts
+        run: npm install
+
+      - name: Compile contracts
+        working-directory: contracts
+        run: npx hardhat compile
+
+      # Same pricing rule as the sends (scripts/_testnet.js). The whole run is
+      # ~67M gas; require 80M x price so a mid-run price rise does not strand it.
+      - name: Check inputs and balance
+        working-directory: contracts
+        shell: bash
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          RPC: ${{ secrets.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
+          VERIFIER: ${{ github.event.inputs.verifier_address }}
+          FLOOR_GWEI: ${{ github.event.inputs.min_gas_price_gwei }}
+        run: |
+          [ -n "$PRIVATE_KEY" ] || { echo "::error::secret DEPLOYER_PRIVATE_KEY is not set"; exit 1; }
+          [[ "$VERIFIER" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo "::error::verifier_address is not an address"; exit 1; }
+          [[ "$FLOOR_GWEI" =~ ^[0-9]+([.][0-9]{1,9})?$ ]] \
+            || { echo "::error::min_gas_price_gwei must be a non-negative number with at most 9 decimals"; exit 1; }
+          node -e '
+            const { ethers } = require("ethers");
+            (async () => {
+              const p = new ethers.JsonRpcProvider(process.env.RPC);
+              const net = await p.getNetwork();
+              if (net.chainId !== 11155111n) { console.error("not Sepolia"); process.exit(1); }
+              if ((await p.getCode(process.env.VERIFIER)) === "0x") { console.error("no contract at verifier_address"); process.exit(1); }
+              const w = new ethers.Wallet(process.env.PRIVATE_KEY, p);
+              const bal = await p.getBalance(w.address);
+              const floor = ethers.parseUnits(process.env.FLOOR_GWEI, "gwei");
+              const suggested = BigInt(await p.send("eth_gasPrice", []));
+              const price = suggested > floor ? suggested : floor;
+              const need = 80_000_000n * price;
+              console.log("sender  :", w.address);
+              console.log("balance :", ethers.formatEther(bal), "ETH");
+              console.log("gasPrice:", ethers.formatUnits(price, "gwei"), "gwei -> the run needs ~", ethers.formatEther(need), "ETH");
+              require("fs").appendFileSync(process.env.GITHUB_ENV, "QLSA_MIN_GAS_PRICE_WEI=" + floor.toString() + "\n");
+              if (bal < need) { console.error("balance does not cover the run at this gas price"); process.exit(1); }
+            })().catch(e => { console.error(e); process.exit(1); });
+          '
+
+      - name: Measure
+        working-directory: contracts
+        shell: bash
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          VERIFIER_ADDRESS: ${{ github.event.inputs.verifier_address }}
+          RESULTS_PATH: /tmp/sender_cost.json
+        run: |
+          npx hardhat run scripts/probe_sender_cost.js --network sepolia --no-compile 2>&1 \
+            | tee /tmp/probe_output.txt
+
+      - name: Upload raw figures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sender-cost
+          path: |
+            /tmp/sender_cost.json
+            /tmp/probe_output.txt
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          [ -f /tmp/probe_output.txt ] || exit 0
+          {
+            echo "## Sender cost on Sepolia"
+            echo '```'
+            cat /tmp/probe_output.txt
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
