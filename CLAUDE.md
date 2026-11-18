@@ -342,8 +342,10 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 > A-6 follow-up: a leaf's membership root must equal the seed it was proved under
 > (`tree_node_expected_roots`). The run's path was re-checked end to end against a
 > standalone node: deploy 8,318,209, submission 14,726,046, `finalized=True`.
-> The public-testnet run is 2026-10-10 on the MAPPING path; `contracts/src` is
-> frozen until then. See `docs/TECH_DEBT.md` § A-4, § A-6 and `ROADMAP.md` § 0, § 5.
+> **First public-network run: 2026-11-17, Sepolia** — 2 signatures, one
+> transaction, `finalized=True`, 15,312,023 gas (4.0% above local; cause not yet
+> established). Registry `0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC`; see
+> `deployments/sepolia.json` → `v8`. The `contracts/src` freeze for the run is lifted. See `docs/TECH_DEBT.md` § A-4, § A-6 and `ROADMAP.md` § 0, § 5.
 
 1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.
 2. ML-DSA verify cross-check: off-circuit (Rust, pre-proof); AIR circuits prove arithmetic witness only

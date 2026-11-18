@@ -120,6 +120,17 @@
       "what": "The 2026-10-10 public-testnet path, re-run end to end against a standalone `npx hardhat node` after the 2026-10-08 Rust changes (A-6 fix, A-4 two-lane component, Ш2/Ш3 nonce folding behind *_with_nonce wrappers). deploy_v8.sh --network localnode, then python3 -m testnet.e2e --stack v8 --txs 2, with the PyO3 extension rebuilt from the current tree.",
       "result": "finalized=True. Deploy 8,318,209 gas — identical to the figure recorded for 2026-10-05. Submission 14,726,046 against v8_stack_full_e2e's 14,724,702: +1,344 (0.009%), from calldata — each run generates fresh keypairs, so the sender bytes differ. testnet.abi._sync --check: both ABIs in sync.",
       "date": "2026-10-08"
+    },
+    "sepolia_v8_first_public_run": {
+      "gasUsed": 15312023,
+      "network": "Ethereum Sepolia (chainId 11155111) — the FIRST run on a public network",
+      "what": "testnet.e2e --stack v8 --txs 2: real ML-DSA-65 signatures -> V23 -> aggregation tree over both -> recursion -> BatchRegistryV7.submitBatchWithNonces, ONE transaction, 2 first-time senders. finalized=True.",
+      "tx": "0xb0ffea25068a88671b2702a0f08c2fc6dcb6433a405e1b0d6b3561e743d6576c",
+      "registry": "0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC",
+      "date": "2026-11-17",
+      "vs_local": "+585,977 (+4.0%) over v8_stack_pre_run_check_2026_10_08 (14,726,046, standalone hardhat node). Local runs of the same command vary by ~10k (fresh keys), so this is not calldata.",
+      "cause": "NOT ESTABLISHED. Ruled out locally: the EVM ruleset of the local node — the fixture submission (v7_tree_submitBatch) measures exactly 14,664,038 under Hardhat's cancun, prague and osaka alike; the contracts call no modexp precompile (Osaka's EIP-7883 repricing). Open candidates: Sepolia running a fork beyond what Hardhat 2.28.6 models (opcode repricing would hit the mulmod/addmod-heavy Poseidon2), or a proof-dependent path. Deciding test: replay the fixture's exact calldata on Sepolia and compare with 14,664,038.",
+      "consequence": "Headroom under the 16,777,216 per-tx cap is 1,465,193 on Sepolia against ~2.05M locally, so the worst-case sender ceiling (first-time senders at 28,777 each) drops from ~71 to ~50 there. The local figures in `entries` are NOT changed: they are what the test suite re-measures."
     }
   }
 }

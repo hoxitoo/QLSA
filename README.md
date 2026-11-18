@@ -80,7 +80,9 @@ below before relying on any claim here.*
 >   deployed stack, and `recursive` is included — so the aggregator can emit either
 >   the direct v7 stack or the recursive v8 stack at 130-bit soundness. The API
 >   reports which registry shape each proof targets.
-> - No public-testnet run: verified against a standalone JSON-RPC node only.
+> - Public testnet: the first batch finalized on Sepolia on 2026-11-17 (2 ML-DSA-65
+>   signatures, one transaction `0xb0ffea25…d6576c`, 15,312,023 gas — 4.0% above the
+>   local measurement, cause not yet established). Not a mainnet deployment.
 > - `/batch/run` and `/batch/flush` support Bearer-token auth via `QLSA_API_TOKEN`;
 >   unset = open (research default — set it on any non-local deployment).
 >
@@ -89,9 +91,11 @@ below before relying on any claim here.*
 
 ## Public testnet run (Sepolia)
 
-Everything below is ready to run; it has not been exercised on a public network
-because outbound RPC is blocked in the development environment. It HAS been run
-end to end against a standalone JSON-RPC node: real ML-DSA-65 signatures through
+**Run on Sepolia on 2026-11-17** through the GitHub Actions path below: deploy
+(registry `0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC`), dry run, then one
+transaction finalizing 2 signatures at **15,312,023 gas** — 4.0% above the local
+figure, cause not yet established (`measurements.json → live_node_runs`). Before
+that it was run end to end against a standalone JSON-RPC node: real ML-DSA-65 signatures through
 V23 → VFRI11 at 20 queries → recursion → `BatchRegistryV7`, finalized in one
 transaction at **14,724,702 gas** (2026-10-05, proving ALL N signatures via the
 aggregation tree). An earlier run of the same command measured 13,168,471 — that
