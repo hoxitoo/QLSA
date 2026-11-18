@@ -1,0 +1,27 @@
+# cargo-audit configuration — read by `cargo audit` run in this directory (CI's
+# `stark_stwo` job does exactly that).
+#
+# Every entry here is an advisory we have READ, found not to apply, and cannot
+# fix by upgrading. Each states why and when to remove it. An entry without
+# both is a muted alarm, not a decision.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2026-0387 — crypto-bigint 0.5.5: timing variability in operations
+  # meant to be constant-time (published 2026-10-23; fix: >= 0.7.6).
+  #
+  # Path: stwo 2.2.0 -> starknet-crypto 0.6.2 / starknet-ff 0.3.7 -> crypto-bigint.
+  # A mandatory dependency of stwo, which pins starknet-crypto 0.6.x, so the
+  # patched version cannot be reached without upgrading the prover itself.
+  #
+  # Does not apply: the vulnerable code serves stwo's Poseidon252 channel over
+  # the Stark field, and this crate never uses it — every prover and verifier
+  # here runs Blake2sM31Channel (no `starknet`/`Poseidon252` use in src/). A
+  # timing leak matters only for SECRET operands; even if the code ran, its
+  # inputs would be public proof data. Signing keys live in liboqs, not here.
+  #
+  # Remove when stwo moves to a starknet-crypto on crypto-bigint >= 0.7.6.
+  # `cargo tree -i crypto-bigint` shows the path; `cargo audit` with this
+  # entry deleted shows whether it still fires.
+  "RUSTSEC-2026-0387",
+]
