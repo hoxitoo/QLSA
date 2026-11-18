@@ -26,24 +26,9 @@ const path = require("path");
 const FIXTURE_PATH = path.join(__dirname, "fixtures", "tree_recursive_bundles_e2e.json");
 const FIXTURE_EXISTS = fs.existsSync(FIXTURE_PATH);
 
-function bundleTuple(b) {
-  return {
-    inner: {
-      traceRoot: b.inner.traceRoot,
-      oodsComboPos: b.inner.oodsComboPos,
-      oodsComboNeg: b.inner.oodsComboNeg,
-      compRoot: b.inner.compRoot,
-      friLayerRoots: b.inner.friLayerRoots,
-      batchRoot: b.inner.batchRoot,
-      treeDepth: b.inner.treeDepth,
-      nQueries: b.inner.nQueries,
-    },
-    outerProof: b.outerProof,
-    outerCommitment: b.outerCommitment,
-    outerHints: b.outerHints,
-    lastLayerEvals: b.lastLayerEvals,
-  };
-}
+// One conversion, shared with scripts/replay_tree_fixture.js, which sends this
+// same fixture to a live network.
+const { bundleTuple } = require("../scripts/_testnet");
 
 describe("BatchRegistryV7 × aggregation tree roots", function () {
   let registry, recursive, fx, b10, b8;

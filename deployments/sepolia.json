@@ -6,9 +6,29 @@
   "deployerCorrected": "2026-10-11: was recorded as 0x8Fb3... — a hand-copy typo (B -> 8). The original casing fails the EIP-55 checksum; 0xBFb3... passes it as written and is the account that holds the key.",
   "contracts": {
     "QLSAVerifierBound": "0xF2dcad845F0fb4a11106E4c4cF23D260a3CB65Dd",
-    "BatchRegistryV2":   "0xF44A51CF1d7620e070ecaf611685418DE4679879"
+    "BatchRegistryV2": "0xF44A51CF1d7620e070ecaf611685418DE4679879"
   },
   "commitmentScheme": "Blake2s(proof[0:32] || merkleRoot[0:32])[0:16]",
   "note": "Research-stage testnet deployment. QLSAVerifierBound binds proof to Merkle root via Blake2s but does not perform full FRI decommitment. Replace with full Circle STARK verifier before mainnet.",
-  "security": "Deployer address is a dedicated testnet-only account. Do NOT reuse this address for mainnet deployment. Use a fresh, separately funded account for any production deployment."
+  "security": "Deployer address is a dedicated testnet-only account. Do NOT reuse this address for mainnet deployment. Use a fresh, separately funded account for any production deployment.",
+  "v8": {
+    "deployedAt": "2026-10-11",
+    "deployer": "0xBFb32E28c22505c34520e3B0830E6789F1943e3f",
+    "deployedBy": "GitHub Actions 'Deploy contracts' run 38135696594 (deploy_v8.js, mapping mode: ZeroHash, 0), gas price 0.1 gwei",
+    "contracts": {
+      "QLSAVerifierVFRI11": "0xeC55471d464DCC8BA4669870C91eCF8B91c609f6",
+      "QLSAVerifierRecursive": "0x78dcad37c260F39DEE07b08856BC57DC8EC64a66",
+      "BatchRegistryV7": "0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC"
+    },
+    "deployerNonces": "3, 4, 5 — each address recomputed as keccak256(rlp(deployer, nonce))[12:] and matched",
+    "firstBatch": {
+      "date": "2026-11-17",
+      "txHash": "0xb0ffea25068a88671b2702a0f08c2fc6dcb6433a405e1b0d6b3561e743d6576c",
+      "gasUsed": 15312023,
+      "signatures": 2,
+      "finalized": true,
+      "soundness": "130-bit FRI (20 queries), ~2^62 Merkle nodes (t=8)",
+      "run": "GitHub Actions 'E2E testnet' run 44052005249 (dry run 44043551313 before it)"
+    }
+  }
 }

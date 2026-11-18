@@ -28,6 +28,10 @@ on:
         default: "sepolia"
         type: choice
         options: [sepolia]
+      min_gas_price_gwei:
+        description: "Gas price floor in gwei (the node's suggestion is used when higher)"
+        required: true
+        default: "0.1"
 
 jobs:
   deploy:
@@ -63,6 +67,7 @@ jobs:
         env:
           PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
           RPC: ${{ secrets.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
+          FLOOR_GWEI: ${{ github.event.inputs.min_gas_price_gwei }}
         run: |
           if [ -z "$PRIVATE_KEY" ]; then
             echo "::error::secret DEPLOYER_PRIVATE_KEY is not set"; exit 1
@@ -79,29 +84,33 @@ jobs:
               console.log("balance :", ethers.formatEther(bal), "ETH");
               if (net.chainId !== 11155111n) { console.error("not Sepolia"); process.exit(1); }
 
-              // What the run costs at the CURRENT gas price, not a fixed guess —
-              // the Sepolia price moves by orders of magnitude, and a fixed floor
-              // either blocks a run that fits or waves through one that does not.
-              //   deploy: 8,318,209 gas measured; EIP-1559, so the node wants
-              //           gasLimit x maxFeePerGas up front (8.4M allows margin).
-              //   submit: testnet/submit.py sends a legacy tx with gas=16,700,000
-              //           at eth_gasPrice; the node wants all of it up front even
-              //           though ~14.7M is charged.
-              const fee = await p.getFeeData();
-              const gp = fee.gasPrice;
-              const deployUpfront = 8_400_000n * (fee.maxFeePerGas ?? gp);
-              const submitUpfront = 16_700_000n * gp;
+              // Price the run by the SAME rule the transactions are sent with
+              // (deploy_v8.js and testnet/submit.py): eth_gasPrice, raised to the
+              // floor. Legacy transactions, so the node wants gasLimit x price
+              // up front. The first version of this check used ethers fee data
+              // while Hardhat priced the deploy its own way (~7 gwei per gas):
+              // the check passed and the node refused the deploy.
+              //   deploy: 8,318,209 gas measured (8.4M allows margin)
+              //   submit: testnet/submit.py sends gas=16,700,000; ~14.7M is charged
+              const floor = ethers.parseUnits(process.env.FLOOR_GWEI || "0", "gwei");
+              const suggested = BigInt(await p.send("eth_gasPrice", []));
+              const price = suggested > floor ? suggested : floor;
+              const deployUpfront = 8_400_000n * price;
+              const submitUpfront = 16_700_000n * price;
               const g = (x) => ethers.formatUnits(x, "gwei");
-              console.log("gasPrice:", g(gp), "gwei (maxFeePerGas", g(fee.maxFeePerGas ?? gp), "gwei)");
+              console.log("gasPrice:", g(price), "gwei (node suggests", g(suggested), "gwei, floor", g(floor), "gwei)");
               console.log("needed  : deploy", ethers.formatEther(deployUpfront),
                           "ETH + submit", ethers.formatEther(submitUpfront),
                           "ETH =", ethers.formatEther(deployUpfront + submitUpfront), "ETH at this price");
+              if (process.env.GITHUB_ENV) {
+                require("fs").appendFileSync(process.env.GITHUB_ENV, "QLSA_MIN_GAS_PRICE_WEI=" + floor.toString() + "\n");
+              }
               if (bal < deployUpfront) {
-                console.error("balance does not cover the deploy at the current gas price — fund the account first");
+                console.error("balance does not cover the deploy at this gas price — fund the account first, or lower min_gas_price_gwei");
                 process.exit(1);
               }
               if (bal < deployUpfront + submitUpfront) {
-                console.log("::warning::enough to deploy, NOT enough to submit a batch at the current gas price — top up before the E2E run");
+                console.log("::warning::enough to deploy, NOT enough to submit a batch at this gas price — top up before the E2E run");
               }
             })().catch(e => { console.error(e); process.exit(1); });
           '

@@ -35,6 +35,10 @@ on:
         default: "true"
         type: choice
         options: ["true", "false"]
+      min_gas_price_gwei:
+        description: "Gas price floor in gwei (the node's suggestion is used when higher)"
+        required: true
+        default: "0.1"
 
 jobs:
   e2e:
@@ -53,9 +57,16 @@ jobs:
           TXS: ${{ github.event.inputs.txs }}
           DRY: ${{ github.event.inputs.dry_run }}
           KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          FLOOR_GWEI: ${{ github.event.inputs.min_gas_price_gwei }}
         run: |
           [[ "$TXS" =~ ^[0-9]+$ ]] && [ "$TXS" -ge 1 ] && [ "$TXS" -le 64 ] \
             || { echo "::error::txs must be 1..64"; exit 1; }
+          # Gas price floor -> wei, exported for the balance check and the run.
+          [[ "$FLOOR_GWEI" =~ ^[0-9]+([.][0-9]{1,9})?$ ]] \
+            || { echo "::error::min_gas_price_gwei must be a non-negative number with at most 9 decimals"; exit 1; }
+          FLOOR_WEI=$(python3 -c "from decimal import Decimal; print(int(Decimal('$FLOOR_GWEI') * 10**9))")
+          echo "QLSA_MIN_GAS_PRICE_WEI=$FLOOR_WEI" >> "$GITHUB_ENV"
+          echo "gas price floor: $FLOOR_GWEI gwei = $FLOOR_WEI wei"
           if [ "$DRY" = "false" ]; then
             [[ "$REGISTRY" =~ ^0x[0-9a-fA-F]{40}$ ]] && [ "$REGISTRY" != "0x0000000000000000000000000000000000000000" ] \
               || { echo "::error::registry_address must be the deployed BatchRegistryV7"; exit 1; }
@@ -68,10 +79,11 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      # Before the ~20-minute build: does the account cover the submission at
-      # TODAY's gas price? testnet/submit.py sends a legacy tx with
-      # gas=16,700,000 at eth_gasPrice, and the node wants all of it up front
-      # (~14.7M is what gets charged). Skipped on a dry run, which sends nothing.
+      # Before the ~20-minute build: does the account cover the submission at the
+      # price it will be SENT at? Priced with testnet/submit.py's own
+      # gas_price_for (eth_gasPrice raised to the floor), so the check and the
+      # send cannot disagree. Legacy tx with gas=16,700,000: the node wants all
+      # of it up front (~14.7M is charged). Skipped on a dry run.
       - name: Check balance against the current gas price
         if: github.event.inputs.dry_run == 'false'
         shell: bash
@@ -83,17 +95,18 @@ jobs:
           python - <<'PY'
           import os, sys
           from web3 import Web3
+          from testnet.submit import gas_price_for  # the rule the submission uses
           w3 = Web3(Web3.HTTPProvider(os.environ["RPC_URL"]))
           if w3.eth.chain_id != 11155111:
               sys.exit(f"::error::RPC is chain {w3.eth.chain_id}, not Sepolia")
           addr = w3.eth.account.from_key(os.environ["KEY"]).address
-          bal, gp = w3.eth.get_balance(addr), w3.eth.gas_price
-          need = 16_700_000 * gp
+          bal, price = w3.eth.get_balance(addr), gas_price_for(w3)
+          need = 16_700_000 * price
           print(f"submitter: {addr}")
           print(f"balance  : {Web3.from_wei(bal, 'ether')} ETH")
-          print(f"gasPrice : {Web3.from_wei(gp, 'gwei')} gwei -> submit needs {Web3.from_wei(need, 'ether')} ETH up front")
+          print(f"gasPrice : {Web3.from_wei(price, 'gwei')} gwei (node suggests {Web3.from_wei(w3.eth.gas_price, 'gwei')}) -> submit needs {Web3.from_wei(need, 'ether')} ETH up front")
           if bal < need:
-              sys.exit("::error::balance does not cover the submission at the current gas price — top up, or retry when gas is cheaper")
+              sys.exit("::error::balance does not cover the submission at this gas price — top up, or lower min_gas_price_gwei")
           PY
 
       # Same liboqs build as the CI python job, so the two cannot drift.

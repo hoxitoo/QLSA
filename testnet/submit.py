@@ -25,6 +25,35 @@ from testnet.abi import abi_for
 logger = logging.getLogger(__name__)
 
 
+#: Optional floor for the gas price, in wei. Unset = the node's suggestion.
+GAS_PRICE_FLOOR_ENV = "QLSA_MIN_GAS_PRICE_WEI"
+
+
+def gas_price_for(w3: Web3) -> int:
+    """The gas price every submission uses: the node's ``eth_gasPrice``, raised to
+    ``$QLSA_MIN_GAS_PRICE_WEI`` when that is set and higher.
+
+    Why a floor exists. On 2026-10-11 Sepolia's suggested price was ~15 wei —
+    near zero — and a transaction priced exactly at the suggestion has no margin
+    for inclusion. The floor is the one knob the testnet workflows turn, and the
+    workflows' balance checks price the run with this same function's rule, so
+    the check and the send cannot disagree. (They did once: the deploy check
+    used ethers' fee data while Hardhat's signer chose ~7 gwei on its own, and a
+    run the check had passed was refused for insufficient funds.)
+    """
+    suggested = int(w3.eth.gas_price)
+    raw = os.environ.get(GAS_PRICE_FLOOR_ENV, "").strip()
+    if not raw:
+        return suggested
+    try:
+        floor = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{GAS_PRICE_FLOOR_ENV} must be an integer number of wei, got {raw!r}") from exc
+    if floor < 0:
+        raise ValueError(f"{GAS_PRICE_FLOOR_ENV} must not be negative, got {floor}")
+    return max(suggested, floor)
+
+
 def _as_bytes32(b: bytes, name: str = "value") -> bytes:
     """Validate that *b* is at least 32 bytes and return the first 32 bytes."""
     if len(b) < 32:
@@ -262,7 +291,7 @@ class OnchainSubmitterV5:
         c8_b16    = _decode_commitment16(commitment_log8, "commitment_log8")
 
         nonce     = self.w3.eth.get_transaction_count(self.account.address)
-        gas_price = self.w3.eth.gas_price
+        gas_price = gas_price_for(self.w3)
         tx = self.registry.functions.submitBatch(
             root_b32, c10_b16, proof_log10, hints_log10,
             c8_b16,  proof_log8,  hints_log8,
@@ -298,7 +327,7 @@ class OnchainSubmitterV5:
         c8_b16      = _decode_commitment16(commitment_log8, "commitment_log8")
         senders_b32 = _validate_senders(senders)
         nonce      = self.w3.eth.get_transaction_count(self.account.address)
-        gas_price  = self.w3.eth.gas_price
+        gas_price  = gas_price_for(self.w3)
         tx = self.registry.functions.submitBatchWithNonces(
             root_b32, c10_b16, proof_log10, hints_log10,
             c8_b16,  proof_log8,  hints_log8,
@@ -441,7 +470,7 @@ class OnchainSubmitterV7:
             "from": self.account.address,
             "nonce": nonce,
             "gas": self.gas_limit,
-            "gasPrice": self.w3.eth.gas_price,
+            "gasPrice": gas_price_for(self.w3),
         })
         signed = self.account.sign_transaction(tx)
         return self.w3.eth.send_raw_transaction(signed.raw_transaction).hex()

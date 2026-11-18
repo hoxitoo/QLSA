@@ -1,0 +1,115 @@
+name: Replay reference batch
+
+# Sends the FIXTURE's tree batch (contracts/test/fixtures/tree_recursive_bundles_e2e.json)
+# to a deployed BatchRegistryV7 and compares gasUsed with the local measurement
+# the test suite re-measures (measurements.json -> v7_tree_submitBatch,
+# 14,663,950).
+#
+# Why: the first public run (2026-11-17) used 15,312,023 gas, 4.0% above the
+# local run of the same command — but its proof was fresh, so the gap could be
+# the network's gas pricing or that proof. Replaying fixed calldata separates
+# the two: same bytes, same contract, so any difference is the chain's.
+#
+# One replay per registry: the fixture's batch can be finalized once; a second
+# run reports that and sends nothing.
+#
+# Secrets: DEPLOYER_PRIVATE_KEY (required), SEPOLIA_RPC_URL (optional).
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry_address:
+        description: "BatchRegistryV7 address (deployments/sepolia.json -> v8)"
+        required: true
+        default: "0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC"
+      min_gas_price_gwei:
+        description: "Gas price floor in gwei (the node's suggestion is used when higher)"
+        required: true
+        default: "0.1"
+
+jobs:
+  replay:
+    name: Replay fixture batch on Sepolia
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: contracts/package-lock.json
+
+      - name: Install dependencies
+        working-directory: contracts
+        run: npm install
+
+      - name: Compile contracts
+        working-directory: contracts
+        run: npx hardhat compile
+
+      # Same pricing rule as the send (scripts/_testnet.js), checked before
+      # anything is sent; exports the floor in wei for the next step.
+      - name: Check inputs and balance
+        working-directory: contracts
+        shell: bash
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          RPC: ${{ secrets.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
+          REGISTRY: ${{ github.event.inputs.registry_address }}
+          FLOOR_GWEI: ${{ github.event.inputs.min_gas_price_gwei }}
+        run: |
+          [ -n "$PRIVATE_KEY" ] || { echo "::error::secret DEPLOYER_PRIVATE_KEY is not set"; exit 1; }
+          [[ "$REGISTRY" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo "::error::registry_address is not an address"; exit 1; }
+          [[ "$FLOOR_GWEI" =~ ^[0-9]+([.][0-9]{1,9})?$ ]] \
+            || { echo "::error::min_gas_price_gwei must be a non-negative number with at most 9 decimals"; exit 1; }
+          node -e '
+            const { ethers } = require("ethers");
+            (async () => {
+              const p = new ethers.JsonRpcProvider(process.env.RPC);
+              const net = await p.getNetwork();
+              if (net.chainId !== 11155111n) { console.error("not Sepolia"); process.exit(1); }
+              const code = await p.getCode(process.env.REGISTRY);
+              if (code === "0x") { console.error("no contract at registry_address"); process.exit(1); }
+              const w = new ethers.Wallet(process.env.PRIVATE_KEY, p);
+              const bal = await p.getBalance(w.address);
+              const floor = ethers.parseUnits(process.env.FLOOR_GWEI, "gwei");
+              const suggested = BigInt(await p.send("eth_gasPrice", []));
+              const price = suggested > floor ? suggested : floor;
+              const need = 16_700_000n * price;
+              console.log("sender  :", w.address);
+              console.log("balance :", ethers.formatEther(bal), "ETH");
+              console.log("gasPrice:", ethers.formatUnits(price, "gwei"), "gwei -> needs", ethers.formatEther(need), "ETH up front");
+              require("fs").appendFileSync(process.env.GITHUB_ENV, "QLSA_MIN_GAS_PRICE_WEI=" + floor.toString() + "\n");
+              if (bal < need) { console.error("balance does not cover the replay at this gas price"); process.exit(1); }
+            })().catch(e => { console.error(e); process.exit(1); });
+          '
+
+      - name: Replay
+        working-directory: contracts
+        shell: bash
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          REGISTRY_ADDRESS: ${{ github.event.inputs.registry_address }}
+        run: |
+          npx hardhat run scripts/replay_tree_fixture.js --network sepolia --no-compile 2>&1 \
+            | tee /tmp/replay_output.txt
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          [ -f /tmp/replay_output.txt ] || exit 0
+          {
+            echo "## Replay result"
+            echo '```'
+            cat /tmp/replay_output.txt
+            echo '```'
+            TX=$(grep -oE "tx_hash  : 0x[0-9a-fA-F]{64}" /tmp/replay_output.txt | awk '{print $NF}' || true)
+            [ -n "$TX" ] && echo "Explorer: https://sepolia.etherscan.io/tx/$TX"
+            true
+          } >> $GITHUB_STEP_SUMMARY

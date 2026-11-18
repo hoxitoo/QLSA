@@ -80,7 +80,9 @@ below before relying on any claim here.*
 >   deployed stack, and `recursive` is included — so the aggregator can emit either
 >   the direct v7 stack or the recursive v8 stack at 130-bit soundness. The API
 >   reports which registry shape each proof targets.
-> - No public-testnet run: verified against a standalone JSON-RPC node only.
+> - Public testnet: the first batch finalized on Sepolia on 2026-11-17 (2 ML-DSA-65
+>   signatures, one transaction `0xb0ffea25…d6576c`, 15,312,023 gas — 4.0% above the
+>   local measurement, cause not yet established). Not a mainnet deployment.
 > - `/batch/run` and `/batch/flush` support Bearer-token auth via `QLSA_API_TOKEN`;
 >   unset = open (research default — set it on any non-local deployment).
 >
@@ -89,9 +91,11 @@ below before relying on any claim here.*
 
 ## Public testnet run (Sepolia)
 
-Everything below is ready to run; it has not been exercised on a public network
-because outbound RPC is blocked in the development environment. It HAS been run
-end to end against a standalone JSON-RPC node: real ML-DSA-65 signatures through
+**Run on Sepolia on 2026-11-17** through the GitHub Actions path below: deploy
+(registry `0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC`), dry run, then one
+transaction finalizing 2 signatures at **15,312,023 gas** — 4.0% above the local
+figure, cause not yet established (`measurements.json → live_node_runs`). Before
+that it was run end to end against a standalone JSON-RPC node: real ML-DSA-65 signatures through
 V23 → VFRI11 at 20 queries → recursion → `BatchRegistryV7`, finalized in one
 transaction at **14,724,702 gas** (2026-10-05, proving ALL N signatures via the
 aggregation tree). An earlier run of the same command measured 13,168,471 — that
@@ -191,16 +195,28 @@ secrets (Settings → Secrets and variables → Actions):
 | `DEPLOYER_PRIVATE_KEY` | `0x`-prefixed key of a funded, testnet-only account |
 | `SEPOLIA_RPC_URL` | optional, recommended — an Alchemy/Infura Sepolia endpoint |
 
-1. Actions → **Deploy contracts** → Run workflow (pick the branch). The job first
-   prints the paying account, its balance, the current gas price and what the
-   deploy and the batch will need up front at that price (deploy: 8.4M ×
-   maxFeePerGas; batch: 16.7M × gasPrice — the submitter's gas limit, though
-   ~14.7M is charged). It stops if the deploy is not covered or the chain is not
-   Sepolia, and warns if the batch is not. The summary lists the three addresses.
+1. Actions → **Deploy contracts** → Run workflow (pick the branch). Both
+   workflows take `min_gas_price_gwei` (default `0.1`): every transaction is a
+   legacy one at the node's `eth_gasPrice` raised to that floor — one rule,
+   shared by `deploy_v8.js`, `testnet/submit.py` (`gas_price_for`) and the
+   balance checks, so a check cannot pass a run the node then refuses. The job
+   prints the paying account, its balance, the price and what the deploy (8.4M
+   gas) and the batch (16.7M gas limit, ~14.7M charged) need up front. It stops
+   if the deploy is not covered or the chain is not Sepolia, and warns if the
+   batch is not. The summary lists the three addresses.
 2. Actions → **E2E testnet** → Run workflow with `registry_address` = the
    `BatchRegistryV7` address, `dry_run=true` first, then `dry_run=false`. A real
    run checks the balance against the current gas price before the build. The
    summary shows `gasUsed`, `finalized=` and an Etherscan link.
+
+### Replaying the reference batch
+
+`Replay reference batch` (`.github/workflows/replay.yml`, Node only, ~1 minute)
+sends the fixture's tree batch — the calldata whose gas the test suite re-measures
+as `v7_tree_submitBatch` — to a deployed `BatchRegistryV7` and prints `gasUsed`
+against that reference. Same bytes and same contract, so a difference is the
+network's gas pricing, not a proof. Locally it reproduces the reference exactly
+(14,664,038). One replay per registry; a second run reports the earlier one.
 
 ### If it fails
 
