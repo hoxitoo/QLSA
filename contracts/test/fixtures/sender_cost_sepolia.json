@@ -1,0 +1,117 @@
+{
+  "network": "sepolia",
+  "chainId": "11155111",
+  "sender": "0xBFb32E28c22505c34520e3B0830E6789F1943e3f",
+  "verifier": "0x78dcad37c260F39DEE07b08856BC57DC8EC64a66",
+  "gasPriceWei": "100000000",
+  "date": "2026-11-18",
+  "run": "GitHub Actions 'Measure sender cost' run 44260373753 (artifact sender-cost)",
+  "real": {
+    "0": "15098738",
+    "1": "15212689",
+    "5": "15666769",
+    "10": "16239454"
+  },
+  "harnessCold": {
+    "5": "583564",
+    "10": "1157101",
+    "25": "2915176"
+  },
+  "harnessReturning": {
+    "10": "177901",
+    "25": "467176"
+  },
+  "derived": {
+    "batchNoSenders": "15098738",
+    "firstSenderIncludingWithNoncesOverhead": "113951",
+    "realColdMarginal_1to5": "113520",
+    "realColdMarginal_5to10": "114537",
+    "harnessColdMarginal_5to10": "114707",
+    "harnessColdMarginal_10to25": "117205",
+    "harnessReturningMarginal_10to25": "19285",
+    "storageDelta_coldMinusReturning": "97920"
+  },
+  "harnessDeviationPct": 0.14,
+  "headroom": "1564527",
+  "ceilingFirstTime": "13",
+  "ceilingReturning": "81",
+  "breakEvenFirstTime": null,
+  "breakEvenReturning": "451",
+  "transactions": [
+    {
+      "label": "deploy registry (0 senders)",
+      "hash": "0x155f8c21fb90611c9e1891e294ce921d7e3691c0e4ebfe3f9f0f8f14529d5ef4",
+      "gasUsed": "9697316"
+    },
+    {
+      "label": "submitBatch, 0 senders",
+      "hash": "0x6004af0edcee1e93264eb0c029a06a9f4763a28a4f179f12c3e99a2ac188e080",
+      "gasUsed": "15098738"
+    },
+    {
+      "label": "deploy registry (1 senders)",
+      "hash": "0x86063fd7e7713d83f597fed595d998593f7a24dc3a930b7bc63a238cc734de37",
+      "gasUsed": "9697316"
+    },
+    {
+      "label": "submitBatchWithNonces, 1 new",
+      "hash": "0xd0bd0bb9121234c10adbbcd4ea34fe81e4d275f74cb7f1e622e0cf1dcef92c14",
+      "gasUsed": "15212689"
+    },
+    {
+      "label": "deploy registry (5 senders)",
+      "hash": "0x42e5cff21e6fa2907421e03f26665dda2b270fc7145128c4e6b3b60b8810ceb8",
+      "gasUsed": "9697316"
+    },
+    {
+      "label": "submitBatchWithNonces, 5 new",
+      "hash": "0xe100830707398303a0aee514f73ac1e7c700310465d5c27a0b3768a8a3e88d51",
+      "gasUsed": "15666769"
+    },
+    {
+      "label": "deploy registry (10 senders)",
+      "hash": "0xaba210ec7324f2ef7ca73dc915749b64f197de59c8d1066cfb79260e08299d2b",
+      "gasUsed": "9697316"
+    },
+    {
+      "label": "submitBatchWithNonces, 10 new",
+      "hash": "0x017a8c6c659c248f978537438bc58f2fbfe3df78a70249ccb032440cf7c1003c",
+      "gasUsed": "16239454"
+    },
+    {
+      "label": "harness, 5 new senders",
+      "hash": "0xf90b8c5ca1754155fa7030f4b321c93e2bfea6847ab370817c8dc4e5f37c9339",
+      "gasUsed": "583564"
+    },
+    {
+      "label": "harness, 10 new senders",
+      "hash": "0x44c753aa03cfd76f611c75bb464f8e5aa570630a9716571b9a50bf91b8c928c7",
+      "gasUsed": "1157101"
+    },
+    {
+      "label": "harness, 25 new senders",
+      "hash": "0xcc22f2daf4d22be6699201a29dff5071a994fddd8f26adebf3ab574c05428bd6",
+      "gasUsed": "2915176"
+    },
+    {
+      "label": "harness, 10 senders (warm-up)",
+      "hash": "0x27691024ed96c5ab6535bbdfb9904fdbda4b6c59d4a3cd90ba067b470a13bf7c",
+      "gasUsed": "1157101"
+    },
+    {
+      "label": "harness, 10 RETURNING senders",
+      "hash": "0x21e6b8cc9ba62682ab0e85134488d2ffab8f57b5a708ab61001f18caa4454737",
+      "gasUsed": "177901"
+    },
+    {
+      "label": "harness, 25 senders (warm-up)",
+      "hash": "0x4e09814d25e9071aa889fe1464df7d88bd60329953868fe6ee0198bcd7b6d077",
+      "gasUsed": "2915176"
+    },
+    {
+      "label": "harness, 25 RETURNING senders",
+      "hash": "0x2503b0e4937bca5ffa62f2512720fbacf4312b423e73789bded9a4d045c9a751",
+      "gasUsed": "467176"
+    }
+  ]
+}

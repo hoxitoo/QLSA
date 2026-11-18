@@ -83,8 +83,9 @@ below before relying on any claim here.*
 > - Public testnet: the first batch finalized on Sepolia on 2026-11-17 (2 ML-DSA-65
 >   signatures, one transaction `0xb0ffea25…d6576c`, 15,312,023 gas — 4.0% above the
 >   local measurement; a replay of the fixture's exact calldata costs +2.96% there,
->   so most of it is Sepolia's gas schedule, and the rest sits in the nonce/storage
->   path — see `measurements.json` → `live_node_runs`). Not a mainnet deployment.
+>   and a per-sender probe shows why: creating a storage slot costs ~80.8k more there,
+>   so a first-time sender is 117,205 gas vs 29,185 locally, while proof verification
+>   costs the same — see `ROADMAP.md` § 1.5a). Not a mainnet deployment.
 > - `/batch/run` and `/batch/flush` support Bearer-token auth via `QLSA_API_TOKEN`;
 >   unset = open (research default — set it on any non-local deployment).
 >

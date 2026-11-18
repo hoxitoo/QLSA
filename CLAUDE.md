@@ -344,9 +344,13 @@ Commit and push to that branch freely. **Never create a PR or merge into `main` 
 > standalone node: deploy 8,318,209, submission 14,726,046, `finalized=True`.
 > **First public-network run: 2026-11-17, Sepolia** — 2 signatures, one
 > transaction, `finalized=True`, 15,312,023 gas (4.0% above local). A replay of the
-> fixture's exact calldata costs +2.96% on Sepolia (network gas schedule); the
-> remaining ~151k is in the nonce/storage path — first-time sender writes look ~3.4x
-> dearer there, unconfirmed; see `measurements.json` → `live_node_runs`. Registry `0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC`; see
+> fixture's exact calldata costs +2.96% on Sepolia, and the per-sender probe
+> (2026-11-18) explains all of it: creating a storage slot costs +80,820 there, so a
+> first-time sender is 117,205 vs 29,185 locally (returning 19,285 vs 12,085), and the
+> batch's 5 new slots account for its gap to 0.21% — proof verification costs the
+> same. On that schedule the mapping path cannot break even (sender ceiling ~13) and a
+> redeploy of `QLSAVerifierVFRI11` would exceed the per-tx cap (estimate; TECH_DEBT
+> C-11). See `ROADMAP.md` § 1.5a. Registry `0xC071BdC6e46421fD4DaCfd54B58EdA2089d1F1cC`; see
 > `deployments/sepolia.json` → `v8`. The `contracts/src` freeze for the run is lifted. See `docs/TECH_DEBT.md` § A-4, § A-6 and `ROADMAP.md` § 0, § 5.
 
 1. On-chain verifier: QLSAVerifierVFRI3 + Blake2sYul passes NttBatch E2E (1 poly / 55 cols / 1 query / 9 folds, within 16.7 M gas). **Scale finding (2026-05-20):** V23 NttBatch has 649 cols (12 polys); on-chain OODS mixing for 649 cols requires ~120 M gas — exceeds eth_call cap. Full V23 on-chain verification requires OODS batching (algebraic hash combining columns, e.g. RPO256 hash AIR) before VFRI3 can be wired to production ML-DSA proofs.

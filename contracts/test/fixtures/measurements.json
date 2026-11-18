@@ -143,6 +143,46 @@
       "and_the_rest": "It does not explain all of the first run's +585,977. Subtracting the two Sepolia transactions isolates the nonce part (2 first-time senders, submitBatchWithNonces vs submitBatch): 213,285 on Sepolia against 62,008 locally — +151,277, ~3.4x, where a uniform ~3% would give ~64k. Fresh-proof variance is ~10k locally, so nearly all of it sits in the sender/storage path. Likely reading: Sepolia's schedule prices new storage writes far above the local one. That is an inference from two numbers, NOT a direct measurement.",
       "why_it_matters": "If storage writes cost ~3-4x more, a first-time sender on the mapping path costs ~100k instead of 28,777 — the per-tx sender ceiling falls from ~70 to ~16, and the nonce accumulator (Ф3.2), which removes those writes, gains correspondingly. ROADMAP § 1.5's economics would need re-deriving on that schedule.",
       "next": "Measure it directly: marginal sender cost on Sepolia (batches with different numbers of first-time senders, differenced), as V7SenderCostProbe does locally."
+    },
+    "sepolia_sender_cost": {
+      "what": "Marginal per-sender cost on Sepolia, same fixed sequence as the local baseline: real BatchRegistryV7 on fresh registries with 0/1/5/10 first-time senders, NonceLoopHarness first-time 5/10/25 and returning 10/25. Raw figures and every tx hash: contracts/test/fixtures/sender_cost_sepolia.json; local: sender_cost_local.json.",
+      "run": "GitHub Actions 'Measure sender cost' run 44260373753, 2026-11-18",
+      "first_time_sender": {
+        "sepolia": 117205,
+        "local": 29185,
+        "delta": 88020,
+        "note": "The delta is EXACTLY 88,020 in all three ranges measured (real 1->5, real 5->10, harness 10->25): a constant per-sender repricing, not noise. Harness vs real contract on Sepolia: 0.14%."
+      },
+      "returning_sender": {
+        "sepolia": 19285,
+        "local": 12085,
+        "delta": 7200
+      },
+      "new_storage_slot_premium": {
+        "value": 80820,
+        "how": "first-time delta minus returning delta: 88,020 - 7,200. A write that CREATES a slot costs ~80.8k more on Sepolia; cold minus returning is 97,920 there vs 17,100 locally (5.7x)."
+      },
+      "batch_without_senders": {
+        "sepolia": 15098738,
+        "local": 14664038,
+        "delta": 434700,
+        "explained": "Finalization creates 5 storage slots (finalizedBatches, batchTimestamps, both commitment maps, batchTxListRoots): 5 x 80,820 = 404,100 of the 434,700. The residual 30,600 is 0.21% of the batch. So the proof VERIFICATION itself — the Poseidon2 / FRI / recursion work — costs the same on Sepolia to within ~0.2%: the whole gap is state creation."
+      },
+      "first_public_run_reconciled": "15,312,023 (2026-11-17) vs fixture batch 15,098,738 + 2 first-time senders 113,951 + 113,520 = 15,326,209: -14,186 (-0.09%), inside the ~±15k proof-to-proof variance seen locally. The +4.0% of the first run is fully accounted for.",
+      "code_deposit": {
+        "registry_deploy_sepolia": 9697316,
+        "registry_deploy_local": 1406706,
+        "per_runtime_byte_extra": 1401,
+        "note": "+8,290,610 over 5,918 runtime bytes: deployed code costs ~7-8x more per byte (local deposit 200/byte). ESTIMATE from this one contract, linear in size: QLSAVerifierVFRI11 (21,993 B) would need ~35.6M to deploy today — over the 16,777,216 per-tx cap, so it could NOT be redeployed on this schedule; QLSAVerifierRecursive (9,477 B) ~15.4M, just under. The deployed copies (2026-10-11) predate this pricing and are unaffected."
+      },
+      "reading": "The pattern — new storage slots ~5x, new code ~7-8x, updates to existing state and computation essentially unchanged — is that of a state-creation repricing. Which network upgrade Sepolia runs could not be checked from the development environment; whether mainnet adopts the same schedule decides how much of this applies there.",
+      "economics_on_this_schedule": {
+        "ceiling_first_time": 13,
+        "ceiling_returning": 81,
+        "break_even_first_time": "UNREACHABLE: a new sender (117,205) costs more than the 52,944 of calldata a signature saves",
+        "break_even_returning": 451,
+        "note": "Both against the mainnet calldata figure (52,944 per signature); local: ceilings ~71/~172, break-even ~618/~359."
+      }
     }
   }
 }
