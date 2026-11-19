@@ -132,10 +132,10 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
       lastLayerEvals: b.lastLayerEvals,
     });
 
-    // The REAL txListRoot, not a zero: storing a nonzero value costs 20,000 gas
-    // (SSTORE from zero), so a zero here under-reports by that much — and
-    // production always has one. With ethers.ZeroHash this measured 14,643,678
-    // against the honest 14,663,950, and the 0.14% gap is exactly that write.
+    // The REAL txListRoot, as production sends. Until 2026-11-19 it had its own
+    // storage slot and a zero here under-reported by that SSTORE (14,643,678 vs
+    // 14,663,950); since the one-slot record it only enters the digest, so a
+    // zero no longer changes the cost — kept real so the call is the real one.
     const tx = await reg.submitBatch(fx.merkleRoot, fx.txListRoot, bundle(fx.bundle10), bundle(fx.bundle8),
       { gasLimit: BigInt(M.cap) - 1n });
     const rc = await tx.wait();
@@ -266,6 +266,44 @@ describe("[measurements] every load-bearing gas figure, re-measured", function (
     const g25 = await run("many");
     check("nonce_transition_verify", g1);
     check("nonce_transition_marginal", (g25 - g1) / 24n);
+  });
+
+  // Ф3.2 folded: the transition rides the batch's two verifyRecursive calls.
+  // These are the figures the economics now turn on (ROADMAP § 1.5b).
+  it("the FOLDED nonce transition: batch + updates in one transaction", async function () {
+    const ffx = FX("tree_nonce_bundles_e2e.json");
+    if (!ffx) {
+      console.log("        [v7_folded_*] fixture absent — skipped");
+      return;
+    }
+    this.timeout(1_800_000);
+    const [owner] = await ethers.getSigners();
+    const vfri11 = await (await ethers.getContractFactory("QLSAVerifierVFRI11")).deploy();
+    const recursive = await (await ethers.getContractFactory("QLSAVerifierRecursive"))
+      .deploy(await vfri11.getAddress());
+    const tuple = (b) => ({
+      inner: b.inner, outerProof: b.outerProof, outerCommitment: b.outerCommitment,
+      outerHints: b.outerHints, lastLayerEvals: b.lastLayerEvals,
+    });
+    const run = async (n) => {
+      const st = ffx.statements[n];
+      const reg = await (await ethers.getContractFactory("BatchRegistryV7"))
+        .deploy(owner.address, await recursive.getAddress(), ffx.emptyRoot, ffx.depth);
+      const tx = await reg.submitBatchWithNonceUpdates(
+        ffx.merkleRoot, ffx.txListRoot, tuple(st.bundle10), tuple(st.bundle8), st.senders,
+        st.updates.map((u) => ({
+          index: u.index, oldNonce: BigInt(u.oldNonce),
+          newNonce: BigInt(u.newNonce), postRoot: u.postRoot,
+        })),
+        st.newRoot, { gasLimit: BigInt(M.cap) - 1n });
+      return (await tx.wait()).gasUsed;
+    };
+    const g1 = await run("1");
+    const g25 = await run("25");
+    const g150 = await run("150");
+    check("v7_folded_nonce_1update", g1);
+    check("v7_folded_nonce_marginal", (g25 - g1) / 24n);
+    check("v7_folded_nonce_marginal_150", (g150 - g25) / 125n);
   });
 
   it("outer recursion verify: why a fully t=16 recursion does not fit", async function () {

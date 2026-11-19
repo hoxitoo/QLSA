@@ -1,5 +1,57 @@
 # QLSA — Project Context
 
+## 2026-11-19: Ф3.2 контракт готов — аккумулятор в батче ОКУПАЕТСЯ (последнее сделанное)
+
+**Где мы.** Публичный тестнет пройден (Sepolia, 2026-11-17, реестр v8
+`0xC071…F1cC`, mapping-путь). Замер в Sepolia (2026-11-18) показал: новый слот
+хранилища там +80 820 газа, новый отправитель 117 205 → mapping-путь не
+окупается ни при каком N. Ответ на это — сложенный аккумулятор, сделан сегодня.
+
+**Сделано (коммит `feat(Ф3.2): batch + nonce transition…`):**
+- `BatchRegistryV7.submitBatchWithNonceUpdates(merkleRoot, txListRoot, b10, b8,
+  senders, updates, newNonceRoot)` — только accumulatorMode; пустой список →
+  `NoNonceUpdates` (используй `submitBatch`). Bundle'ы связаны под
+  `seedEff = nonceFoldSeed(R, nonceStatementBinding(oldRoot=stored, newRoot, depth, updates))`;
+  батч записывается под R. Общие проверки — `_checkNonceUpdates`, `_nonceBinding`.
+- Батч = ОДИН слот: `batchRecords[R] = {uint64 timestamp, bytes24 digest}`,
+  digest = `bytes24(keccak(c10 ‖ c8 ‖ txListRoot))`; значения — в событии
+  `BatchFinalized` (не менялось), сверка `batchRecordMatches`. `finalizedBatches`
+  / `batchTimestamps` остались view-функциями с теми же сигнатурами; геттеров
+  `batchCommitmentsLog10/Log8`, `batchTxListRoots` больше НЕТ.
+  `testnet/submit.py` (V7) читает коммитмент из события — работает и со старым реестром.
+- `nonceStatementBinding` линейный (один буфер + mstore), байт-в-байт с Rust.
+- Фикстура `contracts/test/fixtures/tree_nonce_bundles_e2e.json` — генератор
+  `write_tree_nonce_bundles_fixture` (vfri2_bridge.rs, tests_vfri8, ~4,5 мин):
+  2 подписи, q=20, D=16, утверждения 1/25/150 обновлений от пустого дерева.
+- Тесты `BatchRegistryV7FoldedNonce.test.js` (16), блок в `Measurements.test.js`.
+
+**Замеры (локально, `measurements.json`):**
+
+| | газ |
+|---|---|
+| `submitBatch` дерева (1 слот) | 14 576 578 (было 14 663 950) |
+| сложенный, 1 обновление | 14 595 352 (+18 774) |
+| маргинал на обновление 1→25 / 25→150 | **2 119** / 3 335 (корень log 15→16) |
+| отдельный переход, маргинал | 18 136 (было 20 479) |
+| mapping: повторный / новый отправитель | 12 085 / 28 777 |
+
+Безубыточность ≈ 294 подписи при потолке ≈ 654 (calldata mainnet, 52 944/подпись).
+Sepolia — оценка ≈ 296 / ≈ 620; **замер — workflow `probe_folded.yml`**
+(скрипт `contracts/scripts/probe_folded_nonce.js`, ~110M газа ≈ 0,011 ETH при
+0,1 gwei, верификатор `0x78dc…4a66` переиспользуется; результаты — артефакт
+`folded-nonce`). Новый реестр 7 080 Б кода → деплой в Sepolia ~11,6M (оценка).
+
+**Бэклог — `ROADMAP.md` § 5** (п. 1–3 ✅, п. 4 локально ✅, Sepolia ждёт запуска):
+5 Ф0 выбор среды (владелец) · 6 хвост A-6 (боевой путь вызывает
+`verify_tree_node(_with_nonce)`) · 7 Ф4 скорость прувера · 8 C-11 верификатор
+по частям · 9 аудит. Разбор L1/L2/своя цепь дан владельцу в чате; рекомендация —
+L2 с пересчётом § 1.6 под его цену данных, L1 как эталон.
+
+**Помнить:** в accumulatorMode `submitBatch` без nonce'ов по-прежнему разрешён
+(как и в mapping-режиме) — такой батч не продвигает nonce'ы; это давнее
+свойство, не новое. Тесты: Solidity 294, Rust 583 (126 ignored), Python без
+liboqs в свежем контейнере собираются не все (`oqs` нет) — это среда.
+
 ## 2026-10-08: статус Ф3.2 (последнее сделанное)
 
 - **Две дыры стойкости найдены, доказаны тестами и закрыты** (`bafbcf8` →

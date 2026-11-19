@@ -4417,6 +4417,120 @@ mod tests_vfri8 {
         println!("  25 updates: {} updates, binding 0x{}", st25.updates.len(), hex::encode(bound25));
     }
 
+    /// Ф3.2 contract half — a batch that ALSO moves the nonce accumulator, in
+    /// the shape `BatchRegistryV7.submitBatchWithNonceUpdates` takes.
+    ///
+    /// Run with:
+    ///   cargo test write_tree_nonce_bundles_fixture -- --ignored --nocapture
+    ///
+    /// Same two signatures, `n_queries = 20` and `num_folds = 6` as
+    /// `write_tree_recursive_bundles_fixture`, so the folded batch compares line
+    /// by line with the plain one. Three statements of DIFFERENT size — 1, 25 and
+    /// 150 updates — each from the EMPTY tree, so each runs against its own
+    /// fresh registry and the marginal per update is a difference of two sent
+    /// transactions. 1 and 25 leave the root node's log where the batch puts it
+    /// (15); 150 crosses into log 16, so its step shows what growing the root
+    /// costs on-chain — the figure `probe_root_node_with_nonce_updates` left
+    /// unmeasured.
+    ///
+    /// Depth 16 (65,536 slots): the smaller of the two the probe found free up
+    /// to the transaction's sender ceiling. The on-chain cost does not depend on
+    /// it except through the root's log.
+    #[test]
+    #[ignore]
+    fn write_tree_nonce_bundles_fixture() {
+        use crate::nonce_tree::{apply_updates, slot_index, NonceTree};
+        use crate::recursive::nonce_accumulator::NonceStatement;
+
+        const D: usize = 16;
+        let n_queries = 20usize;
+
+        let mut entries = Vec::new();
+        let mut tx_hashes = Vec::new();
+        for (k, seed) in [16600u64, 16601].into_iter().enumerate() {
+            let (z, c, t1, a_hat) = super::tests::make_v23_inputs(seed);
+            entries.push((z, c, t1, a_hat, [[false; 256]; 6]));
+            tx_hashes.push(std::array::from_fn(|i| ((k * 37 + i * 11) % 256) as u8));
+        }
+        let mut tx_list = sha3::Sha3_256::new();
+        for h in &tx_hashes {
+            sha3::Digest::update(&mut tx_list, h);
+        }
+        let tx_list_root: [u8; 32] = sha3::Digest::finalize(tx_list).into();
+
+        // Multiplying by an odd constant permutes the low 16 bits, so the first
+        // 65,536 senders land in distinct slots; the high bytes make them look
+        // like hashes rather than counters.
+        let sender = |i: usize| -> [u8; 32] {
+            let x = (i as u32 + 1).wrapping_mul(0x9E37_79B1);
+            let mut h = [0u8; 32];
+            h[..4].copy_from_slice(&x.to_le_bytes());
+            for (j, b) in h.iter_mut().enumerate().skip(4) {
+                *b = (x as usize).wrapping_mul(j * 2 + 1).wrapping_add(i) as u8;
+            }
+            h
+        };
+
+        let empty_root = p2t8_pack(NonceTree::new(D).unwrap().root_words());
+        let mut parts = Vec::new();
+        let mut merkle_root = None;
+        for n in [1usize, 25, 150] {
+            let mut tree = NonceTree::new(D).unwrap();
+            let updates: Vec<([u8; 32], u64)> =
+                (0..n).map(|i| (sender(i), (i as u64 % 5) + 1)).collect();
+            let (old_root, new_root, ts) = apply_updates(&mut tree, &updates).unwrap();
+            let st = NonceStatement::from_transitions(&ts, &old_root, &new_root, D).unwrap();
+            assert_eq!(p2t8_pack(st.old_root), empty_root);
+
+            let t0 = std::time::Instant::now();
+            let f = gen_mldsa_tree_recursive_bundles_with_nonce(
+                &entries, &tx_hashes, n_queries, Some(6), 2, &st, &ts)
+                .expect("folded bundles");
+            println!("  {n:>3} updates: proved in {:.1} s, log10 root treeDepth {}",
+                     t0.elapsed().as_secs_f64(), f.bundle10.tree_depth);
+            assert!(verify_tree_root_bundles_with_nonce(
+                &f.bundle10, &f.bundle8, &f.merkle_root, &st).unwrap());
+            // R does not see the nonce, so every statement shares it.
+            assert_eq!(*merkle_root.get_or_insert(f.merkle_root), f.merkle_root);
+
+            // Senders in the STATEMENT's order (apply_updates sorts by slot).
+            let senders: Vec<String> = st.updates.iter().map(|u| {
+                let i = (0..n).find(|&i| slot_index(&sender(i), D).unwrap() == u.index)
+                    .expect("every update's slot belongs to a sender");
+                format!("\"0x{}\"", hex::encode(sender(i)))
+            }).collect();
+            let ups: Vec<String> = st.updates.iter().map(|u| format!(
+                "{{ \"index\": {}, \"oldNonce\": \"{}\", \"newNonce\": \"{}\", \"postRoot\": \"0x{}\" }}",
+                u.index, u.old_nonce, u.new_nonce, hex::encode(p2t8_pack(u.post_root)))).collect();
+            parts.push(format!(
+                "    \"{n}\": {{\n      \"newRoot\": \"0x{}\",\n      \"nonceBinding\": \"0x{}\",\n      \"seedEff\": \"0x{}\",\n      \"senders\": [{}],\n      \"updates\": [\n        {}\n      ],\n      \"bundle10\": {},\n      \"bundle8\": {}\n    }}",
+                hex::encode(p2t8_pack(st.new_root)),
+                hex::encode(f.nonce_binding),
+                hex::encode(f.seed_eff),
+                senders.join(", "),
+                ups.join(",\n        "),
+                bundle_fixture_json(&f.bundle10),
+                bundle_fixture_json(&f.bundle8),
+            ));
+        }
+
+        let json = format!(
+            "{{\n  \"_note\": \"Folded batch (Ф3.2). Regenerate with: cargo test write_tree_nonce_bundles_fixture -- --ignored\",\n  \"nQueries\": {},\n  \"depth\": {},\n  \"merkleRoot\": \"0x{}\",\n  \"txListRoot\": \"0x{}\",\n  \"leafCount\": {},\n  \"emptyRoot\": \"0x{}\",\n  \"statements\": {{\n{}\n  }}\n}}\n",
+            n_queries, D,
+            hex::encode(merkle_root.unwrap()),
+            hex::encode(tx_list_root),
+            entries.len(),
+            hex::encode(empty_root),
+            parts.join(",\n"),
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../contracts/test/fixtures/tree_nonce_bundles_e2e.json"
+        );
+        std::fs::write(path, json).unwrap();
+        println!("wrote {path}");
+    }
+
     /// The accumulator's bundle verifies, and its binding covers every field.
     #[test]
     #[ignore = "STARK proving; the accumulator's recursive bundle"]

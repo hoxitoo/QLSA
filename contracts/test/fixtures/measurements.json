@@ -57,11 +57,11 @@
       "remeasured": "2026-10-08, on the two-lane nonce_update_t8_air (TECH_DEBT § A-4: the two-path construction let a link's new leaf use different siblings from its old one, i.e. replay). The two-path figure was 6,882,057; the conclusion is unchanged."
     },
     "nonce_transition_marginal": {
-      "value": 20479,
+      "value": 18136,
       "what": "Marginal gas per additional update in submitNonceTransition, measured 1 -> 25 updates.",
       "how": "Same test. Marginally, so the ~6.9M constant cancels.",
       "note": "STORAGE is O(1) — one slot holds the whole replay state whatever N is — but this is still HIGHER than the mapping's 12,085 per returning sender, so the accumulator loses on the marginal as well as on the constant. Two contributors, both addressable: nonceStatementBinding concatenates with abi.encodePacked in a loop, which is O(n^2) in memory, and a 25-update statement has a much larger inner trace than a 1-update one: the fixture's inner treeDepth is 13 against 8 (25 two-lane updates at D = 8 is 4,400 rows; it was 14 against 9 on the two-path form). This note said 'log 10 vs 9' until 2026-10-08 — wrong, and it matters: the same depth growth applies to whichever tree-root node carries the nonce paths once they are folded into the batch.",
-      "remeasured": "2026-10-08, two-lane component: half the rows, twice the columns per update. Was 21,083 on the two-path construction."
+      "remeasured": "2026-10-08, two-lane component: half the rows, twice the columns per update. Was 21,083 on the two-path construction. 2026-11-19: nonceStatementBinding writes one preallocated buffer instead of re-concatenating it per update (the O(n^2) named in the note): 20,479 -> 18,136. The rest is the inner trace growing with N."
     },
     "outer_recursion_verify_t8": {
       "value": 5441919,
@@ -72,10 +72,11 @@
       "what": "VFRI12 verify of the same outer trace — 96% of the cap, which is why a fully t=16 recursion does not fit"
     },
     "v7_tree_submitBatch": {
-      "value": 14663950,
+      "value": 14576578,
       "what": "BatchRegistryV7.submitBatch finalizing a BATCH of signatures from the aggregation tree's two roots, at production n_queries=20 (130-bit FRI).",
       "how": "cargo test write_tree_recursive_bundles_fixture -- --ignored; then contracts/test/BatchRegistryV7TreeE2E.test.js sends the tx and reads gasUsed.",
-      "note": "merkleRoot here is R, the membership root DERIVED from the proofs and used as the Fiat-Shamir seed, with txListRoot carried alongside as the (attested, unproved) transaction-list commitment. Constant in N: the root node's shape is a fixed point, so two signatures measure the same as many. The fixture's fold count is derived from each root's DEPTH, not the leaves' — a tree root sits at depth 15/14 where a V23 group sits at 10/8, so inheriting the leaves' 6 folds put 512 last-layer evaluations on chain instead of 16 and the call reverted. Measuring the outer trace alone and inferring the total was the error."
+      "note": "merkleRoot here is R, the membership root DERIVED from the proofs and used as the Fiat-Shamir seed, with txListRoot carried alongside as the (attested, unproved) transaction-list commitment. Constant in N: the root node's shape is a fixed point, so two signatures measure the same as many. The fixture's fold count is derived from each root's DEPTH, not the leaves' — a tree root sits at depth 15/14 where a V23 group sits at 10/8, so inheriting the leaves' 6 folds put 512 last-layer evaluations on chain instead of 16 and the call reverted. Measuring the outer trace alone and inferring the total was the error.",
+      "remeasured": "2026-11-19, one storage slot per batch (BatchRecord: timestamp + 192-bit digest of the two commitments and txListRoot) instead of five mappings: 14,663,950 -> 14,576,578, -87,372 locally (four fewer NEW slots). On Sepolia, where a new slot costs +80,820 more (sepolia_sender_cost), the same change is worth ~-410,000."
     },
     "v7_sender_marginal_cold": {
       "value": 28777,
@@ -91,6 +92,24 @@
       "note": "USE THIS FOR BREAK-EVEN — it is what a running system pays for almost every sender; the first-time cost is paid once per sender ever. The difference from the cold figure is 17,100 gas, which is EXACTLY SSTORE_SET (20,000) - SSTORE_RESET (2,900).",
       "harness_validated": "A harness measured only against itself measures nothing. The same test cross-checks it against the real contract on the TWO points the real contract CAN produce before using its third: cold 29,185 vs 28,777 (1.4%) and warm-within-one-transaction 12,946 vs 12,538 (3.3%), both inside a 5% bound. If V7's loop changes and the harness's does not, that check fails.",
       "consequence": "The correction moves the numbers a lot and does NOT overturn the conclusion. Compared consistently at the steady-state marginal: break-even needs N > 359 and one transaction holds ~172 senders, so break-even stays OUTSIDE the ceiling: on these figures the mapping cannot reach break-even within one transaction. This note used to add that the nonce accumulator (§ A-4) is the lever that does — refuted on 2026-10-05 for the separate-proof form, see nonce_transition_verify. What changes is the margin — the gap narrows from ~8.4x (607 needed against 72 reachable, both on the cold figure) to ~2.1x. The worst-case ceiling, which is what a safety limit must use, stays at ~71."
+    },
+    "v7_folded_nonce_1update": {
+      "value": 14595352,
+      "what": "BatchRegistryV7.submitBatchWithNonceUpdates with ONE update — a tree batch that also moves the nonce accumulator, in one transaction.",
+      "how": "cargo test write_tree_nonce_bundles_fixture -- --ignored (2 signatures, q=20, D=16, statements of 1/25/150 updates from the empty tree); contracts/test/BatchRegistryV7FoldedNonce.test.js and Measurements.test.js send submitBatchWithNonceUpdates on a fresh accumulator-mode registry each and read gasUsed.",
+      "note": "Against the plain submitBatch over the same signatures (14,576,578) the fold costs +18,774: the transition rides the two verifyRecursive calls the batch already pays for. The separate-proof path (nonce_transition_verify) cost 6.8M on top and did not fit next to a batch at all."
+    },
+    "v7_folded_nonce_marginal": {
+      "value": 2119,
+      "what": "Marginal gas per additional nonce update in submitBatchWithNonceUpdates, 1 -> 25 updates (the log10 root node stays at depth 15).",
+      "how": "cargo test write_tree_nonce_bundles_fixture -- --ignored (2 signatures, q=20, D=16, statements of 1/25/150 updates from the empty tree); contracts/test/BatchRegistryV7FoldedNonce.test.js and Measurements.test.js send submitBatchWithNonceUpdates on a fresh accumulator-mode registry each and read gasUsed.",
+      "note": "THE FIGURE Ф3.2 WAS FOR. Against the mapping's 12,085 per RETURNING sender and 28,777 per NEW one (v7_sender_marginal_*), and with NO new storage slot per sender — so the Sepolia state-creation premium (+80,820 per slot, sepolia_sender_cost) does not apply to it. What remains per update is calldata (~5 words) and the absolute checks."
+    },
+    "v7_folded_nonce_marginal_150": {
+      "value": 3335,
+      "what": "Marginal gas per update, 25 -> 150 updates — this range crosses the root node from depth 15 to 16.",
+      "how": "cargo test write_tree_nonce_bundles_fixture -- --ignored (2 signatures, q=20, D=16, statements of 1/25/150 updates from the empty tree); contracts/test/BatchRegistryV7FoldedNonce.test.js and Measurements.test.js send submitBatchWithNonceUpdates on a fresh accumulator-mode registry each and read gasUsed.",
+      "note": "The extra ~1,200 per update over v7_folded_nonce_marginal is the root growing by one level, spread over 125 updates (~150k once): one more FRI fold on chain. probe_root_node_with_nonce_updates had left this unmeasured; it is small."
     }
   },
   "live_node_runs": {
@@ -143,6 +162,46 @@
       "and_the_rest": "It does not explain all of the first run's +585,977. Subtracting the two Sepolia transactions isolates the nonce part (2 first-time senders, submitBatchWithNonces vs submitBatch): 213,285 on Sepolia against 62,008 locally — +151,277, ~3.4x, where a uniform ~3% would give ~64k. Fresh-proof variance is ~10k locally, so nearly all of it sits in the sender/storage path. Likely reading: Sepolia's schedule prices new storage writes far above the local one. That is an inference from two numbers, NOT a direct measurement.",
       "why_it_matters": "If storage writes cost ~3-4x more, a first-time sender on the mapping path costs ~100k instead of 28,777 — the per-tx sender ceiling falls from ~70 to ~16, and the nonce accumulator (Ф3.2), which removes those writes, gains correspondingly. ROADMAP § 1.5's economics would need re-deriving on that schedule.",
       "next": "Measure it directly: marginal sender cost on Sepolia (batches with different numbers of first-time senders, differenced), as V7SenderCostProbe does locally."
+    },
+    "sepolia_sender_cost": {
+      "what": "Marginal per-sender cost on Sepolia, same fixed sequence as the local baseline: real BatchRegistryV7 on fresh registries with 0/1/5/10 first-time senders, NonceLoopHarness first-time 5/10/25 and returning 10/25. Raw figures and every tx hash: contracts/test/fixtures/sender_cost_sepolia.json; local: sender_cost_local.json.",
+      "run": "GitHub Actions 'Measure sender cost' run 44260373753, 2026-11-18",
+      "first_time_sender": {
+        "sepolia": 117205,
+        "local": 29185,
+        "delta": 88020,
+        "note": "The delta is EXACTLY 88,020 in all three ranges measured (real 1->5, real 5->10, harness 10->25): a constant per-sender repricing, not noise. Harness vs real contract on Sepolia: 0.14%."
+      },
+      "returning_sender": {
+        "sepolia": 19285,
+        "local": 12085,
+        "delta": 7200
+      },
+      "new_storage_slot_premium": {
+        "value": 80820,
+        "how": "first-time delta minus returning delta: 88,020 - 7,200. A write that CREATES a slot costs ~80.8k more on Sepolia; cold minus returning is 97,920 there vs 17,100 locally (5.7x)."
+      },
+      "batch_without_senders": {
+        "sepolia": 15098738,
+        "local": 14664038,
+        "delta": 434700,
+        "explained": "Finalization creates 5 storage slots (finalizedBatches, batchTimestamps, both commitment maps, batchTxListRoots): 5 x 80,820 = 404,100 of the 434,700. The residual 30,600 is 0.21% of the batch. So the proof VERIFICATION itself — the Poseidon2 / FRI / recursion work — costs the same on Sepolia to within ~0.2%: the whole gap is state creation."
+      },
+      "first_public_run_reconciled": "15,312,023 (2026-11-17) vs fixture batch 15,098,738 + 2 first-time senders 113,951 + 113,520 = 15,326,209: -14,186 (-0.09%), inside the ~±15k proof-to-proof variance seen locally. The +4.0% of the first run is fully accounted for.",
+      "code_deposit": {
+        "registry_deploy_sepolia": 9697316,
+        "registry_deploy_local": 1406706,
+        "per_runtime_byte_extra": 1401,
+        "note": "+8,290,610 over 5,918 runtime bytes: deployed code costs ~7-8x more per byte (local deposit 200/byte). ESTIMATE from this one contract, linear in size: QLSAVerifierVFRI11 (21,993 B) would need ~35.6M to deploy today — over the 16,777,216 per-tx cap, so it could NOT be redeployed on this schedule; QLSAVerifierRecursive (9,477 B) ~15.4M, just under. The deployed copies (2026-10-11) predate this pricing and are unaffected."
+      },
+      "reading": "The pattern — new storage slots ~5x, new code ~7-8x, updates to existing state and computation essentially unchanged — is that of a state-creation repricing. Which network upgrade Sepolia runs could not be checked from the development environment; whether mainnet adopts the same schedule decides how much of this applies there.",
+      "economics_on_this_schedule": {
+        "ceiling_first_time": 13,
+        "ceiling_returning": 81,
+        "break_even_first_time": "UNREACHABLE: a new sender (117,205) costs more than the 52,944 of calldata a signature saves",
+        "break_even_returning": 451,
+        "note": "Both against the mainnet calldata figure (52,944 per signature); local: ceilings ~71/~172, break-even ~618/~359."
+      }
     }
   }
 }

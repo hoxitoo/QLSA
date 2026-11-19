@@ -97,10 +97,16 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     console.log(`        [gas] V7 submitBatch (2 recursive bundles) = ${rc.gasUsed}`);
     expect(rc.gasUsed).to.be.lessThan(16_777_216n, "must fit one transaction");
     expect(await registry.isBatchFinalized(fx.merkleRoot)).to.equal(true);
-    expect(await registry.batchCommitmentsLog10(fx.merkleRoot))
-      .to.equal(fx.bundle10.outerCommitment);
-    expect(await registry.batchCommitmentsLog8(fx.merkleRoot))
-      .to.equal(fx.bundle8.outerCommitment);
+    // One storage slot per batch: the commitments are checked against its digest.
+    expect(await registry.batchRecordMatches(
+      fx.merkleRoot, fx.bundle10.outerCommitment, fx.bundle8.outerCommitment, ethers.ZeroHash))
+      .to.equal(true);
+    expect(await registry.batchRecordMatches(
+      fx.merkleRoot, fx.bundle8.outerCommitment, fx.bundle10.outerCommitment, ethers.ZeroHash))
+      .to.equal(false, "the digest is positional — swapped commitments must not match");
+    await expect(tx).to.emit(registry, "BatchFinalized").withArgs(
+      fx.merkleRoot, fx.bundle10.outerCommitment, fx.bundle8.outerCommitment, ethers.ZeroHash,
+      await registry.batchTimestamps(fx.merkleRoot));
   });
 
   it("rejects a replayed batch", async function () {
@@ -165,8 +171,9 @@ describe("BatchRegistryV7 — recursive-proof batch finalization", function () {
     await tx.wait();
     expect(await fresh.isBatchFinalized(fx.merkleRoot)).to.equal(true);
     // …and the commitments land in the slots as submitted, hence "positional".
-    expect(await fresh.batchCommitmentsLog10(fx.merkleRoot))
-      .to.equal(fx.bundle8.outerCommitment);
+    expect(await fresh.batchRecordMatches(
+      fx.merkleRoot, fx.bundle8.outerCommitment, fx.bundle10.outerCommitment, ethers.ZeroHash))
+      .to.equal(true);
   });
 
   it("rejects a bundle whose last layer does not match its committed root", async function () {
