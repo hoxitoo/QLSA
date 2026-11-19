@@ -555,10 +555,18 @@ class OnchainSubmitterV7:
         root_b32 = _as_bytes32(merkle_root, "merkle_root")
         finalized: bool = self.registry.functions.isBatchFinalized(root_b32).call()
         if finalized:
-            c10 = self.registry.functions.batchCommitmentsLog10(root_b32).call()
+            # From the event, not storage: since Ф3.2 the registry keeps one
+            # slot per batch (a digest), and the event is the same on the
+            # deployment that still has the old getters.
+            events = self.registry.events.BatchFinalized().process_receipt(receipt)
+            c10 = next(
+                (e["args"]["commitmentLog10"] for e in events
+                 if e["args"]["merkleRoot"] == root_b32),
+                b"",
+            )
             logger.info(
                 "%s batch finalized: root=%s commitmentLog10=%s gasUsed=%d",
-                self._LOG_TAG, root_b32.hex()[:16], c10.hex(), receipt.gasUsed,
+                self._LOG_TAG, root_b32.hex()[:16], c10.hex() or "?", receipt.gasUsed,
             )
         return finalized
 

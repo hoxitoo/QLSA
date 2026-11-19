@@ -112,10 +112,9 @@ describe("BatchRegistryV7 × real V23 @ production n_queries=20", function () {
       "production-security V23 must finalize within one transaction"
     );
     expect(await registry.isBatchFinalized(fx.merkleRoot)).to.equal(true);
-    expect(await registry.batchCommitmentsLog10(fx.merkleRoot))
-      .to.equal(fx.bundle10.outerCommitment);
-    expect(await registry.batchCommitmentsLog8(fx.merkleRoot))
-      .to.equal(fx.bundle8.outerCommitment);
+    expect(await registry.batchRecordMatches(
+      fx.merkleRoot, fx.bundle10.outerCommitment, fx.bundle8.outerCommitment, ethers.ZeroHash))
+      .to.equal(true);
   });
 
   it("rejects a tampered last layer on the real V23 bundle", async function () {

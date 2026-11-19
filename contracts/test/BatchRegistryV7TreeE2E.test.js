@@ -100,7 +100,12 @@ describe("BatchRegistryV7 × aggregation tree roots", function () {
     // contract has no transactions and cannot check it. Its value is that a
     // third party holding the list can recompute it. What IS proved is in
     // merkleRoot, whose leaves bind each member's tx_id to its proofs.
-    expect(await registry.batchTxListRoots(fx.merkleRoot)).to.equal(fx.txListRoot);
+    expect(await registry.batchRecordMatches(
+      fx.merkleRoot, fx.bundle10.outerCommitment, fx.bundle8.outerCommitment, fx.txListRoot))
+      .to.equal(true);
+    expect(await registry.batchRecordMatches(
+      fx.merkleRoot, fx.bundle10.outerCommitment, fx.bundle8.outerCommitment, ethers.ZeroHash))
+      .to.equal(false, "the record must commit to txListRoot");
   });
 
   // Without this the suite would only show that something verifies. The

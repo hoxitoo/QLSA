@@ -58,6 +58,11 @@
   },
   {
     "inputs": [],
+    "name": "NoNonceUpdates",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NonceBindingMismatch",
     "type": "error"
   },
@@ -335,17 +340,61 @@
   {
     "inputs": [
       {
+        "internalType": "bytes16",
+        "name": "commitmentLog10",
+        "type": "bytes16"
+      },
+      {
+        "internalType": "bytes16",
+        "name": "commitmentLog8",
+        "type": "bytes16"
+      },
+      {
         "internalType": "bytes32",
-        "name": "",
+        "name": "txListRoot",
         "type": "bytes32"
       }
     ],
-    "name": "batchCommitmentsLog10",
+    "name": "batchRecordDigest",
     "outputs": [
       {
-        "internalType": "bytes16",
+        "internalType": "bytes24",
         "name": "",
+        "type": "bytes24"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes16",
+        "name": "commitmentLog10",
         "type": "bytes16"
+      },
+      {
+        "internalType": "bytes16",
+        "name": "commitmentLog8",
+        "type": "bytes16"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "txListRoot",
+        "type": "bytes32"
+      }
+    ],
+    "name": "batchRecordMatches",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -359,12 +408,17 @@
         "type": "bytes32"
       }
     ],
-    "name": "batchCommitmentsLog8",
+    "name": "batchRecords",
     "outputs": [
       {
-        "internalType": "bytes16",
-        "name": "",
-        "type": "bytes16"
+        "internalType": "uint64",
+        "name": "timestamp",
+        "type": "uint64"
+      },
+      {
+        "internalType": "bytes24",
+        "name": "digest",
+        "type": "bytes24"
       }
     ],
     "stateMutability": "view",
@@ -374,7 +428,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "",
+        "name": "merkleRoot",
         "type": "bytes32"
       }
     ],
@@ -384,25 +438,6 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "name": "batchTxListRoots",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -436,7 +471,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "",
+        "name": "merkleRoot",
         "type": "bytes32"
       }
     ],
@@ -468,6 +503,30 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "nonceBinding",
+        "type": "bytes32"
+      }
+    ],
+    "name": "nonceFoldSeed",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -785,6 +844,209 @@
       }
     ],
     "name": "submitBatch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "txListRoot",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "components": [
+              {
+                "internalType": "bytes32",
+                "name": "traceRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint128",
+                "name": "oodsComboPos",
+                "type": "uint128"
+              },
+              {
+                "internalType": "uint128",
+                "name": "oodsComboNeg",
+                "type": "uint128"
+              },
+              {
+                "internalType": "bytes32",
+                "name": "compRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "bytes32[]",
+                "name": "friLayerRoots",
+                "type": "bytes32[]"
+              },
+              {
+                "internalType": "bytes32",
+                "name": "batchRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint256",
+                "name": "treeDepth",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "nQueries",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct QLSAVerifierRecursive.InnerPublics",
+            "name": "inner",
+            "type": "tuple"
+          },
+          {
+            "internalType": "bytes",
+            "name": "outerProof",
+            "type": "bytes"
+          },
+          {
+            "internalType": "bytes16",
+            "name": "outerCommitment",
+            "type": "bytes16"
+          },
+          {
+            "internalType": "bytes",
+            "name": "outerHints",
+            "type": "bytes"
+          },
+          {
+            "internalType": "uint128[]",
+            "name": "lastLayerEvals",
+            "type": "uint128[]"
+          }
+        ],
+        "internalType": "struct BatchRegistryV7.RecursiveBundle",
+        "name": "bundle10",
+        "type": "tuple"
+      },
+      {
+        "components": [
+          {
+            "components": [
+              {
+                "internalType": "bytes32",
+                "name": "traceRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint128",
+                "name": "oodsComboPos",
+                "type": "uint128"
+              },
+              {
+                "internalType": "uint128",
+                "name": "oodsComboNeg",
+                "type": "uint128"
+              },
+              {
+                "internalType": "bytes32",
+                "name": "compRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "bytes32[]",
+                "name": "friLayerRoots",
+                "type": "bytes32[]"
+              },
+              {
+                "internalType": "bytes32",
+                "name": "batchRoot",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint256",
+                "name": "treeDepth",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "nQueries",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct QLSAVerifierRecursive.InnerPublics",
+            "name": "inner",
+            "type": "tuple"
+          },
+          {
+            "internalType": "bytes",
+            "name": "outerProof",
+            "type": "bytes"
+          },
+          {
+            "internalType": "bytes16",
+            "name": "outerCommitment",
+            "type": "bytes16"
+          },
+          {
+            "internalType": "bytes",
+            "name": "outerHints",
+            "type": "bytes"
+          },
+          {
+            "internalType": "uint128[]",
+            "name": "lastLayerEvals",
+            "type": "uint128[]"
+          }
+        ],
+        "internalType": "struct BatchRegistryV7.RecursiveBundle",
+        "name": "bundle8",
+        "type": "tuple"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "senders",
+        "type": "bytes32[]"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint32",
+            "name": "index",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "oldNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "newNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "postRoot",
+            "type": "bytes32"
+          }
+        ],
+        "internalType": "struct BatchRegistryV7.NonceUpdate[]",
+        "name": "updates",
+        "type": "tuple[]"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "newNonceRoot",
+        "type": "bytes32"
+      }
+    ],
+    "name": "submitBatchWithNonceUpdates",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

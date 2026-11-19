@@ -113,7 +113,6 @@ _CALLED: dict[str, tuple[str, ...]] = {
         "submitBatch",
         "submitBatchWithNonces",
         "isBatchFinalized",
-        "batchCommitmentsLog10",
         "crossBoundRoot",
     ),
 }
@@ -164,3 +163,15 @@ def test_committed_abi_is_canonically_formatted(contract: str) -> None:
     text = committed_path(contract).read_text(encoding="utf-8")
     assert text.endswith("\n")
     assert text == json.dumps(json.loads(text), indent=2, sort_keys=True) + "\n"
+
+
+def test_v7_submitter_reads_an_event_the_abi_has() -> None:
+    """``OnchainSubmitterV7.wait_and_verify`` reads the commitment from
+    ``BatchFinalized`` — since Ф3.2 the registry stores one digest slot per
+    batch and has no ``batchCommitmentsLog10`` getter. The event is the same on
+    the 2026-10-11 deployment, which still has the getter, so both work."""
+    events = {e["name"]: e for e in abi_for("BatchRegistryV7") if e.get("type") == "event"}
+    assert "BatchFinalized" in events
+    names = [i["name"] for i in events["BatchFinalized"]["inputs"]]
+    assert {"merkleRoot", "commitmentLog10"} <= set(names), names
+    assert "batchCommitmentsLog10" not in _functions(abi_for("BatchRegistryV7"))

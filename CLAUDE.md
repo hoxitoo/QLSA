@@ -221,6 +221,22 @@ deployment runs; a non-zero depth is the accumulator (`nonceStateRoot`,
 paths would be a replay hole, since a transaction counted in the mapping is
 invisible to the tree and vice versa.
 
+**Folded into the batch, the accumulator PAYS (2026-11-19).**
+`BatchRegistryV7.submitBatchWithNonceUpdates(merkleRoot, txListRoot, bundle10,
+bundle8, senders, updates, newNonceRoot)` finalizes a tree batch AND moves
+`nonceStateRoot` in one transaction: the bundles are cross-bound under
+`seedEff = nonceFoldSeed(R, nonceStatementBinding(…))` instead of R. Measured
+locally: **2,119 gas per update** (1→25), 3,335 (25→150, root log 15→16),
++18,774 to fold at all — no new storage slot per sender. Break-even ≈ 294
+signatures under a ceiling ≈ 654 (mainnet calldata pricing). Fixture
+`tree_nonce_bundles_e2e.json` (`write_tree_nonce_bundles_fixture`), tests
+`BatchRegistryV7FoldedNonce.test.js`; Sepolia probe `.github/workflows/probe_folded.yml`.
+Also since then: a batch is ONE storage slot (`batchRecords` = timestamp + 192-bit
+digest of both commitments and `txListRoot`; read the values from `BatchFinalized`,
+check them with `batchRecordMatches`) — the `batchCommitmentsLog10/Log8` and
+`batchTxListRoots` getters are gone; `nonceStatementBinding` is linear.
+
+The SEPARATE-proof form below is what was measured not to pay.
 **The accumulator is implemented and MEASURED NOT TO PAY in this form** — it is
 not the production path. Storage is O(1), but the transition costs **6,813,715
 gas** constant plus **20,479** per update, against the mapping's measured 12,085
