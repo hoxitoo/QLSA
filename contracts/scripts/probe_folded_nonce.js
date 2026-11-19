@@ -15,7 +15,15 @@
 // one mapping-mode for the plain batch, three accumulator-mode at depth 16 for
 // 1 / 25 / 150 updates, each from the empty tree — and the 4 batches.
 //
+// Every check reads the transaction's OWN receipt (its events), never a fresh
+// eth_call: a public RPC is a load balancer, and on 2026-11-19 the receipt came
+// from one backend while the follow-up `nonceStateRoot()` read hit another a
+// block behind and returned the old root — a mined, correct transaction
+// reported as a failure.
+//
 // Usage:
+//   [STATEMENTS=plain,1,25,150] which parts to run (default all); a rerun of a
+//                           part that failed need not pay for the others again
 //   [VERIFIER_ADDRESS=0x…]  QLSAVerifierRecursive to reuse (deployed if unset)
 //   [RESULTS_PATH=out.json] where to write the raw figures
 //   npx hardhat run scripts/probe_folded_nonce.js --network sepolia
@@ -81,51 +89,89 @@ async function main() {
     return [reg, rc.gasUsed];
   };
 
-  console.log("\nplain batch, one-slot record:");
-  const [plainReg, deployGas] = await deploy("mapping", ethers.ZeroHash, 0);
-  const plain = (await sent("submitBatch (plain)", plainReg.submitBatch(
-    TREE.merkleRoot, TREE.txListRoot, bundleTuple(TREE.bundle10), bundleTuple(TREE.bundle8),
-    { ...ov, gasLimit: GAS_LIMIT }))).gasUsed;
+  const ALL = ["plain", "1", "25", "150"];
+  const want = (process.env.STATEMENTS || ALL.join(",")).split(",").map((x) => x.trim()).filter(Boolean);
+  for (const w of want) if (!ALL.includes(w)) throw new Error(`STATEMENTS: unknown part "${w}"`);
+  console.log("parts   :", want.join(", "));
 
-  console.log("\nfolded batch, depth", FOLD.depth, "— fresh registry each, from the empty tree:");
-  const g = {};
-  for (const n of ["1", "25", "150"]) {
-    const st = FOLD.statements[n];
-    const [reg] = await deploy(`accumulator, ${n}`, FOLD.emptyRoot, FOLD.depth);
-    g[n] = (await sent(`submitBatchWithNonceUpdates, ${n}`, reg.submitBatchWithNonceUpdates(
-      FOLD.merkleRoot, FOLD.txListRoot, bundleTuple(st.bundle10), bundleTuple(st.bundle8),
-      st.senders, updates(st), st.newRoot, { ...ov, gasLimit: GAS_LIMIT }))).gasUsed;
-    if ((await reg.nonceStateRoot()) !== st.newRoot) throw new Error(`${n}: nonce root did not move`);
+  // The checks, from the receipt alone (see the header).
+  const events = (reg, rc, name) => rc.logs
+    .filter((l) => l.address.toLowerCase() === reg.target.toLowerCase())
+    .map((l) => { try { return reg.interface.parseLog(l); } catch { return null; } })
+    .filter((e) => e && e.name === name);
+  const expectFinalized = (reg, rc, label) => {
+    if (!events(reg, rc, "BatchFinalized").some((e) => e.args.merkleRoot === FOLD.merkleRoot)) {
+      throw new Error(`${label}: no BatchFinalized for the batch in the receipt`);
+    }
+  };
+
+  let plain = null, deployGas = null;
+  if (want.includes("plain")) {
+    console.log("\nplain batch, one-slot record:");
+    const [plainReg, dg] = await deploy("mapping", ethers.ZeroHash, 0);
+    deployGas = dg;
+    const rc = await sent("submitBatch (plain)", plainReg.submitBatch(
+      TREE.merkleRoot, TREE.txListRoot, bundleTuple(TREE.bundle10), bundleTuple(TREE.bundle8),
+      { ...ov, gasLimit: GAS_LIMIT }));
+    expectFinalized(plainReg, rc, "plain");
+    plain = rc.gasUsed;
   }
 
-  const m1_25 = (g["25"] - g["1"]) / 24n;
-  const m25_150 = (g["150"] - g["25"]) / 125n;
-  const headroom = CAP - g["1"];
-  const ceiling = headroom / m25_150;
-  const breakEven = m25_150 < SAVED_PER_SIG ? g["1"] / (SAVED_PER_SIG - m25_150) : null;
+  const g = {};
+  const folded = ["1", "25", "150"].filter((n) => want.includes(n));
+  if (folded.length) {
+    console.log("\nfolded batch, depth", FOLD.depth, "— fresh registry each, from the empty tree:");
+  }
+  for (const n of folded) {
+    const st = FOLD.statements[n];
+    const [reg] = await deploy(`accumulator, ${n}`, FOLD.emptyRoot, FOLD.depth);
+    const rc = await sent(`submitBatchWithNonceUpdates, ${n}`, reg.submitBatchWithNonceUpdates(
+      FOLD.merkleRoot, FOLD.txListRoot, bundleTuple(st.bundle10), bundleTuple(st.bundle8),
+      st.senders, updates(st), st.newRoot, { ...ov, gasLimit: GAS_LIMIT }));
+    expectFinalized(reg, rc, n);
+    const moved = events(reg, rc, "NonceStateAdvanced");
+    if (moved.length !== 1 || moved[0].args.newRoot !== st.newRoot
+        || moved[0].args.oldRoot !== FOLD.emptyRoot || moved[0].args.updates !== BigInt(n)) {
+      throw new Error(`${n}: the receipt does not move the nonce root to the statement's`);
+    }
+    g[n] = rc.gasUsed;
+  }
+
   const local = (k) => BigInt(M[k].value);
   const vs = (x, k) => `${x}  (local ${local(k)}, ${x >= local(k) ? "+" : ""}${x - local(k)})`;
+  const has = (...ks) => ks.every((k) => g[k] !== undefined);
+  const d = {};
+  console.log("\nderived (each line needs its parts; a partial run prints what it has):");
+  if (plain !== null) console.log(`  plain batch                     ${vs(plain, "v7_tree_submitBatch")}`);
+  if (has("1")) console.log(`  folded, 1 update                ${vs(g["1"], "v7_folded_nonce_1update")}`);
+  if (plain !== null && has("1")) console.log(`  folding overhead at 1 update    ${g["1"] - plain}`);
+  if (has("1", "25")) {
+    d.m1_25 = (g["25"] - g["1"]) / 24n;
+    console.log(`  marginal per update, 1->25      ${vs(d.m1_25, "v7_folded_nonce_marginal")}`);
+  }
+  if (has("25", "150")) {
+    d.m25_150 = (g["150"] - g["25"]) / 125n;
+    console.log(`  marginal per update, 25->150    ${vs(d.m25_150, "v7_folded_nonce_marginal_150")}`);
+  }
+  if (has("150")) console.log(`  folded, 150 updates             ${g["150"]}  (local 15063104, ${g["150"] >= 15063104n ? "+" : ""}${g["150"] - 15063104n})`);
+  if (has("1") && d.m25_150 !== undefined) {
+    d.headroom = CAP - g["1"];
+    d.ceiling = d.headroom / d.m25_150;
+    d.breakEven = d.m25_150 < SAVED_PER_SIG ? g["1"] / (SAVED_PER_SIG - d.m25_150) : null;
+    console.log(`  headroom above 1 update         ${d.headroom}`);
+    console.log(`  update ceiling (at 25->150)     ~${d.ceiling}  (the root grows a level past ~150-300)`);
+    console.log(`  break-even N                    ${d.breakEven === null ? "UNREACHABLE" : "~" + d.breakEven}`);
+    console.log(`  (break-even assumes ${SAVED_PER_SIG} gas of calldata saved per signature — mainnet pricing)`);
+  }
+  if (deployGas !== null) console.log(`  registry deploy                 ${deployGas}  (cap ${CAP})`);
 
-  console.log("\nderived:");
-  console.log(`  plain batch                     ${vs(plain, "v7_tree_submitBatch")}`);
-  console.log(`  folded, 1 update                ${vs(g["1"], "v7_folded_nonce_1update")}`);
-  console.log(`  folding overhead at 1 update    ${g["1"] - plain}`);
-  console.log(`  marginal per update, 1->25      ${vs(m1_25, "v7_folded_nonce_marginal")}`);
-  console.log(`  marginal per update, 25->150    ${vs(m25_150, "v7_folded_nonce_marginal_150")}`);
-  console.log(`  headroom above 1 update         ${headroom}`);
-  console.log(`  update ceiling (at 25->150)     ~${ceiling}  (the root grows a level past ~150-300; see note)`);
-  console.log(`  break-even N                    ${breakEven === null ? "UNREACHABLE" : "~" + breakEven}`);
-  console.log(`  (break-even assumes ${SAVED_PER_SIG} gas of calldata saved per signature — mainnet pricing)`);
-  console.log(`  registry deploy                 ${deployGas}  (cap ${CAP})`);
-
+  const str = (v) => (v === null || v === undefined ? null : v.toString());
   const out = {
     network: hre.network.name, chainId: chainId.toString(), sender: owner.address, verifier,
-    gasPriceWei: price.toString(), date: new Date().toISOString().slice(0, 10),
-    depth: FOLD.depth, registryDeploy: deployGas.toString(), plainBatch: plain.toString(),
+    gasPriceWei: price.toString(), date: new Date().toISOString().slice(0, 10), parts: want,
+    depth: FOLD.depth, registryDeploy: str(deployGas), plainBatch: str(plain),
     folded: Object.fromEntries(Object.entries(g).map(([k, v]) => [k, v.toString()])),
-    marginal_1to25: m1_25.toString(), marginal_25to150: m25_150.toString(),
-    headroom: headroom.toString(), ceiling: ceiling.toString(),
-    breakEven: breakEven === null ? null : breakEven.toString(),
+    derived: Object.fromEntries(Object.entries(d).map(([k, v]) => [k, str(v)])),
     transactions: txs,
   };
   if (process.env.RESULTS_PATH) {

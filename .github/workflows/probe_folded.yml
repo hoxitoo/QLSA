@@ -10,8 +10,10 @@ name: Measure folded nonce path
 # storage slot — the thing Sepolia prices +80,820 higher (sender_cost_sepolia).
 # This checks the network leaves it there.
 #
-# Sends 8 transactions: 4 fresh registries (reusing the deployed verifier) and
-# 4 batches. About 110M gas in total — ~0.011 ETH at 0.1 gwei. Raw figures are
+# Sends 2 transactions per part (a fresh registry, reusing the deployed
+# verifier, and its batch): ~28M gas each, ~110M for all four — ~0.011 ETH at
+# 0.1 gwei. The run of 2026-11-19 measured plain, 1 and 25; `statements: 150`
+# finishes it for ~0.003 ETH. Raw figures are
 # uploaded as the `folded-nonce` artifact and printed in the summary.
 #
 # Secrets: DEPLOYER_PRIVATE_KEY (required), SEPOLIA_RPC_URL (optional).
@@ -23,6 +25,10 @@ on:
         description: "QLSAVerifierRecursive to reuse (deployments/sepolia.json -> v8)"
         required: true
         default: "0x78dcad37c260F39DEE07b08856BC57DC8EC64a66"
+      statements:
+        description: "Parts to run: plain,1,25,150 (a rerun can name only what is missing, e.g. 150)"
+        required: true
+        default: "plain,1,25,150"
       min_gas_price_gwei:
         description: "Gas price floor in gwei (the node's suggestion is used when higher)"
         required: true
@@ -53,7 +59,8 @@ jobs:
         run: npx hardhat compile
 
       # Same pricing rule as the sends (scripts/_testnet.js). The whole run is
-      # ~110M gas; require 125M x price so a mid-run price rise does not strand it.
+      # ~28M gas per part (a registry deploy + a batch); require 31M x price per
+      # part so a mid-run price rise does not strand it.
       - name: Check inputs and balance
         working-directory: contracts
         shell: bash
@@ -62,7 +69,10 @@ jobs:
           RPC: ${{ secrets.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com' }}
           VERIFIER: ${{ github.event.inputs.verifier_address }}
           FLOOR_GWEI: ${{ github.event.inputs.min_gas_price_gwei }}
+          PARTS: ${{ github.event.inputs.statements }}
         run: |
+          [[ "$PARTS" =~ ^(plain|1|25|150)(,(plain|1|25|150))*$ ]] \
+            || { echo "::error::statements must be a comma list of plain,1,25,150"; exit 1; }
           [ -n "$PRIVATE_KEY" ] || { echo "::error::secret DEPLOYER_PRIVATE_KEY is not set"; exit 1; }
           [[ "$VERIFIER" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo "::error::verifier_address is not an address"; exit 1; }
           [[ "$FLOOR_GWEI" =~ ^[0-9]+([.][0-9]{1,9})?$ ]] \
@@ -79,7 +89,8 @@ jobs:
               const floor = ethers.parseUnits(process.env.FLOOR_GWEI, "gwei");
               const suggested = BigInt(await p.send("eth_gasPrice", []));
               const price = suggested > floor ? suggested : floor;
-              const need = 125_000_000n * price;
+              const parts = BigInt(process.env.PARTS.split(",").length);
+              const need = 31_000_000n * parts * price;
               console.log("sender  :", w.address);
               console.log("balance :", ethers.formatEther(bal), "ETH");
               console.log("gasPrice:", ethers.formatUnits(price, "gwei"), "gwei -> the run needs ~", ethers.formatEther(need), "ETH");
@@ -96,6 +107,7 @@ jobs:
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
           VERIFIER_ADDRESS: ${{ github.event.inputs.verifier_address }}
           RESULTS_PATH: /tmp/folded_nonce.json
+          STATEMENTS: ${{ github.event.inputs.statements }}
         run: |
           npx hardhat run scripts/probe_folded_nonce.js --network sepolia --no-compile 2>&1 \
             | tee /tmp/probe_output.txt

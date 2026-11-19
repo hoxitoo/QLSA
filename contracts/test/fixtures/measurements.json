@@ -202,6 +202,52 @@
         "break_even_returning": 451,
         "note": "Both against the mainnet calldata figure (52,944 per signature); local: ceilings ~71/~172, break-even ~618/~359."
       }
+    },
+    "sepolia_folded_nonce": {
+      "what": "The folded nonce path (Ф3.2) and the one-slot batch record on Sepolia: contracts/scripts/probe_folded_nonce.js, fresh registries reusing QLSAVerifierRecursive 0x78dc…4a66, fixtures tree_recursive_bundles_e2e.json / tree_nonce_bundles_e2e.json.",
+      "run": "GitHub Actions 'Measure folded nonce path' run 44469446248, 2026-11-19. PARTIAL: plain, 1 and 25 measured; the script then failed on its own follow-up read (below), so 150 was not sent.",
+      "plain_submitBatch": {
+        "sepolia": 14659398,
+        "local": 14576578,
+        "delta": 82820,
+        "tx": "0x61d6a52ddb40bd42bd3c4c13b14a12f7a3c3950e7137340d227e5cdec25fe7c5",
+        "note": "ONE new slot now: 80,820 of the 82,820 is its creation premium. Against 15,098,738 for the five-slot record (sepolia_fixture_replay) the one-slot record saves 439,340 on Sepolia — more than the ~410,000 estimated."
+      },
+      "folded_1_update": {
+        "sepolia": 14685372,
+        "local": 14595352,
+        "delta": 90020,
+        "tx": "0xeacb857a831ebe0e4c4b2e50f99fea4b254432624d20cc5e94f7e8ce74d0e5f1",
+        "note": "90,020 = 82,820 (the batch record slot) + 7,200 (rewriting the existing nonceStateRoot slot: the same +7,200 measured for a returning sender)."
+      },
+      "folded_25_updates": {
+        "sepolia": 14736247,
+        "local": 14646227,
+        "delta": 90020,
+        "tx": "0xafba03978195077386e823d6bed2928f10fd0a05de48f9c667e098d1ba6e0566"
+      },
+      "marginal_per_update_1to25": {
+        "sepolia": 2119,
+        "local": 2119,
+        "note": "IDENTICAL: the delta to local is the same 90,020 at 1 and at 25 updates, so the per-update cost carries no Sepolia premium at all — an update creates no state. Mapping path on the same network: 117,205 per new sender, 19,285 per returning one."
+      },
+      "registry_deploy": {
+        "mapping_mode": 11493947,
+        "accumulator_mode": 11604187,
+        "estimate": 11600000,
+        "note": "Fits the 16,777,216 cap; 7,080 B runtime."
+      },
+      "economics": {
+        "headroom_above_1_update": 2091844,
+        "ceiling_at_local_25to150_marginal": 627,
+        "break_even": 296,
+        "note": "Ceiling and break-even use the LOCAL 25->150 marginal (3,335) until 150 is measured here; break-even assumes 52,944 gas of calldata saved per signature (mainnet pricing). On the mapping path the same network gave ceiling ~13 and no break-even."
+      },
+      "script_failure": {
+        "what": "The 25-update transaction was mined (status 1, gas identical to local + the same delta), but the script's follow-up eth_call nonceStateRoot() returned the old root and it threw.",
+        "cause": "The public RPC is a load balancer: tx.wait() got the receipt from one backend and the read went to another a block behind. Not a contract fault.",
+        "fix": "2026-11-19: the probe checks the receipt's own events (BatchFinalized, NonceStateAdvanced) and never re-reads state; STATEMENTS=150 finishes the run without repeating the rest."
+      }
     }
   }
 }
