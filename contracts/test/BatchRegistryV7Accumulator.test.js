@@ -321,10 +321,11 @@ describe("[Ф3.2] BatchRegistryV7 — the nonce accumulator", function () {
     this.timeout(1_800_000);
 
     // Why submitNonceTransition is its own call rather than a parameter of
-    // submitBatchWithNonces. The tree batch costs a measured 14,663,950 and the
+    // submitBatchWithNonces. The tree batch costs a measured ~14.6M (v7_tree_submitBatch) and the
     // transition ~6.94M; together they exceed the 16,777,216 cap. Asserted here
     // because the original design DID combine them, and it reverted.
-    const BATCH = 14_663_950n;
+    const BATCH = BigInt(JSON.parse(fs.readFileSync(
+      path.join(__dirname, "fixtures", "measurements.json"), "utf8")).entries.v7_tree_submitBatch.value);
     const st = nfx.one.statement;
     const reg = await deploy({ root: st.oldRoot });
     const tx = await reg.submitNonceTransition(

@@ -40,7 +40,7 @@ mypy core/ aggregator/ --strict --ignore-missing-imports --exclude 'aggregator/a
 # Build and install the Rust PyO3 extension (required for STARK tests)
 cd stark_stwo && maturin develop --features python --release && cd ..
 
-# Run Rust tests (583 passing, 125 ignored slow STARK integration tests — 2026-10-08)
+# Run Rust tests (583 passing, 126 ignored slow STARK integration tests — 2026-11-19)
 #
 # ALWAYS use `cargo test`, never `cargo build`, to decide whether code is dead.
 # `cargo build` does not compile `#[cfg(test)]`, so its "never used" warning is

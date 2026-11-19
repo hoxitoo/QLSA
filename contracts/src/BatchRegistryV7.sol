@@ -45,8 +45,8 @@ import "./QLSAVerifierRecursive.sol";
 /// constraint pair is SYMMETRIC under exchanging the bundles, so submitting them
 /// in the opposite order is accepted: both remain valid proofs bound to this
 /// `merkleRoot`, and neither can be duplicated, so it is not a soundness break —
-/// but it does mean `batchCommitmentsLog10` / `batchCommitmentsLog8` are
-/// POSITIONAL labels rather than enforced group identities. BatchRegistryV5's
+/// but it does mean the Log10 / Log8 commitments in the batch record (and the
+/// `BatchFinalized` event) are POSITIONAL labels rather than enforced group identities. BatchRegistryV5's
 /// binding has the same property. Enforcing the label would need a group tag in
 /// the bound root (`keccak(merkleRoot | otherTraceRoot | groupId)`), which would
 /// diverge from the V5 scheme and require regenerating every cross-bound fixture.
